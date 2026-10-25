@@ -23,7 +23,7 @@ target_compile_options(phys-num PUBLIC /fp:precise PRIVATE /W4)
 
 # phys-data: readers of RBR's files (.trk .col .lsp .rbz .rpl .phr .lbs .sgc .dls).
 add_library(phys-data STATIC src/data/rpl.cpp src/data/trk.cpp src/data/trkworld.cpp src/data/lsp.cpp src/data/inflate.cpp
-            src/data/rec.cpp src/data/lbs.cpp src/data/sgc.cpp src/data/dls.cpp)
+            src/data/rec.cpp src/data/lbs.cpp src/data/sgc.cpp src/data/dls.cpp src/data/files.cpp)
 target_include_directories(phys-data PUBLIC ${SRC})
 
 # phys-native: the physics as native classes.
@@ -36,8 +36,8 @@ add_library(phys-native STATIC src/native/stage_collision.cpp src/native/rigid_b
 target_link_libraries(phys-native PUBLIC phys-num phys-data)
 target_compile_options(phys-native PRIVATE /W4)
 
-# phys-sim: sim/sim.h's Physics over the native world (NativeSim), and the stage clock.
-add_library(phys-sim STATIC src/sim/native_sim.cpp src/sim/stage.cpp src/sim/fault.cpp)
+# phys-sim: sim/sim.h's Physics over the native world (NativeSim).
+add_library(phys-sim STATIC src/sim/native_sim.cpp src/sim/fault.cpp)
 target_link_libraries(phys-sim PUBLIC phys-native wrally-signals)
 target_compile_definitions(phys-sim PRIVATE _CRT_SECURE_NO_WARNINGS NOMINMAX)
 target_compile_options(phys-sim PRIVATE /W4)
@@ -45,3 +45,27 @@ target_compile_options(phys-sim PRIVATE /W4)
 foreach(t phys-num phys-data phys-native phys-sim)
     set_target_properties(${t} PROPERTIES CXX_STANDARD 17)
 endforeach()
+
+# WPhysicsRBR.dll: the module (src/module/module.cpp) over phys-sim, in bin/modules/physics.
+add_library(WPhysicsRBR SHARED src/module/module.cpp)
+target_link_libraries(WPhysicsRBR PRIVATE phys-sim)
+target_compile_definitions(WPhysicsRBR PRIVATE _CRT_SECURE_NO_WARNINGS NOMINMAX)
+target_compile_options(WPhysicsRBR PRIVATE /W4)
+set_target_properties(WPhysicsRBR PROPERTIES CXX_STANDARD 17)
+foreach(cfg "" _DEBUG _RELEASE _RELWITHDEBINFO _MINSIZEREL)
+    set_target_properties(WPhysicsRBR PROPERTIES RUNTIME_OUTPUT_DIRECTORY${cfg} ${WRALLY_BIN}/modules/physics)
+endforeach()
+
+# ModuleInfo::buildHash: what replays and results record to say "this physics, exactly". The sources, the compiler and
+# the switches that change the arithmetic, hashed at configure time (a source change re-runs it: CONFIGURE_DEPENDS).
+file(GLOB_RECURSE PHYS_RBR_SOURCES CONFIGURE_DEPENDS ${SRC}/*.cpp ${SRC}/*.h ${SRC}/*.inc)
+list(SORT PHYS_RBR_SOURCES)
+set(PHYS_RBR_HASH_INPUT "${CMAKE_CXX_COMPILER_ID} ${CMAKE_CXX_COMPILER_VERSION} PHYS_RSQRT=${PHYS_RSQRT}")
+foreach(f ${PHYS_RBR_SOURCES})
+    file(SHA256 ${f} h)
+    string(APPEND PHYS_RBR_HASH_INPUT " ${h}")
+endforeach()
+string(SHA256 PHYS_RBR_HASH "${PHYS_RBR_HASH_INPUT}")
+string(SUBSTRING ${PHYS_RBR_HASH} 0 16 PHYS_RBR_HASH)
+target_compile_definitions(WPhysicsRBR PRIVATE WPHYSICS_RBR_BUILD_HASH=0x${PHYS_RBR_HASH}ull)
+message(STATUS "WPhysicsRBR build hash ${PHYS_RBR_HASH}")

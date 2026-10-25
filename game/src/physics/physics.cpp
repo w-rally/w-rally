@@ -1,0 +1,259 @@
+#include "physics/physics.h"
+
+#include <cstring>
+#include <fstream>
+#include <iterator>
+
+#include "wrally/modules/file_host.h"
+#include "signals/bus.h"
+#include "signals/convert.h"
+#include "wrally/iface/physics.h"
+
+namespace wrally::physics {
+
+using iface::Status;
+
+struct Physics::Impl {
+    modules::ModuleHost host;
+    std::unique_ptr<modules::FileHost> files;
+    iface::PhysicsOutput out{};
+    iface::World* world = nullptr;
+    signals::Bus* bus = nullptr;
+    // The load's once-only records, replayed on Connect.
+    std::vector<std::pair<uint32_t, std::vector<uint8_t>>> infos;
+
+    ~Impl()
+    {
+        if (world) out.api->destroyWorld(world);
+        if (out.instance) out.api->destroy(out.instance);
+    }
+
+    iface::CarState State() const
+    {
+        iface::CarState s{};
+        if (world) out.api->carState(world, 0, &s);
+        return s;
+    }
+
+    static void WRALLY_CALL OnRecord(void* ctx, uint32_t kind, const void* data, uint32_t bytes)
+    {
+        Impl& m = *static_cast<Impl*>(ctx);
+        if (kind == iface::records::CarInfo::kKind || kind == iface::records::EngineInfo::kKind) {
+            const auto* p = static_cast<const uint8_t*>(data);
+            m.infos.push_back({kind, std::vector<uint8_t>(p, p + bytes)});
+        }
+        if (m.bus) signals::EmitFromIface(*m.bus, kind, data, bytes);
+    }
+};
+
+namespace {
+
+// `path` as the VFS sees it: relative to the root when under it, else as it is.
+std::string Relative(const std::string& root, const std::string& path)
+{
+    if (path.empty() || root.empty()) return path;
+    const std::filesystem::path p(path), r(root);
+    std::error_code ec;
+    const std::filesystem::path rel = std::filesystem::relative(p, r, ec);
+    if (ec || rel.empty() || *rel.begin() == "..") return path;
+    return rel.generic_string();
+}
+
+} // namespace
+
+Physics::Physics() = default;
+Physics::~Physics() = default;
+
+std::string Physics::Open(const std::filesystem::path& modulesDir, const std::string& moduleId, const Config& c)
+{
+    m = std::make_unique<Impl>();
+    m->host.Scan(modulesDir);
+    m->files = std::make_unique<modules::FileHost>(c.root, modulesDir.parent_path().parent_path() / "cache",
+                                                   [this](iface::LogLevel level, const char* text) {
+                                                       if (level >= iface::LogLevel::Info) m_log += text;
+                                                   });
+
+    // The first compatible physics module whose id is `moduleId`.
+    std::string tried;
+    for (const modules::ModuleEntry* e : m->host.Available(iface::ModuleKind::Physics)) {
+        iface::PhysicsInput in{};
+        iface::PhysicsOutput out{};
+        iface::InitHeader(in, iface::ModuleKind::Physics, iface::kPhysicsInterfaceVer);
+        iface::InitHeader(out, iface::ModuleKind::Physics, iface::kPhysicsInterfaceVer);
+        in.host = m->files->Services(moduleId);
+        in.config = "";
+        std::string error;
+        if (m->host.Init(*e, &in.header, &out.header, &error) != Status::Ok) {
+            tried += "\n  " + e->path.filename().string() + ": " + error;
+            continue;
+        }
+        if (moduleId == out.info.id) {
+            m->out = out;
+            break;
+        }
+        tried += "\n  " + e->path.filename().string() + ": id " + out.info.id;
+        out.api->destroy(out.instance);
+    }
+    if (!m->out.instance) {
+        for (const modules::ModuleEntry& e : m->host.Entries())
+            if (!e.compatible && e.kind == iface::ModuleKind::Physics)
+                tried += "\n  " + e.path.filename().string() + ": interface " + std::to_string(e.interfaceVer) +
+                         ", the game needs " + std::to_string(iface::kPhysicsInterfaceVer);
+        return m_error = "no physics module \"" + moduleId + "\" in " + modulesDir.string() + (tried.empty() ? "" : ":") + tried;
+    }
+
+    std::string overrides;
+    if (!c.overrides.empty()) {
+        std::ifstream f(c.overrides, std::ios::binary);
+        if (!f) return m_error = "cannot open " + c.overrides;
+        overrides.assign(std::istreambuf_iterator<char>(f), std::istreambuf_iterator<char>());
+    }
+    const std::string rbz = Relative(c.root, c.rbz), trk = Relative(c.root, c.trk), col = Relative(c.root, c.col),
+                      mat = Relative(c.root, c.mat), fnc = Relative(c.root, c.fnc), lbs = Relative(c.root, c.lbs),
+                      sgc = Relative(c.root, c.sgc);
+    iface::CarDesc car{};
+    car.physicsCar = c.car.c_str();
+    car.carData = "";
+    car.model = sgc.c_str();
+    car.setup = c.setup.c_str();
+    car.tyres = c.tyres.c_str();
+    car.overrides = overrides.c_str();
+    car.surface = c.surface == "gravel" ? iface::Surface::Gravel : c.surface == "snow" ? iface::Surface::Snow : iface::Surface::Tarmac;
+    car.tyreType = c.tyreIndex;
+    std::memcpy(car.aids, c.aids, sizeof car.aids);
+    car.useStart = c.start ? 1u : 0u;
+    std::memcpy(car.startPosition, c.startPosition, sizeof car.startPosition);
+    car.startHeading = c.startHeading;
+
+    iface::WorldDesc d{};
+    d.stage.trk = trk.c_str(), d.stage.col = col.c_str(), d.stage.mat = mat.c_str();
+    d.stage.fnc = fnc.c_str(), d.stage.lbs = lbs.c_str(), d.stage.dls = "", d.stage.rbz = rbz.c_str();
+    d.stage.weather = c.weather, d.stage.wetness = c.wetness, d.stage.settings = c.settings, d.stage.flags = 0;
+    d.cars = &car;
+    d.carCount = 1;
+    d.sink = {m.get(), &Impl::OnRecord};
+    if (m->out.api->createWorld(m->out.instance, &d, &m->world) != Status::Ok)
+        return m_error = m->out.api->lastError(m->out.instance);
+    return "";
+}
+
+std::string Physics::ModuleName() const
+{
+    if (!m || !m->out.instance) return "none";
+    return std::string(m->out.info.name) + " (" + m->out.info.id + ")";
+}
+
+void Physics::ApplyWords(const uint32_t words[8])
+{
+    if (!m || !m->world) return;
+    iface::Controls c;
+    std::memcpy(&c, words, sizeof c);
+    m->out.api->setControls(m->world, 0, &c);
+}
+
+void Physics::Apply(const Control& c)
+{
+    uint32_t w[8];
+    std::memcpy(w, &c, sizeof w);
+    ApplyWords(w);
+}
+
+bool Physics::Step(uint32_t n)
+{
+    if (!m || !m->world) return false;
+    if (m->out.api->step(m->world, n) != Status::Ok) {
+        m_error = m->out.api->worldError(m->world);
+        m->out.api->destroyWorld(m->world);   // (unusable after a fault)
+        m->world = nullptr;
+        return false;
+    }
+    return true;
+}
+
+Pose Physics::CarPose() const
+{
+    const iface::CarState s = m ? m->State() : iface::CarState{};
+    Pose p;
+    std::memcpy(p.position, s.position, 12);
+    std::memcpy(p.rotation, s.rotation, 16);
+    std::memcpy(p.velocity, s.velocity, 12);
+    return p;
+}
+
+Dashboard Physics::Dash() const
+{
+    const iface::CarState s = m ? m->State() : iface::CarState{};
+    return {s.speed, s.rpm, s.gear};
+}
+
+void Physics::Wheels(Wheel out[4]) const
+{
+    const iface::CarState s = m ? m->State() : iface::CarState{};
+    for (int k = 0; k < 4; ++k) {
+        std::memcpy(out[k].position, s.wheels[k].position, 12);
+        std::memcpy(out[k].rotation, s.wheels[k].rotation, 16);
+        out[k].spin = s.wheels[k].spin;
+    }
+}
+
+void Physics::Connect(signals::Bus* bus)
+{
+    if (!m) return;
+    m->bus = bus;
+    if (bus)
+        for (const auto& [kind, bytes] : m->infos)
+            signals::EmitFromIface(*bus, kind, bytes.data(), static_cast<uint32_t>(bytes.size()));
+}
+
+void Physics::CenterOfGravity(float out[3]) const
+{
+    std::memset(out, 0, 12);
+    if (m && m->world) m->out.api->centerOfGravity(m->world, 0, out);
+}
+
+std::vector<Box> Physics::Water() const
+{
+    std::vector<Box> out;
+    if (!m || !m->world) return out;
+    std::vector<iface::Box> w(m->out.api->water(m->world, nullptr, 0));
+    m->out.api->water(m->world, w.data(), static_cast<uint32_t>(w.size()));
+    for (const iface::Box& b : w) {
+        Box o;
+        std::memcpy(o.lo, b.lo, 12);
+        std::memcpy(o.hi, b.hi, 12);
+        out.push_back(o);
+    }
+    return out;
+}
+
+const std::vector<Body>& Physics::Bodies()
+{
+    if (!m || !m->world) return m_bodies;
+    std::vector<iface::BodyState> b(m->out.api->bodies(m->world, nullptr, 0));
+    m->out.api->bodies(m->world, b.data(), static_cast<uint32_t>(b.size()));
+    m_bodies.resize(b.size());
+    for (size_t i = 0; i < b.size(); ++i) {
+        Body& o = m_bodies[i];
+        o.id = b[i].id;
+        std::memcpy(o.startPosition, b[i].startPosition, 12);
+        std::memcpy(o.startRotation, b[i].startRotation, 16);
+        std::memcpy(o.position, b[i].position, 12);
+        std::memcpy(o.rotation, b[i].rotation, 16);
+    }
+    return m_bodies;
+}
+
+void Physics::PoseWords(uint32_t out[13]) const
+{
+    const iface::CarState s = m ? m->State() : iface::CarState{};
+    std::memcpy(out, s.rotation, 16);
+    std::memcpy(out + 4, s.position, 12);
+    std::memcpy(out + 7, s.angularVelocity, 12);
+    std::memcpy(out + 10, s.velocity, 12);
+}
+
+float Physics::StageDistance() const { return m ? m->State().stageDistance : 0.0f; }
+float Physics::Dt() const { return m && m->world ? m->out.api->dt(m->world) : 0.0f; }
+uint32_t Physics::Tick() const { return m && m->world ? m->out.api->tick(m->world) : 0; }
+
+} // namespace wrally::physics

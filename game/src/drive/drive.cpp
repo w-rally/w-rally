@@ -5,7 +5,7 @@
 //
 //   WRally <game dir> <stage .ngg> [--stage <the .ngg's>] [--sgc Cars/i20_R5/i20_R5.sgc] [--car s_i2003]
 //              [--surface <the stage's>] [--tyre-type <its>] [--tyres michelin] [--aids 0,0,0,0] [--camera 0] [--out drive.phr]
-//              [--replay run.phr]
+//              [--replay run.phr] [--physics rbr]
 //              [--skip-to <tick>] [--pause-at <tick>] [--exit-at <tick>] [--step <seconds>] [--camera-angle <degrees>]
 //              [--chase-distance <metres>] [--chase-pull <metres per 100 km/h>] [--entry <seconds>] [--quick-start]
 //              [--no-sound] [--eng Focus03-08] [--mix sound-mix.ini] [--overrides cars/s_i2003.ini | none]
@@ -62,6 +62,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <cwchar>
+#include <filesystem>
 #include <memory>
 #include <string>
 #include <vector>
@@ -77,8 +78,8 @@
 #include "drive/launch_control.h"
 #include "drive/replay_camera.h"
 #include "signals/bus.h"
-#include "sim/native_sim.h"
-#include "sim/sim.h"
+#include "physics/physics.h"
+#include "rules/stage.h"
 
 namespace {
 
@@ -249,7 +250,7 @@ ngg_mesh HullMesh(ngg_scene* s, const phys::data::RecMesh& m)
 
 // The car's placement as the renderer's row-major matrix (row vectors, translation in row 3): the pose's rotation
 // conjugated by the axis swap.
-void CarMatrix(const phys::sim::Pose& p, float* m)
+void CarMatrix(const wrally::physics::Pose& p, float* m)
 {
     const V3 cols[3] = {ToRender(Rotate(p.rotation, {1, 0, 0})), ToRender(Rotate(p.rotation, {0, 0, 1})),
                         ToRender(Rotate(p.rotation, {0, 1, 0}))};   // the images of the renderer's x, y, z
@@ -271,7 +272,7 @@ void CarMatrix(const phys::sim::Pose& p, float* m)
 // part (in its hub's frame, the model's axes) goes with the physics' wheel: its knuckle's rotation and hub, the spin
 // about the knuckle's x for the parts turning with it; the right wheels' knuckles are turned half about z, which the
 // model's right wheels already are (car_model.h), so that half turn is taken out first.
-void PartMatrix(const float cog[3], const phys::sim::Wheel* w, bool right, bool spins, float* out)
+void PartMatrix(const float cog[3], const wrally::physics::Wheel* w, bool right, bool spins, float* out)
 {
     V3 cols[3] = {{1, 0, 0}, {0, 1, 0}, {0, 0, 1}};   // physics axes: the images of x, y, z
     V3 t{-cog[0], -cog[1], -cog[2]};
@@ -358,7 +359,7 @@ struct Hud {
     V3 At(float x, float y) const { return eye + fwd + right * (x * tanX) + up * (y * tanY); }
 };
 
-void DrawHud(ngg_scene* s, const Hud& h, const phys::sim::Dashboard& d, int width, int height)
+void DrawHud(ngg_scene* s, const Hud& h, const wrally::physics::Dashboard& d, int width, int height)
 {
     // Each line twice: a dark shadow a few pixels down-right (layers 0..2), then the text (layers 3..5).
     auto put = [&](uint32_t layer, float x, float y, const char* text, uint32_t colour, float px) {
@@ -411,11 +412,11 @@ void DrawDebugHud(ngg_scene* s, bool on, const std::vector<std::string>& lines, 
                    px, NGG_LABEL_SCREEN | NGG_LABEL_SHADOW);
 }
 
-std::string StageTimeText(float t) { return phys::sim::StageClock::Text(t); }
+std::string StageTimeText(float t) { return wrally::rules::StageClock::Text(t); }
 
 // The stage clock on the screen (screen-space labels): the countdown big in the middle (layer 11) and the stage time
 // with the splits at the top right (layer 12).
-void DrawStageHud(ngg_scene* s, const phys::sim::StageClock& clock, int width, int height)
+void DrawStageHud(ngg_scene* s, const wrally::rules::StageClock& clock, int width, int height)
 {
     constexpr uint32_t kCountdownLayer = 11, kTimeLayer = 12;
     auto put = [&](uint32_t layer, const std::vector<std::string>& lines, const std::vector<uint32_t>& colours, float px,
@@ -443,7 +444,7 @@ void DrawStageHud(ngg_scene* s, const phys::sim::StageClock& clock, int width, i
     const std::string shown = clock.Shown();
     // the countdown's digits big; GO green, a false start red, a split / the finish smaller
     const bool go = shown == "GO", warn = shown == "FALSE START", count = shown.size() == 1;
-    const bool finished = clock.GetState() == phys::sim::StageClock::State::Finished;
+    const bool finished = clock.GetState() == wrally::rules::StageClock::State::Finished;
     const float big = height * (count || go ? 0.22f : 0.09f);
     put(kCountdownLayer, shown.empty() ? std::vector<std::string>{} : std::vector<std::string>{shown},
         {warn ? 0xf03030ffu : go || finished ? 0xf040e040u : 0xf0ffffffu}, big, 0, height * 0.32f - big * 0.5f, true);
@@ -451,7 +452,7 @@ void DrawStageHud(ngg_scene* s, const phys::sim::StageClock& clock, int width, i
     std::vector<uint32_t> colours;
     const float px = std::max(14.0f, height * 0.04f);
     lines.push_back(StageTimeText(clock.Time()));
-    colours.push_back(clock.GetState() == phys::sim::StageClock::State::Finished ? 0xf040e040u : 0xf0ffffffu);
+    colours.push_back(clock.GetState() == wrally::rules::StageClock::State::Finished ? 0xf040e040u : 0xf0ffffffu);
     if (clock.FalseStart()) {
         lines.push_back("false start +10 s");
         colours.push_back(0xf03030ffu);
@@ -482,11 +483,11 @@ struct Follower {
         return keyed;
     }
 
-    void Update(ngg_scene* s, const std::vector<phys::sim::Body>& bodies)
+    void Update(ngg_scene* s, const std::vector<wrally::physics::Body>& bodies)
     {
         if (moving.size() != bodies.size()) moving.assign(bodies.size(), 0);
         for (size_t i = 0; i < bodies.size(); ++i) {
-            const phys::sim::Body& b = bodies[i];
+            const wrally::physics::Body& b = bodies[i];
             if (!moving[i]) {
                 if (!std::memcmp(b.position, b.startPosition, 12) && !std::memcmp(b.rotation, b.startRotation, 16)) continue;
                 moving[i] = 1;
@@ -534,7 +535,7 @@ std::string Stem(const std::string& path)
 std::string NggStage(const std::string& game, const std::string& nggPath, std::string& why)
 {
     const std::string stem = Stem(nggPath);
-    const int map = phys::sim::StageMap(stem);
+    const int map = wrally::rules::StageMap(stem);
     if (map < 0) return why = "no track-<n> in its name", "";
     if (stem.find('_') != std::string::npos) {
         if (GetFileAttributesA((game + "/Maps/" + stem + ".trk").c_str()) != INVALID_FILE_ATTRIBUTES) return why = "its name", stem;
@@ -600,13 +601,14 @@ int main(int argc, char** argv)
             if (fromNgg.empty()) return std::fprintf(stderr, "%s: --stage needed (%s)\n", nggPath.c_str(), why.c_str()), 2;
             stage = fromNgg;
             std::printf("stage %s from the .ngg's name (%s)\n", stage.c_str(), why.c_str());
-        } else if (const int a = phys::sim::StageMap(stage), b = phys::sim::StageMap(Stem(nggPath)); a >= 0 && b >= 0 && a != b) {
+        } else if (const int a = wrally::rules::StageMap(stage), b = wrally::rules::StageMap(Stem(nggPath)); a >= 0 && b >= 0 && a != b) {
             std::printf("WARNING: --stage %s is map %d, the .ngg (%s) map %d: the car runs on another stage's ground than "
                         "the one drawn\n", stage.c_str(), a, nggPath.c_str(), b);
         }
     }
     const std::string maps = game + "/Maps/" + stage;
-    phys::sim::Config c;
+    wrally::physics::Config c;
+    c.root = game;
     c.rbz = game + "/physics.rbz";
     c.trk = maps + ".trk";
     c.col = maps + ".col";
@@ -627,21 +629,21 @@ int main(int argc, char** argv)
     {
         std::string from = "--surface";
         c.surface = Arg(argc, argv, "--surface", "");
-        if (c.surface.empty()) c.surface = phys::sim::StageSurface(game, phys::sim::StageMap(stage), &from);
+        if (c.surface.empty()) c.surface = wrally::rules::StageSurface(game, wrally::rules::StageMap(stage), &from);
         if (c.surface != "tarmac" && c.surface != "gravel" && c.surface != "snow")
             return std::fprintf(stderr, "--surface %s: tarmac, gravel or snow\n", c.surface.c_str()), 2;
         const std::string type = Arg(argc, argv, "--tyre-type", "");
-        c.tyreIndex = phys::sim::SurfaceTyreType(c.surface, c.wetness >= 0 ? c.wetness : static_cast<int32_t>(c.weather / 3));
+        c.tyreIndex = wrally::rules::SurfaceTyreType(c.surface, c.wetness >= 0 ? c.wetness : static_cast<int32_t>(c.weather / 3));
         if (!type.empty()) {
             char* end;
             c.tyreIndex = std::strtoul(type.c_str(), &end, 10);
             if (end == type.c_str() || *end)
-                for (c.tyreIndex = 0; c.tyreIndex < 7 && type != phys::sim::kTyreTypeNames[c.tyreIndex]; ++c.tyreIndex) {}
+                for (c.tyreIndex = 0; c.tyreIndex < 7 && type != wrally::rules::kTyreTypeNames[c.tyreIndex]; ++c.tyreIndex) {}
             if (c.tyreIndex >= 7) return std::fprintf(stderr, "--tyre-type %s: 0..6 or a TyreTypeNN name\n", type.c_str()), 2;
         }
         c.tyres = Arg(argc, argv, "--tyres", "michelin");
         std::printf("stage %s: surface %s (%s), tyres TyreType%02u %s%s, brand %s\n", stage.c_str(), c.surface.c_str(),
-                    from.c_str(), c.tyreIndex, phys::sim::kTyreTypeNames[c.tyreIndex], type.empty() ? "" : " (--tyre-type)",
+                    from.c_str(), c.tyreIndex, wrally::rules::kTyreTypeNames[c.tyreIndex], type.empty() ? "" : " (--tyre-type)",
                     c.tyres.c_str());
     }
     const std::string out = Arg(argc, argv, "--out", "drive.phr");
@@ -670,19 +672,23 @@ int main(int argc, char** argv)
             return std::fprintf(stderr, "%s\n", e.what()), 3;
         }
         if (replay.settings & 1) c.settings = replay.settings;
-        c.anims = replay.anims;
         if (Arg(argc, argv, "--aids", "").empty())
             for (uint32_t& a : c.aids) a = 0;
     }
-    // The physics: the native one (sim/native_sim.h). It has not got the replays' animation objects (spectators) yet.
-    if (!c.anims.empty()) {   // (stage 41's recording replays bit-exact without its spectators)
-        std::printf("the replay's %zu animation objects left out (the native physics has none yet)\n", c.anims.size());
-        c.anims.clear();
+    // The physics: a module DLL in modules/physics beside the exe (--physics <id>, "rbr" by default: WPhysicsRBR.dll,
+    // the native RBR physics). It has not got the replays' animation objects (spectators) yet.
+    if (!replay.anims.empty())   // (stage 41's recording replays bit-exact without its spectators)
+        std::printf("the replay's %zu animation objects left out (the physics has none yet)\n", replay.anims.size());
+    wrally::physics::Physics sim;
+    {
+        char exe[MAX_PATH];
+        GetModuleFileNameA(nullptr, exe, MAX_PATH);
+        const std::filesystem::path modules = std::filesystem::path(exe).parent_path() / "modules" / "physics";
+        const std::string id = Arg(argc, argv, "--physics", "rbr");
+        std::printf("loading the physics (%s)...\n", id.c_str());
+        if (const std::string e = sim.Open(modules, id, c); !e.empty()) return std::fprintf(stderr, "physics: %s\n", e.c_str()), 3;
+        std::printf("physics module: %s\n", sim.ModuleName().c_str());
     }
-    std::unique_ptr<phys::sim::Physics> physics = std::make_unique<phys::sim::NativeSim>();
-    phys::sim::Physics& sim = *physics;
-    std::printf("loading the native physics...\n");
-    if (const std::string e = sim.Open(c); !e.empty()) return std::fprintf(stderr, "physics: %s\n", e.c_str()), 3;
     std::printf("%sdt %.4f s\n", sim.Log().c_str(), sim.Dt());
     // The modules hear the physics on the bus: the sound plays from the device's thread, a few ticks behind it.
     signals::Bus bus;
@@ -839,7 +845,7 @@ int main(int argc, char** argv)
 
     const double dt = sim.Dt();
     // The stage clock (sim::StageClock): the .dls's marks, the entry, the countdown.
-    phys::sim::StageClock clock;
+    wrally::rules::StageClock clock;
     {
         float finish = -1;
         std::vector<float> checkpoints;
@@ -859,23 +865,23 @@ int main(int argc, char** argv)
     // The countdown starts this long after the load (the physics' time, tick 0 its load).
     const double countdownAt = quickStart ? 0.0 : std::max(0.0, std::atof(Arg(argc, argv, "--entry", "2").c_str()));
     auto inEntry = [&]() { return sim.Tick() * dt < countdownAt; };
-    clock.Reset(quickStart ? 3.5f : phys::sim::StageClock::kCountdown);
+    clock.Reset(quickStart ? 3.5f : wrally::rules::StageClock::kCountdown);
     // After every physics step: the clock, its events printed (in the entry nothing).
     auto clockStep = [&]() {
         if (inEntry()) return;
         const float time = clock.Time();
         switch (clock.Advance(static_cast<float>(dt), sim.Dash().speed, sim.StageDistance())) {
-        case phys::sim::StageClock::kGo:
+        case wrally::rules::StageClock::kGo:
             std::printf("GO (tick %u)\n", sim.Tick());
             break;
-        case phys::sim::StageClock::kFalseStart:
+        case wrally::rules::StageClock::kFalseStart:
             std::printf("FALSE START (tick %u): %.2f s of the countdown left + %.0f s\n", sim.Tick(),
-                        clock.Time() - phys::sim::StageClock::kFalseStartPenalty, phys::sim::StageClock::kFalseStartPenalty);
+                        clock.Time() - wrally::rules::StageClock::kFalseStartPenalty, wrally::rules::StageClock::kFalseStartPenalty);
             break;
-        case phys::sim::StageClock::kSplit:
+        case wrally::rules::StageClock::kSplit:
             std::printf("split %zu: %s (tick %u)\n", clock.Splits().size(), StageTimeText(clock.Splits().back()).c_str(), sim.Tick());
             break;
-        case phys::sim::StageClock::kFinish:
+        case wrally::rules::StageClock::kFinish:
             std::printf("FINISH: %s%s (tick %u)\n", StageTimeText(time).c_str(), clock.FalseStart() ? " (the false start's 10 s in)" : "",
                         sim.Tick());
             break;
@@ -941,9 +947,9 @@ int main(int argc, char** argv)
     // eye trails the car step by step, on the physics' time, and is drawn between the steps the same way. Drawing
     // only: the physics and the recording do not see it.
     struct Shown {
-        phys::sim::Pose pose;
-        phys::sim::Wheel wheels[4];
-        std::vector<phys::sim::Body> bodies;
+        wrally::physics::Pose pose;
+        wrally::physics::Wheel wheels[4];
+        std::vector<wrally::physics::Body> bodies;
         V3 chase;   // the chase camera's eye
         V3 behind;  // the way from the car to it, flat and unit: what trails, smoothed step by step
         float pull = 0.0f;   // metres further back for the speed, eased
@@ -956,18 +962,18 @@ int main(int argc, char** argv)
     // The chase: at speed the camera drops back, --chase-pull metres per 100 km/h (1.5 by default, 0 off), at most
     // twice that, eased over about a second - so it falls back as the car accelerates and closes in as it brakes.
     const float chasePull = std::max(0.0f, static_cast<float>(std::atof(Arg(argc, argv, "--chase-pull", "1.5").c_str())));
-    auto pullWant = [&](const phys::sim::Pose& p) {
+    auto pullWant = [&](const wrally::physics::Pose& p) {
         const float speed = std::sqrt(p.velocity[0] * p.velocity[0] + p.velocity[1] * p.velocity[1] + p.velocity[2] * p.velocity[2]);
         return std::min(2.0f * chasePull, chasePull * speed * 3.6f / 100.0f);
     };
     // The eye: chaseDistance behind the car along `behind`, 2.2 m up. Only the DIRECTION trails the car's heading.
     // Smoothing the eye's position instead made it trail the car itself - a lag of 6 / s is speed / 6 behind its
     // target, 5 m more at 108 km/h - so the faster the car, the further back the camera fell.
-    auto chaseBehind = [](const phys::sim::Pose& p) {
+    auto chaseBehind = [](const wrally::physics::Pose& p) {
         const V3 fwd = Rotate(p.rotation, {0, -1, 0});
         return Norm({-fwd.x, -fwd.y, 0});
     };
-    auto chaseEye = [&](const phys::sim::Pose& p, V3 behind, float pull) {
+    auto chaseEye = [&](const wrally::physics::Pose& p, V3 behind, float pull) {
         return V3{p.position[0], p.position[1], p.position[2]} + behind * (chaseDistance + pull) + V3{0, 0, 2.2f};
     };
     Shown before, after;   // the steps a frame falls between
@@ -993,6 +999,17 @@ int main(int argc, char** argv)
         after.pull = before.pull + (pullWant(after.pose) - before.pull) * std::min(1.0f, static_cast<float>(dt) * 1.2f);
         after.chase = chaseEye(after.pose, after.behind, after.pull);
     };
+    // A replay checks itself: the pose the recording kept after each step ('P') against the physics' now, word for word -
+    // the golden check (docs/design.md 4.2). Reported at the exit.
+    uint32_t posesChecked = 0, posesDiffering = 0, firstDifference = 0;
+    auto checkPose = [&]() {
+        if (replayAt >= replay.events.size() || replay.events[replayAt].type != 'P') return;
+        uint32_t pose[13];
+        sim.PoseWords(pose);
+        ++posesChecked;
+        if (std::memcmp(pose, replay.events[replayAt].words, sizeof pose) && !posesDiffering++) firstDifference = sim.Tick();
+        ++replayAt;
+    };
     // One step of a replay: its controls up to its next step, then the step. False at its end or on an error.
     auto replayStep = [&]() {
         while (replayAt < replay.events.size() && replay.events[replayAt].type != 'S') {
@@ -1005,6 +1022,7 @@ int main(int argc, char** argv)
             g_quit = true;
             return false;
         }
+        checkPose();
         clockStep();
         return true;
     };
@@ -1019,7 +1037,7 @@ int main(int argc, char** argv)
                 if (!replayStep()) break;
                 continue;
             }
-            phys::sim::Control ctl;
+            wrally::physics::Control ctl;
             uint32_t w[8];
             std::memcpy(w, &ctl, 32);
             sim.Apply(ctl);
@@ -1159,7 +1177,7 @@ int main(int argc, char** argv)
             // driver's filter would.
             const float rate = static_cast<float>(dt) * (target == 0.0f ? 5.0f : 3.0f);
             steering += std::max(-rate, std::min(rate, target - steering));
-            phys::sim::Control ctl;
+            wrally::physics::Control ctl;
             ctl.throttle = focused && DownAt(kThrottle) ? 1.0f : 0.0f;
             {   // launch control between the pedal and the engine
                 static phys::drive::LaunchControl launch = [&] {
@@ -1173,7 +1191,7 @@ int main(int argc, char** argv)
                     a.enabled = a.crack > 0;
                     return a;
                 }();
-                const phys::sim::Dashboard dash = sim.Dash();
+                const wrally::physics::Dashboard dash = sim.Dash();
                 const float pedal = ctl.throttle;
                 const bool was = launch.Active();
                 ctl.throttle = launch.Throttle(ctl.throttle, dash.rpm, dash.speed, dash.gear, static_cast<float>(dt));
@@ -1209,23 +1227,23 @@ int main(int argc, char** argv)
         }
         // This frame between the last two steps (past the last at a replay's end: the last).
         const float t = static_cast<float>(std::min(1.0, acc / dt));
-        static std::vector<phys::sim::Body> bodies;
+        static std::vector<wrally::physics::Body> bodies;
         bodies = after.bodies;
         for (size_t i = 0; i < bodies.size() && i < before.bodies.size(); ++i) {
             Lerp(before.bodies[i].position, after.bodies[i].position, t, 3, bodies[i].position);
             Nlerp(before.bodies[i].rotation, after.bodies[i].rotation, t, bodies[i].rotation);
         }
         follower.Update(s, bodies);
-        phys::sim::Pose p;
+        wrally::physics::Pose p;
         Lerp(before.pose.position, after.pose.position, t, 3, p.position);
         Nlerp(before.pose.rotation, after.pose.rotation, t, p.rotation);
         Lerp(before.pose.velocity, after.pose.velocity, t, 3, p.velocity);
         float m[16], cog[3];
         CarMatrix(p, m);
         sim.CenterOfGravity(cog);
-        phys::sim::Wheel wheels[4];
+        wrally::physics::Wheel wheels[4];
         for (int k = 0; k < 4; ++k) {
-            const phys::sim::Wheel &a = before.wheels[k], &b = after.wheels[k];
+            const wrally::physics::Wheel &a = before.wheels[k], &b = after.wheels[k];
             Lerp(a.position, b.position, t, 3, wheels[k].position);
             Nlerp(a.rotation, b.rotation, t, wheels[k].rotation);
             // the spin is wrapped: the shorter way round
@@ -1400,6 +1418,13 @@ int main(int argc, char** argv)
         }
     }
     ngg_destroy(s);
+    if (posesChecked) {
+        if (posesDiffering)
+            std::printf("replay check: %u of %u poses differ from the recording, the first at tick %u\n", posesDiffering,
+                        posesChecked, firstDifference);
+        else
+            std::printf("replay check: %u poses, all bit-exact with the recording\n", posesChecked);
+    }
     try {
         phys::data::WriteRecording(out, rec);
         std::printf("the drive: %zu events to %s (tick %u)\n", rec.events.size(), out.c_str(), sim.Tick());

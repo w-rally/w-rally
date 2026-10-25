@@ -1,4 +1,5 @@
 #include "lsp.h"
+#include "files.h"
 
 #include <cctype>
 #include <cstdlib>
@@ -145,9 +146,9 @@ LspNode ParseLsp(const std::string& text) { return Parser(text).File(); }
 
 std::string ReadFileText(const std::string& path)
 {
-    std::ifstream f(path, std::ios::binary);
-    if (!f) throw std::runtime_error("cannot open " + path);
-    return std::string((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+    std::vector<uint8_t> d;
+    if (!ReadWholeFile(path, d)) throw std::runtime_error("cannot open " + path);
+    return std::string(d.begin(), d.end());
 }
 
 namespace {

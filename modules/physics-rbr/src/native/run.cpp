@@ -7,6 +7,7 @@
 
 #include "data/lbs.h"
 #include "data/lsp.h"
+#include "data/files.h"
 #include "data/sgc.h"
 #include "data/trk.h"
 
@@ -17,8 +18,9 @@ namespace {
 // A file's bytes (none: a missing file - the .fnc is optional).
 std::vector<uint8_t> ReadBytes(const std::string& path)
 {
-    std::ifstream in(path, std::ios::binary);
-    return in ? std::vector<uint8_t>((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>()) : std::vector<uint8_t>{};
+    std::vector<uint8_t> d;
+    data::ReadWholeFile(path, d);
+    return d;
 }
 
 } // namespace
