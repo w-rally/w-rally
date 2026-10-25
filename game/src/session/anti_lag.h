@@ -22,7 +22,7 @@
 #include <algorithm>
 #include <cmath>
 
-namespace phys::drive {
+namespace wrally::session {
 
 class AntiLag {
 public:
@@ -86,4 +86,4 @@ private:
     unsigned m_random = 0x51ed2701u;
 };
 
-} // namespace phys::drive
+} // namespace wrally::session

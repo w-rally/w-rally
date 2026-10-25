@@ -22,7 +22,7 @@
 #include <string>
 #include <vector>
 
-namespace phys::drive {
+namespace wrally::assets {
 
 struct CarVertex {
     float pos[3], normal[3], uv[2];
@@ -53,4 +53,4 @@ struct CarModel {
 // snow), without the lamps' lit variants. Throws std::runtime_error on a bad file.
 CarModel ReadCarModel(const std::string& sgcPath, const std::string& surface);
 
-} // namespace phys::drive
+} // namespace wrally::assets

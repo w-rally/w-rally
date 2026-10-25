@@ -1,10 +1,10 @@
-#include "drive/replay_camera.h"
+#include "camera/replay_camera.h"
 
 #include <cmath>
 #include <limits>
 #include <utility>
 
-namespace phys::drive {
+namespace wrally::camera {
 
 namespace {
 
@@ -12,10 +12,10 @@ constexpr float kWindow = 60.0f;   // how far (m along the line) the car's dista
 constexpr float kDegree = 3.14159265f / 180.0f;
 
 // A channel's value at distance d: linear between its keys, held past the ends.
-bool ChannelAt(const data::DlsCameraChannel& c, float d, float* out)
+bool ChannelAt(const phys::data::DlsCameraChannel& c, float d, float* out)
 {
-    const data::DlsCameraChannel::Key *prev = nullptr, *next = nullptr;
-    for (const data::DlsCameraChannel::Key& k : c.keys) {
+    const phys::data::DlsCameraChannel::Key *prev = nullptr, *next = nullptr;
+    for (const phys::data::DlsCameraChannel::Key& k : c.keys) {
         if (k.distance <= d && (!prev || k.distance > prev->distance)) prev = &k;
         if (k.distance > d && (!next || k.distance < next->distance)) next = &k;
     }
@@ -32,18 +32,18 @@ bool ChannelAt(const data::DlsCameraChannel& c, float d, float* out)
 
 } // namespace
 
-ReplayCameras::ReplayCameras(data::Dls dls, std::vector<data::LbsScripts::DrivePoint> line)
+ReplayCameras::ReplayCameras(phys::data::Dls dls, std::vector<phys::data::LbsScripts::DrivePoint> line)
     : m_dls(std::move(dls)), m_line(std::move(line))
 {
     // A camera's spans: each start trigger to the first end trigger of the same camera after it.
-    for (const data::DlsCameraTrigger& t : m_dls.triggers) {
+    for (const phys::data::DlsCameraTrigger& t : m_dls.triggers) {
         if (t.end) continue;
         size_t camera = m_dls.cameras.size();
         for (size_t i = 0; i < m_dls.cameras.size(); ++i)
             if (m_dls.cameras[i].id == t.camera) camera = i;
         if (camera == m_dls.cameras.size()) continue;   // an animation object's trigger
         float to = std::numeric_limits<float>::infinity();
-        for (const data::DlsCameraTrigger& e : m_dls.triggers)
+        for (const phys::data::DlsCameraTrigger& e : m_dls.triggers)
             if (e.end && e.camera == t.camera && e.distance > t.distance && e.distance < to) to = e.distance;
         m_spans.push_back({t.distance, to, camera});
     }
@@ -78,14 +78,14 @@ float ReplayCameras::Track(const float p[3])
 
 void ReplayCameras::Place(size_t camera, float start, float eye[3], float angles[3], float* zoom) const
 {
-    const data::DlsCamera& c = m_dls.cameras[camera];
+    const phys::data::DlsCamera& c = m_dls.cameras[camera];
     for (int k = 0; k < 3; ++k) {
         eye[k] = c.position[k];
         angles[k] = c.angles[k];
     }
     *zoom = c.zoom;
     float along = m_distance - start, v;
-    for (const data::DlsCameraChannel& ch : m_dls.channels) {
+    for (const phys::data::DlsCameraChannel& ch : m_dls.channels) {
         if (ch.camera != c.id || !ChannelAt(ch, m_distance, &v)) continue;
         if (ch.type >= 1 && ch.type <= 3) eye[ch.type - 1] = v;
         else if (ch.type == 4) along = v;
@@ -93,11 +93,11 @@ void ReplayCameras::Place(size_t camera, float start, float eye[3], float angles
         else if (ch.type == 12) *zoom = v;
     }
     if (c.path <= 0) return;
-    for (const data::DlsPath& p : m_dls.paths) {
+    for (const phys::data::DlsPath& p : m_dls.paths) {
         if (static_cast<int32_t>(p.id) != c.path || static_cast<int32_t>(p.animationSet) != c.animationSet || p.points.empty())
             continue;
-        const data::DlsPath::Point* prev = &p.points.front();
-        for (const data::DlsPath::Point& q : p.points) {
+        const phys::data::DlsPath::Point* prev = &p.points.front();
+        for (const phys::data::DlsPath::Point& q : p.points) {
             if (q.distance <= along) {
                 prev = &q;
                 continue;
@@ -119,7 +119,7 @@ bool ReplayCameras::View(const float car[3], ReplayView* out)
     for (const Span& s : m_spans)
         if (s.from <= m_distance && m_distance < s.to && (!span || s.from > span->from)) span = &s;
     if (!span) return false;
-    const data::DlsCamera& c = m_dls.cameras[span->camera];
+    const phys::data::DlsCamera& c = m_dls.cameras[span->camera];
     float angles[3], zoom;
     Place(span->camera, span->from, out->eye, angles, &zoom);
     out->camera = c.id;
@@ -132,10 +132,10 @@ bool ReplayCameras::View(const float car[3], ReplayView* out)
     }
     for (int k = 0; k < 3; ++k) out->at[k] = car[k];   // the car
     if (c.aim > 0)
-        for (const data::DlsCamera& o : m_dls.cameras)
+        for (const phys::data::DlsCamera& o : m_dls.cameras)
             if (o.id == c.aim)
                 for (int k = 0; k < 3; ++k) out->at[k] = o.position[k];
     return true;
 }
 
-} // namespace phys::drive
+} // namespace wrally::camera

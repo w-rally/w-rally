@@ -1,4 +1,4 @@
-#include "drive/car_model.h"
+#include "assets/car_model.h"
 
 #include <windows.h>
 
@@ -9,7 +9,7 @@
 #include <map>
 #include <stdexcept>
 
-namespace phys::drive {
+namespace wrally::assets {
 
 namespace {
 
@@ -334,4 +334,4 @@ CarModel ReadCarModel(const std::string& sgcPath, const std::string& surface)
     return model;
 }
 
-} // namespace phys::drive
+} // namespace wrally::assets

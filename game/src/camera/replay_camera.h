@@ -20,7 +20,7 @@
 #include "data/dls.h"
 #include "data/lbs.h"
 
-namespace phys::drive {
+namespace wrally::camera {
 
 struct ReplayView {
     float eye[3], at[3];   // the physics' axes
@@ -30,7 +30,7 @@ struct ReplayView {
 
 class ReplayCameras {
 public:
-    ReplayCameras(data::Dls dls, std::vector<data::LbsScripts::DrivePoint> line);
+    ReplayCameras(phys::data::Dls dls, std::vector<phys::data::LbsScripts::DrivePoint> line);
     bool Empty() const { return m_spans.empty() || m_line.size() < 2; }
     // The view for the car at `car` (the physics' axes); false where no camera covers its distance.
     bool View(const float car[3], ReplayView* out);
@@ -44,10 +44,10 @@ private:
     float Track(const float p[3]);
     void Place(size_t camera, float start, float eye[3], float angles[3], float* zoom) const;
 
-    data::Dls m_dls;
-    std::vector<data::LbsScripts::DrivePoint> m_line;
+    phys::data::Dls m_dls;
+    std::vector<phys::data::LbsScripts::DrivePoint> m_line;
     std::vector<Span> m_spans;
     float m_distance = -1;
 };
 
-} // namespace phys::drive
+} // namespace wrally::camera
