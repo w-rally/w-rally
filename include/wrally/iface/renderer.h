@@ -31,7 +31,10 @@
 
 namespace wrally::iface {
 
-constexpr uint32_t kRendererInterfaceVer = 1;
+// 2: FrameDesc::weatherPreset, RenderSettings::shadows, RenderStats as the
+//    renderer's readout, sceneKeyStats; models and textures belong to the
+//    loaded scene.
+constexpr uint32_t kRendererInterfaceVer = 2;
 
 struct Renderer;                     // the module's instance, opaque
 typedef uint32_t SceneHandle;        // a loaded .ngg stage
@@ -61,11 +64,11 @@ struct Vertex {
 static_assert(sizeof(Vertex) == 44, "Vertex - keep in step with ngg_format.h");
 
 // Metallic-roughness, as ngg_material_desc / ngg::Material v3. Texture slots
-// are TextureHandles, 0 for an empty slot (which binds white, so a factor alone
-// is a complete material).
+// are TextureHandles from createTexture, 0 for an empty slot (which binds
+// white, so a factor alone is a complete material).
 constexpr uint32_t kMaterialAlphaTest = 1u << 0;
 constexpr uint32_t kMaterialTwoSided  = 1u << 1;
-constexpr uint32_t kMaterialBlend     = 1u << 2;   // alpha-blended (car glass); drawn after the opaque pass
+constexpr uint32_t kMaterialBlend     = 1u << 2;   // alpha-blended (car glass) - not drawn blended yet: WRenderer ignores it
 
 struct MaterialDesc {
     TextureHandle baseColour, detail, normal, orm, emissive;
@@ -74,6 +77,21 @@ struct MaterialDesc {
     float         roughness, metallic, normalScale, occlusionStrength, emissiveStrength, alphaCutoff;
 };
 static_assert(sizeof(MaterialDesc) == 64, "MaterialDesc layout");
+
+// What a material is before anything is said about it: ngg::DefaultMaterial - a
+// dielectric, fairly rough, opaque white surface.
+inline MaterialDesc DefaultMaterialDesc()
+{
+    MaterialDesc m{};
+    m.baseColourFactor[0] = m.baseColourFactor[1] = m.baseColourFactor[2] = m.baseColourFactor[3] = 1.0f;
+    m.roughness = 0.75f;
+    m.metallic = 0.0f;
+    m.normalScale = 1.0f;
+    m.occlusionStrength = 1.0f;
+    m.emissiveStrength = 0.0f;
+    m.alphaCutoff = 170.0f / 255.0f;
+    return m;
+}
 
 // As ngg_weather_desc: physical values only.
 struct WeatherDesc {
@@ -95,7 +113,8 @@ static_assert(sizeof(WeatherDesc) == 60, "WeatherDesc layout");
 // A model is a node tree with meshes on the nodes - what a car is (.sgc today,
 // a car .ngg later). The game animates it by node transforms each frame
 // (wheels, steering, doors, detached parts); the renderer never interprets node
-// names.
+// names. A mesh is drawn at node(world) = local * parent(world) * ... * the
+// instance's world.
 struct ModelMesh {
     const Vertex*   vertices;
     uint32_t        vertexCount;
@@ -106,7 +125,7 @@ struct ModelMesh {
 };
 
 struct ModelNode {
-    int32_t parent;               // index, -1 for a root
+    int32_t parent;               // index, -1 for a root; a parent comes before its children
     float   local[16];            // rest transform relative to the parent
     char    name[32];             // for logs and debug views only
 };
@@ -143,6 +162,7 @@ struct InstanceUpdate {
 // A stage object the physics moved (cone, sign, fence): every scene object
 // carrying this .trk instance id (NGGK, ngg_object_key) is drawn with `delta`,
 // a WORLD-SPACE delta from its authored placement (identity: where the file has it).
+// Kept until changed: a key not in this frame's list stays as it was last set.
 struct StageObjectUpdate {
     int32_t  key;
     uint32_t visible;
@@ -157,8 +177,9 @@ struct UiVertex {
     float    uv[2];
     uint32_t colour;
 };
+static_assert(sizeof(UiVertex) == 20, "UiVertex - ImDrawVert's layout");
 struct UiCommand {
-    TextureHandle texture;        // 0: white
+    TextureHandle texture;        // 0: white; else one from createTextureRgba
     float         clip[4];        // x0, y0, x1, y1 pixels
     uint32_t      firstIndex;
     uint32_t      indexCount;
@@ -186,6 +207,9 @@ struct FrameDesc {
     uint32_t                 flags;
     SceneHandle              scene;           // 0: none
     Camera                   camera;
+    // >= 0: the scene's weather preset of that index, exactly as the .ngg has
+    // it (NGGW; 0 its default). -1: `weather`.
+    int32_t                  weatherPreset;
     WeatherDesc              weather;
     float                    time;            // seconds, the game's: animated materials, wind
     const InstanceUpdate*    instances;
@@ -210,15 +234,22 @@ struct RenderSettings {
     uint32_t   rayTracing;        // use it when available
     uint32_t   taa;
     uint32_t   autoExposure;
+    uint32_t   shadows;           // sun shadows at all
     float      renderScale;       // 1 native; < 1 upscaled
 };
 
-// What the last finished frame did - as ngg_stats.
+// What the last finished frame did - ngg_stats, the renderer's own readout.
 struct RenderStats {
-    float    gpuFrameMs, cpuSubmitMs;
-    uint32_t drawCalls, triangles;
-    uint32_t rtAvailable, rtActive;
-    char     rtFallback[96];
+    float    passMs, envMs, aerialMs;      // the main pass; its environment and aerial-table parts (GPU ms)
+    float    rtMs, aoMs, denoiseMs;        // the ray tracing: all of it, the AO's part, the denoise
+    uint32_t rtAvailable, rtActive;        // the adapter can ray trace; this frame's shadows were ray traced
+    uint32_t rtPixels, rtShadowed;         // pixels traced, of them in shadow
+    uint32_t quality;                      // 0 low, 1 medium, 2 high
+    uint32_t taa, shadows, ambientOcclusion, autoExposure;
+    uint32_t debugView;
+    float    exposure;                     // applied last frame
+    float    meteredEv, adaptedEv;         // auto exposure: log2 luminance, this frame / adapted
+    char     rtFallback[96];               // why RT is not active, "" when it is
 };
 
 #pragma pack(pop)
@@ -227,6 +258,10 @@ struct RenderStats {
 //
 // Valid from a successful InitWInterface until `destroy`. Every function
 // tolerates a null renderer and returns ErrInvalidArg rather than faulting.
+//
+// ONE SCENE AT A TIME: textures and models live in the loaded scene, and
+// loading another (or unloading it) releases them - their handles are invalid
+// from then on. UI textures (createTextureRgba) are the renderer's and stay.
 struct RendererApi {
     void        (WRALLY_CALL* destroy)(Renderer*);
     const char* (WRALLY_CALL* lastError)(Renderer*);           // never null; valid until the next call
@@ -239,6 +274,9 @@ struct RendererApi {
     Status   (WRALLY_CALL* loadScene)(Renderer*, const void* ngg, uint64_t bytes, SceneHandle* out);
     void     (WRALLY_CALL* unloadScene)(Renderer*, SceneHandle);
     Status   (WRALLY_CALL* sceneBounds)(Renderer*, SceneHandle, float outMin[3], float outMax[3]);
+    // How many of the scene's objects carry a key (NGGK: they follow the
+    // physics' solids), and how many keys there are.
+    Status   (WRALLY_CALL* sceneKeyStats)(Renderer*, SceneHandle, uint32_t* keyedObjects, uint32_t* keys);
     // The weather presets the .ngg carries (NGGW); index 0 is its default.
     uint32_t (WRALLY_CALL* weatherPresetCount)(Renderer*, SceneHandle);
     Status   (WRALLY_CALL* weatherPreset)(Renderer*, SceneHandle, uint32_t index,
@@ -247,7 +285,7 @@ struct RendererApi {
 
     // ---- resources
     Status (WRALLY_CALL* createTexture)(Renderer*, const void* dds, uint64_t bytes, TextureHandle* out);
-    // RGBA8, for the UI's font atlas and generated images.
+    // RGBA8, for the UI's font atlas and generated images - drawn by the UI pass only.
     Status (WRALLY_CALL* createTextureRgba)(Renderer*, const void* rgba, uint32_t width, uint32_t height,
                                             TextureHandle* out);
     void   (WRALLY_CALL* releaseTexture)(Renderer*, TextureHandle);
@@ -258,13 +296,14 @@ struct RendererApi {
     void   (WRALLY_CALL* destroyInstance)(Renderer*, InstanceHandle);
 
     // ---- the frame: everything between "here is a camera" and "the image is
-    //      presented". Instances not in `instances` keep last frame's state.
+    //      in the back buffer". Instances not in `instances` keep last frame's
+    //      state. present shows it.
     Status (WRALLY_CALL* renderFrame)(Renderer*, const FrameDesc*);
     Status (WRALLY_CALL* present)(Renderer*);
 
     // ---- diagnostics
     Status (WRALLY_CALL* stats)(Renderer*, RenderStats* out);
-    Status (WRALLY_CALL* captureFrame)(Renderer*, const char* path);    // the next presented frame, .bmp
+    Status (WRALLY_CALL* captureFrame)(Renderer*, const char* path);    // the next rendered frame, .bmp
     Status (WRALLY_CALL* setDebugView)(Renderer*, int32_t mode);         // 0 off
     const char* (WRALLY_CALL* debugViewName)(int32_t mode);              // null past the last
 };

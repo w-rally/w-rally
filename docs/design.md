@@ -199,6 +199,17 @@ The renderer still owns frame **order and correctness**. That is the `core::Rend
 environment → prepass → sun visibility (RT or cascades) → AO → sky → scene → models → TAA → exposure → tonemap → UI
 → present.
 
+### 3.1a What WRenderer does today (phase 4)
+
+- One scene at a time. Scene textures and models belong to the loaded scene, and loading another releases them.
+  UI textures (`createTextureRgba`) are the renderer's and stay.
+- Windowed only (`ErrNotSupported` for borderless and fullscreen). `renderScale` is ignored, and `kMaterialBlend`
+  is not drawn blended.
+- UI textures carry a high bit in their handle (`UiPass::kTextureBit`). A UI command naming any other texture draws
+  white.
+- Released models and destroyed instances leave their meshes in ngg-core's dynamic pool until the scene goes.
+- One renderer per process: ngg-core's log sink is global.
+
 ### 3.2 New work inside the renderer
 
 - **Models**: node-hierarchy rendering (no skinning), blended materials (glass), per-instance node transforms.
@@ -512,8 +523,13 @@ Each phase ends with a game you can drive. phys-drive works on day one, and ever
    forwards every bus record through `wrally::sound::Sound` (`game/src/sound`). `tools/audio-check` renders the same
    records offline through the linked library and through the DLL, and the samples are bit for bit the same: CTests
    `audio-offline-*`, from made-up records, with a mix, and from RBR's stage-41 run with RBR's sounds.
-4. **WRenderer.** `ngg-core` behind `RendererApi`. The game drops `ngg-api.dll` and draws its HUD through ImGui on
-   the UI pass.
+4. **WRenderer** — DONE 2026-10-26. `ngg-core` behind `RendererApi` (`modules/renderer/src/module`, interface v2:
+   weather presets by index, a shadows setting, the full readout as `RenderStats`, `sceneKeyStats`). The module makes
+   the same ngg-core calls in the same order as `ngg-api` did, so the frame is the same: compared against the phase-3
+   build on identical inputs, every 3D pixel matches within the GPU's own run-to-run noise (±1); only the HUD
+   differs. The game loads the DLL through `wrally::render::Renderer` (`game/src/render`). The car is a model (a node
+   per part, posed per frame); moved stage objects go by key. The HUD is Dear ImGui 1.91.5 (`game/src/ui`,
+   `third_party/imgui`), drawn by the module's UI pass. `ngg-api` is no longer built.
 5. **Restructure the game** along §6.5: session, rules, camera, input, threads (§3.3).
 6. **Cars as models.** `.sgc` → `ModelDesc`, wheel/part animation, moved stage objects, RT instancing.
 7. **Content.** VFS layers, catalog, `stage.json`/`car.json` with their schemas, and standalone mode without RBR
