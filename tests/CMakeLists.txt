@@ -56,3 +56,9 @@ endif()
 add_test(NAME audio-handshake COMMAND module-info ${WRALLY_BIN}/modules/audio --init --data ${CMAKE_BINARY_DIR}/tests-bin)
 set_tests_properties(audio-handshake PROPERTIES PASS_REGULAR_EXPRESSION
     "WAudio.dll: audio interface [0-9]+ - compatible\n +id waudio, \"WAudio\"")
+
+# The renderer module answers the handshake (not initialised: a renderer needs a window - the golden replay above
+# runs it for real).
+add_test(NAME renderer-handshake COMMAND module-info ${WRALLY_BIN}/modules/renderer)
+set_tests_properties(renderer-handshake PROPERTIES PASS_REGULAR_EXPRESSION
+    "WRenderer.dll: renderer interface [0-9]+ - compatible")

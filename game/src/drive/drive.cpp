@@ -1,11 +1,11 @@
 // WRally, phase 1 (docs/design.md 9): phys-drive, imported from plugin-rbr (docs/imported.md) - drive the car: the
 // native physics (sim/native_sim.h) loaded from the game's files, stepped in real time with keyboard controls, the
-// stage rendered by NGG (ngg-api.dll) with a camera behind the car. The session is written as a recording (data/rec.h)
+// stage rendered by NGG (WRenderer.dll) with a camera behind the car. The session is written as a recording (data/rec.h)
 // on exit. (plugin-rbr's --classic, the game's own code in an arena, is not part of WRally.)
 //
 //   WRally <game dir> <stage .ngg> [--stage <the .ngg's>] [--sgc Cars/i20_R5/i20_R5.sgc] [--car s_i2003]
 //              [--surface <the stage's>] [--tyre-type <its>] [--tyres michelin] [--aids 0,0,0,0] [--camera 0] [--out drive.phr]
-//              [--replay run.phr] [--physics rbr] [--audio waudio]
+//              [--replay run.phr] [--physics rbr] [--audio waudio] [--renderer wrenderer]
 //              [--skip-to <tick>] [--pause-at <tick>] [--exit-at <tick>] [--step <seconds>] [--camera-angle <degrees>]
 //              [--chase-distance <metres>] [--chase-pull <metres per 100 km/h>] [--entry <seconds>] [--quick-start]
 //              [--no-sound] [--eng Focus03-08] [--mix sound-mix.ini] [--overrides cars/s_i2003.ini | none]
@@ -56,12 +56,14 @@
 
 #include <algorithm>
 #include <array>
+#include <cfloat>
 #include <unordered_map>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <cwchar>
+#include <io.h>
 #include <filesystem>
 #include <fstream>
 #include <iterator>
@@ -72,7 +74,9 @@
 #include "sound/sound.h"
 #include "data/rec.h"
 #include "data/sgc.h"
-#include "ngg_api.h"
+#include "imgui.h"
+#include "render/renderer.h"
+#include "ui/imgui_layer.h"
 #include "drive/car_model.h"
 #include "drive/anti_lag.h"
 #include "drive/launch_control.h"
@@ -89,6 +93,7 @@ int g_width, g_height;   // the client area, as the renderer's size
 
 LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l)
 {
+    if (wrally::ui::ImGuiLayer::WndProc(h, m, w, l)) return true;
     if (m == WM_CLOSE || (m == WM_KEYDOWN && w == VK_ESCAPE)) {
         g_quit = true;
         return 0;
@@ -221,10 +226,8 @@ void Perspective(float fovY, float aspect, float zn, float zf, float* m)
 
 // The car's body hull (its collision mesh, MrCarCollision: the body's frame, physics axes) as a flat-shaded mesh in
 // the renderer's axes.
-ngg_mesh HullMesh(ngg_scene* s, const phys::data::RecMesh& m)
+void HullMesh(const phys::data::RecMesh& m, std::vector<wrally::iface::Vertex>& v, std::vector<uint32_t>& idx)
 {
-    std::vector<ngg_vertex> v;
-    std::vector<uint32_t> idx;
     auto at = [&](uint8_t i) {
         float p[3];
         std::memcpy(p, &m.verts[4 * i], 12);
@@ -234,7 +237,7 @@ ngg_mesh HullMesh(ngg_scene* s, const phys::data::RecMesh& m)
         const V3 a = at(m.faces[f]), b = at(m.faces[f + 1]), c = at(m.faces[f + 2]);
         const V3 n = Norm(Cross(b - a, c - a));
         for (const V3& p : {a, b, c}) {
-            ngg_vertex x{};
+            wrally::iface::Vertex x{};
             x.pos[0] = p.x;
             x.pos[1] = p.y;
             x.pos[2] = p.z;
@@ -246,7 +249,6 @@ ngg_mesh HullMesh(ngg_scene* s, const phys::data::RecMesh& m)
             v.push_back(x);
         }
     }
-    return ngg_add_mesh(s, v.data(), static_cast<uint32_t>(v.size()), idx.data(), static_cast<uint32_t>(idx.size()));
 }
 
 // The car's placement as the renderer's row-major matrix (row vectors, translation in row 3): the pose's rotation
@@ -308,73 +310,29 @@ void Mul44(const float* a, const float* b, float* out)
         for (int j = 0; j < 4; ++j) out[4 * i + j] = a[4 * i] * b[j] + a[4 * i + 1] * b[4 + j] + a[4 * i + 2] * b[8 + j] + a[4 * i + 3] * b[12 + j];
 }
 
-// The HUD's font: a monospace atlas (ASCII 32..127, 16 x 6 cells) rasterised by GDI, white glyphs in the alpha, as
-// ngg_set_font takes it.
-bool UploadFont(ngg_scene* s)
+// The HUD's text, as ngg-api's shadowed labels were: a dark copy offset down-right, then the text - on ImGui's
+// foreground draw list (the renderer's UI pass). Big text from the large font, so it is not a small one blown up.
+void HudText(const wrally::ui::ImGuiLayer& ui, float px, float x, float y, const char* text, uint32_t colour)
 {
-    const int cw = 36, ch = 64, cols = 16, rows = 6, w = cw * cols, h = ch * rows;
-    BITMAPINFO bi{};
-    bi.bmiHeader.biSize = sizeof bi.bmiHeader;
-    bi.bmiHeader.biWidth = w;
-    bi.bmiHeader.biHeight = -h;
-    bi.bmiHeader.biPlanes = 1;
-    bi.bmiHeader.biBitCount = 32;
-    void* bits = nullptr;
-    HDC dc = CreateCompatibleDC(nullptr);
-    HBITMAP bmp = CreateDIBSection(dc, &bi, DIB_RGB_COLORS, &bits, nullptr, 0);
-    if (!bmp) return DeleteDC(dc), false;
-    HGDIOBJ oldBmp = SelectObject(dc, bmp);
-    HFONT font = CreateFontW(-ch * 3 / 4, 0, 0, 0, FW_BOLD, 0, 0, 0, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-                             ANTIALIASED_QUALITY, FIXED_PITCH | FF_MODERN, L"Consolas");
-    HGDIOBJ oldFont = SelectObject(dc, font);
-    SetBkColor(dc, RGB(0, 0, 0));
-    SetTextColor(dc, RGB(255, 255, 255));
-    RECT all{0, 0, w, h};
-    FillRect(dc, &all, static_cast<HBRUSH>(GetStockObject(BLACK_BRUSH)));
-    for (int c = 32; c < 128; ++c) {
-        const int k = c - 32;
-        RECT cell{(k % cols) * cw, (k / cols) * ch, (k % cols + 1) * cw, (k / cols + 1) * ch};
-        const wchar_t t[2] = {static_cast<wchar_t>(c), 0};
-        DrawTextW(dc, t, 1, &cell, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
-    }
-    GdiFlush();
-    std::vector<uint8_t> rgba(size_t(w) * h * 4);
-    const uint8_t* src = static_cast<const uint8_t*>(bits);
-    for (size_t i = 0; i < size_t(w) * h; ++i) {
-        rgba[4 * i + 0] = rgba[4 * i + 1] = rgba[4 * i + 2] = 255;
-        rgba[4 * i + 3] = src[4 * i + 1];   // the glyph's coverage (green: any channel of white on black)
-    }
-    SelectObject(dc, oldFont);
-    SelectObject(dc, oldBmp);
-    DeleteObject(font);
-    DeleteObject(bmp);
-    DeleteDC(dc);
-    return ngg_set_font(s, rgba.data(), w, h, cols, rows, 32) != 0;
+    ImFont* font = px > 64.0f ? ui.HudLarge() : ui.HudSmall();
+    ImDrawList* d = ImGui::GetForegroundDrawList();
+    const float off = std::max(1.0f, px * 0.06f);
+    d->AddText(font, px, ImVec2(x + off, y + off), 0xc0000000u, text);
+    d->AddText(font, px, ImVec2(x, y), colour, text);
+}
+float HudWidth(const wrally::ui::ImGuiLayer& ui, float px, const char* text)
+{
+    ImFont* font = px > 64.0f ? ui.HudLarge() : ui.HudSmall();
+    return (font ? font : ImGui::GetFont())->CalcTextSizeA(px, FLT_MAX, 0.0f, text).x;
 }
 
-// The HUD as labels: ngg-api's labels sit at world points and keep their pixel size, so each line is anchored 1 m in
-// front of the camera, where the screen position (x, y in -1 .. 1, y up) projects - drawn over everything.
-struct Hud {
-    V3 eye, right, up, fwd;
-    float tanX, tanY;
-    V3 At(float x, float y) const { return eye + fwd + right * (x * tanX) + up * (y * tanY); }
-};
-
-void DrawHud(ngg_scene* s, const Hud& h, const wrally::physics::Dashboard& d, int width, int height)
+// The dashboard: speed, revs and the gear at the bottom right, where ngg-api's world labels put them - anchored at (x,
+// y) in -1 .. 1 (y up), centred on the anchor and lifted 1.5 lines above it (ngg-core's Scene::SetLabels).
+void DrawHud(const wrally::ui::ImGuiLayer& ui, const wrally::physics::Dashboard& d, int width, int height)
 {
-    // Each line twice: a dark shadow a few pixels down-right (layers 0..2), then the text (layers 3..5).
-    auto put = [&](uint32_t layer, float x, float y, const char* text, uint32_t colour, float px) {
-        const float dx = px * 0.06f * 2.0f / static_cast<float>(width), dy = px * 0.06f * 2.0f / static_cast<float>(height);
-        for (int pass = 0; pass < 2; ++pass) {
-        const V3 p = pass ? h.At(x, y) : h.At(x + dx, y - dy);
-        ngg_label l{};
-        l.pos[0] = p.x;
-        l.pos[1] = p.y;
-        l.pos[2] = p.z;
-        l.colour = pass ? colour : 0xc0000000;
-        l.text_offset = 0;
-        ngg_set_labels(s, layer + 3 * pass, &l, 1, text, static_cast<uint32_t>(std::strlen(text) + 1), px, NGG_OVERLAY_NO_DEPTH);
-        }
+    auto put = [&](float x, float y, const char* text, uint32_t colour, float px) {
+        const float ax = (x + 1) * 0.5f * static_cast<float>(width), ay = (1 - y) * 0.5f * static_cast<float>(height);
+        HudText(ui, px, ax - 0.5f * HudWidth(ui, px, text), ay - 1.5f * px, text, colour);
     };
     char speed[32], rpm[32], gear[8];
     std::snprintf(speed, sizeof speed, "%3.0f km/h", std::fabs(d.speed) * 3.6f);
@@ -382,72 +340,39 @@ void DrawHud(ngg_scene* s, const Hud& h, const wrally::physics::Dashboard& d, in
     std::snprintf(gear, sizeof gear, "%s", d.gear < 0 ? "R" : d.gear == 0 ? "N" : std::to_string(d.gear).c_str());
     const float textPx = height * 0.045f, gearPx = height * 0.12f;
     const uint32_t white = 0xf0ffffff, redline = d.rpm > 7000 ? 0xf03050ff : white;
-    put(0, 0.72f, -0.62f, speed, white, textPx);
-    put(1, 0.72f, -0.75f, rpm, redline, textPx);
-    put(2, 0.90f, -0.68f, gear, 0xf040d0ff, gearPx);
+    put(0.72f, -0.62f, speed, white, textPx);
+    put(0.72f, -0.75f, rpm, redline, textPx);
+    put(0.90f, -0.68f, gear, 0xf040d0ff, gearPx);
 }
 
-// The renderer's readout (F1), as the viewer's HUD: lines of screen-space text at the top left, layer 10. Off, the
-// layer is emptied.
-void DrawDebugHud(ngg_scene* s, bool on, const std::vector<std::string>& lines, int height)
+// The renderer's readout (F1), as the viewer's HUD: lines of text at the top left.
+void DrawDebugHud(const wrally::ui::ImGuiLayer& ui, bool on, const std::vector<std::string>& lines, int height)
 {
-    constexpr uint32_t kLayer = 10;
-    if (!on || lines.empty()) {
-        ngg_set_labels(s, kLayer, nullptr, 0, nullptr, 0, 1.0f, 0);
-        return;
-    }
+    if (!on) return;
     const float px = std::max(12.0f, height * 0.022f);
-    std::string blob;
-    std::vector<ngg_label> labels;
-    for (size_t i = 0; i < lines.size(); ++i) {
-        ngg_label l{};
-        l.pos[0] = px * 0.6f;
-        l.pos[1] = px * 0.6f + static_cast<float>(i) * px * 1.25f;
-        l.colour = 0xf0ffffff;
-        l.text_offset = static_cast<uint32_t>(blob.size());
-        labels.push_back(l);
-        blob += lines[i];
-        blob += '\0';
-    }
-    ngg_set_labels(s, kLayer, labels.data(), static_cast<uint32_t>(labels.size()), blob.data(), static_cast<uint32_t>(blob.size()),
-                   px, NGG_LABEL_SCREEN | NGG_LABEL_SHADOW);
+    for (size_t i = 0; i < lines.size(); ++i)
+        HudText(ui, px, px * 0.6f, px * 0.6f + static_cast<float>(i) * px * 1.25f, lines[i].c_str(), 0xf0ffffff);
 }
 
 std::string StageTimeText(float t) { return wrally::rules::StageClock::Text(t); }
 
-// The stage clock on the screen (screen-space labels): the countdown big in the middle (layer 11) and the stage time
-// with the splits at the top right (layer 12).
-void DrawStageHud(ngg_scene* s, const wrally::rules::StageClock& clock, int width, int height)
+// The stage clock on the screen: the countdown big in the middle and the stage time with the splits at the top right.
+void DrawStageHud(const wrally::ui::ImGuiLayer& ui, const wrally::rules::StageClock& clock, int width, int height)
 {
-    constexpr uint32_t kCountdownLayer = 11, kTimeLayer = 12;
-    auto put = [&](uint32_t layer, const std::vector<std::string>& lines, const std::vector<uint32_t>& colours, float px,
-                   float right, float y0, bool centre) {
-        if (lines.empty()) {
-            ngg_set_labels(s, layer, nullptr, 0, nullptr, 0, 1.0f, 0);
-            return;
-        }
-        std::string blob;
-        std::vector<ngg_label> labels;
+    auto put = [&](const std::vector<std::string>& lines, const std::vector<uint32_t>& colours, float px, float right,
+                   float y0, bool centre) {
         for (size_t i = 0; i < lines.size(); ++i) {
-            const float w = static_cast<float>(lines[i].size()) * px * 0.55f;   // about the font's advance
-            ngg_label l{};
-            l.pos[0] = centre ? (static_cast<float>(width) - w) * 0.5f : right - w;
-            l.pos[1] = y0 + static_cast<float>(i) * px * 1.2f;
-            l.colour = colours[std::min(i, colours.size() - 1)];
-            l.text_offset = static_cast<uint32_t>(blob.size());
-            labels.push_back(l);
-            blob += lines[i];
-            blob += '\0';
+            const float w = HudWidth(ui, px, lines[i].c_str());
+            const float x = centre ? (static_cast<float>(width) - w) * 0.5f : right - w;
+            HudText(ui, px, x, y0 + static_cast<float>(i) * px * 1.2f, lines[i].c_str(), colours[std::min(i, colours.size() - 1)]);
         }
-        ngg_set_labels(s, layer, labels.data(), static_cast<uint32_t>(labels.size()), blob.data(),
-                       static_cast<uint32_t>(blob.size()), px, NGG_LABEL_SCREEN | NGG_LABEL_SHADOW);
     };
     const std::string shown = clock.Shown();
     // the countdown's digits big; GO green, a false start red, a split / the finish smaller
     const bool go = shown == "GO", warn = shown == "FALSE START", count = shown.size() == 1;
     const bool finished = clock.GetState() == wrally::rules::StageClock::State::Finished;
     const float big = height * (count || go ? 0.22f : 0.09f);
-    put(kCountdownLayer, shown.empty() ? std::vector<std::string>{} : std::vector<std::string>{shown},
+    put(shown.empty() ? std::vector<std::string>{} : std::vector<std::string>{shown},
         {warn ? 0xf03030ffu : go || finished ? 0xf040e040u : 0xf0ffffffu}, big, 0, height * 0.32f - big * 0.5f, true);
     std::vector<std::string> lines;
     std::vector<uint32_t> colours;
@@ -462,30 +387,20 @@ void DrawStageHud(ngg_scene* s, const wrally::rules::StageClock& clock, int widt
         lines.push_back("split " + std::to_string(i + 1) + "  " + StageTimeText(clock.Splits()[i]));
         colours.push_back(0xf0c0e8ffu);
     }
-    put(kTimeLayer, lines, colours, px, static_cast<float>(width) - px * 0.8f, px * 0.6f, false);
+    put(lines, colours, px, static_cast<float>(width) - px * 0.8f, px * 0.6f, false);
 }
 
 // The stage's movable objects drawn where the physics has them: the .ngg keys every object built from a movable
-// placement with RBR's instance id (NGGK, ngg_object_key), the same id the .trk's collision instance - the physics'
-// solid - has. Each frame a solid that has moved gives its objects its world-space move since the load
-// (ngg_set_transform on loaded geometry).
+// placement with RBR's instance id (NGGK), the same id the .trk's collision instance - the physics' solid - has. Each
+// frame a solid that has moved gives its key its world-space move since the load (StageObjectUpdate: the renderer
+// moves every object with that key).
 struct Follower {
-    std::unordered_map<int32_t, std::vector<uint32_t>> byKey;   // instance id -> the .ngg objects keyed with it
     std::vector<uint8_t> moving;
+    std::vector<wrally::iface::StageObjectUpdate> updates;   // this frame's
 
-    size_t Load(ngg_scene* s, uint32_t count)
+    void Update(const std::vector<wrally::physics::Body>& bodies)
     {
-        size_t keyed = 0;
-        for (uint32_t i = 0; i < count; ++i)
-            if (const int32_t k = ngg_object_key(s, i); k >= 0) {
-                byKey[k].push_back(i);
-                ++keyed;
-            }
-        return keyed;
-    }
-
-    void Update(ngg_scene* s, const std::vector<wrally::physics::Body>& bodies)
-    {
+        updates.clear();
         if (moving.size() != bodies.size()) moving.assign(bodies.size(), 0);
         for (size_t i = 0; i < bodies.size(); ++i) {
             const wrally::physics::Body& b = bodies[i];
@@ -493,8 +408,6 @@ struct Follower {
                 if (!std::memcmp(b.position, b.startPosition, 12) && !std::memcmp(b.rotation, b.startRotation, 16)) continue;
                 moving[i] = 1;
             }
-            const auto it = byKey.find(b.id);
-            if (it == byKey.end()) continue;
             // The move since the load: q = now * start^-1, then x' = q (x - start) + now; as the renderer's row-major
             // matrix (rows: the images of its axes; translation in row 3).
             const float* a = b.rotation;
@@ -503,7 +416,10 @@ struct Follower {
                                 a[3] * bs[1] - a[0] * bs[2] + a[1] * bs[3] + a[2] * bs[0],
                                 a[3] * bs[2] + a[0] * bs[1] - a[1] * bs[0] + a[2] * bs[3],
                                 a[3] * bs[3] - a[0] * bs[0] - a[1] * bs[1] - a[2] * bs[2]};
-            float m[16];
+            wrally::iface::StageObjectUpdate u{};
+            u.key = b.id;
+            u.visible = 1;
+            float* m = u.delta;
             const V3 rows[3] = {ToRender(Rotate(q, {1, 0, 0})), ToRender(Rotate(q, {0, 0, 1})), ToRender(Rotate(q, {0, 1, 0}))};
             for (int r = 0; r < 3; ++r) {
                 m[r * 4 + 0] = rows[r].x;
@@ -518,7 +434,7 @@ struct Follower {
             m[13] = now.y - turned.y;
             m[14] = now.z - turned.z;
             m[15] = 1;
-            for (uint32_t o : it->second) ngg_set_transform(s, o, m);
+            updates.push_back(u);
         }
     }
 };
@@ -584,9 +500,39 @@ std::string WRallyFile(const std::string& rel)
     return "";
 }
 
+// WRally is a window application, so it has no console of its own. Its output goes where it was sent (a redirect, as
+// CTest's), else to the console it was started from, else - started from Explorer - to WRally.log beside the exe.
+// Returns that log's path ("" when there is a console or a redirect to tell instead).
+std::string SetUpOutput()
+{
+    auto redirected = [](DWORD which) {
+        const HANDLE h = GetStdHandle(which);
+        return h && h != INVALID_HANDLE_VALUE && GetFileType(h) != FILE_TYPE_UNKNOWN;
+    };
+    if (redirected(STD_OUTPUT_HANDLE)) return "";
+    if (AttachConsole(ATTACH_PARENT_PROCESS)) {
+        std::FILE* f;
+        freopen_s(&f, "CONOUT$", "w", stdout);
+        freopen_s(&f, "CONOUT$", "w", stderr);
+        std::printf("\n");   // off the prompt the console printed when it went on without us
+        return "";
+    }
+    char exe[MAX_PATH];
+    GetModuleFileNameA(nullptr, exe, MAX_PATH);
+    std::string log = exe;
+    log.erase(log.find_last_of("\\/") + 1);
+    log += "WRally.log";
+    std::FILE* f;
+    if (freopen_s(&f, log.c_str(), "w", stdout)) return "";
+    _dup2(_fileno(stdout), _fileno(stderr));   // one file, both streams, in order
+    std::setvbuf(stdout, nullptr, _IONBF, 0);
+    std::setvbuf(stderr, nullptr, _IONBF, 0);
+    return log;
+}
+
 } // namespace
 
-int main(int argc, char** argv)
+int Run(int argc, char** argv)
 {
     if (argc < 3) {
         std::fprintf(stderr, "usage: WRally <game dir> <stage .ngg> [--stage track-34_E] [--sgc <car .sgc>] [--car s_i2003] "
@@ -595,6 +541,7 @@ int main(int argc, char** argv)
     }
     const std::string game = argv[1], nggPath = argv[2];
     std::string stage = Arg(argc, argv, "--stage", "");
+    std::string stageWarning;   // shown on the screen as well: a window application's console output is easily unseen
     {
         std::string why;
         const std::string fromNgg = NggStage(game, nggPath, why);
@@ -605,6 +552,8 @@ int main(int argc, char** argv)
         } else if (const int a = wrally::rules::StageMap(stage), b = wrally::rules::StageMap(Stem(nggPath)); a >= 0 && b >= 0 && a != b) {
             std::printf("WARNING: --stage %s is map %d, the .ngg (%s) map %d: the car runs on another stage's ground than "
                         "the one drawn\n", stage.c_str(), a, nggPath.c_str(), b);
+            stageWarning = "--stage " + stage + " is map " + std::to_string(a) + ", the .ngg map " + std::to_string(b) +
+                           ": the car runs on ground that is not drawn";
         }
     }
     const std::string maps = game + "/Maps/" + stage;
@@ -736,7 +685,7 @@ int main(int argc, char** argv)
     wc.lpfnWndProc = WndProc;
     wc.hInstance = GetModuleHandleW(nullptr);
     wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
-    wc.lpszClassName = L"phys-drive";
+    wc.lpszClassName = L"WRally";
     RegisterClassW(&wc);
     // 3/4 of the screen's work area, 16:9
     RECT work;
@@ -745,86 +694,139 @@ int main(int argc, char** argv)
     if (height > (work.bottom - work.top) * 3 / 4) height = (work.bottom - work.top) * 3 / 4, width = height * 16 / 9;
     RECT rc{0, 0, width, height};
     AdjustWindowRect(&rc, WS_OVERLAPPEDWINDOW, FALSE);
-    HWND wnd = CreateWindowExW(0, wc.lpszClassName, L"phys-drive", WS_OVERLAPPEDWINDOW | WS_VISIBLE, CW_USEDEFAULT, CW_USEDEFAULT,
+    HWND wnd = CreateWindowExW(0, wc.lpszClassName, L"WRally", WS_OVERLAPPEDWINDOW | WS_VISIBLE, CW_USEDEFAULT, CW_USEDEFAULT,
                                rc.right - rc.left, rc.bottom - rc.top, nullptr, nullptr, wc.hInstance, nullptr);
     GetClientRect(wnd, &rc);
     g_width = rc.right - rc.left;
     g_height = rc.bottom - rc.top;
-    // PHYS_DRIVE_NGGLOG: the renderer's log on stdout (otherwise only the debugger's output has it).
-    if (std::getenv("PHYS_DRIVE_NGGLOG")) ngg_set_log_sink([](const char* m) { std::printf("ngg: %s\n", m); });
-    ngg_scene* s = ngg_create(wnd, g_width, g_height);
+    // The renderer: a module DLL in modules/renderer beside the exe (--renderer <id>, "wrenderer" by default:
+    // WRenderer.dll, NGG), on this window. PHYS_DRIVE_NGGLOG: its log on stdout.
+    static const bool rendererLog = std::getenv("PHYS_DRIVE_NGGLOG") != nullptr;
+    wrally::iface::RenderSettings settings{};
+    settings.mode = wrally::iface::WindowMode::Windowed;
+    settings.vsync = 1;
+    settings.quality = 1;
+    settings.rayTracing = settings.taa = settings.autoExposure = settings.shadows = 1;
+    settings.renderScale = 1;
+    wrally::render::Renderer renderer;
+    {
+        char exe[MAX_PATH];
+        GetModuleFileNameA(nullptr, exe, MAX_PATH);
+        const std::filesystem::path modules = std::filesystem::path(exe).parent_path() / "modules" / "renderer";
+        const std::string e = renderer.Open(modules, Arg(argc, argv, "--renderer", "wrenderer"), wnd, g_width, g_height, settings);
+        if (rendererLog) std::printf("%s", renderer.TakeLog().c_str());
+        if (!e.empty()) return std::fprintf(stderr, "renderer: %s\n", e.c_str()), 3;
+        std::printf("renderer module: %s\n", renderer.ModuleName().c_str());
+    }
     int shownWidth = g_width, shownHeight = g_height;
-    if (!s) return std::fprintf(stderr, "ngg_create failed\n"), 3;
-    if (!ngg_load_memory(s, bytes.data(), bytes.size())) return std::fprintf(stderr, "ngg: %s\n", ngg_last_error(s)), 3;
+    const wrally::iface::SceneHandle scene = renderer.LoadScene(bytes.data(), bytes.size());
+    if (rendererLog) std::printf("%s", renderer.TakeLog().c_str());
+    if (!scene) return std::fprintf(stderr, "renderer: %s\n", renderer.Error().c_str()), 3;
     bytes.clear();
     Follower follower;
-    if (const size_t keyed = follower.Load(s, ngg_instance_count(s)); keyed)   // the stage's objects, before ours
-        std::printf("movable objects: %zu drawn objects keyed to %zu solids\n", keyed, follower.byKey.size());
-    else
-        std::printf("movable objects: the .ngg has no object keys (NGGK) - reconvert it; nothing will move\n");
-    const ngg_material carMaterial = ngg_add_material(s, NGG_INVALID, NGG_INVALID, NGG_MATERIAL_TWO_SIDED);
-    {   // a red, glossy paint (the material's factors: the texture slots are empty)
-        ngg_material_desc d{};
-        if (ngg_get_material(s, carMaterial, &d)) {
-            d.base_colour_factor[0] = 0.55f;
-            d.base_colour_factor[1] = 0.04f;
-            d.base_colour_factor[2] = 0.03f;
-            d.base_colour_factor[3] = 1.0f;
-            d.roughness = 0.35f;
-            ngg_set_material(s, carMaterial, &d);
-        }
+    {
+        uint32_t keyed = 0, keys = 0;
+        renderer.Api()->sceneKeyStats(renderer.Instance(), scene, &keyed, &keys);
+        if (keyed)   // the stage's objects, before ours
+            std::printf("movable objects: %u drawn objects keyed to %u solids\n", keyed, keys);
+        else
+            std::printf("movable objects: the .ngg has no object keys (NGGK) - reconvert it; nothing will move\n");
     }
-    // The car: its render model from the .sgc (the exterior, this surface's wheels), each part an instance moved with
-    // the car; the body hull (its collision mesh) when the model gives nothing.
-    struct Placed {
-        ngg_instance instance;
+    // The car: its render model from the .sgc (the exterior, this surface's wheels) - a node per part, placed each
+    // frame with the car; the body hull (its collision mesh) when the model gives nothing. Material 0 is a red,
+    // glossy paint (its factors: the texture slots are empty) - the hull's.
+    struct Part {
         int wheel;     // -1: the car body's; else 0 lf, 1 rf, 2 lb, 3 rb (in that hub's frame)
         bool spins;    // turns with the wheel
     };
-    std::vector<Placed> carParts;
-    try {
-        const phys::drive::CarModel model = phys::drive::ReadCarModel(c.sgc, c.surface);
-        std::vector<ngg_material> mats;
-        size_t textured = 0;
-        for (const phys::drive::CarTexture& t : model.materials) {
-            const ngg_texture tex = t.dds.empty() ? NGG_INVALID : ngg_add_texture(s, t.dds.data(), t.dds.size());
-            textured += tex != NGG_INVALID;
-            if (std::getenv("PHYS_DRIVE_MATERIALS")) std::printf("material %s: %zu bytes dds%s, diffuse %.2f %.2f %.2f\n", t.material.c_str(), t.dds.size(), tex == NGG_INVALID && !t.dds.empty() ? " (rejected)" : "", t.diffuse[0], t.diffuse[1], t.diffuse[2]);
-            // One-sided, as the game draws them: the body is a shell whose inner faces (the texture's black) lie close
-            // behind its paint, and drawn they show through it. The glass both ways, seen from inside too.
-            const ngg_material m = ngg_add_material(s, tex, NGG_INVALID, t.transparent ? NGG_MATERIAL_TWO_SIDED | NGG_MATERIAL_ALPHA_TEST : 0u);
-            ngg_material_desc d{};
-            if (ngg_get_material(s, m, &d)) {
-                if (tex == NGG_INVALID)
-                    for (int k = 0; k < 3; ++k) d.base_colour_factor[k] = t.diffuse[k];
-                d.roughness = 0.45f;
-                ngg_set_material(s, m, &d);
+    std::vector<Part> carParts;
+    wrally::iface::InstanceHandle carInstance = 0;
+    {
+        wrally::iface::MaterialDesc paint = wrally::iface::DefaultMaterialDesc();
+        paint.flags = wrally::iface::kMaterialTwoSided;
+        paint.baseColourFactor[0] = 0.55f;
+        paint.baseColourFactor[1] = 0.04f;
+        paint.baseColourFactor[2] = 0.03f;
+        paint.baseColourFactor[3] = 1.0f;
+        paint.roughness = 0.35f;
+        std::vector<wrally::iface::MaterialDesc> materials{paint};
+        std::vector<std::vector<wrally::iface::Vertex>> vertices;
+        std::vector<std::vector<uint32_t>> indices;
+        std::vector<wrally::iface::ModelMesh> modelMeshes;
+        std::vector<wrally::iface::ModelNode> nodes;
+        auto add = [&](std::vector<wrally::iface::Vertex> v, std::vector<uint32_t> idx, Part part) {
+            wrally::iface::ModelNode n{};
+            n.parent = -1;
+            n.local[0] = n.local[5] = n.local[10] = n.local[15] = 1;
+            nodes.push_back(n);
+            vertices.push_back(std::move(v));
+            indices.push_back(std::move(idx));
+            carParts.push_back(part);
+        };
+        std::vector<uint32_t> partMaterial;
+        try {
+            const phys::drive::CarModel model = phys::drive::ReadCarModel(c.sgc, c.surface);
+            size_t textured = 0;
+            for (const phys::drive::CarTexture& t : model.materials) {
+                const wrally::iface::TextureHandle tex = t.dds.empty() ? 0 : renderer.CreateTexture(t.dds.data(), t.dds.size());
+                textured += tex != 0;
+                if (std::getenv("PHYS_DRIVE_MATERIALS")) std::printf("material %s: %zu bytes dds%s, diffuse %.2f %.2f %.2f\n", t.material.c_str(), t.dds.size(), tex == 0 && !t.dds.empty() ? " (rejected)" : "", t.diffuse[0], t.diffuse[1], t.diffuse[2]);
+                // One-sided, as the game draws them: the body is a shell whose inner faces (the texture's black) lie
+                // close behind its paint, and drawn they show through it. The glass both ways, seen from inside too.
+                wrally::iface::MaterialDesc m = wrally::iface::DefaultMaterialDesc();
+                m.baseColour = tex;
+                m.flags = t.transparent ? wrally::iface::kMaterialTwoSided | wrally::iface::kMaterialAlphaTest : 0u;
+                if (!tex)
+                    for (int k = 0; k < 3; ++k) m.baseColourFactor[k] = t.diffuse[k];
+                m.roughness = 0.45f;
+                materials.push_back(m);
             }
-            mats.push_back(m);
-        }
-        for (const phys::drive::CarPart& part : model.parts) {
-            std::vector<ngg_vertex> v(part.vertices.size());
-            for (size_t k = 0; k < v.size(); ++k) {
-                std::memcpy(v[k].pos, part.vertices[k].pos, 12);
-                std::memcpy(v[k].normal, part.vertices[k].normal, 12);
-                std::memcpy(v[k].uv0, part.vertices[k].uv, 8);
-                std::memcpy(v[k].uv1, part.vertices[k].uv, 8);
-                v[k].colour = 0xffffffff;
+            for (const phys::drive::CarPart& part : model.parts) {
+                std::vector<wrally::iface::Vertex> v(part.vertices.size());
+                for (size_t k = 0; k < v.size(); ++k) {
+                    std::memcpy(v[k].pos, part.vertices[k].pos, 12);
+                    std::memcpy(v[k].normal, part.vertices[k].normal, 12);
+                    std::memcpy(v[k].uv0, part.vertices[k].uv, 8);
+                    std::memcpy(v[k].uv1, part.vertices[k].uv, 8);
+                    v[k].colour = 0xffffffff;
+                }
+                size_t mi = 0;
+                while (mi < model.materials.size() && model.materials[mi].material != part.material) ++mi;
+                if (mi >= model.materials.size()) continue;
+                add(std::move(v), part.indices, {part.wheel, part.spins});
+                partMaterial.push_back(static_cast<uint32_t>(mi + 1));
             }
-            size_t mi = 0;
-            while (mi < model.materials.size() && model.materials[mi].material != part.material) ++mi;
-            const ngg_mesh mesh = ngg_add_mesh(s, v.data(), static_cast<uint32_t>(v.size()), part.indices.data(),
-                                               static_cast<uint32_t>(part.indices.size()));
-            if (mesh == NGG_INVALID || mi >= mats.size()) continue;
-            carParts.push_back({ngg_add_instance(s, mesh, mats[mi], 0, nullptr), part.wheel, part.spins});
+            std::printf("the car: %zu parts, %zu materials (%zu textured)\n", carParts.size(), model.materials.size(), textured);
+        } catch (const std::exception& e) {
+            std::fprintf(stderr, "the car's model: %s\n", e.what());
         }
-        std::printf("the car: %zu parts, %zu materials (%zu textured)\n", carParts.size(), model.materials.size(), textured);
-    } catch (const std::exception& e) {
-        std::fprintf(stderr, "the car's model: %s\n", e.what());
+        if (carParts.empty()) {
+            std::vector<wrally::iface::Vertex> v;
+            std::vector<uint32_t> idx;
+            HullMesh(meshes.at(0), v, idx);   // (the car's collision meshes, read for the physics' check above)
+            add(std::move(v), std::move(idx), {-1, false});
+            partMaterial.push_back(0);
+        }
+        for (size_t i = 0; i < carParts.size(); ++i) {
+            wrally::iface::ModelMesh mm{};
+            mm.vertices = vertices[i].data();
+            mm.vertexCount = static_cast<uint32_t>(vertices[i].size());
+            mm.indices = indices[i].data();
+            mm.indexCount = static_cast<uint32_t>(indices[i].size());
+            mm.material = partMaterial[i];
+            mm.node = static_cast<uint32_t>(i);
+            modelMeshes.push_back(mm);
+        }
+        wrally::iface::ModelDesc d{};
+        d.nodes = nodes.data(), d.nodeCount = static_cast<uint32_t>(nodes.size());
+        d.meshes = modelMeshes.data(), d.meshCount = static_cast<uint32_t>(modelMeshes.size());
+        d.materials = materials.data(), d.materialCount = static_cast<uint32_t>(materials.size());
+        const wrally::iface::ModelHandle carModel = renderer.CreateModel(d);
+        carInstance = carModel ? renderer.CreateInstance(carModel) : 0;
+        if (!carInstance) std::fprintf(stderr, "the car: %s\n", renderer.Error().c_str());
     }
-    if (carParts.empty()) carParts.push_back({ngg_add_instance(s, HullMesh(s, meshes.at(0)), carMaterial, 0, nullptr), -1, false});
-    const bool hud = UploadFont(s);
-    if (!hud) std::fprintf(stderr, "the HUD's font: %s\n", ngg_last_error(s));
+    wrally::ui::ImGuiLayer ui;
+    if (const std::string e = ui.Init(wnd, renderer); !e.empty()) std::fprintf(stderr, "the HUD: %s\n", e.c_str());
 
     // The recording of this drive (data/rec.h): the settings, the steps, the controls and the poses.
     phys::data::Recording rec;
@@ -927,10 +929,11 @@ int main(int argc, char** argv)
     int shots = 0;
     // PHYS_DRIVE_OFF=taa,ao,shadows,rt: any of them off from the start, as the keys would.
     if (const char* off = std::getenv("PHYS_DRIVE_OFF")) {
-        if (std::strstr(off, "taa")) ngg_set_taa(s, 0), taa = false;
-        if (std::strstr(off, "ao")) ngg_set_quality(s, 0), ao = false;
-        if (std::strstr(off, "shadows")) ngg_set_shadows(s, 0), shadows = false;
-        if (std::strstr(off, "rt")) ngg_set_ray_tracing(s, 0), rt = false;
+        if (std::strstr(off, "taa")) settings.taa = 0, taa = false;
+        if (std::strstr(off, "ao")) settings.quality = 0, ao = false;
+        if (std::strstr(off, "shadows")) settings.shadows = 0, shadows = false;
+        if (std::strstr(off, "rt")) settings.rayTracing = 0, rt = false;
+        renderer.ApplySettings(settings);
     }
     // A replay's TV cameras (camera 4, a replay's first): the stage's .dls cameras by the car's distance along its drive
     // line; the chase camera where none covers it.
@@ -1081,22 +1084,26 @@ int main(int argc, char** argv)
         bool redraw = false;      // a renderer switch changed: draw one frame even while paused
         if (taaKey(focused && DownAt(kTaa))) {
             taa = !taa;
-            ngg_set_taa(s, taa ? 1 : 0); redraw = true;
+            settings.taa = taa ? 1 : 0;
+            renderer.ApplySettings(settings); redraw = true;
             std::printf("TAA %s\n", taa ? "on" : "off");
         }
         if (aoKey(focused && DownAt(kAo))) {
             ao = !ao;
-            ngg_set_quality(s, ao ? 1 : 0); redraw = true;
+            settings.quality = ao ? 1 : 0;
+            renderer.ApplySettings(settings); redraw = true;
             std::printf("ambient occlusion %s\n", ao ? "on" : "off");
         }
         if (shadowKey(focused && DownAt(kShadows))) {
             shadows = !shadows;
-            ngg_set_shadows(s, shadows ? 1 : 0); redraw = true;
+            settings.shadows = shadows ? 1 : 0;
+            renderer.ApplySettings(settings); redraw = true;
             std::printf("shadows %s\n", shadows ? "on" : "off");
         }
         if (rtKey(focused && DownAt(kRt))) {
             rt = !rt;
-            ngg_set_ray_tracing(s, rt ? 1 : 0); redraw = true;
+            settings.rayTracing = rt ? 1 : 0;
+            renderer.ApplySettings(settings); redraw = true;
             std::printf("ray tracing %s\n", rt ? "on" : "off (cascaded shadow maps)");
         }
         // The mix file saved: read again (checked about twice a second).
@@ -1137,9 +1144,9 @@ int main(int argc, char** argv)
             g_quit = true;
         }
         if (viewKey(focused && DownAt(kView))) {
-            if (!ngg_debug_view_name(++debugView)) debugView = 0;
-            ngg_set_debug_view(s, debugView); redraw = true;
-            std::printf("view %d: %s\n", debugView, ngg_debug_view_name(debugView));
+            if (!renderer.Api()->debugViewName(++debugView)) debugView = 0;
+            renderer.SetDebugView(debugView); redraw = true;
+            std::printf("view %d: %s\n", debugView, renderer.DebugViewName(debugView));
         }
         // , / .: the beside camera round the car at 90 degrees / s; while paused each frame it turns is drawn.
         const int turn = (focused && DownAt(kOrbitRight) ? 1 : 0) - (focused && DownAt(kOrbitLeft) ? 1 : 0);
@@ -1239,7 +1246,7 @@ int main(int argc, char** argv)
             Lerp(before.bodies[i].position, after.bodies[i].position, t, 3, bodies[i].position);
             Nlerp(before.bodies[i].rotation, after.bodies[i].rotation, t, bodies[i].rotation);
         }
-        follower.Update(s, bodies);
+        follower.Update(bodies);
         wrally::physics::Pose p;
         Lerp(before.pose.position, after.pose.position, t, 3, p.position);
         Nlerp(before.pose.rotation, after.pose.rotation, t, p.rotation);
@@ -1256,12 +1263,19 @@ int main(int argc, char** argv)
             const float d = std::remainder(b.spin - a.spin, 6.2831853f);
             wheels[k].spin = a.spin + d * t;
         }
-        for (const Placed& part : carParts) {
-            float local[16], world[16];
-            PartMatrix(cog, part.wheel >= 0 ? &wheels[part.wheel] : nullptr, part.wheel == 1 || part.wheel == 3, part.spins, local);
-            Mul44(local, m, world);
-            ngg_set_transform(s, part.instance, world);
+        static std::vector<float> partNodes;
+        partNodes.resize(16 * carParts.size());
+        for (size_t i = 0; i < carParts.size(); ++i) {
+            const Part& part = carParts[i];
+            PartMatrix(cog, part.wheel >= 0 ? &wheels[part.wheel] : nullptr, part.wheel == 1 || part.wheel == 3, part.spins,
+                       &partNodes[16 * i]);
         }
+        wrally::iface::InstanceUpdate car{};
+        car.instance = carInstance;
+        car.visible = 1;
+        std::memcpy(car.world, m, sizeof car.world);
+        car.nodes = partNodes.data();
+        car.nodeCount = static_cast<uint32_t>(carParts.size());
         // The camera: behind and above the car (chase), on its roof looking ahead (bonnet), above it, beside it, or the
         // replay's TV camera.
         const V3 pos{p.position[0], p.position[1], p.position[2]};
@@ -1292,7 +1306,7 @@ int main(int argc, char** argv)
             at = eye + fwd * 10.0f;
         }
         if (g_width != shownWidth || g_height != shownHeight) {
-            ngg_resize(s, g_width, g_height);
+            renderer.Resize(g_width, g_height);
             shownWidth = g_width;
             shownHeight = g_height;
         }
@@ -1300,16 +1314,10 @@ int main(int argc, char** argv)
         LookAt(ToRender(eye), ToRender(at), view);
         const float aspect = shownHeight ? float(shownWidth) / float(shownHeight) : 16.0f / 9.0f;
         Perspective(fovY, aspect, 0.25f, 8000.0f, proj);
-        if (hud) {
-            Hud h;
-            h.eye = ToRender(eye);
-            h.fwd = Norm(ToRender(at) - h.eye);
-            h.right = Norm(Cross({0, 1, 0}, h.fwd));
-            h.up = Cross(h.fwd, h.right);
-            h.tanY = std::tan(fovY * 0.5f);
-            h.tanX = h.tanY * aspect;
-            DrawHud(s, h, sim.Dash(), shownWidth, shownHeight);
-            DrawStageHud(s, clock, shownWidth, shownHeight);
+        {
+            ui.NewFrame();
+            DrawHud(ui, sim.Dash(), shownWidth, shownHeight);
+            DrawStageHud(ui, clock, shownWidth, shownHeight);
             // The readout: last frame's numbers (the renderer's are read after its frame).
             {
                 LARGE_INTEGER t;
@@ -1321,33 +1329,37 @@ int main(int argc, char** argv)
                 fpsLast = t;
             }
             std::vector<std::string> lines;
-            ngg_stats st{};
-            if (debugHud && ngg_get_stats(s, &st)) {
+            const wrally::iface::RenderStats st = debugHud ? renderer.Stats() : wrally::iface::RenderStats{};
+            if (debugHud) {
                 char b[192];
                 auto line = [&](const char* fmt, auto... a) { std::snprintf(b, sizeof b, fmt, a...); lines.emplace_back(b); };
                 static const char* const kQuality[] = {"low", "medium", "high"};
                 line("%.1f fps   %ux%u   gpu main %.2f ms (env %.2f, aerial fill %.2f)", fpsSmooth, shownWidth, shownHeight,
-                     st.pass_ms, st.env_ms, st.aerial_ms);
+                     st.passMs, st.envMs, st.aerialMs);
                 line("tick %u%s   camera %d   chase %.1f m%s", sim.Tick(), paused ? " PAUSED" : "", camera, chaseDistance,
                      fixedFrame > 0.0 ? "   fixed step" : "");
                 line("K ray tracing %s   L shadows %s   O AO %s   T TAA %s   quality %s",
-                     !st.rt_available ? "n/a" : !rt ? "off" : st.rt_active ? "ON" : "wanted", st.shadows ? "on" : "off",
-                     st.ambient_occlusion ? "on" : "off", st.taa ? "on" : "off", kQuality[st.quality > 2 ? 1 : st.quality]);
-                if (st.rt_active)
-                    line("   rt %.2f ms (ao %.2f, denoise %.2f)   %u px, %.1f%% shadowed", st.rt_ms, st.ao_ms, st.denoise_ms,
-                         st.rt_pixels, st.rt_pixels ? 100.0 * st.rt_shadowed / st.rt_pixels : 0.0);
-                else if (st.rt_fallback[0])
-                    line("   shadows from cascades: %s", st.rt_fallback);
-                if (st.auto_exposure)
-                    line("exposure x%.2f   metered %+.2f EV   adapted %+.2f EV", st.exposure, st.metered_ev, st.adapted_ev);
+                     !st.rtAvailable ? "n/a" : !rt ? "off" : st.rtActive ? "ON" : "wanted", st.shadows ? "on" : "off",
+                     st.ambientOcclusion ? "on" : "off", st.taa ? "on" : "off", kQuality[st.quality > 2 ? 1 : st.quality]);
+                if (st.rtActive)
+                    line("   rt %.2f ms (ao %.2f, denoise %.2f)   %u px, %.1f%% shadowed", st.rtMs, st.aoMs, st.denoiseMs,
+                         st.rtPixels, st.rtPixels ? 100.0 * st.rtShadowed / st.rtPixels : 0.0);
+                else if (st.rtFallback[0])
+                    line("   shadows from cascades: %s", st.rtFallback);
+                if (st.autoExposure)
+                    line("exposure x%.2f   metered %+.2f EV   adapted %+.2f EV", st.exposure, st.meteredEv, st.adaptedEv);
                 else
                     line("exposure x%.2f (manual)", st.exposure);
-                line("V view %u: %s", st.debug_view, ngg_debug_view_name(static_cast<int>(st.debug_view)));
+                line("V view %u: %s", st.debugView, renderer.DebugViewName(static_cast<int32_t>(st.debugView)));
                 line("F1 readout  P pause  F2 shot  C camera  [ ] chase  , . orbit");
             }
-            DrawDebugHud(s, debugHud, lines, shownHeight);
+            DrawDebugHud(ui, debugHud, lines, shownHeight);
+            if (!stageWarning.empty()) {   // under the readout when it is on
+                const float px = std::max(12.0f, shownHeight * 0.022f);
+                const float y = px * 0.6f + (debugHud ? static_cast<float>(lines.size()) * px * 1.25f + px * 0.5f : 0.0f);
+                HudText(ui, px, px * 0.6f, y, stageWarning.c_str(), 0xf03030ffu);
+            }
         }
-        ngg_set_camera(s, view, proj);
         // PHYS_DRIVE_JITTER=<tick>: how steadily the car sits in the picture - per frame its centre's place on the screen
         // (pixels) and the eye's distance to it; their second differences (frame to frame changes of the motion) are
         // printed as RMS on reaching that tick, and the drive ends. A steady car against the camera has them near 0.
@@ -1386,7 +1398,7 @@ int main(int argc, char** argv)
             }
         }
         // PHYS_DRIVE_SHOTS=<n>: a screenshot every n ticks as well, for a replay looked at afterwards. Those come from
-        // the renderer's own frame (ngg_capture_frame), which a covered or minimised window does not spoil.
+        // the renderer's own frame (captureFrame), which a covered or minimised window does not spoil.
         static const uint32_t shotEvery = std::getenv("PHYS_DRIVE_SHOTS") ? std::strtoul(std::getenv("PHYS_DRIVE_SHOTS"), nullptr, 0) : 0;
         static uint32_t shotTick = 0;
         const bool timedShot = shotEvery && !paused && sim.Tick() >= shotTick + shotEvery;
@@ -1398,13 +1410,32 @@ int main(int argc, char** argv)
             char name[32];
             std::snprintf(name, sizeof name, "shot-%03d.bmp", shots++);
             shotPath = (slash == std::string::npos ? std::string() : out.substr(0, slash + 1)) + name;
-            if (timedShot) ngg_capture_frame(s, shotPath.c_str());
+            if (timedShot) renderer.CaptureFrame(shotPath);
         }
         // PAUSED, nothing is drawn either, so the picture stays as it was when the pause began: rendering on, TAA
         // would settle the still image within a few frames and wipe out what was being looked at. A renderer switch
         // (T / O / L / V) draws one frame - that frame alone, no settling.
-        if (!paused || redraw || timedShot) ngg_render(s);
-        else Sleep(15);
+        const wrally::iface::UiDrawList& uiList = ui.Render();   // (an ImGui frame ends every frame, drawn or not)
+        if (!paused || redraw || timedShot) {
+            wrally::iface::FrameDesc fd{};
+            fd.scene = scene;
+            std::memcpy(fd.camera.view, view, sizeof view);
+            std::memcpy(fd.camera.proj, proj, sizeof proj);
+            fd.camera.nearZ = 0.25f;
+            fd.camera.farZ = 8000.0f;
+            fd.camera.fovY = fovY;
+            fd.weatherPreset = 0;   // the stage's own weather, as the .ngg has it
+            fd.instances = carInstance ? &car : nullptr;
+            fd.instanceCount = carInstance ? 1 : 0;
+            fd.stageObjects = follower.updates.data();
+            fd.stageObjectCount = static_cast<uint32_t>(follower.updates.size());
+            fd.ui = uiList;
+            if (!renderer.RenderFrame(fd)) std::fprintf(stderr, "renderer: %s\n", renderer.Error().c_str());
+            renderer.Present();
+        } else {
+            Sleep(15);
+        }
+        if (const std::string log = renderer.TakeLog(); rendererLog && !log.empty()) std::printf("%s", log.c_str());
         if (!shotPath.empty()) {
             const bool saved = timedShot || SaveScreenshot(wnd, shotPath.c_str());
             std::printf("screenshot %s%s (tick %u)\n", shotPath.c_str(), saved ? "" : " failed", sim.Tick());
@@ -1414,7 +1445,7 @@ int main(int argc, char** argv)
             title = 0;
             const float speed = std::sqrt(p.velocity[0] * p.velocity[0] + p.velocity[1] * p.velocity[1] + p.velocity[2] * p.velocity[2]);
             wchar_t t[128];
-            std::swprintf(t, 128, L"phys-drive - %.0f km/h - tick %u - %.0f fps", speed * 3.6f, sim.Tick(), frame > 0 ? 1.0 / frame : 0.0);
+            std::swprintf(t, 128, L"WRally - %.0f km/h - tick %u - %.0f fps", speed * 3.6f, sim.Tick(), frame > 0 ? 1.0 / frame : 0.0);
             if (tv) {
                 const size_t n = std::wcslen(t);
                 if (tvCamera >= 0) std::swprintf(t + n, 128 - n, L" - %.0f m, camera %d", tv->Distance(), tvCamera);
@@ -1423,7 +1454,6 @@ int main(int argc, char** argv)
             SetWindowTextW(wnd, t);
         }
     }
-    ngg_destroy(s);
     if (posesChecked) {
         if (posesDiffering)
             std::printf("replay check: %u of %u poses differ from the recording, the first at tick %u\n", posesDiffering,
@@ -1438,4 +1468,16 @@ int main(int argc, char** argv)
         std::fprintf(stderr, "%s\n", e.what());
     }
     return 0;
+}
+
+int main(int argc, char** argv)
+{
+    const std::string log = SetUpOutput();
+    const int code = Run(argc, argv);
+    // Started without a console, a failure would be silent: say where its reasons went.
+    if (code && !log.empty()) {
+        const std::string text = "WRally stopped (exit code " + std::to_string(code) + ").\n\nThe reason is in\n" + log;
+        MessageBoxA(nullptr, text.c_str(), "WRally", MB_OK | MB_ICONERROR);
+    }
+    return code;
 }

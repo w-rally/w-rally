@@ -37,6 +37,7 @@ enable_testing()
 add_library(wrally-iface INTERFACE)
 target_include_directories(wrally-iface INTERFACE ${CMAKE_CURRENT_SOURCE_DIR}/include)
 
+add_subdirectory(third_party)
 add_subdirectory(libs/signals)
 add_subdirectory(libs/modules)
 add_subdirectory(modules/physics-rbr)
