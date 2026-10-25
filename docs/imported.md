@@ -21,7 +21,7 @@ classic physics remains the oracle that the native port is checked against (`phy
 | `modules/audio/src/audio/` | `audio/` (audio, bank, device, grains, mix, sample, wav) | none; the bench and scan tools not imported |
 | `modules/renderer/src/core/`, `api/`, `format/` | `ngg/core/`, `ngg/api/`, `ngg/format/` | none; the host, bridge, ipc and tools not imported |
 | `third_party/dxc/` | `ngg/api/build/bin/dxcompiler.dll`, `dxil.dll` | binaries (Microsoft DirectX Shader Compiler redistributables) |
-| `game/src/drive/` | `phys/drive/` (drive, car_model, replay_camera, launch_control, anti_lag) | `drive.cpp`: `--classic` removed; WRally's own files found by `WRallyFile` (beside the exe, else the source tree) |
+| `game/src/drive/` (split in phase 5, below) | `phys/drive/` (drive, car_model, replay_camera, launch_control, anti_lag) | `drive.cpp`: `--classic` removed; WRally's own files found by `WRallyFile` (beside the exe, else the source tree) |
 | `game/config/sound-mix.ini` | `phys/drive/sound-mix.ini` | none |
 | `content/cars/s_i2003.ini` | `cars/s_i2003.ini` | none |
 
@@ -43,6 +43,11 @@ native physics is bit-exact with RBR only under them.
 - Phase 4: `modules/renderer/src/api/` (ngg-api) removed. Its swap-chain and capture code lives on in the WRenderer
   module (`src/module/module.cpp`). `drive.cpp` draws through the renderer module (`--renderer <id>`), and its HUD
   is Dear ImGui instead of ngg-api's labels.
+
+- Phase 5: `game/src/drive/` is gone. `drive.cpp` was split into `game/src/app`, `session`, `camera`, `input`,
+  `assets`, `render/stage_objects`, `ui/hud` and `core/math`. The imported helpers moved and took the game's
+  namespaces: `car_model` to `assets/` (`wrally::assets`), `replay_camera` to `camera/` (`wrally::camera`),
+  `launch_control` and `anti_lag` to `session/` (`wrally::session`).
 
 ## Third-party code
 

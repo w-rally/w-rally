@@ -238,8 +238,14 @@ so that a hitch cannot spiral (a 1 kHz WPhysics after a 100 ms stall is 100 step
 car/body poses go into a triple-buffered snapshot, and the render thread interpolates between the last two by the
 remainder. Only the render thread calls `RendererApi`, and only the sim thread calls a given `World`.
 
-phys-drive runs all of this on one thread today. The first WRally builds may keep that (§8). The split is the
-target, and the interfaces already allow it.
+**As built (phase 5).** The sim thread exists: `session::SimThread` runs the `Session`, so physics, driver layer,
+stage clock and recording step there, and the physics' records reach the bus (and the audio module) on that thread.
+It differs from the sketch above in two ways:
+- **Rendering stays on the main thread**, with the window and ImGui. A separate render thread is a later step.
+- **The sim thread steps on request, not on its own clock.** Each frame posts its time and keys, and requests not
+  yet stepped merge. In real time a frame draws the newest snapshot, usually the previous frame's steps while this
+  frame's run alongside: at most one frame of extra latency. Under `--step` (lockstep) a frame waits for its own
+  steps, so a run is the same frame for frame and tick for tick.
 
 ---
 
@@ -530,7 +536,11 @@ Each phase ends with a game you can drive. phys-drive works on day one, and ever
    differs. The game loads the DLL through `wrally::render::Renderer` (`game/src/render`). The car is a model (a node
    per part, posed per frame); moved stage objects go by key. The HUD is Dear ImGui 1.91.5 (`game/src/ui`,
    `third_party/imgui`), drawn by the module's UI pass. `ngg-api` is no longer built.
-5. **Restructure the game** along §6.5: session, rules, camera, input, threads (§3.3).
+5. **Restructure the game** — DONE 2026-10-26. `drive.cpp` split along §6.5 into `app/` (main, options, window,
+   frame loop), `session/` (one stage run, the driver layer), `camera/`, `input/`, `assets/`, `render/stage_objects`,
+   `ui/hud` and `core/math`. The session runs on its own thread (`session/sim_thread.h`, §3.3), in lockstep with the
+   frames under `--step`. Recordings and frames are unchanged in lockstep, a real-time threaded drive replays
+   bit-exact, and a replay now quits at its end (`--hold` keeps it up).
 6. **Cars as models.** `.sgc` → `ModelDesc`, wheel/part animation, moved stage objects, RT instancing.
 7. **Content.** VFS layers, catalog, `stage.json`/`car.json` with their schemas, and standalone mode without RBR
    (tested with the RBR layer switched off; RBR content remains the development data, decision 7).

@@ -14,7 +14,7 @@
 #include <algorithm>
 #include <cmath>
 
-namespace phys::drive {
+namespace wrally::session {
 
 class LaunchControl {
 public:
@@ -54,4 +54,4 @@ private:
     float m_integral = 0, m_lastRpm = 0, m_rate = 0;
 };
 
-} // namespace phys::drive
+} // namespace wrally::session
