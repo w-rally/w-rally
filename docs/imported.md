@@ -35,5 +35,10 @@ native physics is bit-exact with RBR only under them.
   stage helpers moved out of the physics into `game/src/rules/stage.*` (namespace `wrally::rules`). `drive.cpp`
   loads the physics as a module (`--physics <id>`) and checks a replay's poses against its recording.
 
+- Phase 3: the sound reads its files through `audio/files.h` (`ReadWholeFile`, `FileExists`, with a reader the module
+  sets). `Bank::LoadRbr` takes "" for VFS-relative paths. `Bank::LoadBangFiles` takes a list of files
+  (`LoadBangs` lists a folder and calls it). `Mix::Parse` reads a mix from text (`Read` reads the file and calls
+  it). `drive.cpp` plays through the audio module (`--audio <id>`).
+
 **Checked on import:** WRally.exe and plugin-rbr's `phys-drive.exe` with the same arguments (`C:\Brb`, track-108_M,
 `--no-sound --step 0.0166 --quick-start --exit-at 2000 --overrides none`) write byte-identical `.phr` recordings.

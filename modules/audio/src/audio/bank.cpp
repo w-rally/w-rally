@@ -1,4 +1,5 @@
 #include "audio/bank.h"
+#include "audio/files.h"
 
 #include <cstdio>
 #include <filesystem>
@@ -7,22 +8,31 @@ namespace audio {
 
 std::string Bank::LoadBangs(const std::string& dir, bool idle)
 {
+    std::vector<std::string> files;
+    std::error_code ec;
+    for (const auto& e : std::filesystem::directory_iterator(dir, ec))
+        if (e.path().extension() == ".wav") files.push_back(e.path().string());
+    if (ec) return "cannot list " + dir;
+    if (files.empty()) return dir + ": no .wav";
+    return LoadBangFiles(files, idle);
+}
+
+std::string Bank::LoadBangFiles(const std::vector<std::string>& files, bool idle)
+{
     std::vector<Sample>& set = idle ? antiLagIdleBangs : antiLagBangs;
     set.clear();
-    std::error_code ec;
-    for (const auto& e : std::filesystem::directory_iterator(dir, ec)) {
-        if (e.path().extension() != ".wav") continue;
+    for (const std::string& f : files) {
         Sample s;
-        if (std::string err = ReadWav(e.path().string(), s); !err.empty()) return err;
+        if (std::string err = ReadWav(f, s); !err.empty()) return err;
         set.push_back(std::move(s));
     }
-    if (ec) return "cannot list " + dir;
-    return set.empty() ? dir + ": no .wav" : "";
+    return "";
 }
 
 std::string Bank::LoadRbr(const std::string& game, const std::string& engineName)
 {
-    const std::string a = game + "/audio/";
+    const std::string base = game.empty() ? "" : game + "/";
+    const std::string a = base + "audio/";
     std::string missing;
     auto note = [&](const std::string& e) {
         if (!e.empty()) missing += e + "\n";
@@ -44,9 +54,7 @@ std::string Bank::LoadRbr(const std::string& game, const std::string& engineName
     // .eng in it) is taken as it is.
     const bool path = engineName.find_first_of("/\\") != std::string::npos || engineName.find(".eng") != std::string::npos;
     std::string eng = path ? engineName : a + "Cars/" + engineName + ".eng";
-    if (!path)
-        if (std::FILE* f = std::fopen(eng.c_str(), "rb")) std::fclose(f);
-        else eng = game + "/audio.bak/Cars/" + engineName + ".eng";
+    if (!path && !FileExists(eng)) eng = base + "audio.bak/Cars/" + engineName + ".eng";
     note(ReadEng(eng, engine, &warning));
     // Cars.ini's low shelf is RBR's mix for its own loops; a recording of our own (a path) plays as recorded - the
     // shelf on a real engine buried its mids (2.5 - 5 dB under the recording's, a Rally1 preview).

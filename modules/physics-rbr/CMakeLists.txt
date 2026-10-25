@@ -52,20 +52,6 @@ target_link_libraries(WPhysicsRBR PRIVATE phys-sim)
 target_compile_definitions(WPhysicsRBR PRIVATE _CRT_SECURE_NO_WARNINGS NOMINMAX)
 target_compile_options(WPhysicsRBR PRIVATE /W4)
 set_target_properties(WPhysicsRBR PROPERTIES CXX_STANDARD 17)
-foreach(cfg "" _DEBUG _RELEASE _RELWITHDEBINFO _MINSIZEREL)
-    set_target_properties(WPhysicsRBR PROPERTIES RUNTIME_OUTPUT_DIRECTORY${cfg} ${WRALLY_BIN}/modules/physics)
-endforeach()
-
-# ModuleInfo::buildHash: what replays and results record to say "this physics, exactly". The sources, the compiler and
-# the switches that change the arithmetic, hashed at configure time (a source change re-runs it: CONFIGURE_DEPENDS).
-file(GLOB_RECURSE PHYS_RBR_SOURCES CONFIGURE_DEPENDS ${SRC}/*.cpp ${SRC}/*.h ${SRC}/*.inc)
-list(SORT PHYS_RBR_SOURCES)
-set(PHYS_RBR_HASH_INPUT "${CMAKE_CXX_COMPILER_ID} ${CMAKE_CXX_COMPILER_VERSION} PHYS_RSQRT=${PHYS_RSQRT}")
-foreach(f ${PHYS_RBR_SOURCES})
-    file(SHA256 ${f} h)
-    string(APPEND PHYS_RBR_HASH_INPUT " ${h}")
-endforeach()
-string(SHA256 PHYS_RBR_HASH "${PHYS_RBR_HASH_INPUT}")
-string(SUBSTRING ${PHYS_RBR_HASH} 0 16 PHYS_RBR_HASH)
-target_compile_definitions(WPhysicsRBR PRIVATE WPHYSICS_RBR_BUILD_HASH=0x${PHYS_RBR_HASH}ull)
-message(STATUS "WPhysicsRBR build hash ${PHYS_RBR_HASH}")
+wrally_module_output(WPhysicsRBR physics)
+# The rsqrt table changes the arithmetic, so it is part of the hash.
+wrally_build_hash(WPhysicsRBR WPHYSICS_RBR_BUILD_HASH ${SRC} EXTRA "PHYS_RSQRT=${PHYS_RSQRT}")

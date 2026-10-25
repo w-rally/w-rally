@@ -29,7 +29,8 @@
 
 namespace wrally::iface {
 
-constexpr uint32_t kAudioInterfaceVer = 1;
+// 2: CarSoundDesc's mix and the anti-lag bangs as data (text, file lists); setCarMix.
+constexpr uint32_t kAudioInterfaceVer = 2;
 
 struct AudioModule;
 typedef uint32_t CarVoiceHandle;   // one car's sound (engine, drivetrain, tyres, wind)
@@ -60,12 +61,19 @@ struct AudioSettings {
     uint32_t speakers;                              // 2 stereo, 6 5.1, 0 the device's
 };
 
-// One car's sound. VFS paths; "" for the module's default.
+// One car's sound. Paths are VFS paths; "" for the module's default.
+//
+// The mix and the anti-lag's bangs are passed as DATA, not as places: the mix is WRally's own file and the bangs are a
+// folder of .wav files, and the VFS can neither reach the one (it is not under the game data root) nor list the other.
 struct CarSoundDesc {
-    uint32_t    car;          // the physics' car index: records with this Stamp::car drive the voice
-    const char* engine;       // Cars/<car>.eng (RBR), or a WRally engine sound set
-    const char* bank;         // the sounds around it (RBR: Audio/...; WRally: a sound set manifest)
-    const char* mix;          // the per-car mix (layers' volumes), the module's format
+    uint32_t           car;            // the physics' car index: records with this Stamp::car drive the voice
+    const char*        engine;         // RBR: the name of audio/Cars/<engine>.eng ("Focus03-08"), or a path to an .eng
+    const char*        bank;           // the sounds around it: "" RBR's set (audio/Cars/Effects, Surfaces, Ambient)
+    const char*        mix;            // the mix's TEXT (the module's format: `layer = volume [solo]` lines), "" defaults
+    const char* const* bangs;          // the anti-lag's exhaust bangs: .wav paths, bangCount of them (0: the bank's)
+    uint32_t           bangCount;
+    const char* const* idleBangs;      // its bangs at standstill (0: `bangs`)
+    uint32_t           idleBangCount;
 };
 
 struct Listener {
@@ -102,6 +110,10 @@ struct AudioApi {
     // Every record the physics emitted (records.h, by kind) and the game's
     // DriverTick, in the order they came. Unknown kinds are ignored.
     void   (WRALLY_CALL* submitRecord)(AudioModule*, uint32_t kind, const void* data, uint32_t bytes);
+    // A new mix for a playing voice (the text, as CarSoundDesc::mix): the game watches its mix file and resends it when
+    // it changes. Taken at the mixer's next block. ErrFormat: some lines were not understood (lastError says which;
+    // the rest applies).
+    Status (WRALLY_CALL* setCarMix)(AudioModule*, CarVoiceHandle, const char* mix);
 
     // ---- everything else
     Status (WRALLY_CALL* loadSound)(AudioModule*, const char* path, SoundHandle* out);
