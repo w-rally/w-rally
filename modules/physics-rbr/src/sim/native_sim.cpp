@@ -46,11 +46,11 @@ bool RunStep(native::WorldLoader& L, uint32_t n)
 // The cars' gear hooks (DriveHooks::gearChange, gearOut: their context the car, the engine step's) find their NativeSim here.
 std::vector<std::pair<const void*, NativeSim*>> g_gearSims;
 
-// Config::overrides (sim.cpp's CarOverride on the native car's defs). Returns "" or what is wrong; `log` gets each change.
-std::string CarOverride(const std::string& path, native::Car& car, std::string& log)
+// Config::overrides (sim.cpp's CarOverride on the native car's defs): the text, `path` its name in messages. Returns ""
+// or what is wrong; `log` gets each change.
+std::string CarOverride(const std::string& path, const std::string& text, native::Car& car, std::string& log)
 {
-    std::ifstream f(path);
-    if (!f) return "cannot open " + path;
+    std::istringstream f(text);
     struct Field {
         const char* name;
         float* (*at)(native::Car&);
@@ -126,7 +126,7 @@ std::string NativeSim::Open(const Config& c)
     }
     if (!c.overrides.empty()) {
         std::string changes;
-        if (std::string oe = CarOverride(c.overrides, *w.loader->car, changes); !oe.empty()) {
+        if (std::string oe = CarOverride(c.overridesName, c.overrides, *w.loader->car, changes); !oe.empty()) {
             m_world.reset();
             return m_error = "the car's overrides: " + oe;
         }

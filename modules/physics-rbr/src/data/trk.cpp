@@ -1,4 +1,5 @@
 #include "trk.h"
+#include "files.h"
 
 #include <cstring>
 #include <fstream>
@@ -85,9 +86,8 @@ TrkCollisionMesh ReadMesh(Cursor& c)
 
 TrkFile ReadTrk(const std::string& path)
 {
-    std::ifstream f(path, std::ios::binary);
-    if (!f) throw std::runtime_error("trk: cannot open " + path);
-    const std::vector<uint8_t> d((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+    std::vector<uint8_t> d;
+    if (!ReadWholeFile(path, d)) throw std::runtime_error("trk: cannot open " + path);
     TrkFile out;
     size_t at = 0;
     while (at + 16 <= d.size()) {

@@ -1,4 +1,5 @@
 #include "sgc.h"
+#include "files.h"
 
 #include <xmmintrin.h>
 
@@ -50,15 +51,8 @@ struct Reader {
 
 std::vector<SgcCollisionNode> ReadSgcCollision(const std::string& path)
 {
-    FILE* f = std::fopen(path.c_str(), "rb");
-    if (!f) throw std::runtime_error("cannot open " + path);
     std::vector<uint8_t> d;
-    std::fseek(f, 0, SEEK_END);
-    d.resize(static_cast<size_t>(std::ftell(f)));
-    std::fseek(f, 0, SEEK_SET);
-    const size_t got = std::fread(d.data(), 1, d.size(), f);
-    std::fclose(f);
-    if (got != d.size()) throw std::runtime_error("cannot read " + path);
+    if (!ReadWholeFile(path, d)) throw std::runtime_error("cannot open " + path);
     static constexpr uint32_t kHead[4] = {0xc, 0x10, 0, 1};
     std::vector<SgcCollisionNode> out;
     for (size_t at = 0; at + 20 <= d.size(); ++at) {

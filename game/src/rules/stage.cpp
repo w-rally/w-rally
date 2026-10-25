@@ -1,6 +1,5 @@
-// The stage clock and the stage helpers of sim/sim.h (StageClock, StageMap, StageSurface, SurfaceTyreType), apart from
-// the classic Sim they shared a file with in plugin-rbr.
-#include "sim/sim.h"
+// The stage clock and the stage helpers (rules/stage.h), from plugin-rbr phys/sim/sim.cpp.
+#include "rules/stage.h"
 
 #include <windows.h>
 
@@ -10,7 +9,7 @@
 #include <cstdlib>
 #include <cstring>
 
-namespace phys::sim {
+namespace wrally::rules {
 
 void StageClock::SetMarks(float finish, std::vector<float> checkpoints)
 {
@@ -122,4 +121,4 @@ uint32_t SurfaceTyreType(const std::string& surface, int32_t wetness)
     return surface == "snow" ? 6 : surface == "gravel" ? 3 + w : w;
 }
 
-} // namespace phys::sim
+} // namespace wrally::rules

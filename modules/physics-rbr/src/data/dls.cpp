@@ -1,4 +1,5 @@
 #include "dls.h"
+#include "files.h"
 
 #include <cstdio>
 #include <cstring>
@@ -45,15 +46,8 @@ struct Reader {
 
 Dls ReadDls(const std::string& path)
 {
-    FILE* f = std::fopen(path.c_str(), "rb");
-    if (!f) throw std::runtime_error("cannot open " + path);
     std::vector<uint8_t> d;
-    std::fseek(f, 0, SEEK_END);
-    d.resize(static_cast<size_t>(std::ftell(f)));
-    std::fseek(f, 0, SEEK_SET);
-    const size_t got = std::fread(d.data(), 1, d.size(), f);
-    std::fclose(f);
-    if (got != d.size()) throw std::runtime_error("cannot read " + path);
+    if (!ReadWholeFile(path, d)) throw std::runtime_error("cannot open " + path);
     if (d.size() < 56 || std::memcmp(d.data(), "MINAATAD", 8) != 0) throw std::runtime_error(path + ": not a .dls");
     int32_t offsets[10];
     std::memcpy(offsets, d.data() + 16, 40);

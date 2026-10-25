@@ -28,5 +28,12 @@ classic physics remains the oracle that the native port is checked against (`phy
 The physics libraries keep plugin-rbr's compile settings (C++17, `/fp:precise`, `PHYS_RSQRT=AMD`), because the
 native physics is bit-exact with RBR only under them.
 
+## Changed since the import
+
+- Phase 2: every file read in `data/` and `native/run.cpp` goes through `data/files.h` (`ReadWholeFile`, with a
+  reader the module sets). `sim::Config::overrides` is the overrides' text, no longer a path. The stage clock and
+  stage helpers moved out of the physics into `game/src/rules/stage.*` (namespace `wrally::rules`). `drive.cpp`
+  loads the physics as a module (`--physics <id>`) and checks a replay's poses against its recording.
+
 **Checked on import:** WRally.exe and plugin-rbr's `phys-drive.exe` with the same arguments (`C:\Brb`, track-108_M,
 `--no-sound --step 0.0166 --quick-start --exit-at 2000 --overrides none`) write byte-identical `.phr` recordings.

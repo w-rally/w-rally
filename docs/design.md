@@ -265,8 +265,11 @@ configures without an interface bump.
 - Its config is RBR's own data (`physics.rbz`, the cars' `.lsp`). It needs no file of its own, so `config` is "".
   It runs RBR cars only (decision 8), so it is offered only when the RBR layer is present. It can drive those cars on
   WRally stages too, since those use RBR's gameplay formats (§6.3).
-- File access: the native loader currently opens paths. The adapter reads every file through `HostServices::files`
-  into memory and hands the loader buffers. This is the one refactor `phys/native/load` needs.
+- File access: every read the physics makes goes through `phys::data::ReadWholeFile` (`data/files.h`). The module
+  points it at `HostServices::files`, so `WorldDesc` paths are VFS paths. Car overrides arrive as text
+  (`CarDesc::overrides`), because WRally's car data is not in the RBR folder.
+- Not yet read out of the native car: `CarState::steeringTorque` and `damaged` (0), and `resetCar`
+  (`ErrNotSupported`).
 
 ### 4.3 WPhysics.dll — id `"wphysics"`
 
@@ -495,8 +498,11 @@ Each phase ends with a game you can drive. phys-drive works on day one, and ever
    `tools/module-info`, a stub module and handshake tests. phys-drive and the libraries it uses were imported
    (docs/imported.md): WRally.exe is phys-drive, still drawing through `ngg-api.dll`, with `NativeSim` and
    `audio::Audio` linked in. Its recordings are byte-identical to plugin-rbr's phys-drive.
-2. **WPhysicsRBR.** `NativeSim` behind `PhysicsApi`, files through the VFS. The game switches from the linked
-   `NativeSim` to the DLL. Bit-exact suite green through the interface.
+2. **WPhysicsRBR** — DONE 2026-10-25. `NativeSim` behind `PhysicsApi` (`modules/physics-rbr/src/module`), every
+   file read through `HostServices::files` (`data/files.h`). The game loads the DLL through
+   `wrally::physics::Physics` (`game/src/physics`) and turns its records back into bus records
+   (`signals/convert.h`). The stage clock moved to the game (`game/src/rules`). A replay checks every pose against
+   the recording. RBR's own stage-41 recording (49,913 poses) replays bit-exact: CTest `golden-replay-41`.
 3. **WAudio.** `audio/` behind `AudioApi`. The game forwards records instead of linking `audio::Audio`. Offline
    golden test: the same `.phr` gives the same samples as phys-drive.
 4. **WRenderer.** `ngg-core` behind `RendererApi`. The game drops `ngg-api.dll` and draws its HUD through ImGui on
