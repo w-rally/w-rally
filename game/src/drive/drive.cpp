@@ -5,7 +5,7 @@
 //
 //   WRally <game dir> <stage .ngg> [--stage <the .ngg's>] [--sgc Cars/i20_R5/i20_R5.sgc] [--car s_i2003]
 //              [--surface <the stage's>] [--tyre-type <its>] [--tyres michelin] [--aids 0,0,0,0] [--camera 0] [--out drive.phr]
-//              [--replay run.phr] [--physics rbr]
+//              [--replay run.phr] [--physics rbr] [--audio waudio]
 //              [--skip-to <tick>] [--pause-at <tick>] [--exit-at <tick>] [--step <seconds>] [--camera-angle <degrees>]
 //              [--chase-distance <metres>] [--chase-pull <metres per 100 km/h>] [--entry <seconds>] [--quick-start]
 //              [--no-sound] [--eng Focus03-08] [--mix sound-mix.ini] [--overrides cars/s_i2003.ini | none]
@@ -63,13 +63,13 @@
 #include <cstring>
 #include <cwchar>
 #include <filesystem>
+#include <fstream>
+#include <iterator>
 #include <memory>
 #include <string>
 #include <vector>
 
-#include "audio/audio.h"
-#include "audio/device.h"
-#include "audio/mix.h"
+#include "sound/sound.h"
 #include "data/rec.h"
 #include "data/sgc.h"
 #include "ngg_api.h"
@@ -78,6 +78,7 @@
 #include "drive/launch_control.h"
 #include "drive/replay_camera.h"
 #include "signals/bus.h"
+#include "signals/car.h"
 #include "physics/physics.h"
 #include "rules/stage.h"
 
@@ -694,23 +695,29 @@ int main(int argc, char** argv)
     signals::Bus bus;
     std::string mixPath;          // the mix file, watched ("" none)
     FILETIME mixWritten{};
-    audio::Bank bank;
-    audio::Audio sound(audio::Audio::Mode::RealTime);
-    audio::Device device;
+    // The sound: a module DLL in modules/audio beside the exe (--audio <id>, "waudio" by default: WAudio.dll), every
+    // record on the bus forwarded to it.
+    wrally::sound::Sound sound;
     if (!HasFlag(argc, argv, "--no-sound")) {
-        if (const std::string engine = Arg(argc, argv, "--eng", "Focus03-08"); engine != "none") {
-            std::string missing = bank.LoadRbr(game, engine);
-            if (const std::string b = Arg(argc, argv, "--als-bangs", ""); !b.empty()) missing += bank.LoadBangs(b);
-            if (const std::string b = Arg(argc, argv, "--als-idle-bangs", ""); !b.empty()) missing += bank.LoadBangs(b, true);
-            std::printf("sounds: %zu engine loops (%s)%s%s", bank.engine.size(), engine.c_str(),
-                        missing.empty() ? "\n" : "; missing or odd:\n", missing.c_str());
-            sound.SetBank(&bank);
+        char exe[MAX_PATH];
+        GetModuleFileNameA(nullptr, exe, MAX_PATH);
+        const std::filesystem::path modules = std::filesystem::path(exe).parent_path() / "modules" / "audio";
+        wrally::sound::CarSound car;
+        car.engine = Arg(argc, argv, "--eng", "Focus03-08");
+        car.bangs = Arg(argc, argv, "--als-bangs", "");
+        car.idleBangs = Arg(argc, argv, "--als-idle-bangs", "");
+        std::string e = sound.Open(modules, Arg(argc, argv, "--audio", "waudio"), game);
+        if (e.empty()) e = sound.CreateCar(car);
+        std::printf("%s", sound.TakeLog().c_str());
+        if (!e.empty()) {
+            std::printf("no sound: %s\n", e.c_str());
+        } else {
+            std::printf("audio module: %s\n", sound.ModuleName().c_str());
+            sound.Connect(&bus);
+            sim.Connect(&bus);
+            mixPath = Arg(argc, argv, "--mix", "");
+            if (mixPath.empty()) mixPath = WRallyFile("game/config/sound-mix.ini");
         }
-        sound.Connect(bus);
-        sim.Connect(&bus);
-        mixPath = Arg(argc, argv, "--mix", "");
-        if (mixPath.empty()) mixPath = WRallyFile("game/config/sound-mix.ini");
-        if (const std::string e = device.Open(sound); !e.empty()) std::printf("no sound: %s\n", e.c_str());
     }
     const std::vector<phys::data::RecMesh> meshes = phys::data::CarCollisionMeshes(phys::data::ReadSgcCollision(c.sgc));
 
@@ -1099,10 +1106,9 @@ int main(int argc, char** argv)
             WIN32_FILE_ATTRIBUTE_DATA a;
             if (GetFileAttributesExA(mixPath.c_str(), GetFileExInfoStandard, &a) && CompareFileTime(&a.ftLastWriteTime, &mixWritten)) {
                 mixWritten = a.ftLastWriteTime;
-                audio::Mix mix;
-                const std::string e = mix.Read(mixPath);
-                sound.SetMix(mix);
-                std::printf("%smix %s:%s\n", e.c_str(), mixPath.c_str(), mix.Describe().c_str());
+                std::ifstream f(mixPath, std::ios::binary);
+                sound.SetMix(std::string(std::istreambuf_iterator<char>(f), std::istreambuf_iterator<char>()));
+                std::printf("mix %s\n%s", mixPath.c_str(), sound.TakeLog().c_str());
             }
         }
         if (antiLagIdleKey(focused && DownAt(kAntiLagIdle))) {
@@ -1110,8 +1116,8 @@ int main(int argc, char** argv)
             std::printf("anti-lag at standstill %s\n", antiLagIdle ? "armed" : "off");
         }
         if (muteKey(focused && DownAt(kMute))) {
-            sound.muted = !sound.muted;
-            std::printf("sound %s\n", sound.muted ? "muted" : "on");
+            sound.SetMuted(!sound.Muted());
+            std::printf("sound %s\n", sound.Muted() ? "muted" : "on");
         }
         if (debugHudKey(focused && Down(VK_F1))) {
             debugHud = !debugHud;

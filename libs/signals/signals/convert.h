@@ -186,6 +186,22 @@ inline Collision FromIface(const rec::Collision& r)
     return o;
 }
 
+// The game's own record (the driver layer's), on its way to the audio module.
+inline rec::DriverTick ToIface(const DriverTick& r)
+{
+    return {ToIface(r.stamp), r.pedal, r.throttle, r.launchControl ? 1u : 0u, r.antiLag ? 1u : 0u};
+}
+inline DriverTick FromIface(const rec::DriverTick& r)
+{
+    DriverTick o;
+    o.stamp = FromIface(r.stamp);
+    o.pedal = r.pedal;
+    o.throttle = r.throttle;
+    o.launchControl = r.launchControl != 0;
+    o.antiLag = r.antiLag != 0;
+    return o;
+}
+
 #undef SIGNALS_ENGINE_TICK
 #undef SIGNALS_DRIVE_TICK
 #undef SIGNALS_WHEEL
@@ -216,6 +232,7 @@ inline bool EmitFromIface(Bus& bus, uint32_t kind, const void* data, uint32_t by
     case rec::StepEnd::kKind: return as(rec::StepEnd{});
     case rec::GearChange::kKind: return as(rec::GearChange{});
     case rec::Collision::kKind: return as(rec::Collision{});
+    case rec::DriverTick::kKind: return as(rec::DriverTick{});
     default: return false;
     }
 }

@@ -29,6 +29,8 @@ foreach(cfg "" _DEBUG _RELEASE _RELWITHDEBINFO _MINSIZEREL)
     set(CMAKE_RUNTIME_OUTPUT_DIRECTORY${cfg} ${WRALLY_BIN})
 endforeach()
 
+include(cmake/BuildHash.cmake)
+
 enable_testing()
 
 # The module contract (include/wrally/iface): headers only.
@@ -42,4 +44,5 @@ add_subdirectory(modules/audio)
 add_subdirectory(modules/renderer)
 add_subdirectory(game)
 add_subdirectory(tools/module-info)
+add_subdirectory(tools/audio-check)
 add_subdirectory(tests)

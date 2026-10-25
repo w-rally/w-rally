@@ -308,6 +308,10 @@ Interface: [`audio.h`](../include/wrally/iface/audio.h). Implementation: `plugin
 - Offline mode (`kAudioOffline` + `renderOffline`): the same records give the same samples, for rendering a replay to
   WAV. It replaces `audio::Audio::Mode::Offline`.
 - Device: XAudio2 as today. Settings are applied as a set (endpoint, per-bus volume, speakers).
+- **Not in WAudio yet** (phase 3 moved what the game used): one car voice only; the default device only; no
+  one-shots (`loadSound`/`play`: `ErrNotSupported`); `setListener` does nothing, because the mix is still mono with
+  no placed sources (sound-engine plan S3). The gain is `volume[Master] × volume[Car]`; pause and mute both silence
+  the car.
 
 ---
 
@@ -503,8 +507,11 @@ Each phase ends with a game you can drive. phys-drive works on day one, and ever
    `wrally::physics::Physics` (`game/src/physics`) and turns its records back into bus records
    (`signals/convert.h`). The stage clock moved to the game (`game/src/rules`). A replay checks every pose against
    the recording. RBR's own stage-41 recording (49,913 poses) replays bit-exact: CTest `golden-replay-41`.
-3. **WAudio.** `audio/` behind `AudioApi`. The game forwards records instead of linking `audio::Audio`. Offline
-   golden test: the same `.phr` gives the same samples as phys-drive.
+3. **WAudio** — DONE 2026-10-25. `audio/` behind `AudioApi` (`modules/audio/src/module`, interface v2: the mix and
+   the bang files passed as data, `setCarMix`). Its files are read through the VFS (`audio/files.h`). The game
+   forwards every bus record through `wrally::sound::Sound` (`game/src/sound`). `tools/audio-check` renders the same
+   records offline through the linked library and through the DLL, and the samples are bit for bit the same: CTests
+   `audio-offline-*`, from made-up records, with a mix, and from RBR's stage-41 run with RBR's sounds.
 4. **WRenderer.** `ngg-core` behind `RendererApi`. The game drops `ngg-api.dll` and draws its HUD through ImGui on
    the UI pass.
 5. **Restructure the game** along §6.5: session, rules, camera, input, threads (§3.3).

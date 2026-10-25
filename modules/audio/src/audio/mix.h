@@ -41,6 +41,8 @@ struct Mix {
     float Gain(Layer l) const;
     // Reads `path` over the defaults. Returns "" or what was wrong (the lines it could read still apply).
     std::string Read(const std::string& path);
+    // The same from the file's text; `path` names it in the messages.
+    std::string Parse(const std::string& text, const std::string& path);
     std::string Describe() const;   // one line: what is not at its default
 };
 

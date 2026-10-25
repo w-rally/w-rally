@@ -24,10 +24,13 @@ struct Bank {
     std::vector<Sample> antiLagIdleBangs;  // its bangs at standstill (the bubbling idle); none: antiLagBangs
     Sample roll[3], skid[3];   // by signals::CarInfo::Surface
 
-    // Loads what there is of the set; returns what was missing or bad, one line each ("" all there).
+    // Loads what there is of the set under `game` (the RBR folder; "": paths relative, the VFS's); returns what was
+    // missing or bad, one line each ("" all there).
     std::string LoadRbr(const std::string& game, const std::string& engine);
     // Every .wav in `dir` as an anti-lag bang (`idle`: at standstill). Returns "" or what was wrong.
     std::string LoadBangs(const std::string& dir, bool idle = false);
+    // The same from a list of files (what WAudio.dll is given: it cannot list folders through the VFS).
+    std::string LoadBangFiles(const std::vector<std::string>& files, bool idle = false);
 };
 
 } // namespace audio

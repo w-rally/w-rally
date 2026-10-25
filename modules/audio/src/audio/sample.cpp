@@ -1,4 +1,5 @@
 #include "audio/sample.h"
+#include "audio/files.h"
 
 #include <algorithm>
 #include <cstdint>
@@ -11,14 +12,7 @@ namespace {
 
 std::string ReadFile(const std::string& path, std::vector<uint8_t>& d)
 {
-    std::FILE* f = std::fopen(path.c_str(), "rb");
-    if (!f) return "cannot open " + path;
-    std::fseek(f, 0, SEEK_END);
-    d.resize(static_cast<size_t>(std::ftell(f)));
-    std::fseek(f, 0, SEEK_SET);
-    const size_t got = std::fread(d.data(), 1, d.size(), f);
-    std::fclose(f);
-    return got == d.size() ? "" : "cannot read " + path;
+    return ReadWholeFile(path, d) ? "" : "cannot open " + path;
 }
 
 uint32_t U32(const std::vector<uint8_t>& d, size_t at)

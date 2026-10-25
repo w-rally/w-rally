@@ -4,6 +4,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
+#include <iterator>
 #include <sstream>
 
 namespace audio {
@@ -25,8 +26,14 @@ float Mix::Gain(Layer l) const
 
 std::string Mix::Read(const std::string& path)
 {
-    std::ifstream f(path);
+    std::ifstream f(path, std::ios::binary);
     if (!f) return "cannot open " + path;
+    return Parse(std::string(std::istreambuf_iterator<char>(f), std::istreambuf_iterator<char>()), path);
+}
+
+std::string Mix::Parse(const std::string& text, const std::string& path)
+{
+    std::istringstream f(text);
     *this = Mix{};
     std::string line, errors;
     for (int n = 1; std::getline(f, line); ++n) {
