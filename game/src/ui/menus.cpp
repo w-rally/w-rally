@@ -1,0 +1,267 @@
+#include "ui/menus.h"
+
+#include <algorithm>
+#include <cstdio>
+#include <cstring>
+
+#include "imgui.h"
+#include "ui/imgui_layer.h"
+
+namespace wrally::ui {
+
+namespace {
+
+constexpr ImGuiWindowFlags kScreen = ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse |
+                                     ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_AlwaysAutoResize;
+
+// A screen: a window of `title` centred, in the menu's font. Every Begin has its End (ImGui's rule), so the body
+// runs inside.
+template <class F> void Screen(const ImGuiLayer& ui, const char* title, int width, int height, float minWidth, F&& body)
+{
+    ImGui::SetNextWindowPos(ImVec2(width * 0.5f, height * 0.5f), ImGuiCond_Always, ImVec2(0.5f, 0.5f));
+    ImGui::SetNextWindowSizeConstraints(ImVec2(std::min(minWidth * ui.Scale(), width * 0.95f), 0), ImVec2(width * 0.95f, height * 0.95f));
+    if (ui.MenuFont()) ImGui::PushFont(ui.MenuFont());
+    if (ImGui::Begin(title, nullptr, kScreen)) body();
+    ImGui::End();
+    if (ui.MenuFont()) ImGui::PopFont();
+}
+
+// A full-width button; the first one of a screen takes the keyboard's focus when it opens.
+bool Button(const char* label, bool first = false)
+{
+    if (first && ImGui::IsWindowAppearing()) ImGui::SetKeyboardFocusHere();
+    return ImGui::Button(label, ImVec2(-FLT_MIN, 0));
+}
+
+// A combo of `items`; `at` the chosen one. True when it changed.
+bool Choose(const char* label, int& at, const std::vector<std::string>& items)
+{
+    bool changed = false;
+    const char* shown = at >= 0 && at < static_cast<int>(items.size()) ? items[at].c_str() : "";
+    if (ImGui::BeginCombo(label, shown)) {
+        for (int i = 0; i < static_cast<int>(items.size()); ++i) {
+            ImGui::PushID(i);
+            if (ImGui::Selectable(items[i].c_str(), i == at)) at = i, changed = true;
+            if (i == at) ImGui::SetItemDefaultFocus();
+            ImGui::PopID();
+        }
+        ImGui::EndCombo();
+    }
+    return changed;
+}
+
+// A text field over a std::string. True when it changed.
+bool Text(const char* label, std::string& s, bool readOnly)
+{
+    char buf[1024];
+    std::snprintf(buf, sizeof buf, "%s", s.c_str());
+    if (!ImGui::InputText(label, buf, sizeof buf, readOnly ? ImGuiInputTextFlags_ReadOnly : 0)) return false;
+    s = buf;
+    return true;
+}
+
+bool Check(const char* label, bool& v) { return ImGui::Checkbox(label, &v); }
+
+} // namespace
+
+void DrawBackdrop(int width, int height)
+{
+    ImDrawList* d = ImGui::GetBackgroundDrawList();
+    d->AddRectFilledMultiColor(ImVec2(0, 0), ImVec2(float(width), float(height)), IM_COL32(18, 24, 34, 255),
+                               IM_COL32(18, 24, 34, 255), IM_COL32(52, 34, 22, 255), IM_COL32(52, 34, 22, 255));
+}
+
+MainChoice MainMenu(const ImGuiLayer& ui, int width, int height, const std::string& note)
+{
+    // The title above the menu, in the HUD's large face.
+    if (ImFont* f = ui.HudSmall()) {
+        const char* title = "WRally";
+        const float size = std::max(48.0f, height * 0.12f);
+        const ImVec2 t = f->CalcTextSizeA(size, FLT_MAX, 0, title);
+        ImGui::GetBackgroundDrawList()->AddText(f, size, ImVec2((width - t.x) * 0.5f, height * 0.12f), IM_COL32(235, 235, 235, 255), title);
+    }
+    MainChoice c = MainChoice::None;
+    Screen(ui, "Main menu", width, height, 320.0f, [&] {
+        if (Button("Quick rally", true)) c = MainChoice::QuickRally;
+        if (Button("Settings")) c = MainChoice::Settings;
+        if (Button("Exit")) c = MainChoice::Exit;
+        if (!note.empty()) {
+            ImGui::Separator();
+            ImGui::PushTextWrapPos(ImGui::GetFontSize() * 24.0f);
+            ImGui::TextColored(ImVec4(1.0f, 0.6f, 0.4f, 1.0f), "%s", note.c_str());
+            ImGui::PopTextWrapPos();
+        }
+    });
+    return c;
+}
+
+QuickChoice QuickRally(const ImGuiLayer& ui, const assets::Catalog& catalog, app::Settings& s, int width, int height)
+{
+    QuickChoice c = QuickChoice::None;
+    Screen(ui, "Quick rally", width, height, 720.0f, [&] {
+        ImGui::PushItemWidth(-ImGui::GetFontSize() * 7.0f);
+        // The stage
+        std::vector<std::string> items;
+        int stage = 0;
+        for (size_t i = 0; i < catalog.stages.size(); ++i) {
+            items.push_back(catalog.stages[i].title);
+            if (catalog.stages[i].key == s.stage) stage = static_cast<int>(i);
+        }
+        if (Choose("Stage", stage, items) || s.stage.empty()) s.weather.clear();
+        const assets::Stage* st = catalog.stages.empty() ? nullptr : &catalog.stages[stage];
+        if (st) s.stage = st->key;
+
+        // The car, with where its physics comes from
+        items.clear();
+        int car = 0;
+        for (size_t i = 0; i < catalog.cars.size(); ++i) {
+            items.push_back(catalog.cars[i].name + "   [" + catalog.cars[i].physicsFrom + "]");
+            if (!_stricmp(catalog.cars[i].folder.c_str(), s.car.c_str())) car = static_cast<int>(i);
+        }
+        if (Choose("Car", car, items)) s.setup.clear();
+        const assets::Car* cr = catalog.cars.empty() ? nullptr : &catalog.cars[car];
+        if (cr) s.car = cr->folder;
+
+        // Its setup: the default for the surface, or a saved one
+        items = {"Default"};
+        int setup = 0;
+        const std::vector<assets::Setup> setups = cr ? catalog.SetupsFor(*cr) : std::vector<assets::Setup>{};
+        for (size_t i = 0; i < setups.size(); ++i) {
+            items.push_back(setups[i].name);
+            if (setups[i].path == s.setup) setup = static_cast<int>(i) + 1;
+        }
+        Choose("Setup", setup, items);
+        s.setup = setup ? setups[setup - 1].path : "";
+
+        items = {"Off", "Safe", "Reduced", "Realistic"};
+        int damage = static_cast<int>(std::min(s.damage, 3u));
+        Choose("Damage", damage, items);
+        s.damage = static_cast<uint32_t>(damage);
+
+        // The weather: the stage's presets (custom ones later)
+        items = {"Stage default"};
+        int weather = 0;
+        if (st)
+            for (size_t i = 0; i < st->weathers.size(); ++i) {
+                items.push_back(st->weathers[i]);
+                if (!_stricmp(st->weathers[i].c_str(), s.weather.c_str())) weather = static_cast<int>(i) + 1;
+            }
+        Choose("Weather", weather, items);
+        s.weather = weather && st ? st->weathers[weather - 1] : "";
+        if (st && !st->weathersDrawn && weather)
+            ImGui::TextDisabled("   this .ngg has no weather presets: its own sky is drawn, the weather sets the road");
+
+        items = {"From the weather", "Dry", "Damp", "Wet"};
+        int road = static_cast<int>(std::min(s.road, 3u));
+        Choose("Road", road, items);
+        s.road = static_cast<uint32_t>(road);
+        ImGui::PopItemWidth();
+
+        ImGui::Separator();
+        ImGui::BeginDisabled(!st || !cr);
+        if (Button("Start", true)) c = QuickChoice::Start;
+        ImGui::EndDisabled();
+        if (Button("Back")) c = QuickChoice::Back;
+        if (!st) ImGui::TextColored(ImVec4(1.0f, 0.6f, 0.4f, 1.0f), "No stages found: see Settings.");
+        else if (!cr) ImGui::TextColored(ImVec4(1.0f, 0.6f, 0.4f, 1.0f), "No cars found: see Settings.");
+    });
+    return c;
+}
+
+SettingsChoice SettingsUi(const ImGuiLayer& ui, app::Settings& s, bool inStage, const std::string& log, int width, int height)
+{
+    SettingsChoice c = SettingsChoice::None;
+    Screen(ui, "Settings", width, height, 760.0f, [&] {
+        ImGui::PushItemWidth(-ImGui::GetFontSize() * 9.0f);
+        ImGui::SeparatorText("Content");
+        ImGui::BeginDisabled(inStage);
+        Text("RBR folder", s.rbrPath, inStage);
+        Text(".ngg folders", s.nggFolders, inStage);
+        ImGui::TextDisabled("   ';' between folders; empty: %s", s.rbrPath.empty() ? "<RBR folder>\\Ngg" : (s.rbrPath + "\\Ngg").c_str());
+        std::vector<std::string> slots;
+        int base = 5;
+        for (int i = 0; i < 8; ++i) {
+            slots.emplace_back(assets::SlotPhysics(i));
+            if (slots.back() == s.basePhysics) base = i;
+        }
+        Choose("Base physics", base, slots);
+        s.basePhysics = slots[base];
+        ImGui::TextDisabled("   for a car without physics of its own");
+        if (Button("Rescan content")) c = SettingsChoice::Rescan;
+        if (Button("Extract the slot cars' physics into their folders")) c = SettingsChoice::Extract;
+        ImGui::EndDisabled();
+        if (inStage) ImGui::TextDisabled("   (the content can be changed from the main menu)");
+
+        ImGui::SeparatorText("Graphics");
+        std::vector<std::string> quality = {"Low", "Medium", "High"};
+        int q = static_cast<int>(std::min(s.quality, 2u));
+        bool g = Choose("Quality", q, quality);
+        s.quality = static_cast<uint32_t>(q);
+        g |= Check("Ray tracing", s.rayTracing);
+        g |= Check("TAA", s.taa);
+        g |= Check("Shadows", s.shadows);
+        g |= Check("Vertical sync", s.vsync);
+        if (g && c == SettingsChoice::None) c = SettingsChoice::Graphics;
+
+        ImGui::SeparatorText("Sound");
+        Check("Sound", s.sound);
+        ImGui::SameLine();
+        ImGui::TextDisabled("(from the next stage)");
+        ImGui::PopItemWidth();
+
+        if (!log.empty()) {
+            ImGui::Separator();
+            ImGui::PushTextWrapPos(ImGui::GetFontSize() * 36.0f);
+            ImGui::TextUnformatted(log.c_str());
+            ImGui::PopTextWrapPos();
+        }
+        ImGui::Separator();
+        if (Button("Back", true)) c = SettingsChoice::Back;
+    });
+    return c;
+}
+
+PauseChoice PauseMenu(const ImGuiLayer& ui, int width, int height)
+{
+    PauseChoice c = PauseChoice::None;
+    Screen(ui, "Paused", width, height, 320.0f, [&] {
+        if (Button("Resume", true)) c = PauseChoice::Resume;
+        if (Button("Restart stage")) c = PauseChoice::Restart;
+        if (Button("Settings")) c = PauseChoice::Settings;
+        if (Button("Debug")) c = PauseChoice::Debug;
+        if (Button("Exit to main menu")) c = PauseChoice::ExitToMenu;
+    });
+    return c;
+}
+
+DebugChoice DebugMenu(const ImGuiLayer& ui, DebugSwitches& d, const std::vector<std::string>& views, int width, int height)
+{
+    DebugChoice c = DebugChoice::None;
+    Screen(ui, "Debug", width, height, 560.0f, [&] {
+        ImGui::PushItemWidth(-ImGui::GetFontSize() * 9.0f);
+        bool ch = false;
+        ImGui::SeparatorText("Renderer");
+        ch |= Check("TAA  (T)", d.taa);
+        ch |= Check("Ambient occlusion  (O)", d.ao);
+        ch |= Check("Shadows  (L)", d.shadows);
+        ch |= Check("Ray tracing  (K)", d.rayTracing);
+        ch |= Check("Readout  (F1)", d.readout);
+        ch |= Choose("View  (V)", d.debugView, views);
+        ImGui::SeparatorText("Camera");
+        std::vector<std::string> cameras = {"Chase", "Bonnet", "Above", "Beside", "TV"};
+        cameras.resize(static_cast<size_t>(std::max(1, std::min(d.cameras, 5))));
+        ch |= Choose("Camera  (C)", d.camera, cameras);
+        ch |= ImGui::SliderFloat("Chase distance  ([ ])", &d.chaseDistance, 2.0f, 20.0f, "%.1f m");
+        ch |= ImGui::SliderFloat("Beside angle  (, .)", &d.orbitDegrees, -180.0f, 180.0f, "%.0f deg");
+        ImGui::SeparatorText("Sound and driving");
+        ch |= Check("Muted  (M)", d.muted);
+        ch |= Check("Anti-lag armed at standstill  (N)", d.antiLagIdle);
+        ImGui::PopItemWidth();
+        ImGui::Separator();
+        if (Button("Back", true)) c = DebugChoice::Back;
+        if (ch && c == DebugChoice::None) c = DebugChoice::Changed;
+    });
+    return c;
+}
+
+} // namespace wrally::ui

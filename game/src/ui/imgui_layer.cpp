@@ -1,5 +1,6 @@
 #include "ui/imgui_layer.h"
 
+#include <algorithm>
 #include <cstring>
 #include <string>
 
@@ -28,6 +29,7 @@ std::string ImGuiLayer::Init(HWND window, render::Renderer& renderer)
     ImGuiIO& io = ImGui::GetIO();
     io.IniFilename = nullptr;
     io.ConfigFlags |= ImGuiConfigFlags_NoMouseCursorChange;   // the game's cursor
+    io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;      // the menus by the keyboard too
     ImGui_ImplWin32_Init(window);
     m_init = true;
 
@@ -40,6 +42,19 @@ std::string ImGuiLayer::Init(HWND window, render::Renderer& renderer)
         m_large = io.Fonts->AddFontFromFileTTF(consolas.c_str(), 200.0f);
     }
     if (!m_small) m_small = m_large = io.Fonts->Fonts[0];   // (ImGui's own, scaled up)
+    const std::string segoe = std::string(fonts) + "\\Fonts\\segoeui.ttf";
+    // The menus at the monitor's scale (the window is per-monitor DPI aware: its pixels are the screen's).
+    m_scale = std::max(1.0f, static_cast<float>(GetDpiForWindow(window)) / 96.0f);
+    if (GetFileAttributesA(segoe.c_str()) != INVALID_FILE_ATTRIBUTES)
+        m_menu = io.Fonts->AddFontFromFileTTF(segoe.c_str(), 24.0f * m_scale);
+    ImGui::StyleColorsDark();
+    ImGuiStyle& style = ImGui::GetStyle();
+    style.WindowRounding = style.FrameRounding = 4.0f;
+    style.WindowPadding = ImVec2(18, 14);
+    style.FramePadding = ImVec2(10, 6);
+    style.ItemSpacing = ImVec2(10, 8);
+    style.Colors[ImGuiCol_WindowBg].w = 0.92f;
+    style.ScaleAllSizes(m_scale);
 
     unsigned char* pixels = nullptr;
     int w = 0, h = 0;
