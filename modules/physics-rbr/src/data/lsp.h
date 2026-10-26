@@ -9,6 +9,7 @@
 
 #include <cstdint>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace phys::data {
@@ -37,5 +38,7 @@ LspNode ParseLsp(const std::string& text);
 std::string ReadFileText(const std::string& path);
 std::string ReadZipMember(const std::string& zipPath, const std::string& member);
 std::vector<std::string> ListZip(const std::string& zipPath);
+// Every member (name, bytes) of a zip from one read of it - a stage's texture archive, say. Folders are left out.
+std::vector<std::pair<std::string, std::string>> ReadZip(const std::string& zipPath);
 
 } // namespace phys::data

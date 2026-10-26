@@ -8,6 +8,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <cwchar>
+#include <filesystem>
 #include <fstream>
 #include <iterator>
 #include <memory>
@@ -18,6 +19,7 @@
 #include "app/window.h"
 #include "assets/car_render.h"
 #include "assets/catalog.h"
+#include "assets/legacy_stage.h"
 #include "camera/camera.h"
 #include "camera/replay_camera.h"
 #include "core/math.h"
@@ -185,7 +187,14 @@ StageEnd RunStage(Shell& sh, const Options& o, bool fromMenu, std::string& error
         phys::data::CarCollisionMeshes(phys::data::ReadSgcCollision(o.session.physics.sgc));
 
     std::vector<char> bytes;
-    if (FILE* f = std::fopen(o.ngg.c_str(), "rb")) {
+    // An RBR .lbs instead of an .ngg: imported here (assets/legacy_stage.h), its textures for the road's wetness.
+    if (const std::string ext = std::filesystem::path(o.ngg).extension().string(); !_stricmp(ext.c_str(), ".lbs")) {
+        assets::LegacyImport imp;
+        const int wet = o.session.physics.wetness >= 0 ? o.session.physics.wetness : static_cast<int>(o.session.physics.weather / 3);
+        if (const std::string e = assets::ImportLegacyStage(o.ngg, wet, imp); !e.empty()) return fail(e);
+        std::printf("%s", imp.log.c_str());
+        bytes.assign(imp.ngg.begin(), imp.ngg.end());
+    } else if (FILE* f = std::fopen(o.ngg.c_str(), "rb")) {
         std::fseek(f, 0, SEEK_END);
         bytes.resize(static_cast<size_t>(std::ftell(f)));
         std::fseek(f, 0, SEEK_SET);

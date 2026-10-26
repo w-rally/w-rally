@@ -56,6 +56,9 @@ native physics is bit-exact with RBR only under them.
     `LoadLibraryW` searched the exe's folder.
   - ngg-core's `renderer.h` comment on RT fallbacks is corrected; the code already instanced moving objects.
 
+- Legacy stages (phase 8, step 1): `data/lsp.*` gains `ReadZip`, every member of a zip from one read (a stage's
+  texture archive). `ngg_format.h`'s note on who writes the layout now names WRally's writer, `ngg_scene.h`.
+
 - Menus (after phase 6): `native/run.cpp` reads a car's `common.lsp`, `<surface>.lsp`, `r_<surface>.lsp` and default
   setup from a loose folder when `physicsCar` is a VFS path ending in '/' (`CarFile`), and from `physics.rbz` as
   before otherwise. A setup can be a VFS file as well as an rbz member. The tyres still come from `physics.rbz`.

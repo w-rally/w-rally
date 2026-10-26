@@ -12,6 +12,13 @@ target_compile_definitions(ngg-core PRIVATE _CRT_SECURE_NO_WARNINGS)
 target_compile_options(ngg-core PRIVATE /W3)
 set_target_properties(ngg-core PROPERTIES CXX_STANDARD 17)
 
+# ngg-format: the .ngg in memory, its writer and a strict reader, beside the format header the renderer's loader
+# reads by (docs/design.md decision 2) - for the game's legacy importer and the tools.
+add_library(ngg-format STATIC src/format/ngg_scene.cpp)
+target_include_directories(ngg-format PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src/format)
+target_compile_options(ngg-format PRIVATE /W4)
+set_target_properties(ngg-format PROPERTIES CXX_STANDARD 17)
+
 add_library(WRenderer SHARED src/module/module.cpp src/module/ui.cpp)
 target_include_directories(WRenderer PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_link_libraries(WRenderer PRIVATE ngg-core wrally-iface)

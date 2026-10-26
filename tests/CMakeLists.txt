@@ -74,3 +74,18 @@ target_link_libraries(car-parts PRIVATE phys-data wrally-modules)
 target_compile_definitions(car-parts PRIVATE _CRT_SECURE_NO_WARNINGS NOMINMAX)
 set_target_properties(car-parts PROPERTIES CXX_STANDARD 17)
 add_test(NAME car-parts COMMAND car-parts)
+
+# The .ngg writer and its readers in step (tools/ngg-check, docs/design.md decision 2): a made-up scene written, read
+# back the same and loaded by the renderer; Wallaby's stage 41 .ngg (another producer) read, rewritten the same and
+# both loaded; WRally's legacy importer on RBR's stage 41 .lbs, loaded by the renderer. They open a hidden window.
+add_test(NAME ngg-roundtrip COMMAND ngg-check)
+set_tests_properties(ngg-roundtrip PROPERTIES PASS_REGULAR_EXPRESSION "ngg-check: all good")
+if(EXISTS ${WRALLY_TEST_NGG})
+    add_test(NAME ngg-producer-wallaby COMMAND ngg-check ${WRALLY_TEST_NGG})
+    set_tests_properties(ngg-producer-wallaby PROPERTIES PASS_REGULAR_EXPRESSION "ngg-check: all good")
+endif()
+if(EXISTS ${WRALLY_TEST_RBR_DIR}/Maps/track-41_M.lbs)
+    add_test(NAME legacy-import-41 COMMAND ngg-check --lbs ${WRALLY_TEST_RBR_DIR}/Maps/track-41_M.lbs)
+    set_tests_properties(legacy-import-41 PROPERTIES PASS_REGULAR_EXPRESSION
+        "imported track-41_M.lbs: .* 304744 triangles, .*\(0 missing\).*ngg-check: all good")
+endif()

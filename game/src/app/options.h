@@ -1,7 +1,7 @@
 #pragma once
 // WRally's command line (docs/design.md 6.5, wrally::app) - phase 1's phys-drive's, read into one Options.
 //
-//   WRally <game dir> <stage .ngg> [--stage <the .ngg's>] [--sgc Cars/i20_R5/i20_R5.sgc] [--car s_i2003]
+//   WRally <game dir> <stage .ngg or .lbs> [--stage <the .ngg's>] [--sgc Cars/i20_R5/i20_R5.sgc] [--car s_i2003]
 //          [--surface <the stage's>] [--tyre-type <its>] [--tyres michelin] [--aids 0,0,0,0] [--camera 0] [--out drive.phr]
 //          [--replay run.phr [--hold]] [--physics rbr] [--audio waudio] [--renderer wrenderer]
 //          [--setup <file>] [--damage 0..3] [--weather <preset>] [--road dry|damp|wet]
