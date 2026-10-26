@@ -4,6 +4,7 @@
 //   WRally <game dir> <stage .ngg> [--stage <the .ngg's>] [--sgc Cars/i20_R5/i20_R5.sgc] [--car s_i2003]
 //          [--surface <the stage's>] [--tyre-type <its>] [--tyres michelin] [--aids 0,0,0,0] [--camera 0] [--out drive.phr]
 //          [--replay run.phr [--hold]] [--physics rbr] [--audio waudio] [--renderer wrenderer]
+//          [--setup <file>] [--damage 0..3] [--weather <preset>] [--road dry|damp|wet]
 //          [--skip-to <tick>] [--pause-at <tick>] [--exit-at <tick>] [--step <seconds>] [--camera-angle <degrees>]
 //          [--chase-distance <metres>] [--chase-pull <metres per 100 km/h>] [--entry <seconds>] [--quick-start]
 //          [--no-sound] [--eng Focus03-08] [--mix sound-mix.ini] [--overrides cars/s_i2003.ini | none]
@@ -35,6 +36,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <string>
+#include <vector>
 
 #include "session/session.h"
 
@@ -53,10 +55,13 @@ struct Options {
     double fixedStep = 0.0;              // --step: every frame this long (0: the frame's real time)
     uint32_t pauseAt = 0, exitAt = 0;
     bool hold = false;                   // --hold: a replay's end keeps its last frame up (else the game quits)
+    std::string weather;                 // --weather: the .ngg's weather preset by name ("" its default)
 };
 
 // The command line into `o`. Returns 0, or the exit code with what was wrong on stderr.
 int Parse(int argc, char** argv, Options& o);
+// The same from a list (args[0] the program) - what the menus build: a run from the menu is a command line too.
+int Parse(const std::vector<std::string>& args, Options& o);
 
 // The folder the exe is in.
 std::filesystem::path ExeDir();

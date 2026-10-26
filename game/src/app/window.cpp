@@ -9,16 +9,17 @@ namespace wrally::app {
 
 namespace {
 
-bool g_quit;
+bool g_quit, g_escape;
 int g_width, g_height;   // the client area, as WM_SIZE last said
 
 LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l)
 {
     if (ui::ImGuiLayer::WndProc(h, m, w, l)) return true;
-    if (m == WM_CLOSE || (m == WM_KEYDOWN && w == VK_ESCAPE)) {
+    if (m == WM_CLOSE) {
         g_quit = true;
         return 0;
     }
+    if (m == WM_KEYDOWN && w == VK_ESCAPE && !(l & (1 << 30))) g_escape = true;
     if (m == WM_SIZE && LOWORD(l) && HIWORD(l)) {
         g_width = LOWORD(l);
         g_height = HIWORD(l);
@@ -64,6 +65,12 @@ bool Window::Pump()
 }
 
 void Window::Close() { g_quit = true; }
+bool Window::TakeEscape()
+{
+    const bool e = g_escape;
+    g_escape = false;
+    return e;
+}
 int Window::Width() const { return g_width; }
 int Window::Height() const { return g_height; }
 

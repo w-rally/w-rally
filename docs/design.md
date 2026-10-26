@@ -554,6 +554,22 @@ Each phase ends with a game you can drive. phys-drive works on day one, and ever
      clean build had silently lost ray tracing, because the old copies next to the exe were what made it work.
    - **Already there:** moved stage objects (phase 4) and RT instancing (ngg-core).
    - **Not done:** the body's dents (the `.sgc` morph channels, from the damage zones).
+6a. **Menus** — 2026-10-26 (phase 7 moved later). With no command line WRally opens a main menu: Quick rally,
+   Settings, Exit (`game/src/ui/menus.*`, Dear ImGui, mouse or keyboard). The window, the renderer and ImGui live for
+   the whole run, and a stage loads and unloads its scene on them (`app/game.cpp`).
+   - **Quick rally:** stage, car, setup (the default or a saved RBR `.lsp`), damage (off, safe, reduced, realistic),
+     weather (the `.ngg`'s presets, named as `TrackSettings.ini`'s sections) and road (from the weather, dry, damp,
+     wet). The choice becomes a command line (`--setup`, `--damage`, `--weather`, `--road`), so a menu run is the
+     same as a CLI run. Custom weather (sun, rain, clouds...) comes later.
+   - **All cars:** the catalog (`assets/catalog.*`) lists every `Cars/<folder>` that has an `.sgc`, not only the eight
+     `Cars.ini` slots. A car's physics comes from its own `Cars/<folder>/physics/` if it has one, else its slot's
+     `physics.rbz` folder, else the base physics (Settings). Settings → "Extract the slot cars' physics" copies the
+     slot cars' physics out of `physics.rbz` into their folders, so each car's physics is a set of loose files.
+   - **Esc in a stage:** the stage holds and a menu comes up: Resume, Restart stage, Settings, Debug (what the keys
+     switch: renderer switches, debug view, camera, chase distance, mute, anti-lag) and Exit to main menu. A CLI run
+     still quits at its end (the window closed, a replay's end, `--exit-at`). Its Esc menu leads to the main menu.
+   - **Settings:** saved in `wrally.ini` beside the exe (`app/settings.*`). They cover the RBR folder, the `.ngg`
+     folders (default `<RBR>\Ngg`), the base physics, graphics (applied at once) and sound.
 7. **Content.** VFS layers, catalog, `stage.json`/`car.json` with their schemas, and standalone mode without RBR
    (tested with the RBR layer switched off; RBR content remains the development data, decision 7).
 8. **Legacy stages.** C++ LBS reader + `LegacyStageImporter`, so every RBR stage is drivable without conversion.

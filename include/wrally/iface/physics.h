@@ -84,10 +84,13 @@ constexpr uint32_t kStageSpectators = 1u << 0;   // load the animation objects (
 // (the module's own file, e.g. cars/<car>/wphysics.json). A module refuses a car
 // it has no data for with ErrNotSupported.
 struct CarDesc {
-    const char* physicsCar;   // folder in physics.rbz: "s_i2003"
+    const char* physicsCar;   // RBR car physics: a folder in physics.rbz ("s_i2003"), or a VFS folder path ending in
+                              // '/' holding the same files loose ("Cars/i20_R5/physics/": common.lsp, <surface>.lsp,
+                              // r_<surface>.lsp, setups/d_<surface>.lsp)
     const char* carData;      // the module's own car file (VFS path)
     const char* model;        // Cars/<car>/<car>.sgc: the collision meshes
-    const char* setup;        // a setup file (default Physics/<car>/setups/d_<surface>.lsp)
+    const char* setup;        // a setup: a physics.rbz member (Physics/...) or a VFS file (SavedGames/...); default the
+                              // car's setups/d_<surface>.lsp
     const char* tyres;        // brand: "michelin" (Physics/<brand>/tyres.lsp)
     const char* overrides;    // WRally's car data: `Name = value` lines (text, not a path), "" none
     Surface     surface;

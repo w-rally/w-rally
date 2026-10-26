@@ -111,12 +111,19 @@ std::string Physics::Open(const std::filesystem::path& modulesDir, const std::st
     }
     const std::string rbz = Relative(c.root, c.rbz), trk = Relative(c.root, c.trk), col = Relative(c.root, c.col),
                       mat = Relative(c.root, c.mat), fnc = Relative(c.root, c.fnc), lbs = Relative(c.root, c.lbs),
-                      sgc = Relative(c.root, c.sgc);
+                      sgc = Relative(c.root, c.sgc), setup = Relative(c.root, c.setup);
+    // The car's physics: a folder in physics.rbz (a name), or a folder of its own (a path: relative to the root, ending
+    // in a slash, as the module tells the two apart).
+    std::string carPhysics = c.car;
+    if (carPhysics.find_first_of("/\\") != std::string::npos) {
+        carPhysics = Relative(c.root, carPhysics);
+        if (carPhysics.back() != '/' && carPhysics.back() != '\\') carPhysics += '/';
+    }
     iface::CarDesc car{};
-    car.physicsCar = c.car.c_str();
+    car.physicsCar = carPhysics.c_str();
     car.carData = "";
     car.model = sgc.c_str();
-    car.setup = c.setup.c_str();
+    car.setup = setup.c_str();
     car.tyres = c.tyres.c_str();
     car.overrides = overrides.c_str();
     car.surface = c.surface == "gravel" ? iface::Surface::Gravel : c.surface == "snow" ? iface::Surface::Snow : iface::Surface::Tarmac;

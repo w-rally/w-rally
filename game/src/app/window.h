@@ -1,6 +1,6 @@
 #pragma once
 // The game's window (wrally::app): 3/4 of the screen's work area at 16:9, its messages pumped once a frame (ImGui's
-// Win32 backend sees them first), closed by its close box or Esc.
+// Win32 backend sees them first), closed by its close box. Esc is the game's (its menus): TakeEscape.
 
 #include <windows.h>
 
@@ -13,8 +13,10 @@ public:
     // Returns "" or what failed.
     std::string Create(const wchar_t* title);
     HWND Handle() const { return m_hwnd; }
-    // The pending messages handled. False once the window was closed (or Esc pressed).
+    // The pending messages handled. False once the window was closed.
     bool Pump();
+    // Whether Esc was pressed since the last call (its auto-repeat not counted).
+    bool TakeEscape();
     void Close();
     // The client area as it is now (a resize shows here at the next Pump).
     int Width() const;

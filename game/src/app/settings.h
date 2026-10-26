@@ -1,0 +1,42 @@
+#pragma once
+// WRally's settings (wrally::app): wrally.ini beside the exe, `name = value` lines - where the content is, the graphics
+// and the sound, and what Quick rally chose last time. Read at the start, written when the Settings screen or Quick
+// rally changes them. A missing file or key is its default.
+
+#include <cstdint>
+#include <filesystem>
+#include <string>
+
+namespace wrally::app {
+
+struct Settings {
+    // Content
+    std::string rbrPath;                // the RBR folder ("" not set: Settings asks for it)
+    std::string nggFolders;             // folders of stage .ngg files, ';' between them ("": <rbr>/Ngg)
+    std::string basePhysics = "s_i2003";   // the physics of a car without its own (a physics.rbz folder)
+
+    // Graphics
+    uint32_t quality = 1;               // 0 low, 1 medium, 2 high
+    bool rayTracing = true, taa = true, shadows = true, vsync = true;
+
+    // Sound
+    bool sound = true;
+
+    // Quick rally's last choice
+    std::string stage;                  // the stage's key (catalog::Stage::key)
+    std::string car;                    // the car's folder (Cars/<folder>)
+    std::string setup;                  // "" the default, else the setup's path
+    uint32_t damage = 2;                // 0 off, 1 safe, 2 reduced, 3 realistic
+    std::string weather;                // a weather preset's name ("" the stage's default)
+    uint32_t road = 0;                  // 0 from the weather, 1 dry, 2 damp, 3 wet
+
+    // The ';'-separated .ngg folders, or <rbr>/Ngg.
+    std::string NggFolders() const;
+};
+
+std::filesystem::path SettingsPath();   // wrally.ini beside the exe
+Settings LoadSettings();
+// Returns "" or what went wrong.
+std::string SaveSettings(const Settings& s);
+
+} // namespace wrally::app

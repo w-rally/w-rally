@@ -14,8 +14,10 @@
 #include <string>
 #include <vector>
 
+#include "app/settings.h"
 #include "app/window.h"
 #include "assets/car_render.h"
+#include "assets/catalog.h"
 #include "camera/camera.h"
 #include "camera/replay_camera.h"
 #include "core/math.h"
@@ -30,6 +32,7 @@
 #include "sound/sound.h"
 #include "ui/hud.h"
 #include "ui/imgui_layer.h"
+#include "ui/menus.h"
 
 namespace wrally::app {
 
@@ -62,15 +65,100 @@ void Between(const session::Shown& a, const session::Shown& b, float t, physics:
     }
 }
 
-} // namespace
+// What lives from the start to the end: the settings, the window, the renderer on it and ImGui - the stages and the
+// menus come and go on them.
+struct Shell {
+    Settings settings;
+    Window window;
+    render::Renderer renderer;
+    ui::ImGuiLayer ui;
+    int width = 0, height = 0;   // the size the renderer has
+    bool rendererLog = false;
 
-int RunGame(const Options& o)
+    // The renderer follows the window's size.
+    void FollowSize()
+    {
+        if (window.Width() == width && window.Height() == height) return;
+        renderer.Resize(static_cast<uint32_t>(window.Width()), static_cast<uint32_t>(window.Height()));
+        width = window.Width();
+        height = window.Height();
+    }
+};
+
+iface::RenderSettings ToRender(const Settings& s)
 {
+    iface::RenderSettings r{};
+    r.mode = iface::WindowMode::Windowed;
+    r.vsync = s.vsync;
+    r.quality = std::min(s.quality, 2u);
+    r.rayTracing = s.rayTracing;
+    r.taa = s.taa;
+    r.shadows = s.shadows;
+    r.autoExposure = 1;
+    r.renderScale = 1;
+    return r;
+}
+
+// The window, the renderer (module `rendererId`) on it and ImGui. Returns "" or what failed.
+std::string OpenShell(Shell& sh, const std::string& rendererId)
+{
+    if (std::string e = sh.window.Create(L"WRally"); !e.empty()) return e;
+    // The renderer: a module DLL in modules/renderer (--renderer, "wrenderer" by default: WRenderer.dll, NGG), on the
+    // window. PHYS_DRIVE_NGGLOG: its log on stdout.
+    sh.rendererLog = std::getenv("PHYS_DRIVE_NGGLOG") != nullptr;
+    sh.width = sh.window.Width();
+    sh.height = sh.window.Height();
+    const std::string e = sh.renderer.Open(ExeDir() / "modules" / "renderer", rendererId, sh.window.Handle(),
+                                           static_cast<uint32_t>(sh.width), static_cast<uint32_t>(sh.height), ToRender(sh.settings));
+    if (sh.rendererLog) std::printf("%s", sh.renderer.TakeLog().c_str());
+    if (!e.empty()) return "renderer: " + e;
+    std::printf("renderer module: %s\n", sh.renderer.ModuleName().c_str());
+    if (const std::string u = sh.ui.Init(sh.window.Handle(), sh.renderer); !u.empty()) std::fprintf(stderr, "the HUD: %s\n", u.c_str());
+    return "";
+}
+
+// One frame of the menus without a stage: the window's messages, `draw`'s ImGui on the backdrop. False once the window
+// was closed.
+template <class F> bool MenuFrame(Shell& sh, F&& draw)
+{
+    if (!sh.window.Pump()) return false;
+    sh.FollowSize();
+    sh.ui.NewFrame();
+    ui::DrawBackdrop(sh.width, sh.height);
+    draw();
+    iface::FrameDesc fd{};
+    fd.flags = iface::kFrameNoWorld;
+    fd.ui = sh.ui.Render();
+    if (!sh.renderer.RenderFrame(fd)) std::fprintf(stderr, "renderer: %s\n", sh.renderer.Error().c_str());
+    sh.renderer.Present();
+    if (const std::string log = sh.renderer.TakeLog(); sh.rendererLog && !log.empty()) std::printf("%s", log.c_str());
+    if (!sh.settings.vsync) Sleep(5);   // (nothing to hurry for)
+    return true;
+}
+
+enum class StageEnd { Quit, ExitToMenu, Restart, Failed };
+
+// The in-stage menus, Esc's.
+enum class StageMenu { None, Pause, Settings, Debug };
+
+// A stage run, with the in-stage menu on Esc. `fromMenu`: started from Quick rally (a fault goes back to the menu, not
+// out). `error`: why it failed.
+StageEnd RunStage(Shell& sh, const Options& o, bool fromMenu, std::string& error)
+{
+    auto fail = [&](const std::string& e) {
+        std::fprintf(stderr, "%s\n", e.c_str());
+        error = e;
+        return StageEnd::Failed;
+    };
+    Window& window = sh.window;
+    render::Renderer& renderer = sh.renderer;
+    ui::ImGuiLayer& ui = sh.ui;
+    // The modules hear the physics on the bus (before what it connects, which goes first).
+    signals::Bus bus;
     // The physics, through the session (a module DLL in modules/physics: --physics, "rbr" by default).
     session::Session sim;
-    if (const std::string e = sim.Open(o.session); !e.empty()) return std::fprintf(stderr, "%s\n", e.c_str()), 3;
-    // The modules hear the physics on the bus: the sound plays from its device's thread, a few ticks behind it.
-    signals::Bus bus;
+    if (const std::string e = sim.Open(o.session); !e.empty()) return fail(e);
+    // The sound plays from its device's thread, a few ticks behind the physics.
     std::string mixPath;   // the mix file, watched ("" none)
     FILETIME mixWritten{};
     // The sound: a module DLL in modules/audio (--audio, "waudio" by default: WAudio.dll), every record on the bus
@@ -104,32 +192,33 @@ int RunGame(const Options& o)
         bytes.resize(std::fread(bytes.data(), 1, bytes.size(), f));
         std::fclose(f);
     }
-    if (bytes.empty()) return std::fprintf(stderr, "cannot read %s\n", o.ngg.c_str()), 3;
+    if (bytes.empty()) return fail("cannot read " + o.ngg);
 
-    Window window;
-    if (const std::string e = window.Create(L"WRally"); !e.empty()) return std::fprintf(stderr, "%s\n", e.c_str()), 3;
-    // The renderer: a module DLL in modules/renderer (--renderer, "wrenderer" by default: WRenderer.dll, NGG), on the
-    // window. PHYS_DRIVE_NGGLOG: its log on stdout.
-    const bool rendererLog = std::getenv("PHYS_DRIVE_NGGLOG") != nullptr;
-    iface::RenderSettings settings{};
-    settings.mode = iface::WindowMode::Windowed;
-    settings.vsync = 1;
-    settings.quality = 1;
-    settings.rayTracing = settings.taa = settings.autoExposure = settings.shadows = 1;
-    settings.renderScale = 1;
-    render::Renderer renderer;
-    {
-        const std::string e = renderer.Open(ExeDir() / "modules" / "renderer", o.rendererId, window.Handle(),
-                                            static_cast<uint32_t>(window.Width()), static_cast<uint32_t>(window.Height()), settings);
-        if (rendererLog) std::printf("%s", renderer.TakeLog().c_str());
-        if (!e.empty()) return std::fprintf(stderr, "renderer: %s\n", e.c_str()), 3;
-        std::printf("renderer module: %s\n", renderer.ModuleName().c_str());
-    }
-    int shownWidth = window.Width(), shownHeight = window.Height();
+    const bool rendererLog = sh.rendererLog;
+    iface::RenderSettings settings = ToRender(sh.settings);
+    renderer.ApplySettings(settings);
+    renderer.SetDebugView(0);
     const iface::SceneHandle scene = renderer.LoadScene(bytes.data(), bytes.size());
     if (rendererLog) std::printf("%s", renderer.TakeLog().c_str());
-    if (!scene) return std::fprintf(stderr, "renderer: %s\n", renderer.Error().c_str()), 3;
+    if (!scene) return fail("renderer: " + renderer.Error());
     bytes.clear();
+    // The scene goes when the stage does (and the car's model with it: it lives in the scene).
+    struct Unload {
+        render::Renderer& r;
+        iface::SceneHandle s;
+        ~Unload() { r.Api()->unloadScene(r.Instance(), s); }
+    } unload{renderer, scene};
+    // --weather: one of the .ngg's weather presets by name (else its default, 0).
+    int32_t weatherPreset = 0;
+    if (!o.weather.empty()) {
+        uint32_t index = 0;
+        if (renderer.Api()->findWeatherPreset(renderer.Instance(), scene, o.weather.c_str(), &index) == iface::Status::Ok) {
+            weatherPreset = static_cast<int32_t>(index);
+            std::printf("weather %s (preset %u)\n", o.weather.c_str(), index);
+        } else {
+            std::printf("weather %s: not among the .ngg's presets - its default\n", o.weather.c_str());
+        }
+    }
     {
         uint32_t keyed = 0, keys = 0;
         renderer.Api()->sceneKeyStats(renderer.Instance(), scene, &keyed, &keys);
@@ -143,10 +232,8 @@ int RunGame(const Options& o)
     std::vector<physics::Part> parts;   // the car's parts that can come loose, as the physics loaded them
     sim.Physics().Parts(parts);
     car.Create(renderer, o.session.physics.sgc, o.session.physics.surface, collision, parts);
-    ui::ImGuiLayer ui;
-    if (const std::string e = ui.Init(window.Handle(), renderer); !e.empty()) std::fprintf(stderr, "the HUD: %s\n", e.c_str());
 
-    if (const std::string e = sim.Start(); !e.empty()) return std::fprintf(stderr, "%s\n", e.c_str()), 3;
+    if (const std::string e = sim.Start(); !e.empty()) return fail(e);
 
     // The renderer's switches: T its TAA, O its ambient occlusion (quality medium / low), L its shadows, K its ray
     // tracing (off: the cascaded shadow maps, no RT AO), V its debug views, F1 its readout. P a pause (the physics, a
@@ -156,7 +243,7 @@ int RunGame(const Options& o)
     Press gearUpKey, gearDownKey, cameraKey, resetKey;
     int debugView = 0;
     uint32_t pauseAt = o.pauseAt;
-    bool taa = true, paused = false, ao = true, shadows = true, rt = true;
+    bool taa = settings.taa != 0, paused = false, ao = settings.quality != 0, shadows = settings.shadows != 0, rt = settings.rayTracing != 0;
     bool antiLagIdle = false;   // N: the anti-lag armed at standstill (the driver's switch before a start)
     bool debugHud = std::getenv("PHYS_DRIVE_READOUT") != nullptr;   // PHYS_DRIVE_READOUT: the readout on from the start
     double fpsSmooth = 0.0;     // wall-clock frames per second, eased, for the readout
@@ -199,16 +286,29 @@ int RunGame(const Options& o)
     session::Snapshot snap;
     simThread.Latest(snap);
 
+    // Esc's menu: the stage held while it is up, the game's keys not read.
+    StageMenu menu = StageMenu::None;
+    ui::DebugSwitches dbg;
+    std::vector<std::string> views;
+    for (int32_t v = 0; const char* n = renderer.Api()->debugViewName(v); ++v) views.emplace_back(n);
+    std::string settingsLog;
+
     QueryPerformanceCounter(&last);
     bool quit = false;
-    // A quit (Esc, the close box, --exit-at, a fault) still finishes its frame - its steps are in the recording.
+    StageEnd end = StageEnd::Quit;
+    // A quit (the close box, the menu, --exit-at, a fault) still finishes its frame - its steps are in the recording.
     while (!quit) {
-        if (!window.Pump()) quit = true;
+        if (!window.Pump()) quit = true, end = StageEnd::Quit;
+        // Esc: the menu up, down again, or a step back from its Settings / Debug (the settings kept as they are).
+        if (window.TakeEscape()) {
+            if (menu == StageMenu::Settings) SaveSettings(sh.settings);
+            menu = menu == StageMenu::None ? StageMenu::Pause : menu == StageMenu::Pause ? StageMenu::None : StageMenu::Pause;
+        }
         QueryPerformanceCounter(&now);
         // --step: every frame advances the physics by exactly that, whatever the frame took.
         const double frame = o.fixedStep > 0.0 ? o.fixedStep : std::min(0.1, double(now.QuadPart - last.QuadPart) / double(freq.QuadPart));
         last = now;
-        const bool focused = window.Focused();
+        const bool focused = window.Focused() && menu == StageMenu::None;
         session::FrameInput in;
         if (gearUpKey(focused && DownAt(kGearUp))) in.presses |= session::kGearUp;
         if (gearDownKey(focused && DownAt(kGearDown))) in.presses |= session::kGearDown;
@@ -259,7 +359,7 @@ int RunGame(const Options& o)
         }
         if (o.exitAt && snap.tick >= o.exitAt) {
             std::printf("exit at tick %u (--exit-at)\n", snap.tick);
-            quit = true;
+            quit = true, end = StageEnd::Quit;
         }
         if (viewKey(focused && DownAt(kView))) {
             if (!renderer.Api()->debugViewName(++debugView)) debugView = 0;
@@ -285,7 +385,7 @@ int RunGame(const Options& o)
         }
         // The keys for the session: R back on the road, the pedals, the steering's target.
         if (resetKey(focused && DownAt(kReset))) in.presses |= session::kBackOnRoad;
-        in.seconds = paused ? 0.0 : frame;   // a pause keeps the frame where it is, between the same steps
+        in.seconds = paused || menu != StageMenu::None ? 0.0 : frame;   // a pause keeps the frame where it is, between the same steps
         in.throttle = focused && DownAt(kThrottle);
         in.brake = focused && DownAt(kBrake);
         in.handbrake = focused && Down(VK_SPACE);
@@ -294,9 +394,9 @@ int RunGame(const Options& o)
         in.chaseDistance = chaseDistance;
         simThread.Post(in);
         simThread.Latest(snap);
-        if (snap.failed) quit = true;
+        if (snap.failed) quit = true, end = fromMenu ? StageEnd::ExitToMenu : StageEnd::Failed, error = "the physics failed";
         // A replay's end ends the run (its check reported, as at a quit), unless --hold keeps its last frame up.
-        if (snap.replayEnded && !o.hold) quit = true;
+        if (snap.replayEnded && !o.hold) quit = true, end = fromMenu ? StageEnd::ExitToMenu : StageEnd::Quit;
 
         // The frame between the last two steps.
         const float t = snap.t;
@@ -312,11 +412,8 @@ int RunGame(const Options& o)
         const iface::InstanceUpdate& carUpdate = car.Place(p, wheels, snap.centerOfGravity, parts);
         const V3 chaseEye = snap.before.chase.eye + (snap.after.chase.eye - snap.before.chase.eye) * t;
         const camera::View view = camera::Look(cameraMode, p, chaseEye, orbit, tv.get());
-        if (window.Width() != shownWidth || window.Height() != shownHeight) {
-            renderer.Resize(static_cast<uint32_t>(window.Width()), static_cast<uint32_t>(window.Height()));
-            shownWidth = window.Width();
-            shownHeight = window.Height();
-        }
+        sh.FollowSize();
+        const int shownWidth = sh.width, shownHeight = sh.height;
         float viewM[16], proj[16];
         math::LookAt(math::ToRender(view.eye), math::ToRender(view.at), viewM);
         const float aspect = shownHeight ? float(shownWidth) / float(shownHeight) : 16.0f / 9.0f;
@@ -364,6 +461,51 @@ int RunGame(const Options& o)
         }
         ui::DrawReadout(ui, debugHud, lines, o.stageWarning, shownHeight);
 
+        // Esc's menu over the stage.
+        if (menu == StageMenu::Pause) {
+            switch (ui::PauseMenu(ui, shownWidth, shownHeight)) {
+            case ui::PauseChoice::Resume: menu = StageMenu::None; break;
+            case ui::PauseChoice::Restart: quit = true, end = StageEnd::Restart; break;
+            case ui::PauseChoice::Settings: menu = StageMenu::Settings; break;
+            case ui::PauseChoice::Debug:
+                dbg.taa = taa, dbg.ao = ao, dbg.shadows = shadows, dbg.rayTracing = rt, dbg.readout = debugHud;
+                dbg.debugView = debugView, dbg.camera = cameraMode, dbg.cameras = cameras, dbg.chaseDistance = chaseDistance;
+                dbg.orbitDegrees = orbit * 57.29578f, dbg.muted = sound.Muted(), dbg.antiLagIdle = antiLagIdle;
+                menu = StageMenu::Debug;
+                break;
+            case ui::PauseChoice::ExitToMenu: quit = true, end = StageEnd::ExitToMenu; break;
+            case ui::PauseChoice::None: break;
+            }
+        } else if (menu == StageMenu::Settings) {
+            const ui::SettingsChoice c = ui::SettingsUi(ui, sh.settings, true, settingsLog, shownWidth, shownHeight);
+            if (c == ui::SettingsChoice::Graphics) {
+                settings = ToRender(sh.settings);
+                taa = settings.taa != 0, ao = settings.quality != 0, shadows = settings.shadows != 0, rt = settings.rayTracing != 0;
+                renderer.ApplySettings(settings);
+            } else if (c == ui::SettingsChoice::Back) {
+                settingsLog = SaveSettings(sh.settings);
+                if (!settingsLog.empty()) std::fprintf(stderr, "%s\n", settingsLog.c_str());
+                menu = StageMenu::Pause;
+            }
+        } else if (menu == StageMenu::Debug) {
+            const ui::DebugChoice c = ui::DebugMenu(ui, dbg, views, shownWidth, shownHeight);
+            if (c == ui::DebugChoice::Changed) {
+                if (dbg.taa != taa) toggle(taa, settings.taa, 1, "TAA", "off");
+                if (dbg.ao != ao) toggle(ao, settings.quality, std::max(1u, std::min(sh.settings.quality, 2u)), "ambient occlusion", "off");
+                if (dbg.shadows != shadows) toggle(shadows, settings.shadows, 1, "shadows", "off");
+                if (dbg.rayTracing != rt) toggle(rt, settings.rayTracing, 1, "ray tracing", "off (cascaded shadow maps)");
+                debugHud = dbg.readout;
+                if (dbg.debugView != debugView) renderer.SetDebugView(debugView = dbg.debugView);
+                cameraMode = dbg.camera;
+                chaseDistance = dbg.chaseDistance;
+                orbit = dbg.orbitDegrees / 57.29578f;
+                if (dbg.muted != sound.Muted()) sound.SetMuted(dbg.muted);
+                antiLagIdle = dbg.antiLagIdle;
+            } else if (c == ui::DebugChoice::Back) {
+                menu = StageMenu::Pause;
+            }
+        }
+
         // PHYS_DRIVE_JITTER=<tick>: how steadily the car sits in the picture - per frame its centre's place on the
         // screen (pixels) and the eye's distance to it; their second differences (frame to frame changes of the motion)
         // printed as RMS on reaching that tick, and the drive ends. A steady car against the camera has them near 0.
@@ -398,7 +540,7 @@ int RunGame(const Options& o)
                 const int n = std::max(1, frames - 30);
                 std::printf("jitter over %d frames to tick %u: screen x %.3f px, y %.3f px, distance %.2f mm (RMS of second differences)\n",
                             n, snap.tick, std::sqrt(sum[0] / n), std::sqrt(sum[1] / n), std::sqrt(sum[2] / n));
-                quit = true;
+                quit = true, end = StageEnd::Quit;
             }
         }
         // PHYS_DRIVE_SHOTS=<n>: a capture every n ticks as well, for a replay looked at afterwards - the renderer's own
@@ -418,7 +560,7 @@ int RunGame(const Options& o)
         // would settle the still image within a few frames and wipe out what was being looked at. A renderer switch
         // draws one frame - that frame alone, no settling.
         const iface::UiDrawList& uiList = ui.Render();   // (an ImGui frame ends every frame, drawn or not)
-        if (!paused || redraw || timedShot) {
+        if (!paused || redraw || timedShot || menu != StageMenu::None) {
             iface::FrameDesc fd{};
             fd.scene = scene;
             std::memcpy(fd.camera.view, viewM, sizeof viewM);
@@ -426,7 +568,7 @@ int RunGame(const Options& o)
             fd.camera.nearZ = 0.25f;
             fd.camera.farZ = 8000.0f;
             fd.camera.fovY = view.fovY;
-            fd.weatherPreset = 0;   // the stage's own weather, as the .ngg has it
+            fd.weatherPreset = weatherPreset;   // the .ngg's preset (0 its own weather)
             fd.instances = car.Ready() ? &carUpdate : nullptr;
             fd.instanceCount = car.Ready() ? 1 : 0;
             fd.stageObjects = moved.data();
@@ -458,7 +600,145 @@ int RunGame(const Options& o)
     }
     simThread.Stop();   // (the steps posted so far done: the recording is whole)
     sim.Finish();
-    return 0;
+    window.SetTitle(L"WRally");
+    return end;
+}
+
+// Quick rally's choice as a command line - a run from the menu is one too. Empty, and `error`, when it cannot be.
+std::vector<std::string> QuickArgs(const Settings& s, const assets::Catalog& catalog, std::string& error)
+{
+    const assets::Stage* st = catalog.FindStage(s.stage);
+    const assets::Car* car = catalog.FindCar(s.car);
+    if (!st || !car) return error = "choose a stage and a car", std::vector<std::string>{};
+    std::error_code ec;
+    const std::string sgc = std::filesystem::relative(car->sgc, s.rbrPath, ec).string();
+    // The car's physics: a physics.rbz folder, or its own folder (a full path, as the physics wrapper takes one).
+    std::string physics = car->physics;
+    if (physics.find('/') != std::string::npos) {
+        physics = s.rbrPath + "\\" + physics;
+        std::replace(physics.begin(), physics.end(), '/', '\\');
+        while (physics.back() == '\\') physics.pop_back();
+    }
+    std::vector<std::string> a = {"WRally", s.rbrPath, st->ngg, "--stage", st->stage, "--sgc", ec ? car->sgc : sgc, "--car", physics,
+                                  "--damage", std::to_string(std::min(s.damage, 3u)), "--out", (ExeDir() / "drive.phr").string()};
+    if (!s.setup.empty()) a.insert(a.end(), {"--setup", s.rbrPath + "\\" + s.setup});
+    if (!s.weather.empty()) a.insert(a.end(), {"--weather", s.weather});
+    static const char* const kRoad[3] = {"dry", "damp", "wet"};
+    a.insert(a.end(), {"--road", kRoad[s.road ? std::min(s.road, 3u) - 1 : assets::RoadOfWeather(s.weather)]});
+    if (!car->engine.empty()) a.insert(a.end(), {"--eng", car->engine});
+    if (!s.sound) a.push_back("--no-sound");
+    return a;
+}
+
+enum class Screen { Main, Quick, Settings };
+
+// The main menu and its screens until Exit or the window closes. Returns the exit code.
+int Menus(Shell& sh, std::string note)
+{
+    assets::Catalog catalog;
+    auto scan = [&] {
+        const std::string e = catalog.Scan(sh.settings);
+        std::printf("content: %zu stages, %zu cars%s%s\n", catalog.stages.size(), catalog.cars.size(), e.empty() ? "" : " - ", e.c_str());
+        return e;
+    };
+    std::string scanned = scan();
+    if (note.empty()) note = scanned;
+    Screen screen = Screen::Main;
+    std::string settingsLog;
+    Settings atOpen;   // the settings as the Settings screen opened (the content changed: scanned again)
+    for (;;) {
+        bool start = false, exit = false;
+        const bool open = MenuFrame(sh, [&] {
+            switch (screen) {
+            case Screen::Main:
+                switch (ui::MainMenu(sh.ui, sh.width, sh.height, note)) {
+                case ui::MainChoice::QuickRally: screen = Screen::Quick; break;
+                case ui::MainChoice::Settings: screen = Screen::Settings, atOpen = sh.settings, settingsLog.clear(); break;
+                case ui::MainChoice::Exit: exit = true; break;
+                case ui::MainChoice::None: break;
+                }
+                break;
+            case Screen::Quick:
+                switch (ui::QuickRally(sh.ui, catalog, sh.settings, sh.width, sh.height)) {
+                case ui::QuickChoice::Start: start = true; break;
+                case ui::QuickChoice::Back: screen = Screen::Main, SaveSettings(sh.settings); break;
+                case ui::QuickChoice::None: break;
+                }
+                break;
+            case Screen::Settings:
+                switch (ui::SettingsUi(sh.ui, sh.settings, false, settingsLog, sh.width, sh.height)) {
+                case ui::SettingsChoice::Graphics: sh.renderer.ApplySettings(ToRender(sh.settings)); break;
+                case ui::SettingsChoice::Rescan: {
+                    const std::string e = scan();
+                    settingsLog = std::to_string(catalog.stages.size()) + " stages, " + std::to_string(catalog.cars.size()) + " cars" +
+                                  (e.empty() ? "" : "\n" + e);
+                    break;
+                }
+                case ui::SettingsChoice::Extract:
+                    scan();
+                    settingsLog = assets::ExtractSlotPhysics(sh.settings.rbrPath, catalog);
+                    std::printf("%s", settingsLog.c_str());
+                    scan();
+                    break;
+                case ui::SettingsChoice::Back:
+                    if (const std::string e = SaveSettings(sh.settings); !e.empty()) std::fprintf(stderr, "%s\n", e.c_str());
+                    if (sh.settings.rbrPath != atOpen.rbrPath || sh.settings.nggFolders != atOpen.nggFolders ||
+                        sh.settings.basePhysics != atOpen.basePhysics)
+                        scanned = scan();
+                    note = scanned;
+                    screen = Screen::Main;
+                    break;
+                case ui::SettingsChoice::None: break;
+                }
+                break;
+            }
+            if (sh.window.TakeEscape() && screen != Screen::Main) {   // Esc: back, the settings kept as they are
+                SaveSettings(sh.settings);
+                screen = Screen::Main;
+            }
+        });
+        if (!open || exit) return 0;
+        if (!start) continue;
+        SaveSettings(sh.settings);
+        std::string error;
+        const std::vector<std::string> args = QuickArgs(sh.settings, catalog, error);
+        Options o;
+        if (args.empty() || Parse(args, o)) {
+            note = error.empty() ? "the stage could not be set up (the reason is in the log)" : error;
+            screen = Screen::Main;
+            continue;
+        }
+        std::string line;
+        for (const std::string& a : args) line += (line.empty() ? "" : " ") + a;
+        std::printf("quick rally: %s\n", line.c_str());
+        StageEnd end;
+        while ((end = RunStage(sh, o, true, error)) == StageEnd::Restart) {}
+        if (end == StageEnd::Quit) return 0;
+        note = end == StageEnd::Failed ? error : "";
+        screen = Screen::Main;
+    }
+}
+
+} // namespace
+
+int RunGame(const std::vector<std::string>& args)
+{
+    Shell sh;
+    sh.settings = LoadSettings();
+    // A command line: that stage at once (its Esc menu's "Exit to main menu" goes to the menus).
+    if (args.size() > 1) {
+        Options o;
+        if (const int code = Parse(args, o)) return code;
+        if (const std::string e = OpenShell(sh, o.rendererId); !e.empty()) return std::fprintf(stderr, "%s\n", e.c_str()), 3;
+        std::string error;
+        StageEnd end;
+        while ((end = RunStage(sh, o, false, error)) == StageEnd::Restart) {}
+        if (end == StageEnd::Quit) return 0;
+        if (end == StageEnd::Failed) return 3;
+        return Menus(sh, "");
+    }
+    if (const std::string e = OpenShell(sh, "wrenderer"); !e.empty()) return std::fprintf(stderr, "%s\n", e.c_str()), 3;
+    return Menus(sh, "");
 }
 
 } // namespace wrally::app

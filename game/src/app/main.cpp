@@ -8,6 +8,7 @@
 
 #include <cstdio>
 #include <string>
+#include <vector>
 
 #include "app/game.h"
 #include "app/options.h"
@@ -45,9 +46,7 @@ std::string SetUpOutput()
 int main(int argc, char** argv)
 {
     const std::string log = SetUpOutput();
-    wrally::app::Options options;
-    int code = wrally::app::Parse(argc, argv, options);
-    if (!code) code = wrally::app::RunGame(options);
+    const int code = wrally::app::RunGame(std::vector<std::string>(argv, argv + argc));
     // Started without a console, a failure would be silent: say where its reasons went.
     if (code && !log.empty()) {
         const std::string text = "WRally stopped (exit code " + std::to_string(code) + ").\n\nThe reason is in\n" + log;

@@ -14,21 +14,23 @@ namespace wrally::app {
 
 namespace {
 
-std::string Arg(int argc, char** argv, const char* name, const char* def)
+using Args = std::vector<std::string>;
+
+std::string Arg(const Args& args, const char* name, const char* def)
 {
-    for (int i = 1; i + 1 < argc; ++i)
-        if (!std::strcmp(argv[i], name)) return argv[i + 1];
+    for (size_t i = 1; i + 1 < args.size(); ++i)
+        if (args[i] == name) return args[i + 1];
     return def;
 }
-bool HasFlag(int argc, char** argv, const char* name)
+bool HasFlag(const Args& args, const char* name)
 {
-    for (int i = 1; i < argc; ++i)
-        if (!std::strcmp(argv[i], name)) return true;
+    for (size_t i = 1; i < args.size(); ++i)
+        if (args[i] == name) return true;
     return false;
 }
-std::string ArgOrEnv(int argc, char** argv, const char* name, const char* env)
+std::string ArgOrEnv(const Args& args, const char* name, const char* env)
 {
-    const std::string a = Arg(argc, argv, name, "");
+    const std::string a = Arg(args, name, "");
     return !a.empty() ? a : std::string(std::getenv(env) ? std::getenv(env) : "");
 }
 
@@ -86,17 +88,19 @@ std::string WRallyFile(const std::string& rel)
     return "";
 }
 
-int Parse(int argc, char** argv, Options& o)
+int Parse(int argc, char** argv, Options& o) { return Parse(Args(argv, argv + argc), o); }
+
+int Parse(const std::vector<std::string>& args, Options& o)
 {
-    if (argc < 3) {
+    if (args.size() < 3) {
         std::fprintf(stderr, "usage: WRally <game dir> <stage .ngg> [--stage track-34_E] [--sgc <car .sgc>] [--car s_i2003] "
                              "[--surface gravel] [--tyre-type 3] [--tyres michelin] [--out drive.phr]\n");
         return 2;
     }
-    o.game = argv[1];
-    o.ngg = argv[2];
+    o.game = args[1];
+    o.ngg = args[2];
     const std::string& game = o.game;
-    o.stage = Arg(argc, argv, "--stage", "");
+    o.stage = Arg(args, "--stage", "");
     {
         std::string why;
         const std::string fromNgg = NggStage(game, o.ngg, why);
@@ -121,21 +125,38 @@ int Parse(int argc, char** argv, Options& o)
     c.mat = maps + ".mat";
     c.fnc = maps + ".fnc";
     c.lbs = maps + ".lbs";
-    c.sgc = game + "/" + Arg(argc, argv, "--sgc", "Cars/i20_R5/i20_R5.sgc");
-    c.car = Arg(argc, argv, "--car", "s_i2003");
+    c.sgc = game + "/" + Arg(args, "--sgc", "Cars/i20_R5/i20_R5.sgc");
+    c.car = Arg(args, "--car", "s_i2003");
     // WRally's values on top of RBR's car: --overrides, else content/cars/<car>.ini (WRallyFile) if there is one
     // ("none": RBR's car as it is).
-    c.overrides = Arg(argc, argv, "--overrides", "");
+    c.overrides = Arg(args, "--overrides", "");
     if (c.overrides.empty()) c.overrides = WRallyFile("content/cars/" + c.car + ".ini");
     else if (c.overrides == "none") c.overrides.clear();
+    // --road dry | damp | wet: the surface maps' weather (the .mat's: new road), as the tyres' default follows it.
+    if (const std::string road = Arg(args, "--road", ""); !road.empty()) {
+        if (road == "dry") c.weather = 0;
+        else if (road == "damp") c.weather = 3;
+        else if (road == "wet") c.weather = 6;
+        else return std::fprintf(stderr, "--road %s: dry, damp or wet\n", road.c_str()), 2;
+    }
+    // --damage 0..3: off, safe, reduced, realistic (the options word's damage level: bits 8..15, with its flag 0x10).
+    if (const std::string d = Arg(args, "--damage", ""); !d.empty()) {
+        const unsigned long level = std::strtoul(d.c_str(), nullptr, 10);
+        if (level > 3) return std::fprintf(stderr, "--damage %s: 0 off, 1 safe, 2 reduced, 3 realistic\n", d.c_str()), 2;
+        c.settings = (c.settings & ~0xff00u) | 0x10u | static_cast<uint32_t>(level) << 8;
+    }
+    // --setup <file>: a saved setup (SavedGames/..., the car's setups/...) or a physics.rbz member (Physics/...);
+    // default the car's own for the surface.
+    c.setup = Arg(args, "--setup", "");
+    o.weather = Arg(args, "--weather", "");
     // The surface and the tyre type: the stage's unless given.
     {
         std::string from = "--surface";
-        c.surface = Arg(argc, argv, "--surface", "");
+        c.surface = Arg(args, "--surface", "");
         if (c.surface.empty()) c.surface = rules::StageSurface(game, rules::StageMap(o.stage), &from);
         if (c.surface != "tarmac" && c.surface != "gravel" && c.surface != "snow")
             return std::fprintf(stderr, "--surface %s: tarmac, gravel or snow\n", c.surface.c_str()), 2;
-        const std::string type = Arg(argc, argv, "--tyre-type", "");
+        const std::string type = Arg(args, "--tyre-type", "");
         c.tyreIndex = rules::SurfaceTyreType(c.surface, c.wetness >= 0 ? c.wetness : static_cast<int32_t>(c.weather / 3));
         if (!type.empty()) {
             char* end;
@@ -144,17 +165,17 @@ int Parse(int argc, char** argv, Options& o)
                 for (c.tyreIndex = 0; c.tyreIndex < 7 && type != rules::kTyreTypeNames[c.tyreIndex]; ++c.tyreIndex) {}
             if (c.tyreIndex >= 7) return std::fprintf(stderr, "--tyre-type %s: 0..6 or a TyreTypeNN name\n", type.c_str()), 2;
         }
-        c.tyres = Arg(argc, argv, "--tyres", "michelin");
+        c.tyres = Arg(args, "--tyres", "michelin");
         std::printf("stage %s: surface %s (%s), tyres TyreType%02u %s%s, brand %s\n", o.stage.c_str(), c.surface.c_str(),
                     from.c_str(), c.tyreIndex, rules::kTyreTypeNames[c.tyreIndex], type.empty() ? "" : " (--tyre-type)",
                     c.tyres.c_str());
     }
-    o.out = Arg(argc, argv, "--out", "drive.phr");
+    o.out = Arg(args, "--out", "drive.phr");
     // The driving aids (AutoGears, GearGuard, NeutralLock, ClutchHelp): none by default, as the game's. Without the
     // clutch help the engine stalls when a gear goes in at idle with no throttle; it restarts in neutral with the
     // throttle (StarterMotor). --aids 0,0,0,1 keeps it running.
     {
-        const std::string aids = Arg(argc, argv, "--aids", "0,0,0,0");
+        const std::string aids = Arg(args, "--aids", "0,0,0,0");
         const char* a = aids.c_str();
         for (int k = 0; k < 4 && a; ++k) {
             char* end;
@@ -163,36 +184,36 @@ int Parse(int argc, char** argv, Options& o)
         }
     }
     s.physicsModules = ExeDir() / "modules" / "physics";
-    s.physicsId = Arg(argc, argv, "--physics", "rbr");
+    s.physicsId = Arg(args, "--physics", "rbr");
     s.dls = maps + ".dls";
     s.out = o.out;
-    s.replay = Arg(argc, argv, "--replay", "");
-    s.replayAids = !Arg(argc, argv, "--aids", "").empty();
-    s.quickStart = HasFlag(argc, argv, "--quick-start");
-    s.entry = std::atof(Arg(argc, argv, "--entry", "2").c_str());
-    s.skipTo = std::strtoul(Arg(argc, argv, "--skip-to", "0").c_str(), nullptr, 0);
-    s.launchRpm = static_cast<float>(std::atof(Arg(argc, argv, "--launch-rpm", "7400").c_str()));
-    s.antiLagCrack = static_cast<float>(std::atof(Arg(argc, argv, "--als-crack", "0.25").c_str()));
+    s.replay = Arg(args, "--replay", "");
+    s.replayAids = !Arg(args, "--aids", "").empty();
+    s.quickStart = HasFlag(args, "--quick-start");
+    s.entry = std::atof(Arg(args, "--entry", "2").c_str());
+    s.skipTo = std::strtoul(Arg(args, "--skip-to", "0").c_str(), nullptr, 0);
+    s.launchRpm = static_cast<float>(std::atof(Arg(args, "--launch-rpm", "7400").c_str()));
+    s.antiLagCrack = static_cast<float>(std::atof(Arg(args, "--als-crack", "0.25").c_str()));
     // How far behind the car the chase camera sits ([ / ] move it while driving), and how much further back at speed.
-    s.chaseDistance = static_cast<float>(std::atof(Arg(argc, argv, "--chase-distance", "5.2").c_str()));
+    s.chaseDistance = static_cast<float>(std::atof(Arg(args, "--chase-distance", "5.2").c_str()));
     s.chaseDistance = std::max(2.0f, std::min(20.0f, s.chaseDistance));
-    s.chasePull = std::max(0.0f, static_cast<float>(std::atof(Arg(argc, argv, "--chase-pull", "1.5").c_str())));
+    s.chasePull = std::max(0.0f, static_cast<float>(std::atof(Arg(args, "--chase-pull", "1.5").c_str())));
 
-    o.rendererId = Arg(argc, argv, "--renderer", "wrenderer");
-    o.sound = !HasFlag(argc, argv, "--no-sound");
-    o.audioId = Arg(argc, argv, "--audio", "waudio");
-    o.engine = Arg(argc, argv, "--eng", "Focus03-08");
-    o.bangs = Arg(argc, argv, "--als-bangs", "");
-    o.idleBangs = Arg(argc, argv, "--als-idle-bangs", "");
-    o.mix = Arg(argc, argv, "--mix", "");
+    o.rendererId = Arg(args, "--renderer", "wrenderer");
+    o.sound = !HasFlag(args, "--no-sound");
+    o.audioId = Arg(args, "--audio", "waudio");
+    o.engine = Arg(args, "--eng", "Focus03-08");
+    o.bangs = Arg(args, "--als-bangs", "");
+    o.idleBangs = Arg(args, "--als-idle-bangs", "");
+    o.mix = Arg(args, "--mix", "");
     if (o.mix.empty()) o.mix = WRallyFile("game/config/sound-mix.ini");
-    const std::string camera = Arg(argc, argv, "--camera", "");
+    const std::string camera = Arg(args, "--camera", "");
     o.camera = camera.empty() ? -1 : std::atoi(camera.c_str());
-    o.cameraAngle = static_cast<float>(std::atof(Arg(argc, argv, "--camera-angle", "0").c_str()) * 3.14159265 / 180.0);
-    o.fixedStep = std::atof(ArgOrEnv(argc, argv, "--step", "PHYS_DRIVE_STEP").c_str());
-    o.pauseAt = std::strtoul(ArgOrEnv(argc, argv, "--pause-at", "PHYS_DRIVE_PAUSE_AT").c_str(), nullptr, 0);
-    o.exitAt = std::strtoul(ArgOrEnv(argc, argv, "--exit-at", "PHYS_DRIVE_EXIT_AT").c_str(), nullptr, 0);
-    o.hold = HasFlag(argc, argv, "--hold");
+    o.cameraAngle = static_cast<float>(std::atof(Arg(args, "--camera-angle", "0").c_str()) * 3.14159265 / 180.0);
+    o.fixedStep = std::atof(ArgOrEnv(args, "--step", "PHYS_DRIVE_STEP").c_str());
+    o.pauseAt = std::strtoul(ArgOrEnv(args, "--pause-at", "PHYS_DRIVE_PAUSE_AT").c_str(), nullptr, 0);
+    o.exitAt = std::strtoul(ArgOrEnv(args, "--exit-at", "PHYS_DRIVE_EXIT_AT").c_str(), nullptr, 0);
+    o.hold = HasFlag(args, "--hold");
     return 0;
 }
 

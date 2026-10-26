@@ -22,10 +22,10 @@ struct WorldFiles {
     std::string rbz;                              // physics.rbz
     std::string trk, col, mat, fnc, lbs;          // the stage's (Maps/track-<n>_<M|O>.*)
     std::string sgc;                              // the car's model: its collision meshes
-    std::string car = "s_i2003";                  // the car's physics folder in physics.rbz
+    std::string car = "s_i2003";                  // the car's physics: a folder in physics.rbz, or a folder path ending in /
     std::string surface = "tarmac";               // its <surface>.lsp, setup and options
     std::string tyres = "michelin";               // the tyre brand (Physics/<brand>/tyres.lsp)
-    std::string setup;                            // a setup member (default Physics/<car>/setups/d_<surface>.lsp)
+    std::string setup;                            // a setup: a physics.rbz member (Physics/...) or a file; default the car's setups/d_<surface>.lsp
     uint32_t tyreIndex = 0;                       // the tyre type (TyreTypeNN of the options)
     uint32_t settings = 0x217;                    // the game's options word (bit 3 the game mode, 0x10 a damage level in bits 8..15)
     uint32_t aids[4] = {};                        // AutoGears, GearGuard, NeutralLock, ClutchHelp
