@@ -361,7 +361,8 @@ with a source tag on each.
 
 ### 6.2 Formats — `wrally::formats`
 
-One static library used by the game and by modules that need it. Readers only: writing belongs to Wallaby/tools.
+One static library used by the game and by modules that need it. Readers only, with one exception: the NGG writer the
+legacy importer uses (decision 2), which sits next to the renderer's reader. Other writing belongs to Wallaby/tools.
 
 | format | what | source today | used by |
 |---|---|---|---|
@@ -369,7 +370,7 @@ One static library used by the game and by modules that need it. Readers only: w
 | `.lsp`, `.rbz` | physics defs, car/setup/tyre files | `phys/data/lsp`, `inflate` | rbr physics |
 | `.trk` | collision objects, drive line | `phys/data/trk`, `trkworld` | physics, game (drive line) |
 | `.col` `.mat` `.fnc` | static collision, surfaces, fences | `phys/data/col`, `phys/native` | physics |
-| `.lbs` | **render geometry** (+ script objects) | script objects: `phys/data/lbs`; geometry: Wallaby (C#) → **C++ port** | legacy importer, physics |
+| `.lbs` | **render geometry** (+ script objects) | script objects: `phys/data/lbs`; geometry: WRally's own reader (decision 2) | legacy importer, physics |
 | `.dls` | cameras, pacenotes, splits/finish | `phys/data/dls` | game |
 | `.sgc` + `<car>.ini` + `_shaders.ini` | car render model + collision meshes | `phys/drive/car_model`, `phys/data/sgc` | game → renderer model, physics |
 | `.dds` | textures | (pass-through) | renderer |
@@ -405,9 +406,12 @@ gameplay: .trk .col .mat .fnc .lbs (physics) + .dls (cameras, pacenotes, splits)
 So there is **one renderer path**. A legacy stage is "an NGG converted on the fly with default PBR materials", which
 is what `Material`'s defaults are designed for (`DefaultMaterial()`, every factor standing alone).
 
-**The LBS reader is ported to C++** (decision 2): reading `.lbs` geometry and the direct LBS→NGG path (the
-"development shortcut" of NGG design §8) move from Wallaby into `wrally::formats::rbr` and `wrally::assets`. Until it
-lands, RBR stages without an `.ngg` can be driven but not drawn.
+**WRally imports `.lbs` itself** (decision 2): a C++ reader of the `.lbs` geometry and a simple automatic
+importer, written fresh (no Wallaby code). It reads the geometry, the textures and the object keys. It drops RBR's
+baked shading (the sun, ray tracing and AO light the stage), rebuilds the normals by an angle weld, cuts out
+alpha-textured foliage, and takes weather presets from `TrackSettings.ini`. Its result is cached. Wallaby remains
+the tool for a hand-finished `.ngg`, which wins whenever there is one. Until the importer lands, RBR stages without
+an `.ngg` can be driven but not drawn.
 
 Object keys tie the two halves together. The physics moves a solid with `.trk` instance id *k*, and the renderer
 moves every scene object whose NGGK key is *k*. The importer writes those keys for legacy stages too.
@@ -572,7 +576,20 @@ Each phase ends with a game you can drive. phys-drive works on day one, and ever
      folders (default `<RBR>\Ngg`), the base physics, graphics (applied at once) and sound.
 7. **Content.** VFS layers, catalog, `stage.json`/`car.json` with their schemas, and standalone mode without RBR
    (tested with the RBR layer switched off; RBR content remains the development data, decision 7).
-8. **Legacy stages.** C++ LBS reader + `LegacyStageImporter`, so every RBR stage is drivable without conversion.
+8. **Legacy stages.** WRally's own automatic importer (decision 2), so every RBR stage draws without Wallaby:
+   1. a C++ NGG writer next to the renderer's reader, with a round-trip test; the `.lbs` geometry reader; a minimal
+      importer (geometry, textures, object keys, baked shading dropped) — DONE 2026-10-26.
+      - **Writer:** `modules/renderer/src/format/ngg_scene.*` (library `ngg-format`) writes v3 and reads v3 and v2.
+      - **Tests:** `tools/ngg-check` runs three CTests. `ngg-roundtrip` writes a made-up scene, reads it back and
+        has the renderer load it. `ngg-producer-wallaby` reads Wallaby's stage 41 `.ngg`, rewrites it identically
+        and has the renderer load both. `legacy-import-41` imports RBR's `track-41_M.lbs`.
+      - **Reader and importer:** `game/src/formats/lbs_geometry.*` and `game/src/assets/legacy_stage.*`. Given an
+        `.lbs` in place of the `.ngg`, the game imports it. Stage 41 takes 0.5 s and gives 304,744 triangles (as
+        many as Wallaby's `.ngg`) with all 34 textures found.
+      - **Look:** it draws close to Wallaby's `.ngg` under the dynamic light. What step 2 is for still shows:
+        normals facing away on some flat scenery (banners) and a hard edge on the distant backdrop.
+   2. normals rebuilt, foliage cut out
+   3. weather presets from `TrackSettings.ini`, the cache, every RBR stage in the menu catalog
 9. **Game.** Menus, car/stage selection, settings, wheels + FFB, replays, results.
 10. **WPhysics.** Fork, JSON config, higher tick rate, then extend. Multi-car and save-state come with their
     interface bump.
@@ -583,8 +600,13 @@ Each phase ends with a game you can drive. phys-drive works on day one, and ever
 ## 10. Decisions (2026-10-25)
 
 1. **GUI: Dear ImGui** for all game UI in v1, rendered through `FrameDesc::ui`.
-2. **LBS reader: ported to C++** in `wrally::formats`. The game converts legacy stages itself, with no C# tool
-   needed at runtime.
+2. **Two converters (revised 2026-10-26).** WRally has its own simple, automatic LBS → NGG importer in C++, and
+   Wallaby stays the authoring converter. Wallaby does the sophisticated work: replacing low-poly objects, manual
+   overrides, tagging, plants and weather import. The game's importer needs no human input and makes any RBR stage
+   drawable and dynamically lit. No Wallaby code ships with WRally or is copied into it; the importer is written
+   against RBR's formats. A Wallaby-made `.ngg` always wins over the automatic import. To keep the two NGG writers
+   from drifting apart, WRally's writer sits next to the renderer's reader (one format header), a round-trip test
+   writes, loads and compares, and a test loads Wallaby-made `.ngg` files as another producer of the format.
 3. **Audio is a module** (`ModuleKind::Audio`, WAudio.dll), fed by the physics' record stream (§5).
 4. **WPhysics** may run at a higher tick rate and has its own configuration, in JSON (`config/physics/wphysics.json`,
    `cars/<car>/wphysics.json`). The interface leaves config format and `dt` to each module.

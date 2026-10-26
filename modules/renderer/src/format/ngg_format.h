@@ -8,11 +8,10 @@
 // without invalidating anything already written - an unknown chunk is skipped,
 // not an error.
 //
-// Byte layout is duplicated by ngg/tools/make_test_ngg.py, which writes these
-// files. That duplication is deliberate for v0 (the writer is a throwaway dev
-// tool and Python needs no build step); the loader validates sizes so a
-// divergence is caught immediately rather than read as garbage. When the real
-// converter lands in Wallaby, the layout gets one authoritative definition.
+// WRally's writer of this layout is ngg_scene.h beside this file (the legacy
+// importer writes through it); Wallaby's NggWriter.cs is another producer.
+// tools/ngg-check keeps them in step: the writer against a reader and the
+// renderer's own loader, and Wallaby's files read and rewritten the same.
 //
 // All little-endian. All chunk payloads 4-byte aligned.
 // ---------------------------------------------------------------------------

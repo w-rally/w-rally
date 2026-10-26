@@ -5,7 +5,8 @@
 #   camera/   the chase, bonnet, above, beside and TV cameras              wrally::camera
 #   input/    the keyboard by key places                                   wrally::input
 #   rules/    the stage clock, a stage's surface and tyres                 wrally::rules
-#   assets/   the content catalog, the car's model for the renderer      wrally::assets
+#   assets/   the content catalog, the legacy stage importer, car models  wrally::assets
+#   formats/  RBR's .lbs render geometry                                  wrally::formats
 #   render/   the renderer module's wrapper, the stage objects             wrally::render
 #   sound/    the audio module's wrapper                                   wrally::sound
 #   physics/  the physics module's wrapper                                 wrally::physics
@@ -17,13 +18,14 @@ add_executable(WRally
     src/session/session.cpp src/session/sim_thread.cpp
     src/camera/camera.cpp src/camera/replay_camera.cpp
     src/rules/stage.cpp
-    src/assets/car_model.cpp src/assets/car_render.cpp src/assets/catalog.cpp
+    src/assets/car_model.cpp src/assets/car_render.cpp src/assets/catalog.cpp src/assets/legacy_stage.cpp
+    src/formats/lbs_geometry.cpp
     src/render/renderer.cpp src/render/stage_objects.cpp
     src/sound/sound.cpp
     src/physics/physics.cpp
     src/ui/imgui_layer.cpp src/ui/hud.cpp src/ui/menus.cpp)
 target_include_directories(WRally PRIVATE src)
-target_link_libraries(WRally PRIVATE phys-data wrally-modules wrally-signals imgui)
+target_link_libraries(WRally PRIVATE phys-data ngg-format wrally-modules wrally-signals imgui)
 # Not linked: loaded at run time from bin/modules - but built with the game.
 add_dependencies(WRally WPhysicsRBR WAudio WRenderer)
 # Where WRallyFile finds content/ and game/config/ when they are not beside the exe (a build run from its tree).

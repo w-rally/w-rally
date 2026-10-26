@@ -207,6 +207,26 @@ std::string ReadZipMember(const std::string& zipPath, const std::string& member)
     return result;
 }
 
+std::vector<std::pair<std::string, std::string>> ReadZip(const std::string& zipPath)
+{
+    const std::string z = ReadFileText(zipPath);
+    std::vector<std::pair<std::string, std::string>> members;
+    ZipWalk(zipPath, z, [&](const std::string& name, uint16_t method, uint32_t csize, uint32_t usize, size_t data) {
+        if (!name.empty() && (name.back() == '/' || name.back() == '\\')) return false;
+        if (method == 0) {
+            members.emplace_back(name, z.substr(data, csize));
+            return false;
+        }
+        if (method != 8) throw std::runtime_error(zipPath + ": unsupported method for " + name);
+        std::vector<uint8_t> out;
+        Inflate(reinterpret_cast<const uint8_t*>(z.data()) + data, csize, out, usize);
+        if (out.size() != usize) throw std::runtime_error(zipPath + ": size mismatch for " + name);
+        members.emplace_back(name, std::string(out.begin(), out.end()));
+        return false;
+    });
+    return members;
+}
+
 std::vector<std::string> ListZip(const std::string& zipPath)
 {
     const std::string z = ReadFileText(zipPath);
