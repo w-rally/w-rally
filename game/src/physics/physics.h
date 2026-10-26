@@ -68,6 +68,16 @@ struct Wheel {
     float spin;
 };
 
+// A part of the car that can come loose (iface::PartState): `name` the car model's ("door_l", "bonnet", "bumper_f"...).
+// On the car its pose is in the car's frame, off it the world's; rest*: in the car's frame at the load.
+struct Part {
+    char name[16];
+    uint32_t state;      // iface::kPart*: 0 on, 1 loose, 2 off
+    bool inCar;
+    float position[3], rotation[4];
+    float restPosition[3], restRotation[4];
+};
+
 struct Dashboard {
     float speed;   // m/s
     float rpm;
@@ -101,6 +111,8 @@ public:
     void CenterOfGravity(float out[3]) const;
     std::vector<Box> Water() const;
     const std::vector<Body>& Bodies();
+    // The car's parts that can come loose, as they are now.
+    void Parts(std::vector<Part>& out) const;
     // The 13 words a recording's pose check holds: quaternion, position, angular velocity, velocity.
     void PoseWords(uint32_t out[13]) const;
     float StageDistance() const;

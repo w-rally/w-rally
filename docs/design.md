@@ -214,9 +214,9 @@ environment → prepass → sun visibility (RT or cascades) → AO → sky → s
 
 - **Models**: node-hierarchy rendering (no skinning), blended materials (glass), per-instance node transforms.
   `ngg-core` today draws only static scenes plus the dynamic pool.
-- **Dynamic objects in RT**: the static BVH falls back to cascades once anything moves (`Renderer::KeepRtCurrent`).
-  The car and moved stage solids need per-object BLAS/TLAS instancing (NGG 9b item 7) before RT shadows work in
-  real gameplay.
+- **Dynamic objects in RT**: already handled by ngg-core (found in phase 6). `Renderer::KeepRtCurrent` keeps a
+  BLAS per mesh and, when only transforms change, updates just the instances and the TLAS. The moving car and stage
+  solids keep their ray-traced shadows ("instances only" in the renderer's log).
 - **UI pass**: ImGui's `ImDrawData` maps 1:1 onto `UiDrawList` (vertex/index buffers, commands with texture and clip
   rect). Textured 2D triangles after the tonemap, scissored, alpha-blended.
 - **Display modes**: borderless/fullscreen, vsync, render scale. VR (OpenXR) later behind `kRendererCapVr`.
@@ -541,7 +541,19 @@ Each phase ends with a game you can drive. phys-drive works on day one, and ever
    `ui/hud` and `core/math`. The session runs on its own thread (`session/sim_thread.h`, §3.3), in lockstep with the
    frames under `--step`. Recordings and frames are unchanged in lockstep, a real-time threaded drive replays
    bit-exact, and a replay now quits at its end (`--hold` keeps it up).
-6. **Cars as models.** `.sgc` → `ModelDesc`, wheel/part animation, moved stage objects, RT instancing.
+6. **Cars as models** — DONE 2026-10-26.
+   - **Node tree:** the car model has a body node, a hub and a spin node per wheel, and a node per loose part
+     (`game/src/assets/car_render.*`).
+   - **Parts from the physics:** physics interface v2 reports the car's parts that can come loose (`carParts`:
+     doors, bonnet, exhaust, bumpers, wing), with state and pose, and they're drawn where the physics has them. A door
+     swings on its hinge, a loose bumper hangs, and a torn-off part becomes a world object. At rest a part is placed
+     exactly as the body. A mesh goes with a part when it is the part's mesh or hangs under it in the `.sgc`'s node
+     tree (the grille with the front bumper, the mirrors with the doors; `PHYS_DRIVE_PARTS` lists them). In the stage-41
+     run the front bumper comes loose at tick 8792 and is torn off at 45465.
+   - **Shader compiler fix:** ngg-core now loads `dxcompiler.dll`/`dxil.dll` from the renderer module's folder. A
+     clean build had silently lost ray tracing, because the old copies next to the exe were what made it work.
+   - **Already there:** moved stage objects (phase 4) and RT instancing (ngg-core).
+   - **Not done:** the body's dents (the `.sgc` morph channels, from the damage zones).
 7. **Content.** VFS layers, catalog, `stage.json`/`car.json` with their schemas, and standalone mode without RBR
    (tested with the RBR layer switched off; RBR content remains the development data, decision 7).
 8. **Legacy stages.** C++ LBS reader + `LegacyStageImporter`, so every RBR stage is drivable without conversion.

@@ -57,10 +57,11 @@ struct FrameInput {
 };
 constexpr uint32_t kGearUp = 1u << 0, kGearDown = 1u << 1, kBackOnRoad = 0x10u;   // (the control record's flags)
 
-// The car and the stage's solids at one physics step, and the chase camera there.
+// The car (its parts that can come loose too) and the stage's solids at one physics step, and the chase camera there.
 struct Shown {
     physics::Pose pose{};
     physics::Wheel wheels[4]{};
+    std::vector<physics::Part> parts;
     std::vector<physics::Body> bodies;
     camera::Chase chase;
 };

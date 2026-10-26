@@ -166,6 +166,7 @@ void Session::Capture(Shown& out)
     out.pose = m_sim.CarPose();
     m_sim.Wheels(out.wheels);
     out.bodies = m_sim.Bodies();
+    m_sim.Parts(out.parts);
 }
 
 // After a step: the frame's later end moves on, the chase camera follows on the physics' time.
@@ -174,6 +175,17 @@ void Session::Stepped()
     std::swap(m_before, m_after);
     Capture(m_after);
     m_after.chase = m_chase.Follow(m_before.chase, m_after.pose, static_cast<float>(m_dt));
+    // A part loosened or torn off: said once, as it happens.
+    for (size_t i = 0; i < m_after.parts.size() && m_after.parts.size() == m_before.parts.size(); ++i)
+        if (m_after.parts[i].state != m_before.parts[i].state) {
+            static const char* const kStates[] = {"back on", "loose", "torn off"};
+            const physics::Part& p = m_after.parts[i];
+            std::printf("the car's %s: %s (tick %u)", p.name, kStates[p.state % 3], m_sim.Tick());
+            if (!p.inCar)   // where it went, against the car
+                std::printf(" at (%.1f %.1f %.1f), the car at (%.1f %.1f %.1f)", p.position[0], p.position[1], p.position[2],
+                            m_after.pose.position[0], m_after.pose.position[1], m_after.pose.position[2]);
+            std::printf("\n");
+        }
 }
 
 // A replay checks itself: the pose the recording kept after each step ('P') against the physics' now, word for word -

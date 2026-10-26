@@ -80,6 +80,18 @@ struct Wheel {
     float spin;
 };
 
+// A part of the car that can come loose (CHingedRigidBody: the doors, the bonnet, the exhaust pipe; CMountedRigidBody:
+// the bumpers, the wing): `name` is its collision mesh's in the .sgc (c_e_<name>). On the car its pose is in the car's
+// frame (CarPose's: a door swings on its hinge, a loose bumper hangs on its base point); off, it is a solid of the
+// world's and its pose the world's. `rest*`: its pose in the car's frame at the load.
+struct Part {
+    std::string name;
+    uint32_t state = 0;     // 0 on, 1 loose (a mounted part hanging on its base point), 2 off
+    bool inCar = true;      // the pose in the car's frame (else the world's)
+    float position[3]{}, rotation[4]{};
+    float restPosition[3]{}, restRotation[4]{};
+};
+
 struct Dashboard {
     float speed;    // m/s, the car body's velocity
     float rpm;      // the engine: E +0x45c (rad/s) * 60 / 2 pi, E = *(car + 0x4b0 + 8)
@@ -115,6 +127,8 @@ public:
     virtual std::vector<Box> Water() const = 0;
     // The stage's solids (Body), in the order the stage created them; Bodies() refreshes their current poses.
     virtual const std::vector<Body>& Bodies() = 0;
+    // The car's parts that can come loose (Part), as they are now.
+    virtual std::vector<Part> Parts() const = 0;
     // The 13 words the probe's POSE line holds (quaternion, position, angular velocity, velocity), for bit-exact checks.
     virtual void PoseWords(uint32_t out[13]) const = 0;
     // The car's distance along the stage's drive line, as the stage timing measures it.

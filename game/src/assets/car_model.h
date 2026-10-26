@@ -33,6 +33,7 @@ struct CarPart {
     int wheel = -1;        // 0 lf, 1 rf, 2 lb, 3 rb: in that hub's frame; -1 in the car's
     bool spins = false;    // turns with the wheel (the tyre, the brake disc)
     std::string material;          // the group's material name (the .sgc's)
+    std::vector<std::string> parents;   // the node tree above its mesh, nearest first (the root left out)
     std::vector<CarVertex> vertices;
     std::vector<uint32_t> indices;  // into vertices
 };

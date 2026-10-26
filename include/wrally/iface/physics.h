@@ -44,7 +44,8 @@
 
 namespace wrally::iface {
 
-constexpr uint32_t kPhysicsInterfaceVer = 1;
+// 2: carParts (PartState: the doors, the bonnet, the bumpers... where the physics has them).
+constexpr uint32_t kPhysicsInterfaceVer = 2;
 
 struct PhysicsModule;   // the module's instance
 struct World;           // one stage with its cars
@@ -164,6 +165,21 @@ struct Box {
     float lo[3], hi[3];
 };
 
+// A part of the car that can come loose - a door, the bonnet, a bumper - as the physics has it. `name` is the car
+// model's name for it (RBR: its .sgc collision mesh c_e_<name>: "door_l", "door_r", "bonnet", "exhaust", "bumper_f",
+// "bumper_b", "wing"), so the game can find the render meshes that go with it. On the car (inCar) its pose is in the
+// car's frame (CarState's: a door swinging on its hinge, a loose bumper hanging); off, it is a solid of the world's
+// and its pose the world's. rest*: its pose in the car's frame at the load - where it sits undamaged.
+constexpr uint32_t kPartOn = 0, kPartLoose = 1, kPartOff = 2;
+struct PartState {
+    char     name[16];
+    uint32_t state;           // kPart*
+    uint32_t inCar;           // 1: the pose in the car's frame; 0: the world's
+    float    position[3], rotation[4];
+    float    restPosition[3], restRotation[4];
+};
+static_assert(sizeof(PartState) == 80, "PartState layout");
+
 // Outside assistance: put the car back on the road.
 struct ResetDesc {
     uint32_t useDriveLine;    // 1: the nearest drive line point, facing along it
@@ -207,6 +223,10 @@ struct PhysicsApi {
     Status (WRALLY_CALL* saveState)(World*, Blob* out);
     void   (WRALLY_CALL* releaseState)(World*, Blob*);
     Status (WRALLY_CALL* loadState)(World*, const void* data, uint64_t bytes);
+
+    // The car's parts that can come loose (PartState), as they are now. Writes up to `capacity`, returns how many
+    // there are (0: a car without any).
+    uint32_t (WRALLY_CALL* carParts)(World*, uint32_t car, PartState* out, uint32_t capacity);
 };
 
 struct PhysicsInput {

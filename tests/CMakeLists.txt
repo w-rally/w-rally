@@ -13,7 +13,7 @@ endforeach()
 # incompatible and left alone.
 add_test(NAME module-handshake COMMAND module-info $<TARGET_FILE:wstub> --init --data ${CMAKE_BINARY_DIR}/tests-bin)
 set_tests_properties(module-handshake PROPERTIES PASS_REGULAR_EXPRESSION
-    "physics interface 1 - compatible\n +id stub, \"Stub physics \\(tests\\)\".*audio interface [0-9]+ - INCOMPATIBLE")
+    "physics interface [0-9]+ - compatible\n +id stub, \"Stub physics \\(tests\\)\".*audio interface [0-9]+ - INCOMPATIBLE")
 
 # A folder with no modules is not an error.
 add_test(NAME module-empty-folder COMMAND module-info ${CMAKE_CURRENT_SOURCE_DIR}/stub-module)
@@ -22,7 +22,7 @@ set_tests_properties(module-empty-folder PROPERTIES PASS_REGULAR_EXPRESSION "no 
 # The real physics module answers the handshake and initialises.
 add_test(NAME physics-rbr-handshake COMMAND module-info ${WRALLY_BIN}/modules/physics --init --data ${CMAKE_BINARY_DIR}/tests-bin)
 set_tests_properties(physics-rbr-handshake PROPERTIES PASS_REGULAR_EXPRESSION
-    "WPhysicsRBR.dll: physics interface 1 - compatible\n +id rbr, \"RBR original\"")
+    "WPhysicsRBR.dll: physics interface [0-9]+ - compatible\n +id rbr, \"RBR original\"")
 
 # The golden check (docs/design.md 4.2): RBR's own recording of a whole stage replayed through the game and
 # WPhysicsRBR.dll, every pose bit-exact. Needs an RBR folder, a stage .ngg to draw and the recording - this machine's
@@ -62,3 +62,14 @@ set_tests_properties(audio-handshake PROPERTIES PASS_REGULAR_EXPRESSION
 add_test(NAME renderer-handshake COMMAND module-info ${WRALLY_BIN}/modules/renderer)
 set_tests_properties(renderer-handshake PROPERTIES PASS_REGULAR_EXPRESSION
     "WRenderer.dll: renderer interface [0-9]+ - compatible")
+
+# A car's part drawn where the physics has it (game/src/assets/car_render.cpp's PartNode): at rest exactly the body,
+# and torn off it does not jump (the world pose of a moment gives the in-car pose's node).
+set(GAME_SRC ${PROJECT_SOURCE_DIR}/game/src)
+add_executable(car-parts car_parts.cpp ${GAME_SRC}/assets/car_render.cpp ${GAME_SRC}/assets/car_model.cpp
+               ${GAME_SRC}/render/renderer.cpp)
+target_include_directories(car-parts PRIVATE ${GAME_SRC})
+target_link_libraries(car-parts PRIVATE phys-data wrally-modules)
+target_compile_definitions(car-parts PRIVATE _CRT_SECURE_NO_WARNINGS NOMINMAX)
+set_target_properties(car-parts PROPERTIES CXX_STANDARD 17)
+add_test(NAME car-parts COMMAND car-parts)

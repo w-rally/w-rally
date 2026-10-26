@@ -39,8 +39,17 @@ using namespace input;
 namespace {
 
 // The frame between two physics steps at t: the car's pose and its wheels (the spin the shorter way round).
-void Between(const session::Shown& a, const session::Shown& b, float t, physics::Pose& p, physics::Wheel wheels[4])
+void Between(const session::Shown& a, const session::Shown& b, float t, physics::Pose& p, physics::Wheel wheels[4],
+             std::vector<physics::Part>& parts)
 {
+    // The parts as at the later step, blended where both steps had them in the same frame (a part just torn off is
+    // where it is now).
+    parts = b.parts;
+    for (size_t i = 0; i < parts.size() && i < a.parts.size(); ++i) {
+        if (a.parts[i].inCar != b.parts[i].inCar) continue;
+        math::Lerp(a.parts[i].position, b.parts[i].position, t, 3, parts[i].position);
+        math::Nlerp(a.parts[i].rotation, b.parts[i].rotation, t, parts[i].rotation);
+    }
     math::Lerp(a.pose.position, b.pose.position, t, 3, p.position);
     math::Nlerp(a.pose.rotation, b.pose.rotation, t, p.rotation);
     math::Lerp(a.pose.velocity, b.pose.velocity, t, 3, p.velocity);
@@ -131,7 +140,9 @@ int RunGame(const Options& o)
     }
     render::StageObjects stageObjects;
     assets::CarRender car;
-    car.Create(renderer, o.session.physics.sgc, o.session.physics.surface, collision);
+    std::vector<physics::Part> parts;   // the car's parts that can come loose, as the physics loaded them
+    sim.Physics().Parts(parts);
+    car.Create(renderer, o.session.physics.sgc, o.session.physics.surface, collision, parts);
     ui::ImGuiLayer ui;
     if (const std::string e = ui.Init(window.Handle(), renderer); !e.empty()) std::fprintf(stderr, "the HUD: %s\n", e.c_str());
 
@@ -297,8 +308,8 @@ int RunGame(const Options& o)
         const std::vector<iface::StageObjectUpdate>& moved = stageObjects.Update(bodies);
         physics::Pose p;
         physics::Wheel wheels[4];
-        Between(snap.before, snap.after, t, p, wheels);
-        const iface::InstanceUpdate& carUpdate = car.Place(p, wheels, snap.centerOfGravity);
+        Between(snap.before, snap.after, t, p, wheels, parts);
+        const iface::InstanceUpdate& carUpdate = car.Place(p, wheels, snap.centerOfGravity, parts);
         const V3 chaseEye = snap.before.chase.eye + (snap.after.chase.eye - snap.before.chase.eye) * t;
         const camera::View view = camera::Look(cameraMode, p, chaseEye, orbit, tv.get());
         if (window.Width() != shownWidth || window.Height() != shownHeight) {

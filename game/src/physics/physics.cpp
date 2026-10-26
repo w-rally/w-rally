@@ -1,5 +1,6 @@
 #include "physics/physics.h"
 
+#include <algorithm>
 #include <cstring>
 #include <fstream>
 #include <iterator>
@@ -241,6 +242,27 @@ const std::vector<Body>& Physics::Bodies()
         std::memcpy(o.rotation, b[i].rotation, 16);
     }
     return m_bodies;
+}
+
+void Physics::Parts(std::vector<Part>& out) const
+{
+    out.clear();
+    if (!m || !m->world) return;
+    iface::PartState buf[16];
+    const uint32_t n = std::min<uint32_t>(m->out.api->carParts(m->world, 0, buf, 16), 16);
+    for (uint32_t i = 0; i < n; ++i) {
+        const iface::PartState& s = buf[i];
+        Part p{};
+        std::memcpy(p.name, s.name, sizeof p.name);
+        p.name[sizeof p.name - 1] = 0;
+        p.state = s.state;
+        p.inCar = s.inCar != 0;
+        std::memcpy(p.position, s.position, 12);
+        std::memcpy(p.rotation, s.rotation, 16);
+        std::memcpy(p.restPosition, s.restPosition, 12);
+        std::memcpy(p.restRotation, s.restRotation, 16);
+        out.push_back(p);
+    }
 }
 
 void Physics::PoseWords(uint32_t out[13]) const
