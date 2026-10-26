@@ -574,6 +574,10 @@ Each phase ends with a game you can drive. phys-drive works on day one, and ever
      still quits at its end (the window closed, a replay's end, `--exit-at`). Its Esc menu leads to the main menu.
    - **Settings:** saved in `wrally.ini` beside the exe (`app/settings.*`). They cover the RBR folder, the `.ngg`
      folders (default `<RBR>\Ngg`), the base physics, graphics (applied at once) and sound.
+   - **Controls:** the Settings tab that binds every action's key (`game/src/input/bindings.*`). A key is held by its
+     place (scan code), named as the layout prints it. Click an action and press a key: Esc keeps the old one, Delete
+     unbinds, and an action whose key was taken becomes unbound. The keys are saved as `key_<action>` in
+     `wrally.ini`.
 7. **Content.** VFS layers, catalog, `stage.json`/`car.json` with their schemas, and standalone mode without RBR
    (tested with the RBR layer switched off; RBR content remains the development data, decision 7).
 8. **Legacy stages.** WRally's own automatic importer (decision 2), so every RBR stage draws without Wallaby:

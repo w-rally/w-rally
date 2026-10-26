@@ -7,6 +7,8 @@
 #include <filesystem>
 #include <string>
 
+#include "input/bindings.h"
+
 namespace wrally::app {
 
 struct Settings {
@@ -21,6 +23,9 @@ struct Settings {
 
     // Sound
     bool sound = true;
+
+    // Controls: the keys (key_<action> = its scan code, hex)
+    input::Bindings keys;
 
     // Quick rally's last choice
     std::string stage;                  // the stage's key (catalog::Stage::key)
