@@ -69,6 +69,9 @@ Settings LoadSettings()
         Fields(s, [&](const char* name, auto& field) {
             if (key == name) Set(field, value);
         });
+        for (int a = 0; a < input::kActions; ++a)
+            if (key == std::string("key_") + input::Info(static_cast<input::Action>(a)).id)
+                s.keys.scan[a] = static_cast<UINT>(std::strtoul(value.c_str(), nullptr, 0));
     }
     return s;
 }
@@ -79,6 +82,12 @@ std::string SaveSettings(const Settings& in)
     std::ostringstream out;
     out << "# WRally's settings - written by the game (the Settings screen, Quick rally); edits by hand are kept.\n";
     Fields(s, [&](const char* name, auto& field) { out << name << " = " << Text(field) << "\n"; });
+    for (int a = 0; a < input::kActions; ++a) {
+        char hex[16];
+        std::snprintf(hex, sizeof hex, "%#x", s.keys.scan[a]);
+        out << "key_" << input::Info(static_cast<input::Action>(a)).id << " = " << (s.keys.scan[a] ? hex : "0") << "   # "
+            << input::KeyName(s.keys.scan[a]) << "\n";
+    }
     std::ofstream f(SettingsPath(), std::ios::binary);
     if (!f) return "cannot write " + SettingsPath().string();
     f << out.str();

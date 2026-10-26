@@ -1,11 +1,11 @@
 #pragma once
 // The game's menus (wrally::ui), in Dear ImGui - each a function drawing one screen centred in the window, called
 // between ImGuiLayer::NewFrame and Render, returning what was chosen. The screens hold no state of their own beyond
-// ImGui's; what they edit is the caller's (Settings, the debug switches).
+// ImGui's and Controls' wait for a key; what they edit is the caller's (Settings, the debug switches).
 //
 //   MainMenu     Quick rally, Settings, Exit
 //   QuickRally   stage, car, setup, damage, weather, road - Start / Back (the choice kept in Settings)
-//   SettingsUi   the content's folders, the base physics, graphics, sound; Extract the slot cars' physics
+//   SettingsUi   tabs: the content (folders, base physics, Extract the slot cars' physics), graphics, sound, controls
 //   PauseMenu    the in-stage menu (Esc): Resume, Restart stage, Settings, Debug, Exit to main menu
 //   DebugMenu    what the keys switch (the renderer's, the cameras, the sound)
 
@@ -33,7 +33,12 @@ QuickChoice QuickRally(const ImGuiLayer& ui, const assets::Catalog& catalog, app
 enum class SettingsChoice { None, Back, Graphics, Rescan, Extract };
 // Graphics: a graphics field changed (to apply now). `inStage`: the content's part is shown but not editable.
 // `log`: the last Rescan / Extract's report.
-SettingsChoice SettingsUi(const ImGuiLayer& ui, app::Settings& s, bool inStage, const std::string& log, int width, int height);
+// The screen has tabs: Content, Graphics, Sound, Controls (the keys). `keyDown`: the key pressed this frame
+// (Window::TakeKeyDown), which Controls binds while it waits for one.
+SettingsChoice SettingsUi(const ImGuiLayer& ui, app::Settings& s, bool inStage, const std::string& log, UINT keyDown,
+                          int width, int height);
+// Whether Controls is waiting for a key: Esc is then its (no change), not the menu's.
+bool CapturingKey();
 
 enum class PauseChoice { None, Resume, Restart, Settings, Debug, ExitToMenu };
 PauseChoice PauseMenu(const ImGuiLayer& ui, int width, int height);
@@ -49,7 +54,8 @@ struct DebugSwitches {
     bool muted = false, antiLagIdle = false;
 };
 enum class DebugChoice { None, Back, Changed };
-// `views`: the renderer's debug views' names (0 off).
-DebugChoice DebugMenu(const ImGuiLayer& ui, DebugSwitches& d, const std::vector<std::string>& views, int width, int height);
+// `views`: the renderer's debug views' names (0 off). `keys`: for the labels (each switch with its key).
+DebugChoice DebugMenu(const ImGuiLayer& ui, DebugSwitches& d, const std::vector<std::string>& views, const input::Bindings& keys,
+                      int width, int height);
 
 } // namespace wrally::ui

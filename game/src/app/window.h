@@ -17,6 +17,8 @@ public:
     bool Pump();
     // Whether Esc was pressed since the last call (its auto-repeat not counted).
     bool TakeEscape();
+    // The scan code of the last key pressed since the last call (input/bindings.h), 0 none - for binding a key.
+    UINT TakeKeyDown();
     void Close();
     // The client area as it is now (a resize shows here at the next Pump).
     int Width() const;

@@ -3,6 +3,7 @@
 #include <cstdio>
 #include <vector>
 
+#include "input/bindings.h"
 #include "ui/imgui_layer.h"
 
 namespace wrally::app {
@@ -10,6 +11,7 @@ namespace wrally::app {
 namespace {
 
 bool g_quit, g_escape;
+UINT g_keyDown;          // the last key pressed (its scan code, input/bindings.h), 0 none
 int g_width, g_height;   // the client area, as WM_SIZE last said
 
 LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l)
@@ -19,7 +21,10 @@ LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l)
         g_quit = true;
         return 0;
     }
-    if (m == WM_KEYDOWN && w == VK_ESCAPE && !(l & (1 << 30))) g_escape = true;
+    if ((m == WM_KEYDOWN || m == WM_SYSKEYDOWN) && !(l & (1 << 30))) {
+        if (w == VK_ESCAPE) g_escape = true;
+        g_keyDown = input::ScanOf(l);
+    }
     if (m == WM_SIZE && LOWORD(l) && HIWORD(l)) {
         g_width = LOWORD(l);
         g_height = HIWORD(l);
@@ -65,6 +70,12 @@ bool Window::Pump()
 }
 
 void Window::Close() { g_quit = true; }
+UINT Window::TakeKeyDown()
+{
+    const UINT k = g_keyDown;
+    g_keyDown = 0;
+    return k;
+}
 bool Window::TakeEscape()
 {
     const bool e = g_escape;

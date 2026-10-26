@@ -3,7 +3,7 @@
 #   app/      main, options, settings, the window, menus and frame loop  wrally::app
 #   session/  one stage run: physics, clock, driver layer, recording       wrally::session
 #   camera/   the chase, bonnet, above, beside and TV cameras              wrally::camera
-#   input/    the keyboard by key places                                   wrally::input
+#   input/    the keys bound to the actions (Settings -> Controls)         wrally::input
 #   rules/    the stage clock, a stage's surface and tyres                 wrally::rules
 #   assets/   the content catalog, the legacy stage importer, car models  wrally::assets
 #   formats/  RBR's .lbs render geometry                                  wrally::formats
@@ -15,7 +15,7 @@
 # Still linked in: RBR's file readers (phys-data).
 add_executable(WRally
     src/app/main.cpp src/app/options.cpp src/app/settings.cpp src/app/window.cpp src/app/game.cpp
-    src/session/session.cpp src/session/sim_thread.cpp
+    src/session/session.cpp src/session/sim_thread.cpp src/input/bindings.cpp
     src/camera/camera.cpp src/camera/replay_camera.cpp
     src/rules/stage.cpp
     src/assets/car_model.cpp src/assets/car_render.cpp src/assets/catalog.cpp src/assets/legacy_stage.cpp

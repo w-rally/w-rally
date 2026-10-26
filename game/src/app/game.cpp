@@ -25,6 +25,7 @@
 #include "core/math.h"
 #include "data/lbs.h"
 #include "data/sgc.h"
+#include "input/bindings.h"
 #include "input/keyboard.h"
 #include "render/renderer.h"
 #include "render/stage_objects.h"
@@ -39,7 +40,8 @@
 namespace wrally::app {
 
 using math::V3;
-using namespace input;
+using input::Action;
+using input::Press;
 
 namespace {
 
@@ -155,6 +157,7 @@ StageEnd RunStage(Shell& sh, const Options& o, bool fromMenu, std::string& error
     Window& window = sh.window;
     render::Renderer& renderer = sh.renderer;
     ui::ImGuiLayer& ui = sh.ui;
+    const input::Bindings& keys = sh.settings.keys;   // (Settings -> Controls: changes apply at once)
     // The modules hear the physics on the bus (before what it connects, which goes first).
     signals::Bus bus;
     // The physics, through the session (a module DLL in modules/physics: --physics, "rbr" by default).
@@ -229,10 +232,10 @@ StageEnd RunStage(Shell& sh, const Options& o, bool fromMenu, std::string& error
         }
     }
     {
-        uint32_t keyed = 0, keys = 0;
-        renderer.Api()->sceneKeyStats(renderer.Instance(), scene, &keyed, &keys);
+        uint32_t keyed = 0, solids = 0;
+        renderer.Api()->sceneKeyStats(renderer.Instance(), scene, &keyed, &solids);
         if (keyed)   // the stage's objects, before ours
-            std::printf("movable objects: %u drawn objects keyed to %u solids\n", keyed, keys);
+            std::printf("movable objects: %u drawn objects keyed to %u solids\n", keyed, solids);
         else
             std::printf("movable objects: the .ngg has no object keys (NGGK) - reconvert it; nothing will move\n");
     }
@@ -309,7 +312,8 @@ StageEnd RunStage(Shell& sh, const Options& o, bool fromMenu, std::string& error
     while (!quit) {
         if (!window.Pump()) quit = true, end = StageEnd::Quit;
         // Esc: the menu up, down again, or a step back from its Settings / Debug (the settings kept as they are).
-        if (window.TakeEscape()) {
+        const UINT keyDown = window.TakeKeyDown();   // (for Settings -> Controls)
+        if (window.TakeEscape() && !ui::CapturingKey()) {
             if (menu == StageMenu::Settings) SaveSettings(sh.settings);
             menu = menu == StageMenu::None ? StageMenu::Pause : menu == StageMenu::Pause ? StageMenu::None : StageMenu::Pause;
         }
@@ -319,9 +323,9 @@ StageEnd RunStage(Shell& sh, const Options& o, bool fromMenu, std::string& error
         last = now;
         const bool focused = window.Focused() && menu == StageMenu::None;
         session::FrameInput in;
-        if (gearUpKey(focused && DownAt(kGearUp))) in.presses |= session::kGearUp;
-        if (gearDownKey(focused && DownAt(kGearDown))) in.presses |= session::kGearDown;
-        if (cameraKey(focused && DownAt(kCamera))) cameraMode = (cameraMode + 1) % cameras;
+        if (gearUpKey(focused && keys.Down(Action::GearUp))) in.presses |= session::kGearUp;
+        if (gearDownKey(focused && keys.Down(Action::GearDown))) in.presses |= session::kGearDown;
+        if (cameraKey(focused && keys.Down(Action::Camera))) cameraMode = (cameraMode + 1) % cameras;
         bool redraw = false;   // a renderer switch changed: draw one frame even while paused
         auto toggle = [&](bool& on, uint32_t& field, uint32_t onValue, const char* name, const char* offText) {
             on = !on;
@@ -330,10 +334,10 @@ StageEnd RunStage(Shell& sh, const Options& o, bool fromMenu, std::string& error
             redraw = true;
             std::printf("%s %s\n", name, on ? "on" : offText);
         };
-        if (taaKey(focused && DownAt(kTaa))) toggle(taa, settings.taa, 1, "TAA", "off");
-        if (aoKey(focused && DownAt(kAo))) toggle(ao, settings.quality, 1, "ambient occlusion", "off");
-        if (shadowKey(focused && DownAt(kShadows))) toggle(shadows, settings.shadows, 1, "shadows", "off");
-        if (rtKey(focused && DownAt(kRt))) toggle(rt, settings.rayTracing, 1, "ray tracing", "off (cascaded shadow maps)");
+        if (taaKey(focused && keys.Down(Action::Taa))) toggle(taa, settings.taa, 1, "TAA", "off");
+        if (aoKey(focused && keys.Down(Action::Ao))) toggle(ao, settings.quality, 1, "ambient occlusion", "off");
+        if (shadowKey(focused && keys.Down(Action::Shadows))) toggle(shadows, settings.shadows, 1, "shadows", "off");
+        if (rtKey(focused && keys.Down(Action::RayTracing))) toggle(rt, settings.rayTracing, 1, "ray tracing", "off (cascaded shadow maps)");
         // The mix file saved: read again (checked about twice a second).
         if (!mixPath.empty() && (mixCheck += frame) > 0.5) {
             mixCheck = 0;
@@ -345,19 +349,19 @@ StageEnd RunStage(Shell& sh, const Options& o, bool fromMenu, std::string& error
                 std::printf("mix %s\n%s", mixPath.c_str(), sound.TakeLog().c_str());
             }
         }
-        if (antiLagIdleKey(focused && DownAt(kAntiLagIdle))) {
+        if (antiLagIdleKey(focused && keys.Down(Action::AntiLagIdle))) {
             antiLagIdle = !antiLagIdle;
             std::printf("anti-lag at standstill %s\n", antiLagIdle ? "armed" : "off");
         }
-        if (muteKey(focused && DownAt(kMute))) {
+        if (muteKey(focused && keys.Down(Action::Mute))) {
             sound.SetMuted(!sound.Muted());
             std::printf("sound %s\n", sound.Muted() ? "muted" : "on");
         }
-        if (debugHudKey(focused && Down(VK_F1))) {
+        if (debugHudKey(focused && keys.Down(Action::Readout))) {
             debugHud = !debugHud;
             redraw = true;
         }
-        if (pauseKey(focused && DownAt(kPause))) {
+        if (pauseKey(focused && keys.Down(Action::Pause))) {
             paused = !paused;
             std::printf("%s at tick %u\n", paused ? "paused" : "running", snap.tick);
         }
@@ -370,20 +374,20 @@ StageEnd RunStage(Shell& sh, const Options& o, bool fromMenu, std::string& error
             std::printf("exit at tick %u (--exit-at)\n", snap.tick);
             quit = true, end = StageEnd::Quit;
         }
-        if (viewKey(focused && DownAt(kView))) {
+        if (viewKey(focused && keys.Down(Action::DebugView))) {
             if (!renderer.Api()->debugViewName(++debugView)) debugView = 0;
             renderer.SetDebugView(debugView);
             redraw = true;
             std::printf("view %d: %s\n", debugView, renderer.DebugViewName(debugView));
         }
         // , / .: the beside camera round the car at 90 degrees / s; while paused each frame it turns is drawn.
-        const int turn = (focused && DownAt(kOrbitRight) ? 1 : 0) - (focused && DownAt(kOrbitLeft) ? 1 : 0);
+        const int turn = (focused && keys.Down(Action::OrbitRight) ? 1 : 0) - (focused && keys.Down(Action::OrbitLeft) ? 1 : 0);
         if (turn && cameraMode == camera::kBeside) {
             orbit = std::remainder(orbit + turn * static_cast<float>(frame) * 1.5707963f, 6.2831853f);
             redraw = true;
         }
         // [ / ]: the chase camera in / out at 2 m / s - shown at once, paused too (the session moves its eyes).
-        const int zoom = (focused && DownAt(kChaseOut) ? 1 : 0) - (focused && DownAt(kChaseIn) ? 1 : 0);
+        const int zoom = (focused && keys.Down(Action::ChaseOut) ? 1 : 0) - (focused && keys.Down(Action::ChaseIn) ? 1 : 0);
         if (zoom && (cameraMode == camera::kChase || cameraMode == camera::kTv)) {
             chaseDistance = std::max(2.0f, std::min(20.0f, chaseDistance + zoom * static_cast<float>(frame) * 2.0f));
             redraw = true;
@@ -393,12 +397,12 @@ StageEnd RunStage(Shell& sh, const Options& o, bool fromMenu, std::string& error
             std::printf("chase camera %.1f m behind the car\n", chaseDistance);
         }
         // The keys for the session: R back on the road, the pedals, the steering's target.
-        if (resetKey(focused && DownAt(kReset))) in.presses |= session::kBackOnRoad;
+        if (resetKey(focused && keys.Down(Action::BackOnRoad))) in.presses |= session::kBackOnRoad;
         in.seconds = paused || menu != StageMenu::None ? 0.0 : frame;   // a pause keeps the frame where it is, between the same steps
-        in.throttle = focused && DownAt(kThrottle);
-        in.brake = focused && DownAt(kBrake);
-        in.handbrake = focused && Down(VK_SPACE);
-        in.steer = focused ? (Down(VK_LEFT) ? -1.0f : 0.0f) + (Down(VK_RIGHT) ? 1.0f : 0.0f) : 0.0f;
+        in.throttle = focused && keys.Down(Action::Throttle);
+        in.brake = focused && keys.Down(Action::Brake);
+        in.handbrake = focused && keys.Down(Action::Handbrake);
+        in.steer = focused ? (keys.Down(Action::SteerLeft) ? -1.0f : 0.0f) + (keys.Down(Action::SteerRight) ? 1.0f : 0.0f) : 0.0f;
         in.antiLagIdle = antiLagIdle;
         in.chaseDistance = chaseDistance;
         simThread.Post(in);
@@ -466,7 +470,11 @@ StageEnd RunStage(Shell& sh, const Options& o, bool fromMenu, std::string& error
             else
                 line("exposure x%.2f (manual)", st.exposure);
             line("V view %u: %s", st.debugView, renderer.DebugViewName(static_cast<int32_t>(st.debugView)));
-            line("F1 readout  P pause  F2 shot  C camera  [ ] chase  , . orbit");
+            auto key = [&](Action a) { return input::KeyName(keys[a]); };
+            line("%s readout  %s pause  %s shot  %s camera  %s %s chase  %s %s orbit", key(Action::Readout).c_str(),
+                 key(Action::Pause).c_str(), key(Action::Screenshot).c_str(), key(Action::Camera).c_str(),
+                 key(Action::ChaseIn).c_str(), key(Action::ChaseOut).c_str(), key(Action::OrbitLeft).c_str(),
+                 key(Action::OrbitRight).c_str());
         }
         ui::DrawReadout(ui, debugHud, lines, o.stageWarning, shownHeight);
 
@@ -486,7 +494,7 @@ StageEnd RunStage(Shell& sh, const Options& o, bool fromMenu, std::string& error
             case ui::PauseChoice::None: break;
             }
         } else if (menu == StageMenu::Settings) {
-            const ui::SettingsChoice c = ui::SettingsUi(ui, sh.settings, true, settingsLog, shownWidth, shownHeight);
+            const ui::SettingsChoice c = ui::SettingsUi(ui, sh.settings, true, settingsLog, keyDown, shownWidth, shownHeight);
             if (c == ui::SettingsChoice::Graphics) {
                 settings = ToRender(sh.settings);
                 taa = settings.taa != 0, ao = settings.quality != 0, shadows = settings.shadows != 0, rt = settings.rayTracing != 0;
@@ -497,7 +505,7 @@ StageEnd RunStage(Shell& sh, const Options& o, bool fromMenu, std::string& error
                 menu = StageMenu::Pause;
             }
         } else if (menu == StageMenu::Debug) {
-            const ui::DebugChoice c = ui::DebugMenu(ui, dbg, views, shownWidth, shownHeight);
+            const ui::DebugChoice c = ui::DebugMenu(ui, dbg, views, keys, shownWidth, shownHeight);
             if (c == ui::DebugChoice::Changed) {
                 if (dbg.taa != taa) toggle(taa, settings.taa, 1, "TAA", "off");
                 if (dbg.ao != ao) toggle(ao, settings.quality, std::max(1u, std::min(sh.settings.quality, 2u)), "ambient occlusion", "off");
@@ -556,7 +564,7 @@ StageEnd RunStage(Shell& sh, const Options& o, bool fromMenu, std::string& error
         // frame (captureFrame), which a covered or minimised window does not spoil. F2: the window as shown.
         const bool timedShot = shotEvery && !paused && snap.tick >= shotTick + shotEvery;
         if (timedShot) shotTick = snap.tick;
-        const bool keyShot = shotKey(focused && Down(VK_F2));
+        const bool keyShot = shotKey(focused && keys.Down(Action::Screenshot));
         std::string shotPath;
         if (keyShot || timedShot) {
             const size_t slash = o.out.find_last_of("/\\");
@@ -657,6 +665,8 @@ int Menus(Shell& sh, std::string note)
     Settings atOpen;   // the settings as the Settings screen opened (the content changed: scanned again)
     for (;;) {
         bool start = false, exit = false;
+        const UINT keyDown = sh.window.TakeKeyDown();   // (for Settings -> Controls)
+        const bool capturing = ui::CapturingKey();      // (Esc then the binding's, not the menu's)
         const bool open = MenuFrame(sh, [&] {
             switch (screen) {
             case Screen::Main:
@@ -675,7 +685,7 @@ int Menus(Shell& sh, std::string note)
                 }
                 break;
             case Screen::Settings:
-                switch (ui::SettingsUi(sh.ui, sh.settings, false, settingsLog, sh.width, sh.height)) {
+                switch (ui::SettingsUi(sh.ui, sh.settings, false, settingsLog, keyDown, sh.width, sh.height)) {
                 case ui::SettingsChoice::Graphics: sh.renderer.ApplySettings(ToRender(sh.settings)); break;
                 case ui::SettingsChoice::Rescan: {
                     const std::string e = scan();
@@ -701,7 +711,7 @@ int Menus(Shell& sh, std::string note)
                 }
                 break;
             }
-            if (sh.window.TakeEscape() && screen != Screen::Main) {   // Esc: back, the settings kept as they are
+            if (sh.window.TakeEscape() && !capturing && screen != Screen::Main) {   // Esc: back, the settings kept as they are
                 SaveSettings(sh.settings);
                 screen = Screen::Main;
             }

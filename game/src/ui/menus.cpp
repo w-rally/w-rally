@@ -168,12 +168,82 @@ QuickChoice QuickRally(const ImGuiLayer& ui, const assets::Catalog& catalog, app
     return c;
 }
 
-SettingsChoice SettingsUi(const ImGuiLayer& ui, app::Settings& s, bool inStage, const std::string& log, int width, int height)
+namespace {
+
+int g_capturing = -1;          // the action waiting for its key (Controls), -1 none
+bool g_opened = false;         // its popup opened this frame (the key that opened it is not the binding)
+std::string g_controlsNote;    // what the last binding did ("also unbinds ...")
+
+// Settings -> Controls: each action and its key; a click waits for a key (Esc: no change), Delete unbinds.
+void Controls(input::Bindings& keys, UINT keyDown)
+{
+    using input::Action;
+    const char* group = "";
+    if (ImGui::BeginTable("keys", 2, ImGuiTableFlags_SizingStretchProp)) {
+        ImGui::TableSetupColumn("action", ImGuiTableColumnFlags_WidthStretch, 3.0f);
+        ImGui::TableSetupColumn("key", ImGuiTableColumnFlags_WidthStretch, 2.0f);
+        for (int a = 0; a < input::kActions; ++a) {
+            const input::ActionInfo& info = input::Info(static_cast<Action>(a));
+            if (std::strcmp(group, info.group)) {
+                group = info.group;
+                ImGui::TableNextRow();
+                ImGui::TableNextColumn();
+                ImGui::TextDisabled("%s", group);
+            }
+            ImGui::TableNextRow();
+            ImGui::TableNextColumn();
+            ImGui::AlignTextToFramePadding();
+            ImGui::TextUnformatted(info.label);
+            ImGui::TableNextColumn();
+            ImGui::PushID(a);
+            const UINT scan = keys.scan[a];
+            if (!scan) ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.5f, 0.4f, 1.0f));
+            if (ImGui::Button(scan ? input::KeyName(scan).c_str() : "unbound", ImVec2(-FLT_MIN, 0))) {
+                g_capturing = a;
+                g_opened = true;
+                g_controlsNote.clear();
+                ImGui::OpenPopup("press a key");
+            }
+            if (!scan) ImGui::PopStyleColor();
+            if (ImGui::BeginPopupModal("press a key", nullptr, ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoSavedSettings)) {
+                ImGui::Text("Press a key for %s", info.label);
+                ImGui::TextDisabled("Esc: keep %s    Delete: unbound", input::KeyName(scan).c_str());
+                if (g_opened) {
+                    g_opened = false;
+                } else if (keyDown && g_capturing == a) {
+                    if (keyDown == input::kEscapeScan) {
+                        // (Esc is the menus': not bindable)
+                    } else if (keyDown == 0xe053) {   // Delete
+                        keys.scan[a] = 0;
+                    } else if (const Action other = keys.Bind(static_cast<Action>(a), keyDown); other != Action::Count) {
+                        g_controlsNote = input::KeyName(keyDown) + " was " + input::Info(other).label + "'s: that is unbound now";
+                    }
+                    g_capturing = -1;
+                    ImGui::CloseCurrentPopup();
+                }
+                ImGui::EndPopup();
+            }
+            ImGui::PopID();
+        }
+        ImGui::EndTable();
+    }
+    if (!g_controlsNote.empty()) ImGui::TextColored(ImVec4(1.0f, 0.6f, 0.4f, 1.0f), "%s", g_controlsNote.c_str());
+    if (Button("Default keys")) {
+        keys = input::Bindings();
+        g_controlsNote.clear();
+    }
+}
+
+} // namespace
+
+SettingsChoice SettingsUi(const ImGuiLayer& ui, app::Settings& s, bool inStage, const std::string& log, UINT keyDown,
+                          int width, int height)
 {
     SettingsChoice c = SettingsChoice::None;
     Screen(ui, "Settings", width, height, 760.0f, [&] {
+        if (!ImGui::BeginTabBar("settings")) return;
         ImGui::PushItemWidth(-ImGui::GetFontSize() * 9.0f);
-        ImGui::SeparatorText("Content");
+        if (ImGui::BeginTabItem("Content")) {
         ImGui::BeginDisabled(inStage);
         Text("RBR folder", s.rbrPath, inStage);
         Text(".ngg folders", s.nggFolders, inStage);
@@ -191,8 +261,16 @@ SettingsChoice SettingsUi(const ImGuiLayer& ui, app::Settings& s, bool inStage, 
         if (Button("Extract the slot cars' physics into their folders")) c = SettingsChoice::Extract;
         ImGui::EndDisabled();
         if (inStage) ImGui::TextDisabled("   (the content can be changed from the main menu)");
+        if (!log.empty()) {
+            ImGui::Separator();
+            ImGui::PushTextWrapPos(ImGui::GetFontSize() * 36.0f);
+            ImGui::TextUnformatted(log.c_str());
+            ImGui::PopTextWrapPos();
+        }
+        ImGui::EndTabItem();
+        }
 
-        ImGui::SeparatorText("Graphics");
+        if (ImGui::BeginTabItem("Graphics")) {
         std::vector<std::string> quality = {"Low", "Medium", "High"};
         int q = static_cast<int>(std::min(s.quality, 2u));
         bool g = Choose("Quality", q, quality);
@@ -202,24 +280,30 @@ SettingsChoice SettingsUi(const ImGuiLayer& ui, app::Settings& s, bool inStage, 
         g |= Check("Shadows", s.shadows);
         g |= Check("Vertical sync", s.vsync);
         if (g && c == SettingsChoice::None) c = SettingsChoice::Graphics;
+        ImGui::EndTabItem();
+        }
 
-        ImGui::SeparatorText("Sound");
+        if (ImGui::BeginTabItem("Sound")) {
         Check("Sound", s.sound);
         ImGui::SameLine();
         ImGui::TextDisabled("(from the next stage)");
-        ImGui::PopItemWidth();
-
-        if (!log.empty()) {
-            ImGui::Separator();
-            ImGui::PushTextWrapPos(ImGui::GetFontSize() * 36.0f);
-            ImGui::TextUnformatted(log.c_str());
-            ImGui::PopTextWrapPos();
+        ImGui::EndTabItem();
         }
+
+        if (ImGui::BeginTabItem("Controls")) {
+            Controls(s.keys, keyDown);
+            ImGui::EndTabItem();
+        }
+        ImGui::PopItemWidth();
+        ImGui::EndTabBar();
+
         ImGui::Separator();
         if (Button("Back", true)) c = SettingsChoice::Back;
     });
     return c;
 }
+
+bool CapturingKey() { return g_capturing >= 0; }
 
 PauseChoice PauseMenu(const ImGuiLayer& ui, int width, int height)
 {
@@ -234,28 +318,36 @@ PauseChoice PauseMenu(const ImGuiLayer& ui, int width, int height)
     return c;
 }
 
-DebugChoice DebugMenu(const ImGuiLayer& ui, DebugSwitches& d, const std::vector<std::string>& views, int width, int height)
+DebugChoice DebugMenu(const ImGuiLayer& ui, DebugSwitches& d, const std::vector<std::string>& views, const input::Bindings& keys,
+                      int width, int height)
 {
     DebugChoice c = DebugChoice::None;
     Screen(ui, "Debug", width, height, 560.0f, [&] {
         ImGui::PushItemWidth(-ImGui::GetFontSize() * 9.0f);
         bool ch = false;
         ImGui::SeparatorText("Renderer");
-        ch |= Check("TAA  (T)", d.taa);
-        ch |= Check("Ambient occlusion  (O)", d.ao);
-        ch |= Check("Shadows  (L)", d.shadows);
-        ch |= Check("Ray tracing  (K)", d.rayTracing);
-        ch |= Check("Readout  (F1)", d.readout);
-        ch |= Choose("View  (V)", d.debugView, views);
+        using input::Action;
+        // A label with its key(s): "TAA  (T)".
+        auto k = [&](const char* label, Action a, Action b = Action::Count) {
+            std::string s = std::string(label) + "  (" + input::KeyName(keys[a]);
+            if (b != Action::Count) s += " " + input::KeyName(keys[b]);
+            return s + ")";
+        };
+        ch |= Check(k("TAA", Action::Taa).c_str(), d.taa);
+        ch |= Check(k("Ambient occlusion", Action::Ao).c_str(), d.ao);
+        ch |= Check(k("Shadows", Action::Shadows).c_str(), d.shadows);
+        ch |= Check(k("Ray tracing", Action::RayTracing).c_str(), d.rayTracing);
+        ch |= Check(k("Readout", Action::Readout).c_str(), d.readout);
+        ch |= Choose(k("View", Action::DebugView).c_str(), d.debugView, views);
         ImGui::SeparatorText("Camera");
         std::vector<std::string> cameras = {"Chase", "Bonnet", "Above", "Beside", "TV"};
         cameras.resize(static_cast<size_t>(std::max(1, std::min(d.cameras, 5))));
-        ch |= Choose("Camera  (C)", d.camera, cameras);
-        ch |= ImGui::SliderFloat("Chase distance  ([ ])", &d.chaseDistance, 2.0f, 20.0f, "%.1f m");
-        ch |= ImGui::SliderFloat("Beside angle  (, .)", &d.orbitDegrees, -180.0f, 180.0f, "%.0f deg");
+        ch |= Choose(k("Camera", Action::Camera).c_str(), d.camera, cameras);
+        ch |= ImGui::SliderFloat(k("Chase distance", Action::ChaseIn, Action::ChaseOut).c_str(), &d.chaseDistance, 2.0f, 20.0f, "%.1f m");
+        ch |= ImGui::SliderFloat(k("Beside angle", Action::OrbitLeft, Action::OrbitRight).c_str(), &d.orbitDegrees, -180.0f, 180.0f, "%.0f deg");
         ImGui::SeparatorText("Sound and driving");
-        ch |= Check("Muted  (M)", d.muted);
-        ch |= Check("Anti-lag armed at standstill  (N)", d.antiLagIdle);
+        ch |= Check(k("Muted", Action::Mute).c_str(), d.muted);
+        ch |= Check(k("Anti-lag armed at standstill", Action::AntiLagIdle).c_str(), d.antiLagIdle);
         ImGui::PopItemWidth();
         ImGui::Separator();
         if (Button("Back", true)) c = DebugChoice::Back;
