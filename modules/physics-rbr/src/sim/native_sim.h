@@ -5,12 +5,15 @@
 // objects (Config::anims, the spectators) are not ported: Open refuses them.
 
 #include <memory>
+#include <string>
+#include <vector>
 
 #include "sim/sim.h"
 
 namespace phys::native {
 struct LoadedWorld;
 struct GearChange;
+class Solid;
 }
 
 namespace phys::sim {
@@ -30,6 +33,7 @@ public:
     void CenterOfGravity(float out[3]) const override;
     std::vector<Box> Water() const override;
     const std::vector<Body>& Bodies() override;
+    std::vector<Part> Parts() const override;
     void PoseWords(uint32_t out[13]) const override;
     float StageDistance() const override;
     float Dt() const override;
@@ -46,6 +50,14 @@ private:
     std::unique_ptr<native::LoadedWorld> m_world;
     std::string m_error, m_log, m_surface;
     std::vector<Body> m_bodies;
+    // The car's hinged and mounted parts, found at the load (they stay alive torn off: free solids of the world).
+    struct PartRef {
+        const native::Solid* solid;
+        bool hinged;
+        std::string name;
+        float restPosition[3], restRotation[4];
+    };
+    std::vector<PartRef> m_parts;
     signals::Bus* m_bus = nullptr;
     uint32_t m_busCar = 0;
 };

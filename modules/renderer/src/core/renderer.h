@@ -16,12 +16,12 @@
 // choose; ORDER and CORRECTNESS are not.
 //
 // It also owns the one policy no client should have to know: whether the
-// ray-traced shadows are valid for the scene as it stands. The acceleration
-// structure holds the file's static geometry at its authored positions. Hide
-// an object and it is rebuilt; add a mesh or move an object (the editor does
-// both) and the static BVH can no longer represent the scene, so the frame
-// falls back to the cascaded maps until per-object instancing exists (9b item
-// 7) - rather than casting shadows from where things used to be.
+// ray-traced shadows are valid for the scene as it stands. KeepRtCurrent keeps
+// one BLAS per mesh key (the world, each moved object, each added mesh) and a
+// TLAS of their instances: a new mesh builds its BLAS, and when only
+// transforms changed (a car driving, a cone knocked over) just the instances
+// and the TLAS are rebuilt - so moving objects keep their ray-traced shadows.
+// Only a failed build falls back to the cascaded maps.
 // ---------------------------------------------------------------------------
 #pragma once
 

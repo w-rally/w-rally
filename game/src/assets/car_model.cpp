@@ -252,10 +252,20 @@ CarModel ReadCarModel(const std::string& sgcPath, const std::string& surface)
             idx[k] = v;
         }
         c.at += 6 * size_t(nt);
+        // The names above it in the node tree (a grille under its bumper goes where the bumper goes).
+        std::vector<std::string> parents;
+        if (const auto self = nodes.find(id); self != nodes.end())
+            for (uint32_t p = self->second.parent, guard = 0; guard < 64; ++guard) {
+                const auto it = nodes.find(p);
+                if (it == nodes.end() || it->second.parent == 0xffffffffu) break;   // the root: left out
+                parents.push_back(it->second.name);
+                p = it->second.parent;
+            }
         const uint32_t ng = c.U32();
         for (uint32_t g = 0; g < ng; ++g) {
             CarPart part;
             part.name = name;
+            part.parents = parents;
             part.wheel = wheel;
             part.spins = wheel >= 0 && (Starts(name, "e_wheel_") || Starts(name, "e_brakedisc_"));
             part.material = c.Str();

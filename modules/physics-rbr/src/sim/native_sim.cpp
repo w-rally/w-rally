@@ -124,6 +124,33 @@ std::string NativeSim::Open(const Config& c)
         }
         m_bodies.push_back(b);
     }
+    // The car's parts that can come loose: named by their def's kind (load.cpp's CarRecords: 0x25 the left door, 0x26
+    // the right, 0x28 the bonnet, 0x2c the exhaust pipe hinged; 0x2a the front bumper, 0x29 the rear, 0x2b the wing
+    // mounted) - the .sgc's collision mesh of each (data/sgc.h: c_e_<name>).
+    {
+        static const struct {
+            uint32_t kind;
+            bool hinged;
+            const char* name;
+        } kParts[] = {{0x25, true, "door_l"},   {0x26, true, "door_r"},   {0x28, true, "bonnet"}, {0x2c, true, "exhaust"},
+                      {0x2a, false, "bumper_f"}, {0x29, false, "bumper_b"}, {0x2b, false, "wing"}};
+        const native::Car& car = *w.loader->car;
+        auto add = [&](const native::Solid* s, bool hinged) {
+            if (!s) return;
+            for (const auto& k : kParts) {
+                const bool match = hinged ? (w.defs.hinged[k.kind] && &w.defs.hinged[k.kind]->body == s->body.def)
+                                          : (w.defs.mounted[k.kind] && &w.defs.mounted[k.kind]->body == s->body.def);
+                if (k.hinged != hinged || !match) continue;
+                PartRef p{s, hinged, k.name, {}, {}};
+                std::memcpy(p.restPosition, &s->body.position, 12);
+                std::memcpy(p.restRotation, &s->body.orientation, 16);
+                m_parts.push_back(p);
+                return;
+            }
+        };
+        for (const native::Solid* s : car.hinged) add(s, true);
+        for (const native::MountedSolid* m : car.mounted) add(m, false);
+    }
     if (!c.overrides.empty()) {
         std::string changes;
         if (std::string oe = CarOverride(c.overridesName, c.overrides, *w.loader->car, changes); !oe.empty()) {
@@ -350,6 +377,26 @@ const std::vector<Body>& NativeSim::Bodies()
             std::memcpy(m_bodies[i].position, &b.position, 12);
         }
     return m_bodies;
+}
+
+std::vector<Part> NativeSim::Parts() const
+{
+    std::vector<Part> out;
+    if (!m_world) return out;
+    for (const PartRef& r : m_parts) {
+        Part p;
+        p.name = r.name;
+        const auto& part = static_cast<const native::PartSolid&>(*r.solid);
+        p.inCar = part.car != nullptr;   // (a torn-off part's frame is the world's: World::ReleasePart)
+        const uint32_t stick = r.hinged ? 0 : static_cast<const native::MountedSolid&>(part).Stick();
+        p.state = !p.inCar ? 2 : stick == 1 ? 1 : 0;
+        std::memcpy(p.position, &part.body.position, 12);
+        std::memcpy(p.rotation, &part.body.orientation, 16);
+        std::memcpy(p.restPosition, r.restPosition, 12);
+        std::memcpy(p.restRotation, r.restRotation, 16);
+        out.push_back(p);
+    }
+    return out;
 }
 
 Dashboard NativeSim::Dash() const

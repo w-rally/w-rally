@@ -256,9 +256,28 @@ Status WRALLY_CALL SaveState(World*, Blob* out)
 void WRALLY_CALL ReleaseState(World*, Blob*) {}
 Status WRALLY_CALL LoadState(World*, const void*, uint64_t) { return Status::ErrNotSupported; }
 
+uint32_t WRALLY_CALL CarParts(World* w, uint32_t car, PartState* out, uint32_t capacity)
+{
+    if (!w || car != 0) return 0;
+    const std::vector<phys::sim::Part> parts = w->sim.Parts();
+    for (uint32_t i = 0; out && i < capacity && i < parts.size(); ++i) {
+        const phys::sim::Part& p = parts[i];
+        PartState& o = out[i];
+        o = {};
+        std::snprintf(o.name, sizeof o.name, "%s", p.name.c_str());
+        o.state = p.state;
+        o.inCar = p.inCar ? 1u : 0u;
+        std::memcpy(o.position, p.position, 12);
+        std::memcpy(o.rotation, p.rotation, 16);
+        std::memcpy(o.restPosition, p.restPosition, 12);
+        std::memcpy(o.restRotation, p.restRotation, 16);
+    }
+    return static_cast<uint32_t>(parts.size());
+}
+
 const PhysicsApi kApi = {&Destroy, &LastError, &CreateWorld, &DestroyWorld, &WorldError, &Dt, &Tick,
                          &SetControls, &Step, &GetCarState, &CenterOfGravity, &Bodies, &Water, &ResetCar,
-                         &SaveState, &ReleaseState, &LoadState};
+                         &SaveState, &ReleaseState, &LoadState, &CarParts};
 
 } // namespace
 

@@ -39,9 +39,11 @@ Status WRALLY_CALL SaveState(World*, Blob*) { return Status::ErrNotSupported; }
 void WRALLY_CALL ReleaseState(World*, Blob*) {}
 Status WRALLY_CALL LoadState(World*, const void*, uint64_t) { return Status::ErrNotSupported; }
 
+uint32_t WRALLY_CALL CarParts(World*, uint32_t, PartState*, uint32_t) { return 0; }
+
 const PhysicsApi kApi = {&Destroy, &LastError, &CreateWorld, &DestroyWorld, &WorldError, &Dt, &Tick,
                          &SetControls, &Step, &GetCarState, &CenterOfGravity, &Bodies, &Water, &ResetCar,
-                         &SaveState, &ReleaseState, &LoadState};
+                         &SaveState, &ReleaseState, &LoadState, &CarParts};
 
 bool HeaderIs(const StructHeader* h, ModuleKind kind, uint32_t ver, uint32_t size)
 {

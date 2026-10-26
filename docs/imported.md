@@ -49,6 +49,13 @@ native physics is bit-exact with RBR only under them.
   namespaces: `car_model` to `assets/` (`wrally::assets`), `replay_camera` to `camera/` (`wrally::camera`),
   `launch_control` and `anti_lag` to `session/` (`wrally::session`).
 
+- Phase 6:
+  - `sim::Physics::Parts` / `NativeSim::Parts` report the car's hinged and mounted parts, named by their def's
+    kind.
+  - ngg-core's `dxc.cpp` loads `dxcompiler.dll` and `dxil.dll` from its own module's folder (`LoadBeside`); a bare
+    `LoadLibraryW` searched the exe's folder.
+  - ngg-core's `renderer.h` comment on RT fallbacks is corrected; the code already instanced moving objects.
+
 ## Third-party code
 
 | here | what | from |

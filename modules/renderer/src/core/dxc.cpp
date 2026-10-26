@@ -10,11 +10,36 @@ using Microsoft::WRL::ComPtr;
 namespace ngg {
 namespace core {
 
+namespace {
+
+// A DLL beside the module this code is linked into (WRenderer.dll in WRally), then by the normal search. A bare
+// LoadLibraryW(name) searches the EXE's folder, not ours - and a module DLL's dependencies sit beside the module.
+HMODULE LoadBeside(const wchar_t* name)
+{
+    HMODULE self = nullptr;
+    wchar_t path[MAX_PATH];
+    if (GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                           reinterpret_cast<LPCWSTR>(&LoadBeside), &self) &&
+        GetModuleFileNameW(self, path, MAX_PATH))
+    {
+        std::wstring p(path);
+        p.erase(p.find_last_of(L"\\/") + 1);
+        p += name;
+        // LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR: dxcompiler.dll's own dependencies from its folder too.
+        if (HMODULE m = LoadLibraryExW(p.c_str(), nullptr,
+                                       LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_DEFAULT_DIRS))
+            return m;
+    }
+    return LoadLibraryW(name);
+}
+
+} // namespace
+
 bool Dxc::Load()
 {
     if (m_createInstance) return true;
 
-    m_dll = LoadLibraryW(L"dxcompiler.dll");
+    m_dll = LoadBeside(L"dxcompiler.dll");
     if (!m_dll)
     {
         Log("dxc: dxcompiler.dll not found - no shader model 6 shaders, so no "
@@ -33,7 +58,7 @@ bool Dxc::Load()
     // Not fatal, but it decides whether the DXIL this produces will be accepted
     // by a driver on a machine that is not in developer mode - so it is said out
     // loud rather than discovered as "the pipeline fails to create".
-    if (!GetModuleHandleW(L"dxil.dll") && !LoadLibraryW(L"dxil.dll"))
+    if (!GetModuleHandleW(L"dxil.dll") && !LoadBeside(L"dxil.dll"))
         Log("dxc: WARNING - dxil.dll not found. DXIL will be unsigned, and the "
             "runtime rejects unsigned DXIL outside developer mode.");
 
