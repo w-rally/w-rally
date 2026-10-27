@@ -170,6 +170,11 @@ void Renderer::CaptureFrame(const std::string& path)
     if (m_instance) m_api->captureFrame(m_instance, path.c_str());
 }
 
+void Renderer::SetLegacyProfile(int32_t mode)
+{
+    if (m_instance) m_api->setLegacyProfile(m_instance, mode);
+}
+
 void Renderer::SetDebugView(int32_t mode)
 {
     if (m_instance) m_api->setDebugView(m_instance, mode);

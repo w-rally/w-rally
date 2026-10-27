@@ -685,12 +685,19 @@ Status WRALLY_CALL SetDebugView(Renderer* r, int32_t mode)
 
 const char* WRALLY_CALL DebugViewName(int32_t mode) { return ngg::core::Scene::DebugModeName(mode); }
 
+Status WRALLY_CALL SetLegacyProfile(Renderer* r, int32_t mode)
+{
+    if (!r) return Status::ErrInvalidArg;
+    r->scene.SetLegacyProfile(mode);
+    return Status::Ok;
+}
+
 const RendererApi kApi = {&Destroy,       &LastError,         &ApplySettings,  &Resize,         &LoadScene,
                           &UnloadScene,   &SceneBounds,       &SceneKeyStats,  &WeatherPresetCount,
                           &WeatherPresetAt, &FindWeatherPreset, &CreateTexture, &CreateTextureRgba,
                           &ReleaseTexture, &CreateModel,      &ReleaseModel,   &CreateInstance, &DestroyInstance,
                           &RenderFrame,   &Present,           &Stats,          &CaptureFrame,   &SetDebugView,
-                          &DebugViewName};
+                          &DebugViewName, &SetLegacyProfile};
 
 } // namespace
 
@@ -734,10 +741,11 @@ WRALLY_EXPORT Status WRALLY_CALL InitWInterface(uint32_t gameVersion, const Stru
         if (r->settings.mode != WindowMode::Windowed) r->settings.mode = WindowMode::Windowed;
         Apply(*r);
         // ngg-api's environment switches, after the settings (a quality tier sets the AO's rays): NGG_DEBUG_VIEW,
-        // NGG_AO_RAYS, NGG_LIGHT_MODE.
+        // NGG_AO_RAYS, NGG_LIGHT_MODE, NGG_LEGACY_PROFILE.
         if (const char* dv = std::getenv("NGG_DEBUG_VIEW")) r->scene.SetDebugMode(std::atoi(dv));
         if (const char* ar = std::getenv("NGG_AO_RAYS")) r->core.SetAoRays((uint32_t)std::atoi(ar));
         if (const char* lm = std::getenv("NGG_LIGHT_MODE")) r->scene.SetLightMode(std::atoi(lm));
+        if (const char* lp = std::getenv("NGG_LEGACY_PROFILE")) r->scene.SetLegacyProfile(std::atoi(lp));
         ngg::core::Log("wrenderer: %ux%u ready", input.width, input.height);
 
         output.info = {};

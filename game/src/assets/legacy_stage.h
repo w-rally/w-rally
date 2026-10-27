@@ -8,8 +8,9 @@
 //   - layers as the .ngg has them: 0 the ground, 1 vegetation, 2 scenery, 3 movable objects (each placement of a
 //     movable object its own geometry, keyed in NGGK by its instance id - the physics' solid, so it follows it)
 //   - the ground's two-texture blend (detail by uv1, weighted by vertex alpha); RBR's hidden ground chunks left out
-//   - vegetation alpha-tested and two-sided; scenery and movable objects alpha-tested only where their texture has
-//     alpha (an opaque texture's vertex alpha is not coverage), two-sided always
+//   - vegetation alpha-tested and two-sided, each connected piece of its meshes a plant in the plant table (NGGP, no
+//     tags: topology only), which the renderer gives volume normals; scenery and movable objects alpha-tested only
+//     where their texture has alpha (an opaque texture's vertex alpha is not coverage), two-sided always
 //   - default PBR materials (DefaultMaterial): no PBR data in an RBR stage
 //   - RBR's baked lighting NOT used for light: it stays in the vertex colour, as the renderer's A/B reference (its
 //     light mode 0), and the default dynamic mode lights the stage from the sun and the sky alone; normals where the

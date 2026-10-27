@@ -184,6 +184,17 @@ public:
     void SetLightMode(int mode) { m_lightMode = WrapMode(mode, kLightModeCount); }
     int  LightMode() const { return m_lightMode; }
 
+    // The LEGACY PROFILE: how a scene WRally's .lbs importer made (kSceneFlagLegacyImport) lights its alpha-tested
+    // geometry - RBR's cards, untagged, which modern lighting shows up as cardboard. Other scenes are never touched.
+    //   0 off: as any scene
+    //   1 A, baked: the card lit by RBR's bake (its vertex colour) times the dynamic light of an upward surface
+    //   2 B, occlusion: dynamic light on normals bent up, the bake's brightness as occlusion of the ambient
+    // In 1 and 2 a card's sun and AO rays skip every card (only opaque geometry shadows it).
+    enum { kLegacyProfileCount = 3 };
+    void SetLegacyProfile(int mode) { m_legacyProfile = WrapMode(mode, kLegacyProfileCount); }
+    int  LegacyProfile() const { return m_legacyProfile; }
+    bool LegacyImport() const { return m_legacyImport; }
+
     // Smooth split normals at load. FALLBACK for assets whose normals were
     // never meant for shading - see WeldNormals. Takes effect on the next Load.
     void SetWeldNormals(bool on) { m_weldNormals = on; }
@@ -600,8 +611,10 @@ private:
     void FindPlants(const ::ngg::Vertex* verts, uint32_t vertexCount,
                     const uint8_t* indexData, uint32_t indexCount);
     // The same from the file's NGGG/NGGP chunks; false when it has none.
+    // `untaggedCards`: every plant is old card vegetation, tags or none (an automatic legacy import: its plants are
+    // its vegetation's connected pieces, untagged).
     bool ReadPlants(const uint8_t* tags, size_t tagBytes,
-                    const uint8_t* table, size_t tableBytes, uint32_t indexCount);
+                    const uint8_t* table, size_t tableBytes, uint32_t indexCount, bool untaggedCards);
 
     // Bounds are computed at LOAD from the vertex data - the renderer-side
     // fallback promised in design 3.3e. The converter should eventually emit
@@ -830,7 +843,10 @@ private:
     // A plant's box in the static (authored) space; see FindPlants.
     // `crossed`: old crossed-card vegetation, shaded as one volume - tagged "tree-card",
     // "bush-card" or "grass-card" in the file, or found so by FindPlants.
-    struct Plant { float bmin[3], bmax[3]; bool crossed; uint32_t firstTag = 0, tagCount = 0; };
+    // `shadow`: what the plant casts (kPlantShadow*): grass nothing, a bush a lighter, softer shadow, a tree all of
+    // it - its tags' (grass-card, bush-card), or for an automatic legacy import its height (kGrassHeight, kBushHeight).
+    enum { kPlantShadowCast = 0, kPlantShadowNone = 1, kPlantShadowSoft = 2 };
+    struct Plant { float bmin[3], bmax[3]; bool crossed; uint32_t firstTag = 0, tagCount = 0; uint32_t shadow = kPlantShadowCast; };
     std::vector<Plant>       m_plants;
     std::vector<uint32_t>    m_triPlant;            // per static triangle; ~0 = not in a plant
     std::vector<std::string> m_tagNames;            // NGGG
@@ -875,6 +891,8 @@ private:
     // Dynamic by default now that shadows are real. Mode 0 stays as the A/B
     // reference against RBR's own look, not as a fallback.
     int                      m_lightMode = 1;
+    int                      m_legacyProfile = 2;    // B until compared (SetLegacyProfile)
+    bool                     m_legacyImport = false; // the loaded scene's kSceneFlagLegacyImport
     bool                     m_weldNormals = true;
     bool                     m_singleStageFix = true;
     bool                     m_foliageNormals = true;

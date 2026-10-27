@@ -48,6 +48,7 @@ struct DebugSwitches {
     bool taa = true, ao = true, shadows = true, rayTracing = true;
     bool readout = false;
     int debugView = 0;
+    int legacyProfile = -1;   // an imported .lbs stage's card lighting (0 off, 1 A, 2 B); -1 not an imported stage
     int camera = 0, cameras = 4;
     float chaseDistance = 5.2f;
     float orbitDegrees = 0;

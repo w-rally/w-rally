@@ -59,6 +59,14 @@ native physics is bit-exact with RBR only under them.
 - Legacy stages (phase 8, step 1): `data/lsp.*` gains `ReadZip`, every member of a zip from one read (a stage's
   texture archive). `ngg_format.h`'s note on who writes the layout now names WRally's writer, `ngg_scene.h`.
 
+- Vegetation (phase 8, 2026-10-27), in ngg-core:
+  - `ngg_format.h` gains `kSceneFlagLegacyImport`.
+  - `Scene` gains the legacy profile (`SetLegacyProfile`; shader `gLegacyMode` in the former `gPadB` slot) and a
+    per-plant shadow mode (`Plant::shadow`). The mode is packed into plant vertices' uv1.y above
+    `kPlantShadowPack`; `PSShadow` and `rt.cpp`'s `Occluded` read it.
+  - `ReadPlants` takes `untaggedCards`; `FindPlants` is skipped on a legacy import.
+  - The prepass marks a legacy card `~0`, and `Occluded` skips cards within `kLegacyCardSkip` of its rays.
+
 - Menus (after phase 6): `native/run.cpp` reads a car's `common.lsp`, `<surface>.lsp`, `r_<surface>.lsp` and default
   setup from a loose folder when `physicsCar` is a VFS path ending in '/' (`CarFile`), and from `physics.rbz` as
   before otherwise. A setup can be a VFS file as well as an rbz member. The tyres still come from `physics.rbz`.
