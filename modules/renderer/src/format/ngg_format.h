@@ -66,6 +66,10 @@ struct ChunkHeader
 // the game's per-stage world space, so offsetting it would be exactly wrong -
 // this is the switch that keeps the debug behaviour out of the real path.
 const uint32_t kSceneFlagAnchorToCamera = 1u << 0;
+// Set by WRally's automatic .lbs importer (game/src/assets/legacy_stage.h): converted with no human input and no
+// tags, the vertex colour RBR's bake. The renderer then lights alpha-tested geometry by its legacy profile
+// (Scene::SetLegacyProfile). Wallaby's files never carry it.
+const uint32_t kSceneFlagLegacyImport = 1u << 1;
 
 // 'NGGH' - scene header
 struct SceneHeader

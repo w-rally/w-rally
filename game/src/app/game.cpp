@@ -190,8 +190,11 @@ StageEnd RunStage(Shell& sh, const Options& o, bool fromMenu, std::string& error
         phys::data::CarCollisionMeshes(phys::data::ReadSgcCollision(o.session.physics.sgc));
 
     std::vector<char> bytes;
-    // An RBR .lbs instead of an .ngg: imported here (assets/legacy_stage.h), its textures for the road's wetness.
-    if (const std::string ext = std::filesystem::path(o.ngg).extension().string(); !_stricmp(ext.c_str(), ".lbs")) {
+    // An RBR .lbs instead of an .ngg: imported here (assets/legacy_stage.h), its textures for the road's wetness. Its
+    // cards are lit by the renderer's legacy profile (B unless NGG_LEGACY_PROFILE says; the Debug menu switches it).
+    const bool imported = !_stricmp(std::filesystem::path(o.ngg).extension().string().c_str(), ".lbs");
+    int legacyProfile = !imported ? -1 : std::getenv("NGG_LEGACY_PROFILE") ? std::atoi(std::getenv("NGG_LEGACY_PROFILE")) : 2;
+    if (imported) {
         assets::LegacyImport imp;
         const int wet = o.session.physics.wetness >= 0 ? o.session.physics.wetness : static_cast<int>(o.session.physics.weather / 3);
         if (const std::string e = assets::ImportLegacyStage(o.ngg, wet, imp); !e.empty()) return fail(e);
@@ -210,6 +213,7 @@ StageEnd RunStage(Shell& sh, const Options& o, bool fromMenu, std::string& error
     iface::RenderSettings settings = ToRender(sh.settings);
     renderer.ApplySettings(settings);
     renderer.SetDebugView(0);
+    if (imported) renderer.SetLegacyProfile(legacyProfile);   // (the renderer keeps it from stage to stage)
     const iface::SceneHandle scene = renderer.LoadScene(bytes.data(), bytes.size());
     if (rendererLog) std::printf("%s", renderer.TakeLog().c_str());
     if (!scene) return fail("renderer: " + renderer.Error());
@@ -470,6 +474,7 @@ StageEnd RunStage(Shell& sh, const Options& o, bool fromMenu, std::string& error
             else
                 line("exposure x%.2f (manual)", st.exposure);
             line("V view %u: %s", st.debugView, renderer.DebugViewName(static_cast<int32_t>(st.debugView)));
+            if (legacyProfile >= 0) line("legacy cards: %s", legacyProfile == 1 ? "A (bake)" : legacyProfile == 2 ? "B (bake as occlusion)" : "off");
             auto key = [&](Action a) { return input::KeyName(keys[a]); };
             line("%s readout  %s pause  %s shot  %s camera  %s %s chase  %s %s orbit", key(Action::Readout).c_str(),
                  key(Action::Pause).c_str(), key(Action::Screenshot).c_str(), key(Action::Camera).c_str(),
@@ -487,6 +492,7 @@ StageEnd RunStage(Shell& sh, const Options& o, bool fromMenu, std::string& error
             case ui::PauseChoice::Debug:
                 dbg.taa = taa, dbg.ao = ao, dbg.shadows = shadows, dbg.rayTracing = rt, dbg.readout = debugHud;
                 dbg.debugView = debugView, dbg.camera = cameraMode, dbg.cameras = cameras, dbg.chaseDistance = chaseDistance;
+                dbg.legacyProfile = legacyProfile;
                 dbg.orbitDegrees = orbit * 57.29578f, dbg.muted = sound.Muted(), dbg.antiLagIdle = antiLagIdle;
                 menu = StageMenu::Debug;
                 break;
@@ -513,6 +519,7 @@ StageEnd RunStage(Shell& sh, const Options& o, bool fromMenu, std::string& error
                 if (dbg.rayTracing != rt) toggle(rt, settings.rayTracing, 1, "ray tracing", "off (cascaded shadow maps)");
                 debugHud = dbg.readout;
                 if (dbg.debugView != debugView) renderer.SetDebugView(debugView = dbg.debugView);
+                if (legacyProfile >= 0 && dbg.legacyProfile != legacyProfile) renderer.SetLegacyProfile(legacyProfile = dbg.legacyProfile);
                 cameraMode = dbg.camera;
                 chaseDistance = dbg.chaseDistance;
                 orbit = dbg.orbitDegrees / 57.29578f;

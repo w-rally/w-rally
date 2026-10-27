@@ -339,6 +339,11 @@ DebugChoice DebugMenu(const ImGuiLayer& ui, DebugSwitches& d, const std::vector<
         ch |= Check(k("Ray tracing", Action::RayTracing).c_str(), d.rayTracing);
         ch |= Check(k("Readout", Action::Readout).c_str(), d.readout);
         ch |= Choose(k("View", Action::DebugView).c_str(), d.debugView, views);
+        if (d.legacyProfile >= 0) {   // (an imported .lbs stage: how its cards are lit)
+            const std::vector<std::string> profiles = {"Off (as a modern stage)", "A - RBR's bake, today's light",
+                                                       "B - dynamic, bake as occlusion"};
+            ch |= Choose("Legacy cards", d.legacyProfile, profiles);
+        }
         ImGui::SeparatorText("Camera");
         std::vector<std::string> cameras = {"Chase", "Bonnet", "Above", "Beside", "TV"};
         cameras.resize(static_cast<size_t>(std::max(1, std::min(d.cameras, 5))));

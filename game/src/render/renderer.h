@@ -46,6 +46,8 @@ public:
     iface::RenderStats Stats();
     void CaptureFrame(const std::string& path);
     void SetDebugView(int32_t mode);
+    // An automatic .lbs import's card lighting (RendererApi::setLegacyProfile): 0 off, 1 A baked, 2 B occlusion.
+    void SetLegacyProfile(int32_t mode);
     const char* DebugViewName(int32_t mode) const;
 
 private:

@@ -206,6 +206,59 @@ public:
         return firstIndex;
     }
 
+    // A vegetation object's connected pieces as PLANTS (the plant table, NGGP): RBR's trees and tufts are crossed
+    // flat cards, and without plants the renderer lights each card by its own plane - cardboard - and a card's rays
+    // hit the cards crossing it. A piece is the triangles sharing a vertex position (a tree's crossed cards share
+    // their crossing edge, and separate plants do not touch - design 7.2b). Topology only: no tags (what a piece IS
+    // stays Wallaby's), nothing merged, pieces wider than 50 m (the renderer's kPlantMaxWidth) left out. The object's
+    // triangles are reordered by piece, so each piece is one part and the draw is unchanged.
+    void Plants(uint32_t object)
+    {
+        const ngg::Object o = scene.objects[object];
+        const uint32_t tris = o.indexCount / 3;
+        uint32_t* idx = scene.indices.data() + o.firstIndex;
+        std::vector<uint32_t> parent(tris);
+        for (uint32_t t = 0; t < tris; ++t) parent[t] = t;
+        auto find = [&](uint32_t x) {
+            while (parent[x] != x) x = parent[x] = parent[parent[x]];
+            return x;
+        };
+        std::map<std::tuple<int64_t, int64_t, int64_t>, uint32_t> at;   // a position (1 cm) -> a triangle on it
+        auto cm = [](float v) { return static_cast<int64_t>(std::floor(v * 100.0f + 0.5f)); };
+        for (uint32_t t = 0; t < tris; ++t)
+            for (int k = 0; k < 3; ++k) {
+                const float* p = scene.vertices[idx[t * 3 + k]].pos;
+                const auto [it, fresh] = at.emplace(std::make_tuple(cm(p[0]), cm(p[1]), cm(p[2])), t);
+                if (!fresh) parent[find(t)] = find(it->second);
+            }
+        // The triangles by piece, in the order the pieces first appear.
+        std::map<uint32_t, uint32_t> rank;
+        std::vector<uint32_t> pieceOf(tris);
+        for (uint32_t t = 0; t < tris; ++t) pieceOf[t] = rank.emplace(find(t), static_cast<uint32_t>(rank.size())).first->second;
+        std::vector<uint32_t> order(tris);
+        for (uint32_t t = 0; t < tris; ++t) order[t] = t;
+        std::stable_sort(order.begin(), order.end(), [&](uint32_t a, uint32_t b) { return pieceOf[a] < pieceOf[b]; });
+        std::vector<uint32_t> sorted(o.indexCount);
+        for (uint32_t t = 0; t < tris; ++t)
+            for (int k = 0; k < 3; ++k) sorted[t * 3 + k] = idx[order[t] * 3 + k];
+        std::copy(sorted.begin(), sorted.end(), idx);
+        for (uint32_t from = 0; from < tris;) {
+            uint32_t to = from;
+            ngg::PlantRecord r{};
+            for (int j = 0; j < 3; ++j) r.bboxMin[j] = 1e30f, r.bboxMax[j] = -1e30f;
+            for (; to < tris && pieceOf[order[to]] == pieceOf[order[from]]; ++to)
+                for (int k = 0; k < 3; ++k) {
+                    const float* p = scene.vertices[idx[to * 3 + k]].pos;
+                    for (int j = 0; j < 3; ++j) r.bboxMin[j] = std::min(r.bboxMin[j], p[j]), r.bboxMax[j] = std::max(r.bboxMax[j], p[j]);
+                }
+            if (std::max(r.bboxMax[0] - r.bboxMin[0], r.bboxMax[2] - r.bboxMin[2]) <= 50.0f) {
+                m_parts.push_back({static_cast<uint32_t>(m_plants.size()), object, o.firstIndex + from * 3, (to - from) * 3});
+                m_plants.push_back(r);
+            }
+            from = to;
+        }
+    }
+
     void Object(uint32_t layer, uint32_t material, uint32_t firstIndex, uint32_t indexCount, int32_t key)
     {
         scene.objects.push_back({layer, material, firstIndex, indexCount});
@@ -239,6 +292,14 @@ public:
     void Finish()
     {
         if (std::any_of(m_keys.begin(), m_keys.end(), [](int32_t k) { return k >= 0; })) scene.objectKeys = m_keys;
+        // The plant table (NGGP): its header, the plants, their parts; no tags (NGGG left out).
+        if (!m_plants.empty()) {
+            const ngg::PlantTableHeader h{static_cast<uint32_t>(m_plants.size()), static_cast<uint32_t>(m_parts.size()), 0, 0};
+            auto put = [&](const void* p, size_t n) { scene.plants.insert(scene.plants.end(), static_cast<const uint8_t*>(p), static_cast<const uint8_t*>(p) + n); };
+            put(&h, sizeof h);
+            put(m_plants.data(), m_plants.size() * sizeof(ngg::PlantRecord));
+            put(m_parts.data(), m_parts.size() * sizeof(ngg::PlantPart));
+        }
         // The bake's scale: 255 over its 99th percentile (a few stray bright vertices would read a dim bake as full).
         uint64_t total = 0;
         for (uint64_t n : m_brightest) total += n;
@@ -275,6 +336,8 @@ private:
     std::map<int, bool> m_alpha;
     std::vector<int32_t> m_keys;
     uint64_t m_brightest[256] = {};
+    std::vector<ngg::PlantRecord> m_plants;
+    std::vector<ngg::PlantPart> m_parts;
 };
 
 } // namespace
@@ -326,9 +389,12 @@ std::string ImportLegacyStage(const std::string& lbsPath, int surface, LegacyImp
         }
     }
     // Vegetation: alpha-tested, two-sided, one texture (both slots the same: the blend a no-op).
-    for (const LbsPlaced& p : g.vegetation)
-        b.Object(kVegetation, b.Material(p.texture, p.texture, ngg::kMaterialAlphaTest | ngg::kMaterialTwoSided), b.Mesh(p.mesh, nullptr),
-                 static_cast<uint32_t>(p.mesh.indices.size()), -1);
+    // Each object's connected pieces its plants (Builder::Plants).
+    for (const LbsPlaced& p : g.vegetation) {
+        const uint32_t first = b.Mesh(p.mesh, nullptr), count = static_cast<uint32_t>(p.mesh.indices.size());
+        b.Object(kVegetation, b.Material(p.texture, p.texture, ngg::kMaterialAlphaTest | ngg::kMaterialTwoSided), first, count, -1);
+        b.Plants(static_cast<uint32_t>(b.scene.objects.size() - 1));
+    }
     // Scenery (world space) and the movable objects (each placement its own geometry, keyed): alpha-tested only where
     // the texture has alpha to test.
     for (const auto& [layer, list] : {std::make_pair(kScenery, &g.scenery), std::make_pair(kMovable, &g.movable)})
@@ -338,6 +404,7 @@ std::string ImportLegacyStage(const std::string& lbsPath, int surface, LegacyImp
                      static_cast<uint32_t>(p.mesh.indices.size()), p.placed ? p.instanceId : -1);
         }
     b.Finish();
+    b.scene.flags |= ngg::kSceneFlagLegacyImport;   // (the renderer's legacy profile for its cards)
 
     if (const std::string e = ngg::Write(b.scene, out.ngg); !e.empty()) return lbsPath + ": the .ngg: " + e;
     const ngg::SceneData& s = b.scene;

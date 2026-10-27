@@ -50,6 +50,8 @@ static const DXGI_FORMAT kMotionFormat = DXGI_FORMAT_R16G16B16A16_FLOAT;
 // The prepass's third target: which PLANT a pixel is a card of (FindPlants),
 // + 1, or 0. The ray tracer compares it with the plant of what a ray hits.
 static const DXGI_FORMAT kPlantFormat = DXGI_FORMAT_R32_UINT;
+// A plant vertex's uv1.y is its size plus this times what it casts (Plant::shadow) - the same in the shaders.
+static const float kPlantShadowPack = 1000.0f;
 
 namespace {
 
@@ -106,7 +108,7 @@ cbuffer Camera : register(b0)
     float              gAoOn;          // and the user wants it applied
     float2             gInvScreen;     // 1/width, 1/height: SV_Position -> table uv
     float3             gCamFwd;        // for cascade selection by view depth
-    float              gPadB;
+    float              gLegacyMode;    // the legacy profile (Scene::SetLegacyProfile): 0 none, 1 A, 2 B
     float4             gCascadeSplit;  // view-space far distance per cascade
     row_major float4x4 gLightViewProj[4];
     float4             gShadowParams;  // x = on, y = texel size, z = normal bias
@@ -302,7 +304,9 @@ struct VSOut { float4 pos : SV_Position; float3 nrm : NORMAL; float2 uv0 : TEXCO
               // A plant's card: its plant + 1, from uv1.x (SphericalFoliageNormals), else 0.
               nointerpolation uint plant : TEXCOORD4;
               // Its size: the plant's radius across, metres (uv1.y), else 0.
-              nointerpolation float plantSize : TEXCOORD5; };
+              nointerpolation float plantSize : TEXCOORD5;
+              // What it casts (Plant::shadow): 0 all, 1 nothing (grass), 2 a lighter, softer shadow (a bush).
+              nointerpolation float plantShadow : TEXCOORD6; };
 
 )" /* fifth split: MSVC 16380-byte literal limit, adjacent literals concatenate */ R"(
 // Leaves are not opaque lambertian sheets. Two cheap terms stand in for that:
@@ -311,6 +315,7 @@ struct VSOut { float4 pos : SV_Position; float3 nrm : NORMAL; float2 uv0 : TEXCO
 // which is why real backlit foliage glows instead of silhouetting black.
 static const float kFoliageWrap = 0.4;
 static const float kFoliageTransmission = 0.5;
+static const float kPlantShadowPack = 1000.0;   // uv1.y = size + this * Plant::shadow (scene.cpp)
 
 // A plant's place-in-the-plant (kVolumeScale in scene.cpp): the same seen from
 // either side of a card, so never flipped by facing.
@@ -379,7 +384,9 @@ VSOut VSMain(VSIn i)
     // alpha-tested geometry never blends a second layer - and carries the
     // plant's index as a float, exact to 2^24.
     o.plant = (VolumeNormal(i.nrm) && i.uv1.x >= 0.0 && i.uv1.x < 16777215.0) ? (uint)i.uv1.x + 1u : 0u;
-    o.plantSize = o.plant != 0u ? max(i.uv1.y, 0.0) : 0.0;
+    const float packed = max(i.uv1.y, 0.0);
+    o.plantShadow = o.plant != 0u ? floor(packed / kPlantShadowPack) : 0.0;
+    o.plantSize = o.plant != 0u ? packed - o.plantShadow * kPlantShadowPack : 0.0;
     o.col = i.col;
     return o;
 }
@@ -391,6 +398,10 @@ VSOut VSMain(VSIn i)
 void PSShadow(VSOut i)
 {
 #ifdef ALPHA_TEST
+    // What a plant casts (Plant::shadow): grass nothing - its shadow is the cards' outlines - and a bush every other
+    // texel, which the 2x2 comparison filter reads as a lighter shadow.
+    if (i.plantShadow > 0.5 && i.plantShadow < 1.5) discard;
+    if (i.plantShadow > 1.5 && ((uint(i.pos.x) + uint(i.pos.y)) & 1u) != 0u) discard;
     float4 t0 = gTex0.Sample(gSamp, i.uv0);
     clip(t0.a * i.col.a - (170.0 / 255.0));
 #endif
@@ -458,6 +469,17 @@ PrepassOut PSPrepass(VSOut i, bool frontFace : SV_IsFrontFace)
         if (dot(G, gCamPos - i.wpos) < 0.0) G = -G;
         o.normal = float4(G, 0.5);
         o.plant = i.plant;
+    }
+    else if (gLegacyMode > 0.5)
+    {
+        // A card of an automatic legacy import (Scene::SetLegacyProfile): no plants, and its rays skip EVERY
+        // card - ~0 says so (rt.cpp Occluded) - so only opaque geometry shadows it. The card's plane for the
+        // ray origin, as a plant's.
+        float3 G = cross(ddy(i.wpos), ddx(i.wpos));
+        G = dot(G, G) > 1e-20 ? normalize(G) : float3(0.0, 1.0, 0.0);
+        if (dot(G, gCamPos - i.wpos) < 0.0) G = -G;
+        o.normal = float4(G, 0.5);
+        o.plant = 0xFFFFFFFFu;
     }
 #endif
     o.motion = float4(0.0, 0.0, 0.0, 0.0);
@@ -627,6 +649,17 @@ float4 PSMain(VSOut i, bool frontFace : SV_IsFrontFace) : SV_Target
         // is on the side we are looking at. Flipping by facing is the whole fix
         // for that half of the problem.
         if (!frontFace && !VolumeNormal(i.nrm)) N = -N;
+#ifdef ALPHA_TEST
+        // THE LEGACY PROFILE (Scene::SetLegacyProfile), on an automatic import's cards: their own plane normals are
+        // what makes crossed cards read as cardboard - one catches the sun, the one crossing it goes dark. A: an
+        // upward surface (the bake gives the pattern); B: halfway up. (The importer's vegetation is plants - its
+        // connected pieces in a plant table - and has volume normals, so this is the rest: fences, spectators.)
+        if (gLegacyMode > 0.5 && !VolumeNormal(i.nrm))
+        {
+            if (gLegacyMode < 1.5) N = float3(0.0, 1.0, 0.0);
+            else N = normalize(N + float3(0.0, 1.0, 0.0));
+        }
+#endif
 
         // Normal mapping, with the tangent frame from SCREEN-SPACE DERIVATIVES
         // rather than a vertex attribute. Two reasons, and the second decided
@@ -815,6 +848,20 @@ float4 PSMain(VSOut i, bool frontFace : SV_IsFrontFace) : SV_Target
         // already (see SphericalFoliageNormals) - and a highlight computed from
         // a fiction lands in the wrong place and flickers as the camera moves.
         lit = diffuseCol * (sunColour * (ndl + trans) * vis + ambient * matAo);
+        // The legacy profile's two ways (Scene::SetLegacyProfile); `vis` is already from opaque geometry only (the
+        // card's rays skipped every card). RBR's bake is the vertex colour times its scale.
+        if (gLegacyMode > 0.5 && !VolumeNormal(i.nrm))
+        {
+            const float3 bake = i.col.rgb * gBakedScale;
+            if (gLegacyMode < 1.5)
+                // A: the bake's pattern under today's light - an upward surface's sun and sky, so weather and
+                // exposure still apply; the bake's own sun stays where RBR baked it.
+                lit = diffuseCol * bake * (sunColour * ndl * vis + ambient * matAo);
+            else
+                // B: dynamic, the bake only as occlusion of the ambient (its darker canopy insides and undergrowth).
+                lit = diffuseCol * (sunColour * (ndl + trans) * vis
+                                    + ambient * matAo * saturate(dot(bake, float3(0.299, 0.587, 0.114))));
+        }
 #else
         float ndl = saturate(dot(N, gSunTowards));
         float vis = SunVis(i.wpos, i.pos.xy, N);
@@ -1081,7 +1128,7 @@ struct CameraCB
     float aoOn;
     float invScreen[2];
     float camFwd[3];
-    float padB;
+    float legacyMode;      // gLegacyMode: the legacy profile of this scene, 0 none
     float cascadeSplit[4];
     float lightViewProj[4][16];
     float shadowParams[4];
@@ -1883,7 +1930,8 @@ void Scene::SphericalFoliageNormals(std::vector<Vertex>& verts,
             // grass is a strip metres long and 40 cm tall, and its length as
             // the size gave sunlit tufts a tree's dark side (sun 0.70).
             verts[v].uv1[0] = (float)pi;
-            verts[v].uv1[1] = (std::min)((std::max)(e[0], e[2]), 0.5f * h);
+            // And what it casts, in the thousands (Plant::shadow: the shadow pass and the rays read it there).
+            verts[v].uv1[1] = (std::min)((std::max)(e[0], e[2]), 0.5f * h) + kPlantShadowPack * (float)pl.shadow;
             ++touched;
         }
     }
@@ -1906,9 +1954,14 @@ void Scene::SphericalFoliageNormals(std::vector<Vertex>& verts,
 // Feeds the volume normals (SphericalFoliageNormals) and the ray tracer, whose
 // foliage rays ignore the plant they start in (rt.cpp, Occluded).
 static const float kPlantMaxWidth = 50.0f;    // metres; see FindPlants
+// An untagged import's plant casts by its height (Plant::shadow) as Wallaby's tags would have it - measured on stage
+// 41's tagged .ngg: grass-card 99% under 0.60 m, bush-card 10-90% 0.69-2.25 m, tree-card from 2.89 m (p10). Under
+// kGrassHeight nothing, under kBushHeight a bush's soft shadow, above all of it.
+static const float kGrassHeight = 0.65f;      // metres
+static const float kBushHeight = 2.5f;        // metres
 
 bool Scene::ReadPlants(const uint8_t* tags, size_t tagBytes,
-                       const uint8_t* table, size_t tableBytes, uint32_t indexCount)
+                       const uint8_t* table, size_t tableBytes, uint32_t indexCount, bool untaggedCards)
 {
     m_plants.clear();
     m_triPlant.clear();
@@ -1954,7 +2007,7 @@ bool Scene::ReadPlants(const uint8_t* tags, size_t tagBytes,
                     m_tagNames[i] == "grass-card";
 
     m_plants.resize(h.plantCount);
-    size_t cards = 0;
+    size_t cards = 0, shadowless = 0, soft = 0;
     for (uint32_t p = 0; p < h.plantCount; ++p)
     {
         Plant& pl = m_plants[p];
@@ -1962,14 +2015,27 @@ bool Scene::ReadPlants(const uint8_t* tags, size_t tagBytes,
         memcpy(pl.bmax, rec[p].bboxMax, sizeof(pl.bmax));
         pl.firstTag = rec[p].firstTagRef;
         pl.tagCount = rec[p].tagCount;
-        pl.crossed = false;
+        pl.crossed = untaggedCards;
+        // What it casts: an untagged import's plant by its height (a tuft or a strip of grass is short, its shadow
+        // the cards' outlines and nothing else), a tagged one by its tag.
+        const float height = pl.bmax[1] - pl.bmin[1];
+        pl.shadow = !untaggedCards ? kPlantShadowCast : height < kGrassHeight ? kPlantShadowNone
+                  : height < kBushHeight ? kPlantShadowSoft : kPlantShadowCast;
         for (uint32_t k = 0; k < pl.tagCount; ++k)
         {
             const uint32_t r = pl.firstTag + k;
             if (r < m_plantTagRefs.size() && m_plantTagRefs[r] < isCard.size() && isCard[m_plantTagRefs[r]])
                 pl.crossed = true;
+            if (r < m_plantTagRefs.size() && m_plantTagRefs[r] < m_tagNames.size())
+            {
+                const std::string& t = m_tagNames[m_plantTagRefs[r]];
+                if (t == "grass-card") pl.shadow = kPlantShadowNone;
+                else if (t == "bush-card") pl.shadow = kPlantShadowSoft;
+            }
         }
         cards += pl.crossed;
+        shadowless += pl.shadow == kPlantShadowNone;
+        soft += pl.shadow == kPlantShadowSoft;
     }
 
     m_triPlant.assign(indexCount / 3, 0xFFFFFFFFu);
@@ -1984,7 +2050,8 @@ bool Scene::ReadPlants(const uint8_t* tags, size_t tagBytes,
         tris += q.indexCount / 3;
     }
     Log("scene: plants from the file - %u plants in %u parts (%zu triangles), %zu of crossed cards, "
-        "%zu tag names%s", h.plantCount, h.partCount, tris, cards, m_tagNames.size(),
+        "%zu tag names; %zu cast no shadow, %zu a soft one%s", h.plantCount, h.partCount, tris, cards, m_tagNames.size(),
+        shadowless, soft,
         bad ? " - some parts out of range, skipped" : "");
     return true;
 }
@@ -2620,6 +2687,7 @@ void Scene::ResetScene()
     m_indexCount = 0;
     m_bakedScale = 1.0f;
     m_anchorToCamera = false;
+    m_legacyImport = false;
     m_staticIndices.clear();
     ++m_rtGeneration;              // every mesh key from the previous stage is dead
 }
@@ -2891,9 +2959,12 @@ bool Scene::LoadFromMemory(ID3D12Device* dev, ID3D12CommandQueue* queue,
     // alpha-test flag, and the object table is what says which vertices belong
     // to which tree.
     // The plants as the file says (NGGP, written by the converter, corrected by a human
-    // where one did); only a file without them gets the renderer's own guess.
+    // where one did); only a file without them gets the renderer's own guess - and not an
+    // automatic legacy import (kSceneFlagLegacyImport): its cards are the legacy profile's,
+    // and the guess is wrong there (RBR's vegetation block also holds people, cars, fences).
     if (idx && sh->indexCount && sh->vertexCount &&
-        !ReadPlants(tagNames, tagNameBytes, plants, plantBytes, sh->indexCount))
+        !ReadPlants(tagNames, tagNameBytes, plants, plantBytes, sh->indexCount, (sh->flags & kSceneFlagLegacyImport) != 0) &&
+        !(sh->flags & kSceneFlagLegacyImport))
         FindPlants(reinterpret_cast<const Vertex*>(verts), sh->vertexCount, idx, sh->indexCount);
 
     std::vector<Vertex> fixed;
@@ -2925,6 +2996,8 @@ bool Scene::LoadFromMemory(ID3D12Device* dev, ID3D12CommandQueue* queue,
 
     m_indexCount = sh->indexCount;
     m_anchorToCamera = (sh->flags & kSceneFlagAnchorToCamera) != 0;
+    m_legacyImport = (sh->flags & kSceneFlagLegacyImport) != 0;
+    if (m_legacyImport) Log("scene: an automatic legacy import - its cards lit by the legacy profile %d", m_legacyProfile);
     for (int i = 0; i < 3; ++i) { m_bboxMin[i] = sh->bboxMin[i]; m_bboxMax[i] = sh->bboxMax[i]; }
     ComputeFocusPoint(reinterpret_cast<const Vertex*>(verts), sh->vertexCount);
 
@@ -4953,6 +5026,7 @@ void Scene::RecordPass(ID3D12GraphicsCommandList* list, D3D12_CPU_DESCRIPTOR_HAN
     cb.exposure     = m_atmosphere.exposure;
     cb.aerial       = m_aerial ? 1.0f : 0.0f;
     cb.lightMode    = (float)m_lightMode;
+    cb.legacyMode   = m_legacyImport ? (float)m_legacyProfile : 0.0f;
     cb.sunDiffuse   = m_atmosphere.sunDiffuse;
     cb.skyAmbient   = m_atmosphere.skyAmbient;
     for (int i = 0; i < 3; ++i) cb.groundColour[i] = m_atmosphere.groundColour[i];

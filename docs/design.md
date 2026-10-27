@@ -592,6 +592,22 @@ Each phase ends with a game you can drive. phys-drive works on day one, and ever
         many as Wallaby's `.ngg`) with all 34 textures found.
       - **Look:** it draws close to Wallaby's `.ngg` under the dynamic light. What step 2 is for still shows:
         normals facing away on some flat scenery (banners) and a hard edge on the distant backdrop.
+   1b. vegetation without cardboard — DONE 2026-10-27, on imported and Wallaby stages:
+      - **Import marker:** the importer sets `kSceneFlagLegacyImport` in the scene header. The renderer never guesses
+        plants on such a scene (`FindPlants` does not run).
+      - **Plant table from topology:** the importer writes `NGGP` itself. Each connected piece of a vegetation
+        mesh is a plant, with no tags and nothing merged; pieces over 50 m are left out. The renderer gives an
+        import's untagged plants the full plant path: volume normals, the own-plant ray skip and the canopy's
+        inner darkening. Stage 41: 25,944 plants. RBR's vegetation block also holds people, cars and fences, which
+        become plants too; Wallaby's tags are the exact answer.
+      - **Grass and bush shadows (all stages):** `grass-card` plants cast no sun shadow and no AO. `bush-card`
+        plants cast a lighter, softer one: half their ray hits, every other shadow-map texel. Trees are unchanged.
+        An import goes by plant height instead: under 0.65 m grass, under 2.5 m bush, measured from Wallaby's tags
+        on stage 41.
+      - **Legacy profile:** alpha-tested cards outside the plant table (fences, banners, spectators in scenery)
+        on imports. Mode 0 off, 1 A (RBR's bake times today's light), 2 B (dynamic, the bake as occlusion;
+        default). Their rays skip cards within 1.5 m. Switched by Debug → Legacy cards, `NGG_LEGACY_PROFILE` or
+        renderer interface 3's `setLegacyProfile`.
    2. normals rebuilt, foliage cut out
    3. weather presets from `TrackSettings.ini`, the cache, every RBR stage in the menu catalog
 9. **Game.** Menus, car/stage selection, settings, wheels + FFB, replays, results.

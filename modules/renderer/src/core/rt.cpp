@@ -116,15 +116,22 @@ void Basis(float3 d, out float3 T, out float3 B)
 // held the ray's start, and grass under a tree is inside the tree's box, so it
 // lost the tree's shadow and glowed. What shading the plant's own volume gets
 // comes from the PIXEL shader (FoliageSelfShadow), the same on every card.
+// How far from a legacy card its rays ignore other cards, metres: past a grass tuft (~0.5 m) and the near cards of a
+// tree, short of the canopy over the grass.
+static const float kLegacyCardSkip = 1.5;
 bool Occluded(RayDesc ray, bool count, uint fromPlant, out bool onMoved)
 {
     onMoved = false;
     RayQuery<RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH |
              RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES> q;
+    // From a legacy card (~0, scene.cpp PSPrepass): the cards within kLegacyCardSkip of the start do not count -
+    // the card's own tuft or tree, whose crossing cards split it card by card - while cards farther off (a
+    // canopy over the grass) still shadow it, as everything opaque does.
     q.TraceRayInline(gScene, RAY_FLAG_NONE, 0xFF, ray);
     while (q.Proceed())
     {
         if (q.CandidateType() != CANDIDATE_NON_OPAQUE_TRIANGLE) continue;
+        if (fromPlant == 0xFFFFFFFFu && q.CandidateTriangleRayT() < kLegacyCardSkip) continue;
 
         // Which mesh, and where its alpha triangles live: per INSTANCE now,
         // because the world, a moved object and an editor-added mesh are
@@ -139,6 +146,23 @@ bool Occluded(RayDesc ray, bool count, uint fromPlant, out bool onMoved)
         const uint3 idx  = gAlphaIndices.Load3(tri * 12) + inst.vertexBase;
         const float2 b   = q.CandidateTriangleBarycentrics();
         const float3 w   = float3(1.0 - b.x - b.y, b.x, b.y);
+
+        // What a plant casts (scene.cpp Plant::shadow, in its vertices' uv1.y above kPlantShadowPack; a plant's
+        // vertex has a volume normal, shorter than 0.55): grass nothing - its sun and AO shadows are its cards'
+        // outlines - and a bush half its hits, which the denoise turns into a lighter, softer shadow.
+        {
+            const uint at = idx.x * gStride;
+            const float3 pn = asfloat(inst.vb == 0 ? gVerts.Load3(at + 12) : gDynVerts.Load3(at + 12));
+            if (dot(pn, pn) < 0.3025)
+            {
+                const float packed = max(asfloat(inst.vb == 0 ? gVerts.Load(at + 36) : gDynVerts.Load(at + 36)), 0.0);
+                const float mode = floor(packed / 1000.0);
+                if (mode > 0.5 && mode < 1.5) continue;
+                if (mode > 1.5 && frac(sin(dot(ray.Origin + ray.Direction * 7.0 + float(tri) * 0.001,
+                                                float3(12.9898, 78.233, 37.719))) * 43758.5453) < 0.5)
+                    continue;
+            }
+        }
 
         float2 uv0, uv1, uv2;
         float  a0, a1, a2;
