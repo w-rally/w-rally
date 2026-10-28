@@ -62,6 +62,11 @@ native physics is bit-exact with RBR only under them.
 - Physics libraries (2026-10-29, design 4.3a step 1): `phys-native` split into `rbr-base`, `rbr-collision`,
   `rbr-tyre`, `rbr-car` and `rbr-world`. `Unreached` and its probe moved from `native/entity.*` to
   `native/unreached.*`, so `drive.cpp` and `driveline.cpp` include that instead of `entity.h`. No code changed.
+  - Step 2: `entity.h` split into `entity.h`, `solid.h` and `car_solids.h`, and `rbr-load` added (design 4.3a).
+    The car's impulse code and `CarBody`'s methods moved to `car_parts.cpp`, the base classes' tick slots to
+    `entity.cpp`. Two virtuals replace the casts to `Car` (`Solid::DriveLineStep`, `Solid::SurfaceAt`).
+    `World::ReleasePart` takes `(Solid&, Solid*& carSlot, bool)`; `DetachHinged`, `ReleaseHinged` and
+    `ReleaseStick` left `World` for `car_solids.h`.
 
 - Vegetation (phase 8, 2026-10-27), in ngg-core:
   - `ngg_format.h` gains `kSceneFlagLegacyImport`.

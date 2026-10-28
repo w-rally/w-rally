@@ -1,4 +1,4 @@
-#include "native/entity.h"
+#include "native/car_solids.h"
 
 #include "num/math.h"
 #include "native/flags.h"
@@ -292,14 +292,14 @@ void Car::Step(World& w, float dt)
             continue;
         }
         if (h.damage->lock != 1 && !h.Awake()) w.WakeSolid(h);
-        if (h.damage->lock != 1 && h.damage->attached != 1 && w.ReleaseHinged(h)) slot = nullptr;
+        if (h.damage->lock != 1 && h.damage->attached != 1 && ReleaseHinged(w, h)) slot = nullptr;
     }
     // The mounted parts: a loose one stepped, one off let go.
     for (MountedSolid*& slot : mounted) {
         if (!slot) continue;
         if (slot->Stick() == 1) {
             slot->StickStep(w, dt);
-        } else if (slot->Stick() == 2 && w.ReleaseStick(*slot)) {
+        } else if (slot->Stick() == 2 && ReleaseStick(w, *slot)) {
             if (slot->hasExclusions)   // EntityChildRemove: the car out of the part's exclusions
                 if (const auto it = std::find(slot->exclusions.begin(), slot->exclusions.end(), this); it != slot->exclusions.end()) slot->exclusions.erase(it);
             slot = nullptr;

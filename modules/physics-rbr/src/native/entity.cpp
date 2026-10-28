@@ -93,15 +93,6 @@ Vec4* FramePointMove(const FramePoint& fp, Vec4& out, const Frame& to)
     return FrameMove(*fp.frame, to, &out, 1, Move::Points);
 }
 
-void CarBody::PointsUp(Vec4* p, uint32_t n) const
-{
-    for (uint32_t k = 0; k < n; ++k) {   // CarBodyToLocal4 (0x4eb820)
-        p[k].x = (F32(p[k].x) - F32(centerOfGravity.x)).f();
-        p[k].y = (F32(p[k].y) - F32(centerOfGravity.y)).f();
-        p[k].z = (F32(p[k].z) - F32(centerOfGravity.z)).f();
-    }
-}
-
 Vec4* FrameMove(const Frame& t, const Frame& a, Vec4* p, uint32_t n, Move m)
 {
     struct Ops {
@@ -124,6 +115,61 @@ Vec4* FrameMoveCopyN(const Frame& t, const Vec4* src, const Frame& a, Vec4* dst,
 {
     for (uint32_t i = 0; i < n; ++i) std::memcpy(&dst[i], &src[i], 16);
     return FrameMove(t, a, dst, n, m);
+}
+
+// ---- the notify and tick slots (a plain entity hands them to its awake children)
+
+namespace {
+void NotifyDescendants(Entity& e)   // ChildVisit with vslot 16
+{
+    for (Entity* ch : e.children) {
+        if (!ch->Awake()) continue;
+        ch->Notify();
+        NotifyDescendants(*ch);
+    }
+}
+constexpr float kBig = 999999.875f;
+} // namespace
+
+void Entity::Notify() { NotifyDescendants(*this); }
+
+void Body::Notify()
+{
+    boundsMin.x = boundsMin.y = boundsMin.z = kBig;   // (w kept)
+    boundsMax.x = boundsMax.y = boundsMax.z = -kBig;
+    if (mesh) MeshWorldBounds(*mesh, frame, WorldOf(frame), &boundsMin, &boundsMax);
+    Entity::Notify();
+}
+
+void Entity::TickBegin(World& w, float dt)
+{
+    for (Entity* ch : children)
+        if (ch->Awake()) ch->TickBegin(w, dt);
+}
+
+void Entity::PrepareForces(World& w)
+{
+    for (Entity* ch : children)
+        if (ch->Awake()) ch->PrepareForces(w);
+}
+
+void Entity::Forces(World& w)
+{
+    for (Entity* ch : children)
+        if (ch->Awake()) ch->Forces(w);
+}
+
+void Entity::Step(World& w, float dt)
+{
+    Notify();
+    for (Entity* ch : children)
+        if (ch->Awake()) ch->Step(w, dt);
+}
+
+void Entity::StepChildren(World& w, float dt)
+{
+    for (Entity* ch : children)
+        if (ch->Awake()) ch->StepChildren(w, dt);
 }
 
 } // namespace phys::native

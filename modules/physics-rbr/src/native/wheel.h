@@ -6,7 +6,7 @@
 // car's links wait.
 #include <cstdint>
 
-#include "native/entity.h"
+#include "native/car_solids.h"
 #include "native/stage_collision.h"
 #include "native/suspension.h"
 #include "native/tyre.h"
