@@ -299,6 +299,38 @@ configures without an interface bump.
   (restart/rewind), extended car data (more than 4 cylinders, modern drivetrains, aero).
 - It never claims RBR compatibility for timing. Results and replays carry the module id + `buildHash` (§6).
 
+### 4.3a Splitting the physics: libraries, not modules (decided 2026-10-28)
+
+The physics stays **one module per world**, behind one interface. Its parts are split at the **source** level
+instead, into libraries in `modules/physics-rbr` that a module links or replaces when it is built:
+
+| library | holds (today in `phys-native`) |
+|---|---|
+| `rbr-collision` | the stage's `.col`/`.trk`/`.mat` world, contact detection, queries: `stage_collision`, `collision_mesh`, `contacts`, `brake_wall` |
+| `rbr-tyre` | the tyre model and the ground probe: `tyre`, the wheel's probe |
+| `rbr-car` | engine, drive, driveline, VCU, suspension, damage, hinged parts |
+| `rbr-world` | the solver, rigid bodies, entities, events, and `World::Step` that ties them together |
+
+- **WPhysicsRBR** links all four and stays bit-exact (golden replay).
+- **WPhysics** (§4.3) links the parts it keeps and replaces the ones it rewrites. A new tyre model, for example,
+  replaces `rbr-tyre` but keeps RBR's collision and car.
+- **The seams are C++ interfaces** (for example a `TyreModel` the world step calls), not a C ABI.
+
+**Why not separate DLLs:**
+- **The parts interleave inside every tick.** The wheels probe the stage, the tyre forces feed the car, and the
+  body, parts and wheels go through contacts, the solver and the penetration pass before integrating. A runtime
+  boundary there would freeze those internals as an ABI, and they are what WPhysics exists to change.
+- **Bit-exactness is easiest from one build of one source tree.** Several DLLs that must match each other add a
+  way to break it for no gain.
+
+**Status:** the split is not done yet. When it is, it is a refactor that the golden replay must pass unchanged.
+
+**Queries for the rest of the game.** Other parts of the game need answers from the physics: the camera a ray
+against the stage (so it does not clip into banks), AI or ghost cars the surface under a point, sound and particles
+the surface type. They go into the physics interface as optional functions (`raycast`, `surfaceAt`), each behind a
+capability bit (`kPhysicsCap...`). A module without them does not set the bit, and the game falls back.
+Adding them is an interface version bump when the first caller needs them, not before.
+
 ### 4.4 Choosing the physics
 
 - The config has a default physics. An event or online championship may *require* one (id + minimum module
