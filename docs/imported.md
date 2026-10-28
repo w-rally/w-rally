@@ -59,6 +59,10 @@ native physics is bit-exact with RBR only under them.
 - Legacy stages (phase 8, step 1): `data/lsp.*` gains `ReadZip`, every member of a zip from one read (a stage's
   texture archive). `ngg_format.h`'s note on who writes the layout now names WRally's writer, `ngg_scene.h`.
 
+- Physics libraries (2026-10-29, design 4.3a step 1): `phys-native` split into `rbr-base`, `rbr-collision`,
+  `rbr-tyre`, `rbr-car` and `rbr-world`. `Unreached` and its probe moved from `native/entity.*` to
+  `native/unreached.*`, so `drive.cpp` and `driveline.cpp` include that instead of `entity.h`. No code changed.
+
 - Vegetation (phase 8, 2026-10-27), in ngg-core:
   - `ngg_format.h` gains `kSceneFlagLegacyImport`.
   - `Scene` gains the legacy profile (`SetLegacyProfile`; shader `gLegacyMode` in the former `gPadB` slot) and a

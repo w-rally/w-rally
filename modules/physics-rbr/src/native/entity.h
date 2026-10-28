@@ -14,6 +14,7 @@
 #include <vector>
 
 #include "native/rigid_body.h"
+#include "native/unreached.h"
 #include "native/vcu.h"
 
 namespace phys::native {
@@ -86,11 +87,6 @@ struct MeshInFrame {
     const Frame* frame = nullptr;
 };
 
-// A move no classic run makes (a vtable slot without ported code): reported and the program stopped - or, with
-// g_unreachedProbe set (a check asking whether a walk can be made), the move skipped and *g_unreachedProbe set.
-void Unreached(const char* what);
-inline thread_local bool* g_unreachedProbe = nullptr;
-inline thread_local const char* g_unreachedWhat = nullptr;   // the last move a probe skipped
 
 class Entity {
 public:

@@ -6,7 +6,7 @@
 #include "num/bits.h"
 #include "num/x87.h"
 #include "num/x87math.h"
-#include "native/entity.h"
+#include "native/unreached.h"
 
 namespace phys::native {
 

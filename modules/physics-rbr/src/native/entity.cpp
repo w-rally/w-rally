@@ -1,7 +1,5 @@
 #include "native/entity.h"
 
-#include <cstdio>
-#include <cstdlib>
 #include <cstring>
 
 #include "num/f32.h"
@@ -11,17 +9,6 @@
 namespace phys::native {
 
 using num::F32;
-
-void Unreached(const char* what)
-{
-    if (g_unreachedProbe) {
-        *g_unreachedProbe = true;
-        g_unreachedWhat = what;
-        return;
-    }
-    std::fprintf(stderr, "native: %s reached - no classic run made this move, it is not ported\n", what);
-    std::abort();
-}
 
 void Frame::Up(Vec4* p, uint32_t n, Move m) const
 {
