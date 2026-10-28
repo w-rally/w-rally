@@ -17,7 +17,7 @@
 #include "num/math.h"
 #include "native/drive.h"
 #include "native/engine.h"
-#include "native/entity.h"
+#include "native/car_solids.h"
 #include "native/rigid_body.h"
 #include "native/solver.h"
 #include "native/suspension.h"

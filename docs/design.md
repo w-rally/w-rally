@@ -304,14 +304,18 @@ configures without an interface bump.
 The physics stays **one module per world**, behind one interface. Its parts are split at the **source** level
 instead, into libraries in `modules/physics-rbr` that a module links or replaces when it is built:
 
-| library | holds (today in `phys-native`) |
-|---|---|
-| `rbr-collision` | the stage's `.col`/`.trk`/`.mat` world, contact detection, queries: `stage_collision`, `collision_mesh`, `contacts`, `brake_wall` |
-| `rbr-tyre` | the tyre model and the ground probe: `tyre`, the wheel's probe |
-| `rbr-car` | engine, drive, driveline, VCU, suspension, damage, hinged parts |
-| `rbr-world` | the solver, rigid bodies, entities, events, and `World::Step` that ties them together |
+Each library depends only on the ones above it in this table:
 
-- **WPhysicsRBR** links all four and stays bit-exact (golden replay).
+| library | holds | headers |
+|---|---|---|
+| `rbr-base` | `Unreached`, the stop on a path no classic run takes | `unreached.h` |
+| `rbr-collision` | static collision (the stage's `.col`, materials) and dynamic collision: the object model's base (frames, entities, bodies), collision meshes, events, the pair tests, brake walls | `entity.h`, `stage_collision.h`, `collision_mesh.h`, `event.h`, `contacts.h`, `brake_wall.h` |
+| `rbr-tyre` | the tyre model and the spring-damper | `tyre.h`, `suspension.h` |
+| `rbr-world` | rigid bodies (`Solid`), the contact solver, the world and its step | `solid.h`, `rigid_body.h`, `solver.h`, `world.h` |
+| `rbr-car` | the car's models (drive, engine, VCU, driveline) and its solids (the car, its wheels, hinged and mounted parts, damage) | `car_solids.h`, `wheel.h`, `damage.h`, `drive.h`, `engine.h`, `vcu.h`, `driveline.h` |
+| `rbr-load` | the world built from RBR's files (defs, setups, the stage and the car) and run | `defs.h`, `setup.h`, `load.h`, `run.h` |
+
+- **WPhysicsRBR** links them all and stays bit-exact (golden replay).
 - **WPhysics** (§4.3) links the parts it keeps and replaces the ones it rewrites. A new tyre model, for example,
   replaces `rbr-tyre` but keeps RBR's collision and car.
 - **The seams are C++ interfaces** (for example a `TyreModel` the world step calls), not a C ABI.
@@ -332,12 +336,25 @@ instead, into libraries in `modules/physics-rbr` that a module links or replaces
   - `rbr-world`: everything else; `phys-native` is gone.
 
   The three model libraries include nothing above them. The golden replay is unchanged (49,913 poses bit-exact).
-- **Step 2, still to do:** dynamic collision (`collision_mesh`, `event`, `contacts`, `brake_wall`) and the car's
-  solids (`Car`, `Wheel`, `HingedSolid`, `damage`) are still in `rbr-world`. They live in RBR's single object model
-  (`entity.h` declares `Solid`, `Car` with its `Vcu`, and the hinged and mounted parts), and their methods reach
-  into `World` (`car.cpp`, `wheel.cpp` and `hinge.cpp` include `world.h`; `Car::ApplyImpulse` is in `solver.cpp`).
-  Moving them out needs the C++ seams above: `World` services the car calls through an interface, and the class
-  declarations split from `entity.h`.
+- **Step 2, the object model: DONE 2026-10-29.** The layout in the table above.
+  - **Headers:** RBR's one object model in `entity.h` is split into `entity.h` (frames, `Entity`, `Body`),
+    `solid.h` (`Solid`, what its damage handler hears) and `car_solids.h` (the car, its passengers, its hinged and
+    mounted parts, its body). The declarations moved verbatim.
+  - **Definitions:** the car's impulse code moved from `solver.cpp` into `car_parts.cpp`, and so did `CarBody`'s
+    from `world.cpp` and `entity.cpp`. The base classes' notify and tick slots moved from `world.cpp` into
+    `entity.cpp`.
+  - **Seams** where RBR cast a car-flagged solid to `CCar`:
+    - `Solid::DriveLineStep`: the car's drive-line parameter after the integration;
+    - `Solid::SurfaceAt`: the car's surface cells under a contact;
+    - `World::ReleasePart` takes a plain solid and its car slot; the car's `DetachHinged`, `ReleaseHinged` and
+      `ReleaseStick` are free functions in `rbr-car`.
+
+    The calls happen at the same points, so the arithmetic is unchanged: the golden replay is still bit-exact.
+  - **Enforced:** CTests `physics-layer-rbr-collision`, `-rbr-tyre`, `-rbr-world` and `-rbr-car` link each
+    library whole with only the ones below it. An upward call fails the link: a planted one in `world.cpp` did.
+  - **Not yet a seam:** the car calls the world's concrete members (gravity, stage collision, the mesh and grid
+    queries, the game's callbacks). A physics module replacing `rbr-world` but keeping RBR's car would need those
+    behind an interface. Not done until one does.
 
 **Queries for the rest of the game.** Other parts of the game need answers from the physics: the camera a ray
 against the stage (so it does not clip into banks), AI or ghost cars the surface under a point, sound and particles

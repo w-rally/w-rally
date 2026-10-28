@@ -82,96 +82,6 @@ void Solid::ApplyImpulse(const Vec4& p, const Vec4& J, const ImpulseContact& c)
     // (The impact recorder - a debug ring drawn with RenderDamageInfo - is not kept.)
 }
 
-void PartSolid::ImpulseResponse(const Frame& from, const Vec4& p, const Vec4& n, const Vec4& d, bool cross, float* self, float* other) const
-{
-    if (!car) {
-        Solid::ImpulseResponse(from, p, n, d, cross, self, other);
-        return;
-    }
-    const Solid* const to = parent ? const_cast<Entity*>(parent)->AsSolid() : nullptr;
-    if (!to) {
-        Unreached("a part's response forwarded to a parent that is not a solid");
-        return;
-    }
-    Vec4 a, b, r;   // in the part's frame - handed to the parent's response as they are
-    FrameMoveCopy(from, n, frame, a, Move::Dirs);
-    FrameMoveCopy(from, d, frame, b, Move::Dirs);
-    FrameMoveCopy(from, p, frame, r, Move::Points);
-    to->body.ImpulseResponse(r, a, b, cross, self, other);
-}
-
-void HingedSolid::ApplyImpulse(const Vec4& p, const Vec4& J, const ImpulseContact& c)
-{
-    if (!car) {
-        Solid::ApplyImpulse(p, J, c);
-        return;
-    }
-    Vec4 axis;   // the hinge axis in the world
-    FrameMoveCopy(car->frame, hingeAxis, WorldOf(car->frame), axis, Move::Dirs);
-    const Vec4 r{(F32(p.x) - F32(pivot.x)).f(), (F32(p.y) - F32(pivot.y)).f(), (F32(p.z) - F32(pivot.z)).f(), 0.0f};   // (w: stack)
-    Vec4 m;
-    num::Cross3(r, J, m);
-    const F32 t = (F32(axis.z) * F32(m.z) + F32(axis.y) * F32(m.y)) + F32(axis.x) * F32(m.x);   // the moment about the axis
-    spin = (F32(spin) + t / F32(inertia)).f();
-    F32 j = (F32(J.z) * F32(axis.z) + F32(J.y) * F32(axis.y)) + F32(axis.x) * F32(J.x);
-    bool broke = false;
-    if (jmp::A(j.f(), 2000.0f)) {
-        j = F32(2000.0f);
-        broke = true;
-    } else if (jmp::A(-2000.0f, j.f())) {
-        j = F32(-2000.0f);
-        broke = true;
-    }
-    if (breakChain) return;
-    Vec4 F;
-    num::Scale4(axis, j.f(), F);
-    const float s = jmp::A(j.f(), 0.0f) ? j.f() : (F32(0.0f) - j).f();
-    Solid* const to = car;
-    to->ApplyImpulse(p, F, {0, 0, c.materials, s, 0.0f, c.tangent});   // the load along the axis into the car
-    if (!broke) return;
-    // Overloaded: the part comes off (its damage unlocked and detached, the car lets it go into the world).
-    Car* const owner = dynamic_cast<Car*>(to);
-    if (!damage || !world || !owner) {
-        Unreached("a hinged part torn off without its damage, its world or a car");
-        return;
-    }
-    damage->lock = 0;
-    damage->attached = 0;
-    world->DetachHinged(*owner, *this);
-}
-
-void Car::SurfaceAt(const Vec4& pb, uint32_t& surfaceA, uint32_t& surfaceB) const
-{
-    const float len = num::Length3(pb);
-    Vec4 p0, p1{}, point, plane;
-    if (jmp::A(len, 0.0010000000474974513f)) num::Scale4(pb, (F32(10.0f) / F32(len)).f(), p0);
-    else num::Vec4Zero(p0);
-    p1.z = 0.3499999940395355f;
-    float t;
-    uint32_t mat;
-    CollisionMesh* const m = Mesh();
-    if (!m) {
-        Unreached("CarSurfaceAt without a mesh");
-        surfaceA = surfaceB = 0;
-        return;
-    }
-    if (m->SegmentHit(&p0.x, &p1.x, &point, &t, &plane, &mat)) {
-        surfaceB = m->surfaceB, surfaceA = m->surfaceA;
-        m->surfaceA = m->surfaceB = 0;
-    } else {
-        surfaceA = surfaceB = 0;
-    }
-}
-
-void Car::ApplyImpulse(const Vec4& p, const Vec4& J, const ImpulseContact& c)
-{
-    Vec4 pb;
-    FrameMoveCopy(WorldOf(frame), p, frame, pb, Move::Points);
-    ImpulseContact own = c;   // the car's own surface there replaces the pair
-    SurfaceAt(pb, own.surfaceA, own.surfaceB);
-    Solid::ApplyImpulse(p, J, own);
-}
-
 // ---- the events
 
 namespace {
@@ -590,13 +500,11 @@ bool ContactResponse(Solid& body, const ContactRecord& R, float weight, float fr
     FrameMoveCopy(world, F, body.frame, force, Move::Dirs);   // into the body's axes, and its torque about the body's origin
     num::Cross3(R.bodyPoint, force, torque);
     if (body.damage && (body.flags & kCar)) {   // the car's damage handler feels the push
-        const Car* const car = dynamic_cast<const Car*>(&body);
-        if (!car) {
+        ContactImpact im;
+        if (!body.SurfaceAt(R.bodyPoint, im.surfaceA, im.surfaceB)) {   // (the car's slot: CarSurfaceAt)
             Unreached("a contact impact on a car that is not a Car");
             return true;
         }
-        ContactImpact im;
-        car->SurfaceAt(R.bodyPoint, im.surfaceA, im.surfaceB);
         im.material = R.material;
         im.force = num::Length3(F);
         im.slide = slip.f();

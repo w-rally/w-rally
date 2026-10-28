@@ -386,26 +386,8 @@ void World::PenetrationDetect(Entity& owner, EventList& list)
 // ---- the entities' pose updates and resets
 
 namespace {
-void NotifyDescendants(Entity& e)   // ChildVisit with vslot 16
-{
-    for (Entity* ch : e.children) {
-        if (!ch->Awake()) continue;
-        ch->Notify();
-        NotifyDescendants(*ch);
-    }
-}
 constexpr float kBig = 999999.875f;
 } // namespace
-
-void Entity::Notify() { NotifyDescendants(*this); }
-
-void Body::Notify()
-{
-    boundsMin.x = boundsMin.y = boundsMin.z = kBig;   // (w kept)
-    boundsMax.x = boundsMax.y = boundsMax.z = -kBig;
-    if (mesh) MeshWorldBounds(*mesh, frame, WorldOf(frame), &boundsMin, &boundsMax);
-    Entity::Notify();
-}
 
 void Solid::Notify()
 {
@@ -425,15 +407,6 @@ void Solid::ResetStep()
     num::Vec4Zero(body.stepAngularAcceleration);
     body.backwards = false;
     pushGroup = nullptr;
-}
-
-void CarBody::Notify()
-{
-    Body::Notify();
-    Vec4 lo{kBig, kBig, kBig, 0.0f}, hi{-kBig, -kBig, -kBig, 0.0f};   // (w: the original's stack)
-    stateBoundsValid = true;
-    if (mesh) MeshWorldBounds(*mesh, frame, WorldOf(frame), &lo, &hi);   // BodyMeshBounds (0x4e11a0)
-    stateBoundsLo = lo, stateBoundsHi = hi;
 }
 
 // ---- the wheels' queries
@@ -522,37 +495,6 @@ bool World::GridQuadSegmentQuery(const float* a, const float* b, Vec4* out, floa
 }
 
 // ---- a tick's slots
-
-void Entity::TickBegin(World& w, float dt)
-{
-    for (Entity* ch : children)
-        if (ch->Awake()) ch->TickBegin(w, dt);
-}
-
-void Entity::PrepareForces(World& w)
-{
-    for (Entity* ch : children)
-        if (ch->Awake()) ch->PrepareForces(w);
-}
-
-void Entity::Forces(World& w)
-{
-    for (Entity* ch : children)
-        if (ch->Awake()) ch->Forces(w);
-}
-
-void Entity::Step(World& w, float dt)
-{
-    Notify();
-    for (Entity* ch : children)
-        if (ch->Awake()) ch->Step(w, dt);
-}
-
-void Entity::StepChildren(World& w, float dt)
-{
-    for (Entity* ch : children)
-        if (ch->Awake()) ch->StepChildren(w, dt);
-}
 
 void Solid::PrepareForces(World& w)
 {
@@ -688,10 +630,8 @@ void Solid::Step(World& w, float dt)
 {
     body.Step(dt, (flags & kCar) != 0);
     if (!parent && (jmp::A(dt, 0.0f) || jmp::A(0.0f, dt))) w.GridRefile(*this);   // (SolidIntegrate: moved, re-filed)
-    if ((flags & kCar) && !parent && (jmp::A(dt, 0.0f) || jmp::A(0.0f, dt))) {   // (SolidIntegrate: the car's parameter)
-        if (!w.driveLine) Unreached("a car's step without the stage's drive line");
-        else static_cast<Car*>(this)->driveLineDistance = w.driveLine->Project(&body.position.x, static_cast<Car*>(this)->driveLineDistance).Store();
-    }
+    if ((flags & kCar) && !parent && (jmp::A(dt, 0.0f) || jmp::A(0.0f, dt)))   // (SolidIntegrate: the car's parameter)
+        DriveLineStep(w);
     Entity::Step(w, dt);   // BodyVslot27: the pose's dependants, the children stepped
     if (body.SleepCheck(dt)) w.Sleep(*this);
     if (w.stepped) w.stepped(*this);
@@ -783,23 +723,12 @@ void World::Wake(Solid& s)
 
 // ---- the car's parts
 
-void World::DetachHinged(Car& car, HingedSolid& h)
-{
-    for (Solid*& slot : car.hinged)
-        if (slot == &h && ReleaseHinged(h)) slot = nullptr;
-    if (!h.hasExclusions) return;   // EntityChildRemove: the car out of the part's exclusions
-    if (const auto it = std::find(h.exclusions.begin(), h.exclusions.end(), &car); it != h.exclusions.end()) h.exclusions.erase(it);
-}
-
-bool World::ReleaseHinged(HingedSolid& h) { return ReleasePart(h, false); }
-bool World::ReleaseStick(MountedSolid& m) { return ReleasePart(m, true); }
-
-bool World::ReleasePart(PartSolid& h, bool renormalise)
+bool World::ReleasePart(Solid& h, Solid*& carSlot, bool renormalise)
 {
     if (!h.parent || std::find(h.parent->children.begin(), h.parent->children.end(), &h) == h.parent->children.end()) return false;
     RigidBody& b = h.body;
     const Vec4 p0 = b.position, q0 = b.orientation;
-    Solid& car = *h.car;
+    Solid& car = *carSlot;
     // The pose from the car's frame into the world's (0x51da60 / 0x4e6950; a stick's orientation renormalised).
     Vec4 p, q;
     FrameMoveCopy(car.frame, b.position, *world, p, Move::Points);
@@ -825,7 +754,7 @@ bool World::ReleasePart(PartSolid& h, bool renormalise)
     auto& siblings = h.parent->children;   // out of the car's children
     siblings.erase(std::find(siblings.begin(), siblings.end(), &h));
     h.parent = nullptr;
-    h.car = nullptr;
+    carSlot = nullptr;
     h.Wake();   // vslot 36: woken (not in a list yet: the re-filing finds none)
     Wake(h);
     h.frame.parent = h.olderFrame.parent = world;   // both frames under the world now

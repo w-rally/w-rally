@@ -89,3 +89,15 @@ if(EXISTS ${WRALLY_TEST_RBR_DIR}/Maps/track-41_M.lbs)
     set_tests_properties(legacy-import-41 PROPERTIES PASS_REGULAR_EXPRESSION
         "imported track-41_M.lbs: .* 304744 triangles, .*\(0 missing\).*ngg-check: all good")
 endif()
+
+# The physics' libraries depend downwards only (docs/design.md 4.3a): each linked WHOLE into an empty program with only
+# the libraries below it - a call into one above fails the link, so the build itself is the check.
+foreach(layer rbr-collision rbr-tyre rbr-world rbr-car)
+    add_executable(physics-layer-${layer} physics-layers/main.cpp)
+    target_link_libraries(physics-layer-${layer} PRIVATE ${layer})
+    target_link_options(physics-layer-${layer} PRIVATE /WHOLEARCHIVE:$<TARGET_FILE:${layer}>)
+    foreach(cfg "" _DEBUG _RELEASE _RELWITHDEBINFO _MINSIZEREL)
+        set_target_properties(physics-layer-${layer} PROPERTIES RUNTIME_OUTPUT_DIRECTORY${cfg} ${CMAKE_BINARY_DIR}/tests-bin)
+    endforeach()
+    add_test(NAME physics-layer-${layer} COMMAND physics-layer-${layer})
+endforeach()

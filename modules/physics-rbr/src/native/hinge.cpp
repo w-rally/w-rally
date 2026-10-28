@@ -1,4 +1,4 @@
-#include "native/entity.h"
+#include "native/car_solids.h"
 
 #include <cstring>
 

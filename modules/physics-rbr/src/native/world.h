@@ -18,12 +18,14 @@
 #include "native/collision_mesh.h"
 #include "native/driveline.h"
 #include "native/contacts.h"
-#include "native/entity.h"
+#include "native/solid.h"
 #include "native/event.h"
 #include "native/solver.h"
 #include "native/records.h"
 
 namespace phys::native {
+
+class Car;   // native/car_solids.h (the game's callbacks name it)
 
 // The object grid (the classic ObjectGrid, model/grid.h): 100 x 100 m blocks of 10 x 10 cells; a cell holds its entities in
 // the classic list's order (the first its head: a re-filed body goes first).
@@ -168,13 +170,11 @@ public:
     // the penetration stage with CHECK_PENETR, then the awake bodies' step data reset and saved.
     void Collide(float dt);
 
-    // A hinged part torn off its car (CarHingedDetach 0x4e58f0: each of the car's slots holding it emptied when the part is
-    // released; then EntityChildRemove 0x51a060: the car out of the part's exclusions).
-    void DetachHinged(Car& car, HingedSolid& h);
-    // The part let go into the world (HingedRelease 0x51fd00, then PartFree): false when it is not on its car any more.
-    bool ReleaseHinged(HingedSolid& h);
-    // A mounted part let go (StickRelease 0x522100: its orientation renormalised, then PartFree).
-    bool ReleaseStick(MountedSolid& m);
+    // A part let go into the world (PartFree, with HingedRelease 0x51fd00 / StickRelease 0x522100): its pose and velocities
+    // from its car's (`carSlot`, the part's own: emptied) into the world's - the orientation renormalised for a mounted
+    // part -, out of the car's children, woken, filed, the game told. False when it is not on its car any more. (The
+    // car's own releases: native/car_solids.h.)
+    bool ReleasePart(Solid& part, Solid*& carSlot, bool renormalise);
     // A solid woken by the game's call (SolidWake, vslot 36: its state, re-filed, the game told).
     void WakeSolid(Solid& s)
     {
@@ -204,7 +204,6 @@ public:
     void Hold(Solid& s);
 
 private:
-    bool ReleasePart(PartSolid& p, bool renormalise);
     void Wake(Solid& s);   // the solver's: re-filed (a parent's child stays), the game told
 };
 

@@ -17,7 +17,7 @@
 #include <cstdint>
 #include <functional>
 
-#include "native/entity.h"
+#include "native/solid.h"
 #include "native/event.h"
 
 namespace phys::native {
