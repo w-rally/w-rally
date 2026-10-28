@@ -26,23 +26,38 @@ add_library(phys-data STATIC src/data/rpl.cpp src/data/trk.cpp src/data/trkworld
             src/data/rec.cpp src/data/lbs.cpp src/data/sgc.cpp src/data/dls.cpp src/data/files.cpp)
 target_include_directories(phys-data PUBLIC ${SRC})
 
-# phys-native: the physics as native classes.
-add_library(phys-native STATIC src/native/stage_collision.cpp src/native/rigid_body.cpp src/native/entity.cpp
-            src/native/collision_mesh.cpp src/native/event.cpp src/native/contacts.cpp src/native/brake_wall.cpp
-            src/native/world.cpp src/native/solver.cpp src/native/tyre.cpp src/native/suspension.cpp src/native/wheel.cpp
-            src/native/drive.cpp src/native/engine.cpp src/native/vcu.cpp src/native/car.cpp src/native/driveline.cpp
-            src/native/hinge.cpp src/native/damage.cpp src/native/def_load.cpp src/native/setup.cpp src/native/load.cpp
-            src/native/run.cpp)
-target_link_libraries(phys-native PUBLIC phys-num phys-data)
-target_compile_options(phys-native PRIVATE /W4)
+# The physics as native classes, in the libraries a physics module links or replaces (docs/design.md 4.3a). They
+# depend downwards only: rbr-world on the other three, those on rbr-base, phys-num and phys-data.
+#   rbr-base       what every part shares: Unreached (a move no classic run makes)
+#   rbr-collision  the stage's static collision world and its queries (.col, materials)
+#   rbr-tyre       the tyre model and the spring-damper
+#   rbr-car        the car's models: drive, engine, VCU, driveline
+#   rbr-world      RBR's object model (entities, bodies, the car's solids and wheels), dynamic collision (meshes,
+#                  events, contacts, brake walls), the solver, damage, the load and the world step
+add_library(rbr-base STATIC src/native/unreached.cpp)
+target_include_directories(rbr-base PUBLIC ${SRC})
+add_library(rbr-collision STATIC src/native/stage_collision.cpp)
+target_link_libraries(rbr-collision PUBLIC rbr-base phys-num phys-data)
+add_library(rbr-tyre STATIC src/native/tyre.cpp src/native/suspension.cpp)
+target_link_libraries(rbr-tyre PUBLIC rbr-base phys-num)
+add_library(rbr-car STATIC src/native/drive.cpp src/native/engine.cpp src/native/vcu.cpp src/native/driveline.cpp)
+target_link_libraries(rbr-car PUBLIC rbr-base phys-num)
+add_library(rbr-world STATIC src/native/rigid_body.cpp src/native/entity.cpp src/native/collision_mesh.cpp
+            src/native/event.cpp src/native/contacts.cpp src/native/brake_wall.cpp src/native/world.cpp
+            src/native/solver.cpp src/native/wheel.cpp src/native/car.cpp src/native/hinge.cpp src/native/damage.cpp
+            src/native/def_load.cpp src/native/setup.cpp src/native/load.cpp src/native/run.cpp)
+target_link_libraries(rbr-world PUBLIC rbr-collision rbr-tyre rbr-car phys-num phys-data)
+foreach(t rbr-base rbr-collision rbr-tyre rbr-car rbr-world)
+    target_compile_options(${t} PRIVATE /W4)
+endforeach()
 
 # phys-sim: sim/sim.h's Physics over the native world (NativeSim).
 add_library(phys-sim STATIC src/sim/native_sim.cpp src/sim/fault.cpp)
-target_link_libraries(phys-sim PUBLIC phys-native wrally-signals)
+target_link_libraries(phys-sim PUBLIC rbr-world wrally-signals)
 target_compile_definitions(phys-sim PRIVATE _CRT_SECURE_NO_WARNINGS NOMINMAX)
 target_compile_options(phys-sim PRIVATE /W4)
 
-foreach(t phys-num phys-data phys-native phys-sim)
+foreach(t phys-num phys-data rbr-base rbr-collision rbr-tyre rbr-car rbr-world phys-sim)
     set_target_properties(${t} PROPERTIES CXX_STANDARD 17)
 endforeach()
 

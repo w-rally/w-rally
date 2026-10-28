@@ -323,7 +323,21 @@ instead, into libraries in `modules/physics-rbr` that a module links or replaces
 - **Bit-exactness is easiest from one build of one source tree.** Several DLLs that must match each other add a
   way to break it for no gain.
 
-**Status:** the split is not done yet. When it is, it is a refactor that the golden replay must pass unchanged.
+**Status:**
+- **Step 1, the separable layer: DONE 2026-10-29.** `modules/physics-rbr/CMakeLists.txt` now builds:
+  - `rbr-base`: `Unreached`, moved out of `entity.*` into `native/unreached.*`
+  - `rbr-collision`: `stage_collision`
+  - `rbr-tyre`: `tyre`, `suspension`
+  - `rbr-car`: `drive`, `engine`, `vcu`, `driveline`
+  - `rbr-world`: everything else; `phys-native` is gone.
+
+  The three model libraries include nothing above them. The golden replay is unchanged (49,913 poses bit-exact).
+- **Step 2, still to do:** dynamic collision (`collision_mesh`, `event`, `contacts`, `brake_wall`) and the car's
+  solids (`Car`, `Wheel`, `HingedSolid`, `damage`) are still in `rbr-world`. They live in RBR's single object model
+  (`entity.h` declares `Solid`, `Car` with its `Vcu`, and the hinged and mounted parts), and their methods reach
+  into `World` (`car.cpp`, `wheel.cpp` and `hinge.cpp` include `world.h`; `Car::ApplyImpulse` is in `solver.cpp`).
+  Moving them out needs the C++ seams above: `World` services the car calls through an interface, and the class
+  declarations split from `entity.h`.
 
 **Queries for the rest of the game.** Other parts of the game need answers from the physics: the camera a ray
 against the stage (so it does not clip into banks), AI or ghost cars the surface under a point, sound and particles

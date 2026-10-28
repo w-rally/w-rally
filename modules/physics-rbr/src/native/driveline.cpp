@@ -6,7 +6,7 @@
 
 #include "num/f32.h"
 #include "num/bits.h"
-#include "native/entity.h"
+#include "native/unreached.h"
 
 namespace phys::native {
 
