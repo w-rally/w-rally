@@ -20,6 +20,7 @@ classic physics remains the oracle that the native port is checked against (`phy
 | `libs/signals/signals/` | `signals/bus.h`, `car.h` | none |
 | `modules/audio/src/audio/` | `audio/` (audio, bank, device, grains, mix, sample, wav) | none; the bench and scan tools not imported |
 | `modules/renderer/src/core/`, `api/`, `format/` | `ngg/core/`, `ngg/api/`, `ngg/format/` | none; the host, bridge, ipc and tools not imported |
+| `docs/ngg-design.md` | `doc/rendering-overhaul-design.md` (commit `e756b11`) | **moved** 2026-10-29, not copied: the renderer's design record continues here, and plugin-rbr keeps only a pointer. A move note heads the file |
 | `third_party/dxc/` | `ngg/api/build/bin/dxcompiler.dll`, `dxil.dll` | binaries (Microsoft DirectX Shader Compiler redistributables) |
 | `game/src/drive/` (split in phase 5, below) | `phys/drive/` (drive, car_model, replay_camera, launch_control, anti_lag) | `drive.cpp`: `--classic` removed; WRally's own files found by `WRallyFile` (beside the exe, else the source tree) |
 | `game/config/sound-mix.ini` | `phys/drive/sound-mix.ini` | none |
