@@ -5,8 +5,9 @@
 #   camera/   the chase, bonnet, above, beside and TV cameras              wrally::camera
 #   input/    the keys bound to the actions (Settings -> Controls)         wrally::input
 #   rules/    the stage clock, a stage's surface and tyres                 wrally::rules
-#   assets/   the content catalog, the legacy stage importer, car models  wrally::assets
-#   formats/  RBR's .lbs render geometry                                  wrally::formats
+#   assets/   the content catalog, the legacy stage importer, car models,  wrally::assets
+#             the fences
+#   formats/  RBR's .lbs render geometry, .fnc fences                     wrally::formats
 #   render/   the renderer module's wrapper, the stage objects             wrally::render
 #   sound/    the audio module's wrapper                                   wrally::sound
 #   physics/  the physics module's wrapper                                 wrally::physics
@@ -18,8 +19,8 @@ add_executable(WRally
     src/session/session.cpp src/session/sim_thread.cpp src/input/bindings.cpp
     src/camera/camera.cpp src/camera/replay_camera.cpp
     src/rules/stage.cpp
-    src/assets/car_model.cpp src/assets/car_render.cpp src/assets/catalog.cpp src/assets/legacy_stage.cpp
-    src/formats/lbs_geometry.cpp
+    src/assets/car_model.cpp src/assets/car_render.cpp src/assets/catalog.cpp src/assets/fences.cpp src/assets/legacy_stage.cpp
+    src/formats/lbs_geometry.cpp src/formats/fnc.cpp
     src/render/renderer.cpp src/render/stage_objects.cpp
     src/sound/sound.cpp
     src/physics/physics.cpp
