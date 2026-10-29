@@ -18,6 +18,7 @@
 #include "app/settings.h"
 #include "app/window.h"
 #include "assets/car_render.h"
+#include "assets/fences.h"
 #include "assets/catalog.h"
 #include "assets/legacy_stage.h"
 #include "camera/camera.h"
@@ -248,6 +249,14 @@ StageEnd RunStage(Shell& sh, const Options& o, bool fromMenu, std::string& error
     std::vector<physics::Part> parts;   // the car's parts that can come loose, as the physics loaded them
     sim.Physics().Parts(parts);
     car.Create(renderer, o.session.physics.sgc, o.session.physics.surface, collision, parts);
+    // The stage's fences (its .fnc), knocked about by the car's hull (assets/fences.h).
+    assets::Fences fences;
+    if (const std::string e = fences.Create(renderer, o.session.physics.fnc, o.game); !e.empty())
+        std::printf("fences: %s\n", e.c_str());
+    else if (fences.Posts())
+        std::printf("fences: %zu posts, %zu tapes\n", fences.Posts(), fences.Tapes());
+    if (!collision.empty()) fences.SetCar(collision[0]);
+    std::vector<iface::InstanceUpdate> instances;   // the frame's: the car's, the fences' that moved
 
     if (const std::string e = sim.Start(); !e.empty()) return fail(e);
 
@@ -427,6 +436,9 @@ StageEnd RunStage(Shell& sh, const Options& o, bool fromMenu, std::string& error
         physics::Wheel wheels[4];
         Between(snap.before, snap.after, t, p, wheels, parts);
         const iface::InstanceUpdate& carUpdate = car.Place(p, wheels, snap.centerOfGravity, parts);
+        instances.clear();
+        if (car.Ready()) instances.push_back(carUpdate);
+        for (const iface::InstanceUpdate& u : fences.Step(in.seconds, p, snap.centerOfGravity)) instances.push_back(u);
         const V3 chaseEye = snap.before.chase.eye + (snap.after.chase.eye - snap.before.chase.eye) * t;
         const camera::View view = camera::Look(cameraMode, p, chaseEye, orbit, tv.get());
         sh.FollowSize();
@@ -593,8 +605,8 @@ StageEnd RunStage(Shell& sh, const Options& o, bool fromMenu, std::string& error
             fd.camera.farZ = 8000.0f;
             fd.camera.fovY = view.fovY;
             fd.weatherPreset = weatherPreset;   // the .ngg's preset (0 its own weather)
-            fd.instances = car.Ready() ? &carUpdate : nullptr;
-            fd.instanceCount = car.Ready() ? 1 : 0;
+            fd.instances = instances.data();
+            fd.instanceCount = static_cast<uint32_t>(instances.size());
             fd.stageObjects = moved.data();
             fd.stageObjectCount = static_cast<uint32_t>(moved.size());
             fd.ui = uiList;

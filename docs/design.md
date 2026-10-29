@@ -433,6 +433,7 @@ legacy importer uses (decision 2), which sits next to the renderer's reader. Oth
 | `.lsp`, `.rbz` | physics defs, car/setup/tyre files | `phys/data/lsp`, `inflate` | rbr physics |
 | `.trk` | collision objects, drive line | `phys/data/trk`, `trkworld` | physics, game (drive line) |
 | `.col` `.mat` `.fnc` | static collision, surfaces, fences | `phys/data/col`, `phys/native` | physics |
+| `.fnc` + `Textures/fence.dat` | the fences drawn: post points, tape/post textures | `formats/fnc` | game (`assets/fences`: drawn, knocked about by the car) |
 | `.lbs` | **render geometry** (+ script objects) | script objects: `phys/data/lbs`; geometry: WRally's own reader (decision 2) | legacy importer, physics |
 | `.dls` | cameras, pacenotes, splits/finish | `phys/data/dls` | game |
 | `.sgc` + `<car>.ini` + `_shaders.ini` | car render model + collision meshes | `phys/drive/car_model`, `phys/data/sgc` | game → renderer model, physics |
