@@ -1552,7 +1552,10 @@ void Scene::DescribeRt(std::vector<uint64_t>& meshes, std::vector<RtInstanceDesc
 
     // The world's key: FNV over the load and the static objects it LEAVES OUT.
     // Same exclusions, same key - so an edit that only moves an already-moved
-    // object does not touch the world BLAS.
+    // object does not touch the world BLAS. A keyed object (NGGK: the physics
+    // moves it) is left out from the load, moved or not: its first move is
+    // then a TLAS update, not a rebuild of the whole world's BLAS - which a
+    // car going through a row of barriers paid once per barrier.
     uint64_t h = 1469598103934665603ull;
     auto mix = [&](uint64_t v) { h ^= v; h *= 1099511628211ull; };
     mix(m_rtGeneration);
@@ -1561,7 +1564,7 @@ void Scene::DescribeRt(std::vector<uint64_t>& meshes, std::vector<RtInstanceDesc
     {
         const DrawItem& o = m_objects[i];
         if (o.meshId != 0 || o.layerId == kLayerFarScenery) continue;
-        if (o.removed || !o.visible || !o.identity) mix(i + 1);
+        if (!InRtWorld(i)) mix(i + 1);
         else worldHasGeometry = true;
     }
     if (worldHasGeometry)
@@ -1577,7 +1580,7 @@ void Scene::DescribeRt(std::vector<uint64_t>& meshes, std::vector<RtInstanceDesc
         if (o.removed || !o.visible || o.layerId == kLayerFarScenery) continue;
         if (o.meshId == 0)
         {
-            if (o.identity) continue;                       // in the world
+            if (InRtWorld(i)) continue;                     // in the world
             RtInstanceDesc d;
             d.mesh = kRtMoved | (uint64_t)i;
             memcpy(d.xform, o.xform, sizeof(d.xform));
@@ -1629,9 +1632,9 @@ bool Scene::BuildRtMesh(uint64_t key, RtMeshData& out) const
         out.vbSelect = 0;
         if (kind == kRtWorld)
         {
-            for (const DrawItem& o : m_objects)
-                if (o.meshId == 0 && o.layerId != kLayerFarScenery && !o.removed && o.visible && o.identity)
-                    addStatic(o);
+            for (size_t i = 0; i < m_objects.size(); ++i)
+                if (m_objects[i].meshId == 0 && m_objects[i].layerId != kLayerFarScenery && InRtWorld(i))
+                    addStatic(m_objects[i]);
         }
         else
         {
