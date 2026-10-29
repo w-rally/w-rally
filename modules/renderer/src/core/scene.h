@@ -571,6 +571,13 @@ public:
         std::vector<ID3D12Resource*> textures;             // null-free; missing -> white
     };
     void DescribeRt(std::vector<uint64_t>& meshes, std::vector<RtInstanceDesc>& instances) const;
+    // A static object in the world's BLAS: drawn, not moved, and not keyed (a
+    // keyed object is the physics' and gets a BLAS of its own from the load).
+    bool InRtWorld(size_t i) const
+    {
+        const DrawItem& o = m_objects[i];
+        return !o.removed && o.visible && o.identity && ObjectKey(static_cast<uint32_t>(i)) < 0;
+    }
     bool BuildRtMesh(uint64_t key, RtMeshData& out) const;
     bool BuildRtShared(ID3D12Device* device, RtShared& out) const;
     // The dynamic pool's upload is lazy (the next pass does it); a BVH built
