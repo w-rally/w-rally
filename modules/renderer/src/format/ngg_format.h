@@ -1,7 +1,7 @@
 // ---------------------------------------------------------------------------
 // .ngg asset format - v0 (minimal).
 //
-// This is the real container design from doc/rendering-overhaul-design.md 3.5,
+// This is the real container design from docs/ngg-design.md 3.5,
 // implemented so far only as much as the renderer needs: header, vertices,
 // indices. The chunk framing is the part worth getting right now, because it is
 // what lets later versions add materials, clusters, lights and skeletons

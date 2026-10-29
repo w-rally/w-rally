@@ -76,7 +76,7 @@ All modules run in one 64-bit process that the game owns. No IPC is needed.
 | **Physics** | the world (stage collision, solids, cars), stepping, the car's state and records, its own config and car files | rendering, timing the stage, reading files except through the VFS |
 | **Audio** | the output device and mixer thread, the car's sound from the records, one-shots, buses, listener | deciding *when* game sounds play (the game does), reading files except through the VFS |
 
-Two rules carry over from NGG design §8.0. The renderer knows nothing about RBR. A module includes only
+Two rules carry over from NGG design §8.0 ([`ngg-design.md`](ngg-design.md), the renderer's own design record). The renderer knows nothing about RBR. A module includes only
 `wrally/iface/*`, never the game's headers or another module's.
 
 ---
