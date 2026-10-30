@@ -67,6 +67,20 @@ struct SkyParams
     float cloudCover    = 0.0f;    // 0 clear .. 1 overcast
     float fogVisibility = 0.0f;    // metres (2 % contrast); 0 = no fog layer
     float fogHeight     = 150.0f;  // fog layer scale height, metres
+
+    // NIGHT (design 5.4, N1b), set by ApplySkyTime from a date, a time and a place; neutral otherwise - no moon is
+    // drawn, no stars, no glow, and sunDir/sunIntensity are the sun's.
+    float lightIsMoon   = 0.0f;    // 1: sunDir/sunIntensity are the MOON's (the night's light): no sun disc drawn
+    float trueSunTowards[3] = { 0.0f, 1.0f, 0.0f };   // the real sun, towards it: it lights the moon's disc
+    float moonTowards[3]    = { 0.0f, -1.0f, 0.0f };  // towards the moon
+    float moonRadiance  = 0.0f;    // its disc's radiance where the sun lights it, model units; 0: no moon drawn
+    float starIrradiance = 0.0f;   // a magnitude-0 star's irradiance, model units; 0: no stars
+    float worldToEquatorial[9] = { 1.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 1.0f };   // the stars' frame
+    float nightGlow     = 0.0f;    // airglow + starlight: the moonless sky's own radiance, model units
+    // The OTHER body's sky: the moon's while the sun is the light, the sun's twilight while the moon is. The sky
+    // and the environment add it to the light's own; the direct light stays the one body's. 0: none.
+    float light2Towards[3] = { 0.0f, -1.0f, 0.0f };
+    float light2Intensity  = 0.0f;
 };
 
 // Ground-level fog extinction from visibility (Koschmieder: 3.912 / V), per metre.

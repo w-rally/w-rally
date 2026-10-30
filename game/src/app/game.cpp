@@ -300,6 +300,8 @@ StageEnd RunStage(Shell& sh, const Options& o, bool fromMenu, std::string& error
     const int cameras = tv ? 5 : 4;
     int cameraMode = (o.camera >= 0 ? o.camera : tv ? camera::kTv : camera::kChase) % cameras;
     float orbit = o.cameraAngle;   // the beside camera's place round the car, radians from its left side toward its front
+    // PHYS_DRIVE_LOOK_UP=<degrees>: every view tilted up by that much - the sky's moon and stars to look at.
+    const float lookUp = std::getenv("PHYS_DRIVE_LOOK_UP") ? static_cast<float>(std::atof(std::getenv("PHYS_DRIVE_LOOK_UP"))) : 0.0f;
     float chaseDistance = o.session.chaseDistance;
     bool chaseChanged = false;     // reported once the key is let go
     const uint32_t jitterTo = std::getenv("PHYS_DRIVE_JITTER") ? std::strtoul(std::getenv("PHYS_DRIVE_JITTER"), nullptr, 0) : 0;
@@ -446,7 +448,16 @@ StageEnd RunStage(Shell& sh, const Options& o, bool fromMenu, std::string& error
         sh.FollowSize();
         const int shownWidth = sh.width, shownHeight = sh.height;
         float viewM[16], proj[16];
-        math::LookAt(math::ToRender(view.eye), math::ToRender(view.at), viewM);
+        V3 eyeR = math::ToRender(view.eye), atR = math::ToRender(view.at);
+        if (lookUp != 0.0f) {   // PHYS_DRIVE_LOOK_UP: the view tilted up by that many degrees (a check of the sky)
+            const V3 d = atR - eyeR;
+            const float horiz = std::sqrt(d.x * d.x + d.z * d.z), len = std::sqrt(horiz * horiz + d.y * d.y);
+            if (horiz > 1e-4f && len > 1e-4f) {
+                const float e = std::atan2(d.y, horiz) + lookUp * 3.14159265f / 180.0f;
+                atR = eyeR + V3{d.x / horiz * std::cos(e), std::sin(e), d.z / horiz * std::cos(e)} * len;
+            }
+        }
+        math::LookAt(eyeR, atR, viewM);
         const float aspect = shownHeight ? float(shownWidth) / float(shownHeight) : 16.0f / 9.0f;
         math::Perspective(view.fovY, aspect, 0.25f, 8000.0f, proj);
 

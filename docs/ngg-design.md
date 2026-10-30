@@ -2989,10 +2989,35 @@ Four decisions, the user's:
   [--utc-offset] [--latitude] [--longitude] [--north]`. Stage 41 on 21 June at 50 N: noon, a low evening sun at
   20:30, civil dusk at 21:30 lit by the sky alone, and black at 22:30 - what the moon and the night exposure
   (N1b, N1c) are for.
-- **N1 - time and the night sky.** Astronomy (sun, moon, phase), the moon as a second, dim, cool directional
-  light, stars and airglow in the sky pass, exposure that reaches night (the auto exposure's ±3 EV around the
-  dial is not enough: the preset's EV and a wider range), twilight as the atmosphere already gives it. The
-  weather record gains date/time/place by appending (5.0t's growth rule).
+- **N1b/N1c - DONE 2026-10-30: the moon, the stars, the night's exposure and colour.**
+  - **The light passes to the moon** at the end of civil twilight (the sun 6 degrees down, its direct light long
+    gone): the renderer's one directional light - the direct light, its ray-traced shadows (moon shadows), the
+    aerial table - becomes the moon's, at the full moon's 2.3e-6 of the sun's illuminance times its phase's
+    brightness (Krisciunas-Schaefer: 0.026 a + 4e-9 a^4 magnitudes over the phase angle a).
+  - **The sky is both bodies':** `SkyParams::light2` adds the other one's sky in `AtmSkyRadiance` (sky pass and
+    environment): the moon's through the dusk, the sun's twilight into the night, only while it shows (not the
+    moon's by day, not the sun's 20 degrees down). The first version handed the sky over at -11 degrees and it
+    jumped (a full moon's sky is brighter than the twilight there); either side of -6 degrees it is now the same
+    picture.
+  - **The moon's disc** (0.52 degrees), by day too: a sphere lit by the real sun, so the phase draws itself, its
+    radiance albedo 0.12 x the sun's irradiance / pi, with earthshine and the atmosphere's extinction.
+  - **The stars:** procedural on the celestial sphere (cube-face cells, ~9,000 to magnitude 6, brighter ones
+    rarer as N(<m) ~ 10^(0.5 m)), turned by the sidereal time about the pole, each a pixel-wide gaussian holding
+    its flux (as bright at any resolution), magnitude 0 = 2.3e-11 of the sun's irradiance. The moon outshines the
+    faint ones by itself.
+  - **The glow** (airglow + starlight, ~0.001 lux) in `AtmSkyRadiance`, brighter towards the horizon, dimmed by
+    cloud: what lights a moonless night.
+  - **Night exposure:** the meter reaches 2^-32 (the day's floor was 2^-12, where a night counted as black and the
+    meter froze); beyond 3 EV under the day's grey only 0.75 of the rest is made up, so a full moon sits ~4 EV and
+    a moonless night ~6 EV under the day: dark, readable.
+  - **Night vision** in the tonemap: per pixel, on the scene's own luminance before exposure, full colour down to
+    8 EV under the day's grey, the rods alone (desaturated, blue-shifted: the Purkinje shift) from 17 EV. A surface
+    in a beam keeps its colour beside a moonlit verge that has none.
+  - Checked on stage 41: dusk, a full moon (hard moon shadows, a grey-blue moonlit stage), a moonless night (the
+    stars, the glow), the handover either side of -6 degrees (the same picture), and the day unchanged (mean
+    difference 0.03/255 against the frame before N1). `PHYS_DRIVE_LOOK_UP=<deg>` tilts the view to the sky.
+  - Not done: the moon's phase is too small to see at its true size (as to the eye); twinkling; the Milky Way; a
+    stage's real latitude and north (stage metadata).
 - **N2 - the light system.** A per-frame light list (renderer interface), clustered culling, one shadow ray per
   pixel through RIS/ReSTIR over the lights, denoised with the RT filter that exists. Point and spot lights with
   profiles.

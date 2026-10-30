@@ -146,15 +146,15 @@ struct Renderer {
     ngg::core::Renderer core;
     ngg::core::Scene& scene = core.GetScene();
     ngg::core::PostFx& post = core.Post();
-    ngg::core::SkyParams skyParams;
+    ngg::core::SkyParams weatherSky;       // the weather's sky; a frame's is this plus its time (FrameDesc::skyTime)
     wrally::render::UiPass ui;
     RenderSettings settings{};
     std::string error;
 
     bool sceneLoaded = false;
-    int32_t appliedPreset = -2;            // the weather preset in skyParams (-1 a WeatherDesc, -2 none yet)
-    bool    skyTimeApplied = false;        // skyParams' sun is a FrameDesc::skyTime's, not the weather's
+    int32_t appliedPreset = -2;            // the weather preset in weatherSky (-1 a WeatherDesc, -2 none yet)
     WeatherDesc appliedDesc{};
+    SkyTimeDesc loggedSkyTime{};           // the last FrameDesc::skyTime the log reported
     std::unordered_map<int32_t, std::vector<uint32_t>> byKey;   // NGGK key -> the scene's objects
     std::unordered_map<int32_t, bool> keyVisible;
     std::vector<Model> models;             // by handle - 1
@@ -201,15 +201,15 @@ void ToDesc(const ngg::core::WeatherPreset& w, WeatherDesc& d)
     d.exposure = w.sky.exposure;
 }
 
-// The frame's weather into skyParams, when it changed: a preset exactly as ngg-api's load applied the file's default
+// The frame's weather into weatherSky, when it changed: a preset exactly as ngg-api's load applied the file's default
 // (ApplyWeather onto fresh SkyParams); a WeatherDesc as ngg_set_weather applied it.
 void ApplyFrameWeather(Renderer& r, const FrameDesc& f)
 {
     const auto& presets = r.scene.WeatherPresets();
     if (f.weatherPreset >= 0) {
         if (f.weatherPreset == r.appliedPreset || size_t(f.weatherPreset) >= presets.size()) return;
-        r.skyParams = ngg::core::SkyParams{};
-        ngg::core::ApplyWeather(presets[size_t(f.weatherPreset)], r.skyParams);
+        r.weatherSky = ngg::core::SkyParams{};
+        ngg::core::ApplyWeather(presets[size_t(f.weatherPreset)], r.weatherSky);
         r.appliedPreset = f.weatherPreset;
         return;
     }
@@ -226,8 +226,8 @@ void ApplyFrameWeather(Renderer& r, const FrameDesc& f)
     w.rain = d.rain;
     w.snow = d.snow;
     w.sky.exposure = d.exposure;
-    ngg::core::ApplyWeather(w, r.skyParams);
-    r.skyParams.exposure = d.exposure;
+    ngg::core::ApplyWeather(w, r.weatherSky);
+    r.weatherSky.exposure = d.exposure;
     r.appliedPreset = -1;
     r.appliedDesc = d;
 }
@@ -362,9 +362,9 @@ Status WRALLY_CALL LoadScene(Renderer* r, const void* bytes, uint64_t count, Sce
     for (uint32_t i = 0, n = r->scene.ObjectCount(); i < n; ++i)
         if (const int32_t k = r->scene.ObjectKey(i); k >= 0) r->byKey[k].push_back(i);
     // The file's default weather until a frame says otherwise - as ngg-api's load.
-    r->skyParams = ngg::core::SkyParams{};
+    r->weatherSky = ngg::core::SkyParams{};
     if (const ngg::core::WeatherPreset* w = r->scene.FindWeather(nullptr)) {
-        ngg::core::ApplyWeather(*w, r->skyParams);
+        ngg::core::ApplyWeather(*w, r->weatherSky);
         r->appliedPreset = 0;
     }
     r->error.clear();
@@ -585,23 +585,7 @@ Status WRALLY_CALL RenderFrame(Renderer* r, const FrameDesc* f)
     if (world) {
         for (uint32_t i = 0; f->stageObjects && i < f->stageObjectCount; ++i) MoveStageObject(*r, f->stageObjects[i]);
         for (uint32_t i = 0; f->instances && i < f->instanceCount; ++i) Place(*r, f->instances[i]);
-        // The time and place over the weather's sun (NGG design 5.4). When the override goes, the weather is applied
-        // again from scratch, which brings its own sun back.
-        if (!f->skyTime.set && r->skyTimeApplied) {
-            r->appliedPreset = -2;
-            std::memset(&r->appliedDesc, 0xff, sizeof r->appliedDesc);
-            r->skyTimeApplied = false;
-        }
         ApplyFrameWeather(*r, *f);
-        if (f->skyTime.set) {
-            const SkyTimeDesc& t = f->skyTime;
-            ngg::core::SkyTime st;
-            st.year = t.year, st.month = t.month, st.day = t.day;
-            st.localHour = t.localHour, st.utcOffset = t.utcOffset;
-            st.latitude = t.latitude, st.longitude = t.longitude, st.northDeg = t.northDeg;
-            ngg::core::ApplySkyTime(st, r->skyParams);
-            r->skyTimeApplied = true;
-        }
         r->scene.SetWetness(f->wetness);
         if (f->lineVertexCount && f->lines) {
             static_assert(sizeof(LineVertex) == sizeof(ngg::core::Scene::OverlayVertex), "uploaded raw");
@@ -625,12 +609,31 @@ Status WRALLY_CALL RenderFrame(Renderer* r, const FrameDesc* f)
     r->dev.list->ResourceBarrier(1, &toRt);
 
     const D3D12_CPU_DESCRIPTOR_HANDLE rtv = r->sc.CurrentRtv();
+    // The frame's sky: the weather's, and over its sun the time and place when the frame gives them (NGG design 5.4)
+    // - from the weather's sky every frame, so the night's scaling of the light never compounds.
+    ngg::core::SkyParams sky = r->weatherSky;
+    if (world && f->skyTime.set) {
+        const SkyTimeDesc& t = f->skyTime;
+        ngg::core::SkyTime st;
+        st.year = t.year, st.month = t.month, st.day = t.day;
+        st.localHour = t.localHour, st.utcOffset = t.utcOffset;
+        st.latitude = t.latitude, st.longitude = t.longitude, st.northDeg = t.northDeg;
+        const ngg::core::SkyBodies b = ngg::core::ApplySkyTime(st, sky);
+        if (std::memcmp(&t, &r->loggedSkyTime, sizeof t)) {   // said once per time, not per frame
+            const int minutes = static_cast<int>(t.localHour * 60.0f + 0.5f);
+            ngg::core::Log("sky: %04d-%02d-%02d %02d:%02d (UTC%+.1f) at %.2f, %.2f: sun %.1f deg up, moon %.1f deg up "
+                           "(%.0f %% lit), the light: %s", t.year, t.month, t.day, minutes / 60, minutes % 60, t.utcOffset,
+                           t.latitude, t.longitude, b.sunElevationDeg, b.moonElevationDeg, 100.0f * b.moonIlluminated,
+                           sky.lightIsMoon > 0.5f ? "the moon" : "the sun");
+            r->loggedSkyTime = t;
+        }
+    }
     if (world) {
         // The frame, exactly as ngg-api recorded it: sky on, the settings' TAA, ACES.
         r->core.SetSkyOn(true);
         r->core.SetTaa(r->settings.taa != 0);
         r->core.SetCurve(ngg::core::PostFx::kCurveAces);
-        r->core.RecordFrame(r->dev, rtv, f->camera.view, f->camera.proj, r->sc.width, r->sc.height, r->skyParams);
+        r->core.RecordFrame(r->dev, rtv, f->camera.view, f->camera.proj, r->sc.width, r->sc.height, sky);
         r->scene.RenderEditorOverlay(r->dev.list.Get(), rtv, f->camera.view, f->camera.proj, r->sc.width, r->sc.height);
     } else {
         const float black[4] = {0, 0, 0, 1};
