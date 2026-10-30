@@ -9,8 +9,9 @@
 //   - the condition in the name, translated once into our units: hazy -> turbidity 3; partcloud / lightcloud /
 //     heavycloud -> cloud cover 0.35 / 0.6 / 0.95; lightfog / heavyfog -> visibility from FogEnd (else 1500 / 300 m)
 //     under a 150 m layer; light/heavy rain and snow -> rain or snow 0.4 / 1 with their haze and visibility
-// and two repairs RBR's file needs: decimal commas ("0,64") read as points, and a daytime preset whose sun is at or
-// below the horizon (31 of them) given a low sun on the same bearing, or a physical sky draws it as night.
+// and two repairs RBR's file needs: decimal commas ("0,64") read as points, and a preset whose sun is at or near the
+// horizon (48 of them, overcast ones mostly) given a low sun on the same bearing, or a physical sky draws it as night. Every
+// RBR stage is daytime: M morning, N noon, E evening.
 
 #include <string>
 #include <vector>

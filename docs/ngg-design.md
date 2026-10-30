@@ -2680,7 +2680,9 @@ hand-set ambient made the sun irrelevant). A physical sky renders those as night
   - the translation: `crisp`/`hazy` set turbidity 1/3; `lightfog`/`heavyfog` set fog visibility from
     `FogEnd`; `partcloud`/`lightcloud`/`heavycloud` set cover 0.35/0.6/0.95; rain and snow set visibility
     and precipitation; decimal commas are parsed; a daytime sun below the horizon is mirrored to a low sun on
-    the same bearing; night keeps its own.
+    the same bearing; night keeps its own. *(Corrected 2026-10-30, in WRally's port: `N` is NOON, not night -
+    its suns stand ~50 degrees up, and RBR has no night stages. 17 overcast noon presets with the sun 2.8 degrees
+    up were left as dusk; the port raises every preset's low sun, 48 in all.)*
 - **Selection:** the viewer's `--weather <name>`; the game host uses the file's default until the bridge
   passes the event's chosen preset (item 28).
 
