@@ -39,14 +39,15 @@ public:
     ~CoDriver();   // (a load still running finished first)
     // The calls of `notes` with RBR's voice under `rbrRoot` (CoDriver.ini read from it; the sounds decoded and loaded
     // through `sound`, VFS paths) - on a loader thread, so the stage loads meanwhile: nothing is called until it is
-    // done (Ready). `sound` must outlive this co-driver.
-    void LoadAsync(Sound& sound, std::string rbrRoot, std::vector<phys::data::DlsPacenote> notes);
+    // done (Ready). `sound` must outlive this co-driver; null: no voice, the calls only shown (Upcoming).
+    void LoadAsync(Sound* sound, std::string rbrRoot, std::vector<phys::data::DlsPacenote> notes);
     bool Ready() const { return m_ready.load(std::memory_order_acquire); }
     // Once ready, the load's report, once: the calls, the recordings, what is missing, how long it took ("" else).
     std::string TakeReport();
     // Each frame: the car at `distance` along the drive line at `speed` (m/s); `leadSeconds` how far ahead it calls.
-    // Nothing before Ready.
-    void Update(float distance, float speed, float leadSeconds);
+    // `running`: the stage time runs (the stage clock's Running) - before GO and after the finish nothing is called
+    // (what was already called still plays). Nothing before Ready.
+    void Update(float distance, float speed, float leadSeconds, bool running);
     // (These three: once Ready.)
     size_t Phrases() const { return Ready() ? m_phrases.size() : 0; }
     size_t Recordings() const { return m_recordings; }
@@ -54,6 +55,12 @@ public:
     std::string Describe(size_t count) const;
     // The last phrase called, as text (for the readout).
     const std::string& LastCall() const { return m_last; }
+    // The HUD's text (temporary, until the HUD's pacenote graphics: the corners as L1 / R1 (flat) .. L7 / R7
+    // (hairpin), the rest short words, a distance its number): `current` the first phrase ahead (not yet passed by
+    // 5 m) once it is spoken - from when its first word starts (no voice: when it is called), so the HUD and the voice
+    // agree; `next` the one after it when the car is `nextSeconds` from it or less at its speed (only with a current).
+    // "" not shown.
+    void Upcoming(float distance, float speed, float nextSeconds, std::string& current, std::string& next) const;
 
 private:
     struct Phrase {
@@ -61,7 +68,7 @@ private:
         std::vector<std::string> words;   // CoDriver.ini's call names, or a distance's number
     };
     // The load itself (the loader thread's): "" or what is missing (it still calls what it has).
-    std::string Load(Sound& sound, const std::string& rbrRoot, const std::vector<phys::data::DlsPacenote>& notes);
+    std::string Load(Sound* sound, const std::string& rbrRoot, const std::vector<phys::data::DlsPacenote>& notes);
     // A word's sound (0: none), a variant picked at random.
     uint32_t SoundOf(const std::string& word);
 
@@ -74,7 +81,12 @@ private:
     std::vector<std::pair<std::string, std::vector<uint32_t>>> m_words;   // a call's (or a number's) loaded variants
     std::vector<Phrase> m_phrases;
     size_t m_next = 0;               // the first phrase not called yet
-    std::deque<uint32_t> m_queue;    // the sounds still to play
+    struct Queued {
+        uint32_t sound;   // 0: a word without a recording (marks its phrase spoken, plays nothing)
+        size_t phrase;
+    };
+    std::deque<Queued> m_queue;      // the words still to say
+    size_t m_spoken = 0;             // the phrases whose speech has started (the HUD's current call)
     uint32_t m_playing = 0;
     std::string m_last;
     size_t m_recordings = 0;

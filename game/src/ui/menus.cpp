@@ -296,6 +296,9 @@ SettingsChoice SettingsUi(const ImGuiLayer& ui, app::Settings& s, bool inStage, 
         ImGui::SliderFloat("Call ahead", &s.codriverLead, 1.0f, 6.0f, "%.1f s at the speed");
         ImGui::TextDisabled("   more: called earlier; at least 60 m ahead (from the next stage)");
         ImGui::EndDisabled();
+        ImGui::SeparatorText("Pacenotes on the HUD");
+        ImGui::SliderFloat("Next call", &s.pacenoteNext, 0.0f, 20.0f, "%.1f s before it");
+        ImGui::TextDisabled("   at the car's speed; the current call shows as it is spoken (Call ahead; live runs)");
         ImGui::EndTabItem();
         }
 
