@@ -85,12 +85,13 @@ ngg::SceneData MadeUp()
     const float lo[3] = {0, 0, 0}, hi[3] = {20, 1, 10};   // (the writer computes the box: what it must come to)
     std::memcpy(s.bboxMin, lo, sizeof lo);
     std::memcpy(s.bboxMax, hi, sizeof hi);
-    ngg::Material ground = ngg::DefaultMaterial(), leaf = ngg::DefaultMaterial();
+    ngg::Material ground = ngg::DefaultMaterial(), leaf = ngg::DefaultMaterial(), glass = ngg::DefaultMaterial();
     ground.baseColour = 0, ground.detail = 1;
     leaf.baseColour = 1, leaf.flags = ngg::kMaterialAlphaTest | ngg::kMaterialTwoSided;
-    s.materials = {ground, leaf};
-    s.objects = {{0, 0, 0, 6}, {3, 1, 6, 6}};
-    s.objectKeys = {-1, 42};
+    glass.baseColour = 1, glass.flags = ngg::kMaterialBlend | ngg::kMaterialTwoSided, glass.roughness = 0.05f;
+    s.materials = {ground, leaf, glass};
+    s.objects = {{0, 0, 0, 6}, {3, 1, 6, 6}, {2, 2, 0, 3}};
+    s.objectKeys = {-1, 42, -1};
     // Two 4x4 DXT1 textures: a header and one block each.
     for (const char* name : {"ground.dds", "leaf.dds"}) {
         std::vector<uint8_t> dds(128 + 8, 0);

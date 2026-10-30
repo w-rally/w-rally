@@ -465,8 +465,14 @@ Status WRALLY_CALL CreateModel(Renderer* r, const ModelDesc* d, ModelHandle* out
     std::vector<uint32_t> mats;
     for (uint32_t i = 0; i < d->materialCount; ++i) {
         const MaterialDesc& in = d->materials[i];
-        constexpr uint32_t kMask = ngg::kMaterialAlphaTest | ngg::kMaterialTwoSided;
-        const uint32_t h = r->scene.AddMaterial(r->dev.device.Get(), in.baseColour, in.detail, in.flags & kMask);
+        // The interface's flags as the format's: alpha test and two-sided are the same bits; blend is bit 2 here and
+        // bit 3 there (the format's bit 2 was v2's single-stage, left unused). Blend wins over the alpha test.
+        static_assert(kMaterialAlphaTest == ngg::kMaterialAlphaTest && kMaterialTwoSided == ngg::kMaterialTwoSided,
+                      "renderer.h's material flags and ngg_format.h's");
+        constexpr uint32_t kMask = ngg::kMaterialAlphaTest | ngg::kMaterialTwoSided | ngg::kMaterialBlend;
+        uint32_t flags = in.flags & (ngg::kMaterialAlphaTest | ngg::kMaterialTwoSided);
+        if (in.flags & kMaterialBlend) flags = (flags & ~ngg::kMaterialAlphaTest) | ngg::kMaterialBlend;
+        const uint32_t h = r->scene.AddMaterial(r->dev.device.Get(), in.baseColour, in.detail, flags);
         if (!h) return r->Fail(Status::ErrDevice, "createModel: the descriptor heap could not be rebuilt");
         ngg::core::Scene::MaterialSlot s;
         if (!r->scene.GetMaterial(h - 1, &s)) return r->Fail(Status::ErrInternal, "createModel: a material vanished");

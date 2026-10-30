@@ -210,13 +210,15 @@ void CarRender::Create(render::Renderer& renderer, const std::string& sgc, const
                 std::printf("material %s: %zu bytes dds%s, diffuse %.2f %.2f %.2f\n", t.material.c_str(), t.dds.size(),
                             tex == 0 && !t.dds.empty() ? " (rejected)" : "", t.diffuse[0], t.diffuse[1], t.diffuse[2]);
             // One-sided, as the game draws them: the body is a shell whose inner faces (the texture's black) lie close
-            // behind its paint, and drawn they show through it. The glass both ways, seen from inside too.
+            // behind its paint, and drawn they show through it. The glass both ways, seen from inside too, and
+            // BLENDED: its texture's alpha is how much tint covers the cabin, and it reflects the sky as smooth glass
+            // does (alpha-tested, a pane was either solid or a hole with no reflection at all).
             iface::MaterialDesc m = iface::DefaultMaterialDesc();
             m.baseColour = tex;
-            m.flags = t.transparent ? iface::kMaterialTwoSided | iface::kMaterialAlphaTest : 0u;
+            m.flags = t.transparent ? iface::kMaterialTwoSided | iface::kMaterialBlend : 0u;
             if (!tex)
                 for (int k = 0; k < 3; ++k) m.baseColourFactor[k] = t.diffuse[k];
-            m.roughness = 0.45f;
+            m.roughness = t.transparent ? 0.05f : 0.45f;
             materials.push_back(m);
         }
         for (const CarPart& part : model.parts) {

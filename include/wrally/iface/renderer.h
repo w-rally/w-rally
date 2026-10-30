@@ -69,7 +69,7 @@ static_assert(sizeof(Vertex) == 44, "Vertex - keep in step with ngg_format.h");
 // white, so a factor alone is a complete material).
 constexpr uint32_t kMaterialAlphaTest = 1u << 0;
 constexpr uint32_t kMaterialTwoSided  = 1u << 1;
-constexpr uint32_t kMaterialBlend     = 1u << 2;   // alpha-blended (car glass) - not drawn blended yet: WRenderer ignores it
+constexpr uint32_t kMaterialBlend     = 1u << 2;   // alpha-blended (car glass): over what is behind, no depth, no shadow
 
 struct MaterialDesc {
     TextureHandle baseColour, detail, normal, orm, emissive;

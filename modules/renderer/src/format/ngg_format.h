@@ -124,7 +124,13 @@ const uint32_t kMaterialAlphaTest = 1u << 0;   // clip() against alphaCutoff
 const uint32_t kMaterialTwoSided  = 1u << 1;   // no back-face culling
 // 1u << 2 was kMaterialSingleStage in v2. It is gone, and its absence is the
 // point: "this material has no second layer" is now said by `detail ==
-// kNoTexture`, which cannot disagree with itself. See the note below.
+// kNoTexture`, which cannot disagree with itself. See the note below. (Left
+// unused, so a v2 file's old bit can never read as anything else.)
+// Alpha-BLENDED (glass): drawn after everything opaque, far to near, over it -
+// its base colour's alpha (texture x vertex x factor) is how much of the tint
+// covers what is behind, while its reflection stays whole. It writes no depth,
+// casts no shadow and is not in the ray-traced scene (NGG design 5.0u).
+const uint32_t kMaterialBlend     = 1u << 3;
 
 // 'NGGM' - materials. METALLIC-ROUGHNESS, v3.
 //
