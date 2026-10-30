@@ -673,7 +673,20 @@ Each phase ends with a game you can drive. phys-drive works on day one, and ever
         default). Their rays skip cards within 1.5 m. Switched by Debug → Legacy cards, `NGG_LEGACY_PROFILE` or
         renderer interface 3's `setLegacyProfile`.
    2. normals rebuilt, foliage cut out
-   3. weather presets from `TrackSettings.ini`, the cache, every RBR stage in the menu catalog
+   3. weather presets from `TrackSettings.ini` (DONE 2026-10-29), the cache, every RBR stage in the menu catalog
+      - **Weather:** the importer writes every `TrackSettings.ini` section of the stage's map as an `NGGW` preset
+        (`game/src/assets/legacy_weather.*`, reading through `game/src/formats/track_settings.*`), named as the section,
+        so `--weather` and the menu select it. The stage's own time of day, crisp and clear, is the default. The
+        translation is plugin-rbr's (NGG design 5.0q): SunDir and the ground's reflectance kept, the condition in the
+        name turned into haze, cloud cover, fog visibility, rain and snow, decimal commas read, and daytime suns at or
+        below the horizon raised. Checked against plugin-rbr's own translation (`rbrtm --export-weather`): stages 108,
+        41 and 4, 61 presets, every field the same to float precision. On stage 41, `--weather 41O_M_lightfog_heavycloud`
+        draws an overcast, foggy sky; the default draws a sunny morning.
+      - **Maps under 10:** `TrackSettings.ini` writes them in two digits (`04E_...`). The catalog's weather list missed
+        them with `4E_`, and now uses `formats::TrackSettingsMap` too.
+      - **Tests:** `legacy-import-41` also checks the weather line (7 presets, default `41M_crisp_clear`), and
+        `legacy-import-weather-4` checks a map under 10 (43, `04E_crisp_clear`). `ngg-check` already compares the
+        renderer's preset count with the file's.
 9. **Game.** Menus, car/stage selection, settings, wheels + FFB, replays, results.
 10. **WPhysics.** Fork, JSON config, higher tick rate, then extend. Multi-car and save-state come with their
     interface bump.

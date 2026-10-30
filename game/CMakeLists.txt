@@ -19,8 +19,8 @@ add_executable(WRally
     src/session/session.cpp src/session/sim_thread.cpp src/input/bindings.cpp
     src/camera/camera.cpp src/camera/replay_camera.cpp
     src/rules/stage.cpp
-    src/assets/car_model.cpp src/assets/car_render.cpp src/assets/catalog.cpp src/assets/fences.cpp src/assets/legacy_stage.cpp
-    src/formats/lbs_geometry.cpp src/formats/fnc.cpp
+    src/assets/car_model.cpp src/assets/car_render.cpp src/assets/catalog.cpp src/assets/fences.cpp src/assets/legacy_stage.cpp src/assets/legacy_weather.cpp
+    src/formats/lbs_geometry.cpp src/formats/fnc.cpp src/formats/track_settings.cpp
     src/render/renderer.cpp src/render/stage_objects.cpp
     src/sound/sound.cpp
     src/physics/physics.cpp

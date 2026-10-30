@@ -13,6 +13,7 @@
 #include <stdexcept>
 #include <tuple>
 
+#include "assets/legacy_weather.h"
 #include "data/lsp.h"
 #include "formats/lbs_geometry.h"
 #include "ngg_scene.h"
@@ -405,6 +406,9 @@ std::string ImportLegacyStage(const std::string& lbsPath, int surface, LegacyImp
         }
     b.Finish();
     b.scene.flags |= ngg::kSceneFlagLegacyImport;   // (the renderer's legacy profile for its cards)
+    // The stage's weathers, TrackSettings.ini's sections of its map translated (assets/legacy_weather.h), so the menu's
+    // or --weather's choice is drawn: the sky, the fog, the clouds.
+    out.log += LegacyWeather((lbs.parent_path() / "TrackSettings.ini").string(), lbs.stem().string(), b.scene.weather);
 
     if (const std::string e = ngg::Write(b.scene, out.ngg); !e.empty()) return lbsPath + ": the .ngg: " + e;
     const ngg::SceneData& s = b.scene;
