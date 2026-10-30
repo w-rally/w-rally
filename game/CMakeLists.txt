@@ -22,7 +22,7 @@ add_executable(WRally
     src/assets/car_model.cpp src/assets/car_render.cpp src/assets/catalog.cpp src/assets/fences.cpp src/assets/legacy_stage.cpp src/assets/legacy_weather.cpp
     src/formats/lbs_geometry.cpp src/formats/fnc.cpp src/formats/track_settings.cpp
     src/render/renderer.cpp src/render/stage_objects.cpp
-    src/sound/sound.cpp src/sound/codriver.cpp
+    src/sound/sound.cpp src/sound/codriver.cpp src/sound/mix_edit.cpp
     src/physics/physics.cpp
     src/ui/imgui_layer.cpp src/ui/hud.cpp src/ui/menus.cpp)
 target_include_directories(WRally PRIVATE src)
