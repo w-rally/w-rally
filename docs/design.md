@@ -396,10 +396,37 @@ Interface: [`audio.h`](../include/wrally/iface/audio.h). Implementation: `plugin
 - Offline mode (`kAudioOffline` + `renderOffline`): the same records give the same samples, for rendering a replay to
   WAV. It replaces `audio::Audio::Mode::Offline`.
 - Device: XAudio2 as today. Settings are applied as a set (endpoint, per-bus volume, speakers).
-- **Not in WAudio yet** (phase 3 moved what the game used): one car voice only; the default device only; no
-  one-shots (`loadSound`/`play`: `ErrNotSupported`); `setListener` does nothing, because the mix is still mono with
-  no placed sources (sound-engine plan S3). The gain is `volume[Master] × volume[Car]`; pause and mute both silence
-  the car.
+- **One-shots (2026-10-30):** `loadSound` (`.ogg` through stb_vorbis, or `.wav`, by the file's first bytes) and
+  `play` / `stop` / `isPlaying` work. `audio::Voices` holds the samples and their playing instances, resampled by
+  linear interpolation. It applies each bus's gain times the master, and the world's buses hold while paused (the UI
+  plays on). The car's `Audio::Render` adds them after its own samples, so the car's sound is unchanged: the
+  offline checks still pass bit for bit. Offline renders the car alone.
+- **The co-driver (2026-10-30)** is the game's (`game/src/sound/codriver.*`):
+  - **Calls:** the stage's `.dls` pacenotes, using the types and flags as Wallaby's pacenotes editor names them,
+    become phrases: the call, its modifiers, a note within 25 m chained with "into", and a distance note saying
+    the gap to the next call (once per call).
+  - **Voice:** RBR's: `audio/CoDriver.ini` names each call's recordings in `audio/Speech/PaceNote`, and one is
+    picked at random each time.
+  - **Timing:** a phrase is called when the car is the speed × the lead time from it (at least 60 m). Its sounds
+    play one after another on the CoDriver bus, held with the stage.
+  - **Settings:** Sound → Co-driver (on, volume, how far ahead), or `--no-codriver`, `--codriver-lead`,
+    `--codriver-volume`. F1's readout shows the last call. Stage 41: 79 calls from 112 notes, 97 recordings.
+  - **Loaded on its own thread** (`CoDriver::LoadAsync`): `CoDriver.ini`, the recordings' decoding and the
+    phrases, while the stage loads. Nothing is called until it is ready. Stage 41: 68 ms, ready before the scene.
+  - **Not yet:** the Czech voice (`audio/Speech/Czh`, other file names); RBR's own timing rules beyond the lead;
+    `PLUS` and `MINUS`, which `CoDriver.ini` names but this install has no recordings of.
+- **Not in WAudio yet** (phase 3 moved what the game used): one car voice only; the default device only;
+  `setListener` does nothing, because the mix is still mono with no placed sources (sound-engine plan S3). The car's
+  gain is `volume[Master] × volume[Car]`; pause and mute both silence the car.
+- **TODO, low priority** (the audio threads, 2026-10-30):
+  - **A render thread of our own.** Today the car and the one-shots render inside XAudio2's callback on its
+    thread, so a slow block would glitch. The fix is our thread rendering a few ms ahead into a ring the callback
+    only copies, at a little latency. First measure one block's render time against its budget (0.67 ms per 32
+    samples); only worth it near the limit, which positional sound (S3) or more cars may reach.
+  - **Lock-free one-shot commands.** `play`/`stop` take the mutex `Voices::Mix` holds while mixing; a command ring
+    like the records' would stop the game's thread ever waiting on the audio's.
+  - **`lastError` across threads.** The module's error string is written by `loadSound` on the co-driver's loader
+    thread and read by the game's: a benign race (a message, never a crash) to close with the command ring.
 
 ---
 

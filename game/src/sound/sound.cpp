@@ -176,6 +176,53 @@ void Sound::SetMuted(bool muted)
     m->out.api->applySettings(m->out.instance, &m->settings);
 }
 
+void Sound::SetPaused(bool paused)
+{
+    if (m && m->out.instance) m->out.api->setPaused(m->out.instance, paused ? 1u : 0u);
+}
+
+uint32_t Sound::LoadSound(const std::string& path, std::string* error)
+{
+    if (!m || !m->out.instance) {
+        if (error) *error = "no audio module";
+        return 0;
+    }
+    iface::SoundHandle h = 0;
+    if (m->out.api->loadSound(m->out.instance, path.c_str(), &h) != Status::Ok) {
+        if (error) *error = m->out.api->lastError(m->out.instance);
+        return 0;
+    }
+    return h;
+}
+
+uint32_t Sound::Play(uint32_t sound, Bus bus, float gain)
+{
+    if (!m || !m->out.instance || !sound) return 0;
+    iface::PlayDesc d{};
+    d.bus = static_cast<iface::AudioBus>(bus);
+    d.gain = gain;
+    d.pitch = 1.0f;
+    iface::PlayHandle p = 0;
+    return m->out.api->play(m->out.instance, sound, &d, &p) == Status::Ok ? p : 0;
+}
+
+bool Sound::Playing(uint32_t play) const
+{
+    return m && m->out.instance && play && m->out.api->isPlaying(m->out.instance, play) != 0;
+}
+
+void Sound::Stop(uint32_t play)
+{
+    if (m && m->out.instance && play) m->out.api->stop(m->out.instance, play);
+}
+
+void Sound::SetVolume(Bus bus, float volume)
+{
+    if (!m || !m->out.instance) return;
+    m->settings.volume[static_cast<uint32_t>(bus)] = volume;
+    m->out.api->applySettings(m->out.instance, &m->settings);
+}
+
 uint32_t Sound::RenderOffline(float* out, uint32_t frames)
 {
     return m && m->out.instance ? m->out.api->renderOffline(m->out.instance, out, frames) : 0;

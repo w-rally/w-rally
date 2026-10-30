@@ -33,6 +33,7 @@
 #include "session/session.h"
 #include "session/sim_thread.h"
 #include "signals/bus.h"
+#include "sound/codriver.h"
 #include "sound/sound.h"
 #include "ui/hud.h"
 #include "ui/imgui_layer.h"
@@ -170,6 +171,7 @@ StageEnd RunStage(Shell& sh, const Options& o, bool fromMenu, std::string& error
     // The sound: a module DLL in modules/audio (--audio, "waudio" by default: WAudio.dll), every record on the bus
     // forwarded to it.
     sound::Sound sound;
+    bool soundOn = false;   // the module opened, the car's voice made
     if (o.sound) {
         sound::CarSound car;
         car.engine = o.engine;
@@ -184,8 +186,21 @@ StageEnd RunStage(Shell& sh, const Options& o, bool fromMenu, std::string& error
             std::printf("audio module: %s\n", sound.ModuleName().c_str());
             sound.Connect(&bus);
             mixPath = o.mix;
+            soundOn = true;
         }
     }
+    // The co-driver: the stage's pacenotes read out (sound/codriver.h), with RBR's voice - loaded on its own thread while
+    // the stage loads here; it starts calling once ready (its report then, in the frame loop).
+    sound::CoDriver codriver;
+    if (soundOn && o.codriver) {
+        try {
+            codriver.LoadAsync(sound, o.game, phys::data::ReadDls(o.session.dls).pacenotes);
+            sound.SetVolume(sound::Sound::Bus::CoDriver, o.codriverVolume);
+        } catch (const std::exception& ex) {
+            std::printf("no co-driver: %s\n", ex.what());
+        }
+    }
+    bool soundPaused = false;
     sim.Connect(&bus);
     const std::vector<phys::data::RecMesh> collision =
         phys::data::CarCollisionMeshes(phys::data::ReadSgcCollision(o.session.physics.sgc));
@@ -424,6 +439,17 @@ StageEnd RunStage(Shell& sh, const Options& o, bool fromMenu, std::string& error
         in.chaseDistance = chaseDistance;
         simThread.Post(in);
         simThread.Latest(snap);
+        // The co-driver's calls ahead of the car; held with the stage (a pause, the menu), the world's sound with them.
+        if (soundOn) {
+            if (const std::string r = codriver.TakeReport(); !r.empty()) {
+                std::printf("%s\n", r.c_str());
+                // WRALLY_CODRIVER_LIST=<n>: the first n calls in the log.
+                if (const char* n = std::getenv("WRALLY_CODRIVER_LIST")) std::printf("%s", codriver.Describe(std::strtoul(n, nullptr, 0)).c_str());
+            }
+            const bool hold = paused || menu != StageMenu::None;
+            if (hold != soundPaused) sound.SetPaused(soundPaused = hold);
+            if (!hold) codriver.Update(snap.distance, snap.dash.speed, o.codriverLead);
+        }
         if (snap.failed) quit = true, end = fromMenu ? StageEnd::ExitToMenu : StageEnd::Failed, error = "the physics failed";
         // A replay's end ends the run (its check reported, as at a quit), unless --hold keeps its last frame up.
         if (snap.replayEnded && !o.hold) quit = true, end = fromMenu ? StageEnd::ExitToMenu : StageEnd::Quit;
@@ -500,6 +526,7 @@ StageEnd RunStage(Shell& sh, const Options& o, bool fromMenu, std::string& error
                 line("exposure x%.2f (manual)", st.exposure);
             line("V view %u: %s", st.debugView, renderer.DebugViewName(static_cast<int32_t>(st.debugView)));
             if (legacyProfile >= 0) line("legacy cards: %s", legacyProfile == 1 ? "A (bake)" : legacyProfile == 2 ? "B (bake as occlusion)" : "off");
+            if (codriver.Phrases()) line("co-driver: %s   (%.0f m along the stage)", codriver.LastCall().empty() ? "-" : codriver.LastCall().c_str(), snap.distance);
             auto key = [&](Action a) { return input::KeyName(keys[a]); };
             line("%s readout  %s pause  %s shot  %s camera  %s %s chase  %s %s orbit", key(Action::Readout).c_str(),
                  key(Action::Pause).c_str(), key(Action::Screenshot).c_str(), key(Action::Camera).c_str(),
@@ -681,6 +708,8 @@ std::vector<std::string> QuickArgs(const Settings& s, const assets::Catalog& cat
     a.insert(a.end(), {"--road", kRoad[s.road ? std::min(s.road, 3u) - 1 : assets::RoadOfWeather(s.weather)]});
     if (!car->engine.empty()) a.insert(a.end(), {"--eng", car->engine});
     if (!s.sound) a.push_back("--no-sound");
+    if (!s.codriver) a.push_back("--no-codriver");
+    a.insert(a.end(), {"--codriver-lead", std::to_string(s.codriverLead), "--codriver-volume", std::to_string(s.codriverVolume)});
     return a;
 }
 

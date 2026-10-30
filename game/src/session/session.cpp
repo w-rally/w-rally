@@ -297,6 +297,7 @@ void Session::Snap(Snapshot& out) const
     out.t = static_cast<float>(std::min(1.0, m_acc / m_dt));
     out.tick = m_sim.Tick();
     out.dash = m_sim.Dash();
+    out.distance = m_sim.StageDistance();
     out.clock = m_clock;
     std::memcpy(out.centerOfGravity, m_cog, sizeof m_cog);
     out.failed = m_failed;

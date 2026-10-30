@@ -60,6 +60,12 @@ native physics is bit-exact with RBR only under them.
 - Legacy stages (phase 8, step 1): `data/lsp.*` gains `ReadZip`, every member of a zip from one read (a stage's
   texture archive). `ngg_format.h`'s note on who writes the layout now names WRally's writer, `ngg_scene.h`.
 
+- Co-driver (2026-10-30), in the audio library:
+  - `audio/sample.*` gains `ReadOgg` (stb_vorbis) and `ReadSound`.
+  - New `audio/voices.*`, the one-shots.
+  - `audio::Audio` gains `overlay`, mixed in after the car's samples by `Render`, both when it plays and when it
+    is silent. The car's own samples are untouched.
+
 - Physics libraries (2026-10-29, design 4.3a step 1): `phys-native` split into `rbr-base`, `rbr-collision`,
   `rbr-tyre`, `rbr-car` and `rbr-world`. `Unreached` and its probe moved from `native/entity.*` to
   `native/unreached.*`, so `drive.cpp` and `driveline.cpp` include that instead of `entity.h`. No code changed.
@@ -92,6 +98,7 @@ native physics is bit-exact with RBR only under them.
 |---|---|---|
 | `third_party/imgui/` | Dear ImGui 1.91.5 (MIT): core + `backends/imgui_impl_win32.*`, unchanged | github.com/ocornut/imgui, tag v1.91.5, downloaded 2026-10-25 |
 | `third_party/imgui_config/` | WRally's ImGui configuration (32-bit indices) | ours |
+| `third_party/stb/stb_vorbis.c` | stb_vorbis v1.22 (public domain), the Ogg Vorbis decoder, unchanged | github.com/nothings/stb, master, downloaded 2026-10-30 (sha256 4c7cb2ff1f7011e9d67950446b7eb9ca044f2e464d76bfbb0b84dd2e23e65636) |
 | `third_party/dxc/` | DirectX Shader Compiler redistributables | see the table above |
 
 **Checked on import:** WRally.exe and plugin-rbr's `phys-drive.exe` with the same arguments (`C:\Brb`, track-108_M,

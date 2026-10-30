@@ -72,6 +72,7 @@ struct Snapshot {
     float t = 0.0f;
     uint32_t tick = 0;
     physics::Dashboard dash{};
+    float distance = 0.0f;     // the car along the stage's drive line, metres (the co-driver's, the stage clock's)
     rules::StageClock clock;
     float centerOfGravity[3]{};
     bool failed = false;       // the physics faulted: the run is over (Error())

@@ -20,6 +20,10 @@ struct Sample {
 
 // "" or what is wrong.
 std::string ReadWav(const std::string& path, Sample& out);
+// An Ogg Vorbis file (RBR's speech: audio/Speech/*), decoded whole (stb_vorbis), its channels averaged to mono.
+std::string ReadOgg(const std::string& path, Sample& out);
+// A .wav or an .ogg, by its first bytes.
+std::string ReadSound(const std::string& path, Sample& out);
 
 struct EngineLoop {
     float rpm = 0;

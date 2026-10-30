@@ -23,6 +23,9 @@ struct Settings {
 
     // Sound
     bool sound = true;
+    bool codriver = true;               // the pacenotes read out
+    float codriverVolume = 1.0f;        // 0..1
+    float codriverLead = 3.0f;          // seconds ahead at the speed: earlier (more) or later (less)
 
     // Controls: the keys (key_<action> = its scan code, hex)
     input::Bindings keys;

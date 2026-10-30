@@ -234,8 +234,10 @@ void Audio::Drain()
 void Audio::Render(float* out, uint32_t frames)
 {
     Drain();
+    Voices* const voices = overlay.load(std::memory_order_acquire);   // the game's one-shots, after the car's
     if (m_count < 2 || muted.load(std::memory_order_relaxed)) {
         std::fill(out, out + 2 * size_t(frames), 0.0f);
+        if (voices) voices->Mix(out, frames, static_cast<float>(kRate));
         return;
     }
     const double newest = m_history[m_count - 1].tick, oldest = m_history[0].tick;
@@ -247,6 +249,7 @@ void Audio::Render(float* out, uint32_t frames)
     // Faster when further behind than the lag, slower when closer: the physics' bursts even out.
     const double rate = std::clamp(1.0 + (newest - m_play - kLag) * 0.03, 0.5, 1.5);
     Produce(out, frames, rate);
+    if (voices) voices->Mix(out, frames, static_cast<float>(kRate));
 }
 
 const Audio::Frame* Audio::At(double tick, const Frame** next, float* u) const

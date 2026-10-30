@@ -8,7 +8,8 @@
 //          [--time HH:MM [--date YYYY-MM-DD] [--utc-offset h] [--latitude deg] [--longitude deg] [--north deg]]
 //          [--skip-to <tick>] [--pause-at <tick>] [--exit-at <tick>] [--step <seconds>] [--camera-angle <degrees>]
 //          [--chase-distance <metres>] [--chase-pull <metres per 100 km/h>] [--entry <seconds>] [--quick-start]
-//          [--no-sound] [--eng Focus03-08] [--mix sound-mix.ini] [--overrides cars/s_i2003.ini | none]
+//          [--no-sound] [--no-codriver] [--codriver-lead 3] [--codriver-volume 1] [--eng Focus03-08]
+//          [--mix sound-mix.ini] [--overrides cars/s_i2003.ini | none]
 //          [--launch-rpm 7400] [--als-crack 0.25] [--als-bangs <folder of .wav>] [--als-idle-bangs <folder>]
 //
 // The stage (Maps/<stage>.*: the physics' ground) defaults to the .ngg's: track-34_E.ngg that one, track-34.ngg the
@@ -32,7 +33,8 @@
 // The environment: PHYS_DRIVE_READOUT the readout on from the start, PHYS_DRIVE_OFF=taa,ao,shadows,rt those off from the
 // start, PHYS_DRIVE_SHOTS=<n> a capture every n ticks, PHYS_DRIVE_JITTER=<tick> how steadily the car sits in the
 // picture up to that tick (then quit), PHYS_DRIVE_NGGLOG the renderer's log on stdout, PHYS_DRIVE_MATERIALS the car's
-// materials listed, PHYS_DRIVE_LOOK_UP=<degrees> every view tilted up by that much (the sky).
+// materials listed, PHYS_DRIVE_LOOK_UP=<degrees> every view tilted up by that much (the sky), PHYS_DRIVE_TEST_LIGHTS
+// test lamps on the car (two headlight spots, a lamp behind it).
 
 #include <cstdint>
 #include <filesystem>
@@ -50,6 +52,9 @@ struct Options {
     std::string out = "drive.phr";
     std::string rendererId = "wrenderer";
     bool sound = true;
+    bool codriver = true;                // the pacenotes read out (--no-codriver: not)
+    float codriverLead = 3.0f;           // --codriver-lead: seconds ahead at the speed
+    float codriverVolume = 1.0f;         // --codriver-volume: 0..1
     std::string audioId = "waudio", engine = "Focus03-08", bangs, idleBangs, mix;
     int camera = -1;                     // -1: the replay's TV cameras in a replay, else the chase camera
     float cameraAngle = 0.0f;            // the beside camera's place round the car, radians

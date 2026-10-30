@@ -29,6 +29,9 @@ template <class F> void Fields(Settings& s, F&& f)
     f("shadows", s.shadows);
     f("vsync", s.vsync);
     f("sound", s.sound);
+    f("codriver", s.codriver);
+    f("codriver_volume", s.codriverVolume);
+    f("codriver_lead", s.codriverLead);
     f("quick_stage", s.stage);
     f("quick_car", s.car);
     f("quick_setup", s.setup);
@@ -40,9 +43,16 @@ template <class F> void Fields(Settings& s, F&& f)
 void Set(std::string& v, const std::string& text) { v = text; }
 void Set(uint32_t& v, const std::string& text) { v = static_cast<uint32_t>(std::strtoul(text.c_str(), nullptr, 10)); }
 void Set(bool& v, const std::string& text) { v = text == "1" || text == "true" || text == "on"; }
+void Set(float& v, const std::string& text) { v = static_cast<float>(std::atof(text.c_str())); }
 std::string Text(const std::string& v) { return v; }
 std::string Text(uint32_t v) { return std::to_string(v); }
 std::string Text(bool v) { return v ? "1" : "0"; }
+std::string Text(float v)
+{
+    char t[32];
+    std::snprintf(t, sizeof t, "%g", v);
+    return t;
+}
 
 } // namespace
 
