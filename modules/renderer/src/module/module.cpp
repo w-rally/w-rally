@@ -153,6 +153,7 @@ struct Renderer {
 
     bool sceneLoaded = false;
     int32_t appliedPreset = -2;            // the weather preset in skyParams (-1 a WeatherDesc, -2 none yet)
+    bool    skyTimeApplied = false;        // skyParams' sun is a FrameDesc::skyTime's, not the weather's
     WeatherDesc appliedDesc{};
     std::unordered_map<int32_t, std::vector<uint32_t>> byKey;   // NGGK key -> the scene's objects
     std::unordered_map<int32_t, bool> keyVisible;
@@ -584,7 +585,23 @@ Status WRALLY_CALL RenderFrame(Renderer* r, const FrameDesc* f)
     if (world) {
         for (uint32_t i = 0; f->stageObjects && i < f->stageObjectCount; ++i) MoveStageObject(*r, f->stageObjects[i]);
         for (uint32_t i = 0; f->instances && i < f->instanceCount; ++i) Place(*r, f->instances[i]);
+        // The time and place over the weather's sun (NGG design 5.4). When the override goes, the weather is applied
+        // again from scratch, which brings its own sun back.
+        if (!f->skyTime.set && r->skyTimeApplied) {
+            r->appliedPreset = -2;
+            std::memset(&r->appliedDesc, 0xff, sizeof r->appliedDesc);
+            r->skyTimeApplied = false;
+        }
         ApplyFrameWeather(*r, *f);
+        if (f->skyTime.set) {
+            const SkyTimeDesc& t = f->skyTime;
+            ngg::core::SkyTime st;
+            st.year = t.year, st.month = t.month, st.day = t.day;
+            st.localHour = t.localHour, st.utcOffset = t.utcOffset;
+            st.latitude = t.latitude, st.longitude = t.longitude, st.northDeg = t.northDeg;
+            ngg::core::ApplySkyTime(st, r->skyParams);
+            r->skyTimeApplied = true;
+        }
         r->scene.SetWetness(f->wetness);
         if (f->lineVertexCount && f->lines) {
             static_assert(sizeof(LineVertex) == sizeof(ngg::core::Scene::OverlayVertex), "uploaded raw");

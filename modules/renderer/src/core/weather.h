@@ -44,6 +44,7 @@
 #include <string>
 #include <vector>
 
+#include "astronomy.h"
 #include "sky.h"
 
 namespace ngg {
@@ -59,6 +60,10 @@ struct WeatherPreset
     float       fogHeight = 150.0f;     // scale height of the fog layer, metres
     float       rain = 0.0f;            // 0 dry .. 1 heavy - carried, not yet rendered
     float       snow = 0.0f;            // 0 none .. 1 heavy - carried, not yet rendered
+    // The time and place (NGG design 5.4, N1). When set, the sun follows from them (ApplyWeather) and sky.sunDir is
+    // not used.
+    bool        timeSet = false;
+    SkyTime     time;
 };
 
 // The .ngg's NGGW chunk (design 5.0t): binary records. Parse returns false on a
@@ -72,8 +77,13 @@ bool        SaveWeather(const wchar_t* path, const WeatherPreset& in);
 std::string WeatherToJson(const WeatherPreset& in);
 bool        WeatherFromJson(const char* text, WeatherPreset& out);
 
-// The preset's weather, applied onto SkyParams (the renderer's input).
+// The preset's weather, applied onto SkyParams (the renderer's input). A preset with its time set places the sun
+// astronomically (ApplySkyTime).
 void ApplyWeather(const WeatherPreset& w, SkyParams& sky);
+
+// The sun where a date, a time and a place put it: sky.sunDir becomes the direction its light travels. Returns the
+// bodies, for what else follows from them (the moon, the stars).
+SkyBodies ApplySkyTime(const SkyTime& t, SkyParams& sky);
 
 } // namespace core
 } // namespace ngg

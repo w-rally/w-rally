@@ -608,6 +608,10 @@ StageEnd RunStage(Shell& sh, const Options& o, bool fromMenu, std::string& error
             fd.camera.fovY = view.fovY;
             fd.weatherPreset = weatherPreset;   // the .ngg's preset (0 its own weather)
             fd.wetness = 0.5f * static_cast<float>(std::clamp(wet, 0, 2));   // the road's: dry 0, damp 0.5, wet 1
+            if (o.skyTimeSet) {   // the time and place: the sun from them (NGG design 5.4)
+                fd.skyTime = {1, o.skyYear, o.skyMonth, o.skyDay, static_cast<float>(o.skyHour), static_cast<float>(o.skyUtcOffset),
+                              static_cast<float>(o.skyLatitude), static_cast<float>(o.skyLongitude), static_cast<float>(o.skyNorth)};
+            }
             fd.instances = instances.data();
             fd.instanceCount = static_cast<uint32_t>(instances.size());
             fd.stageObjects = moved.data();

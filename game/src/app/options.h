@@ -5,6 +5,7 @@
 //          [--surface <the stage's>] [--tyre-type <its>] [--tyres michelin] [--aids 0,0,0,0] [--camera 0] [--out drive.phr]
 //          [--replay run.phr [--hold]] [--physics rbr] [--audio waudio] [--renderer wrenderer]
 //          [--setup <file>] [--damage 0..3] [--weather <preset>] [--road dry|damp|wet]
+//          [--time HH:MM [--date YYYY-MM-DD] [--utc-offset h] [--latitude deg] [--longitude deg] [--north deg]]
 //          [--skip-to <tick>] [--pause-at <tick>] [--exit-at <tick>] [--step <seconds>] [--camera-angle <degrees>]
 //          [--chase-distance <metres>] [--chase-pull <metres per 100 km/h>] [--entry <seconds>] [--quick-start]
 //          [--no-sound] [--eng Focus03-08] [--mix sound-mix.ini] [--overrides cars/s_i2003.ini | none]
@@ -56,6 +57,11 @@ struct Options {
     uint32_t pauseAt = 0, exitAt = 0;
     bool hold = false;                   // --hold: a replay's end keeps its last frame up (else the game quits)
     std::string weather;                 // --weather: the .ngg's weather preset by name ("" its default)
+    // --time HH:MM [--date YYYY-MM-DD] [--utc-offset h] [--latitude deg] [--longitude deg] [--north deg]: the time and
+    // place, the sun from them over the weather's (NGG design 5.4). Without --time, the weather's own sun.
+    bool skyTimeSet = false;
+    int skyYear = 2026, skyMonth = 6, skyDay = 21;
+    double skyHour = 12.0, skyUtcOffset = 1.0, skyLatitude = 50.0, skyLongitude = 14.4, skyNorth = 0.0;
 };
 
 // The command line into `o`. Returns 0, or the exit code with what was wrong on stderr.

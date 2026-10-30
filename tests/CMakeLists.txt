@@ -75,6 +75,14 @@ target_compile_definitions(car-parts PRIVATE _CRT_SECURE_NO_WARNINGS NOMINMAX)
 set_target_properties(car-parts PROPERTIES CXX_STANDARD 17)
 add_test(NAME car-parts COMMAND car-parts)
 
+# The renderer's sky clockwork (modules/renderer/src/core/astronomy.*, NGG design 5.4 N1) against Meeus's worked
+# examples and the solstice's noon sun.
+add_executable(astronomy-check astronomy_check.cpp ${PROJECT_SOURCE_DIR}/modules/renderer/src/core/astronomy.cpp)
+target_include_directories(astronomy-check PRIVATE ${PROJECT_SOURCE_DIR}/modules/renderer/src/core)
+set_target_properties(astronomy-check PROPERTIES CXX_STANDARD 17)
+add_test(NAME astronomy-check COMMAND astronomy-check)
+set_tests_properties(astronomy-check PROPERTIES PASS_REGULAR_EXPRESSION "astronomy-check: all good")
+
 # What the Quick rally menu offers (game/src/assets/catalog.cpp) from the RBR folder: every stage, those no .ngg draws
 # imported from their .lbs with drawn weathers, no protected (encrypted) one, and a map under 10's weathers under their
 # two-digit names.

@@ -373,15 +373,27 @@ struct WeatherRecord
     float rain;               // 0..1
     float snow;               // 0..1
     float exposure;           // exposure at reference brightness
+    // --- appended 2026-10-30 (NGG design 5.4, N1): the TIME and PLACE. With kWeatherTimeSet the sun and the moon
+    // follow from them astronomically (core/astronomy.h) and `sunDirection` is not used. A 124-byte record (before
+    // this) reads as no time set.
+    uint32_t timeFlags;       // kWeatherTimeSet
+    int32_t  year, month, day;
+    float    localHour;       // the stage's clock, 0..24
+    float    utcOffset;       // hours: local = UTC + utcOffset
+    float    latitude;        // degrees, north positive
+    float    longitude;       // degrees, east positive
+    float    northDeg;        // where north lies in the world: degrees from +z towards +x
 };
 #pragma pack(pop)
 
 const uint32_t kWeatherVersion = 1;
-// Everything through `exposure`: a record shorter than this is not v1.
-const uint32_t kWeatherRecordMinSize = (uint32_t)sizeof(WeatherRecord);
+const uint32_t kWeatherTimeSet = 1u << 0;
+// Everything through `exposure`: a record shorter than this is not v1. Longer ones are newer v1 records; a reader
+// takes min(recordSize, sizeof(WeatherRecord)) bytes of each over DefaultWeatherRecord().
+const uint32_t kWeatherRecordMinSize = 124;
 
 static_assert(sizeof(WeatherChunkHeader) == 16, "WeatherChunkHeader layout");
-static_assert(sizeof(WeatherRecord) == 124,     "WeatherRecord v1 layout - keep NggWriter.cs in step");
+static_assert(sizeof(WeatherRecord) == 160,     "WeatherRecord v1 layout - keep NggWriter.cs in step");
 
 // A clear morning with no name: what a producer starts a record from. The same values as core::SkyParams' defaults
 // (core/sky.h) - a producer outside the renderer (WRally's importer) cannot include that, so the format says them;
@@ -396,6 +408,10 @@ constexpr WeatherRecord DefaultWeatherRecord()
     r.groundColour[0] = 0.49f; r.groundColour[1] = 0.49f; r.groundColour[2] = 0.50f;
     r.fogHeight = 150.0f;
     r.exposure = 0.8f;
+    // No time set; if one is, these are where it starts (core::SkyTime's defaults): midsummer noon in central Europe.
+    r.year = 2026; r.month = 6; r.day = 21;
+    r.localHour = 12.0f; r.utcOffset = 1.0f;
+    r.latitude = 50.0f; r.longitude = 14.4f;
     return r;
 }
 
