@@ -15,7 +15,9 @@
 //   - RBR's baked lighting NOT used for light: it stays in the vertex colour, as the renderer's A/B reference (its
 //     light mode 0), and the default dynamic mode lights the stage from the sun and the sky alone; normals where the
 //     file has none are the faces' (area-weighted)
-// Not yet: welded normals, weather presets from TrackSettings.ini, the start point, a cache (steps 2 and 3).
+//   - the weather presets (NGGW): every TrackSettings.ini section of the stage's map, translated, the stage's own time
+//     of day the default (assets/legacy_weather.h)
+// Not yet: welded normals, the start point, a cache (steps 2 and 3).
 
 #include <cstdint>
 #include <string>

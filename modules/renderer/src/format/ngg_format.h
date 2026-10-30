@@ -377,6 +377,22 @@ const uint32_t kWeatherRecordMinSize = (uint32_t)sizeof(WeatherRecord);
 static_assert(sizeof(WeatherChunkHeader) == 16, "WeatherChunkHeader layout");
 static_assert(sizeof(WeatherRecord) == 124,     "WeatherRecord v1 layout - keep NggWriter.cs in step");
 
+// A clear morning with no name: what a producer starts a record from. The same values as core::SkyParams' defaults
+// (core/sky.h) - a producer outside the renderer (WRally's importer) cannot include that, so the format says them;
+// core/weather.cpp checks at compile time that they agree.
+constexpr WeatherRecord DefaultWeatherRecord()
+{
+    WeatherRecord r = {};
+    r.sunDirection[0] = -0.843359f; r.sunDirection[1] = -0.503774f; r.sunDirection[2] = 0.186968f;
+    r.sunIntensity = 22.0f;
+    r.turbidity = 1.0f;
+    r.groundAlbedo = 0.1f;
+    r.groundColour[0] = 0.49f; r.groundColour[1] = 0.49f; r.groundColour[2] = 0.50f;
+    r.fogHeight = 150.0f;
+    r.exposure = 0.8f;
+    return r;
+}
+
 inline uint32_t ChunkWeather()     { return FourCC('N','G','G','W'); }
 
 static_assert(sizeof(Object) == 16,   "Object layout");

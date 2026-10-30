@@ -203,6 +203,21 @@ bool SaveWeather(const wchar_t* path, const WeatherPreset& in)
     return ok;
 }
 
+// The format's default record is the renderer's default sky: a producer that starts from it and changes nothing gets
+// the weather a scene without presets draws.
+namespace {
+constexpr SkyParams kSky{};
+constexpr WeatherRecord kRec = DefaultWeatherRecord();
+static_assert(kRec.sunDirection[0] == kSky.sunDir[0] && kRec.sunDirection[1] == kSky.sunDir[1] &&
+              kRec.sunDirection[2] == kSky.sunDir[2] && kRec.sunIntensity == kSky.sunIntensity &&
+              kRec.turbidity == kSky.turbidity && kRec.groundAlbedo == kSky.groundAlbedo &&
+              kRec.groundColour[0] == kSky.groundColour[0] && kRec.groundColour[1] == kSky.groundColour[1] &&
+              kRec.groundColour[2] == kSky.groundColour[2] && kRec.cloudCover == kSky.cloudCover &&
+              kRec.fogVisibility == kSky.fogVisibility && kRec.fogHeight == kSky.fogHeight &&
+              kRec.exposure == kSky.exposure,
+              "ngg_format.h's DefaultWeatherRecord() and sky.h's SkyParams defaults disagree");
+} // namespace
+
 bool ParseWeatherChunk(const void* payload, size_t bytes, std::vector<WeatherPreset>& out)
 {
     out.clear();

@@ -87,7 +87,13 @@ endif()
 if(EXISTS ${WRALLY_TEST_RBR_DIR}/Maps/track-41_M.lbs)
     add_test(NAME legacy-import-41 COMMAND ngg-check --lbs ${WRALLY_TEST_RBR_DIR}/Maps/track-41_M.lbs)
     set_tests_properties(legacy-import-41 PROPERTIES PASS_REGULAR_EXPRESSION
-        "imported track-41_M.lbs: .* 304744 triangles, .*\(0 missing\).*ngg-check: all good")
+        "weather: 7 presets from TrackSettings.ini, default 41M_crisp_clear .*imported track-41_M.lbs: .* 304744 triangles, .*\(0 missing\).*ngg-check: all good")
+endif()
+# Its weathers on a map under 10: TrackSettings.ini writes it "04", so a "4" prefix would find none.
+if(EXISTS ${WRALLY_TEST_RBR_DIR}/Maps/track-4_E.lbs)
+    add_test(NAME legacy-import-weather-4 COMMAND ngg-check --lbs ${WRALLY_TEST_RBR_DIR}/Maps/track-4_E.lbs)
+    set_tests_properties(legacy-import-weather-4 PROPERTIES PASS_REGULAR_EXPRESSION
+        "weather: 43 presets from TrackSettings.ini, default 04E_crisp_clear .*ngg-check: all good")
 endif()
 
 # The physics' libraries depend downwards only (docs/design.md 4.3a): each linked WHOLE into an empty program with only

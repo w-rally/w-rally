@@ -10,6 +10,7 @@
 #include <map>
 
 #include "data/lsp.h"
+#include "formats/track_settings.h"
 #include "rules/stage.h"
 
 namespace fs = std::filesystem;
@@ -151,8 +152,10 @@ std::string Catalog::Scan(const app::Settings& s)
                 st.map = map;
                 const char tod = v.size() >= 2 ? v.back() : ' ';
                 st.title = v + (TimeOfDay(tod)[0] ? std::string(" (") + TimeOfDay(tod) + ")" : "") + "  -  " + ngg.filename().string();
-                const std::string prefix = std::to_string(map) + static_cast<char>(std::toupper(static_cast<unsigned char>(tod))) + "_";
-                const std::string overcast = std::to_string(map) + "O_" + static_cast<char>(std::toupper(static_cast<unsigned char>(tod))) + "_";
+                // (The map in two digits at least, as TrackSettings.ini writes it: "04M_...", not "4M_...".)
+                const std::string mapName = formats::TrackSettingsMap(map);
+                const std::string prefix = mapName + static_cast<char>(std::toupper(static_cast<unsigned char>(tod))) + "_";
+                const std::string overcast = mapName + "O_" + static_cast<char>(std::toupper(static_cast<unsigned char>(tod))) + "_";
                 for (const std::string& sec : sections)
                     if (!_strnicmp(sec.c_str(), prefix.c_str(), prefix.size()) || !_strnicmp(sec.c_str(), overcast.c_str(), overcast.size()))
                         st.weathers.push_back(sec);

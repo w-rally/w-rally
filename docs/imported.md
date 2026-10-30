@@ -77,6 +77,11 @@ native physics is bit-exact with RBR only under them.
   - `ReadPlants` takes `untaggedCards`; `FindPlants` is skipped on a legacy import.
   - The prepass marks a legacy card `~0`, and `Occluded` skips cards within `kLegacyCardSkip` of its rays.
 
+- Legacy weather (phase 8 step 3, 2026-10-29): `ngg_format.h` gains `DefaultWeatherRecord()` (constexpr), the record
+  a producer starts from, and `core/weather.cpp` checks at compile time that it equals `SkyParams`' defaults. The
+  TrackSettings.ini translation itself is ported from plugin-rbr's `ngg/host/tracksettings.cpp`, which was not
+  imported, into the game (`assets/legacy_weather.*`, `formats/track_settings.*`).
+
 - Menus (after phase 6): `native/run.cpp` reads a car's `common.lsp`, `<surface>.lsp`, `r_<surface>.lsp` and default
   setup from a loose folder when `physicsCar` is a VFS path ending in '/' (`CarFile`), and from `physics.rbz` as
   before otherwise. A setup can be a VFS file as well as an rbz member. The tyres still come from `physics.rbz`.
