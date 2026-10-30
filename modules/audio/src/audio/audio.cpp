@@ -20,7 +20,7 @@ constexpr float kRadToRpm = 9.5492966f;
 constexpr float kHeadroom = 0.6f;
 
 // The mix (S1: by ear against RBR's; 1 is a loop at its recorded level).
-constexpr float kEngineGain = 0.55f, kGrainGain = 1.0f, kUnfiredGain = 0.8f, kCutGain = 0.25f, kIdleSpread = 0.10f, kWanderTime = 3.0f * kRate / 1000, kWanderLevel = 0.06f, kTurboGain = 0.18f, kValveGain = 0.45f, kTransmissionGain = 0.10f;
+constexpr float kEngineGain = 0.55f, kGrainGain = 1.0f, kUnfiredGain = 0.8f, kUnfiredOnGain = 0.3f, kCutGain = 0.25f, kIdleSpread = 0.10f, kWanderTime = 3.0f * kRate / 1000, kWanderLevel = 0.06f, kTurboGain = 0.18f, kValveGain = 0.45f, kTransmissionGain = 0.10f;
 constexpr float kRollGain = 0.22f, kSkidGain = 0.35f, kWindGain = 0.25f;
 // The gear change and the dog ring: RBR's samples are a cabin's clunk; outside, a sequential box's upshift is near
 // silent - its sound is the ignition cut (a Rally1 recording, the user). Up again inside the car (S3).
@@ -485,9 +485,13 @@ void Audio::Produce(float* out, uint32_t frames, double rate)
                         const float vary = (1 + spread * (2 * Random() - 1)) * swell;
                         if (fired >> c & 1) m_grains.Fire(m_grainRpm, m_grainLoad, m_grainOn * vary, m_grainOff * vary, spacing, m_mix.rpmBlend, delay);
                         // A cylinder whose spark was cut (the rev limiter, the shift cut) is near silent - the limiter's
-                        // stutter; one that had its spark but did not burn (too little charge: the overrun) still pumps.
-                        else if (!(after->engine.sparks >> c & 1)) m_grains.Fire(m_grainRpm, 0, m_grainOn, m_grainOff * kCutGain * vary, spacing, m_mix.rpmBlend, delay);
-                        else m_grains.Fire(m_grainRpm, 0, m_grainOn, m_grainOff * kUnfiredGain * vary, spacing, m_mix.rpmBlend, delay);
+                        // stutter; one that had its spark but did not burn still pumps: off the throttle (the overrun)
+                        // an overrun pulse, under load a weak pull's - a gap in it, not the overrun. (As overrun pulses
+                        // at any throttle, the physics' unburnt firings under full throttle - 2-6 % at 4000-7200 rpm,
+                        // ~20 % on the limiter - put the off loops within 12 dB of the on ones in 13-46 % of a drive's
+                        // full-throttle moments: heard as noise in the pull.)
+                        else if (!(after->engine.sparks >> c & 1)) m_grains.Fire(m_grainRpm, m_grainLoad, m_grainOn * kCutGain * vary, m_grainOff * kCutGain * vary, spacing, m_mix.rpmBlend, delay);
+                        else m_grains.Fire(m_grainRpm, m_grainLoad, m_grainOn * kUnfiredOnGain * vary, m_grainOff * kUnfiredGain * vary, spacing, m_mix.rpmBlend, delay);
                     }
             }
             // The grains at the recording's own level; RBR's engines get Cars.ini's low shelf after, its boost taken
