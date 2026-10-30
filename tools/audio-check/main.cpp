@@ -249,6 +249,21 @@ int main(int argc, char** argv)
 
     sound.Connect(bus);
     module.Connect(&bus);
+    // --engine-log <file>: per tick the driver's pedal and throttle, the engine's throttle, its revs, which cylinders
+    // fired and had a spark, the gear (a CSV) - what the sound's engine hears.
+    FILE* engineLog = nullptr;
+    signals::DriverTick lastDriver{};
+    int32_t lastGear = 0;
+    if (const std::string path = Arg(argc, argv, "--engine-log", ""); !path.empty() && (engineLog = std::fopen(path.c_str(), "w"))) {
+        std::fprintf(engineLog, "tick,pedal,driverThrottle,engineThrottle,easedThrottle,rpm,fired,sparks,gear,antiLag,launch\n");
+        bus.Connect<signals::DriverTick>([&](const signals::DriverTick& d) { lastDriver = d; });
+        bus.Connect<signals::DriveTick>([&](const signals::DriveTick& d) { lastGear = d.gear; });
+        bus.Connect<signals::EngineTick>([&](const signals::EngineTick& e) {
+            std::fprintf(engineLog, "%u,%.3f,%.3f,%.3f,%.3f,%.0f,%x,%x,%d,%u,%u\n", e.stamp.tick, lastDriver.pedal, lastDriver.throttle,
+                         e.throttle, e.easedThrottle, e.crankSpeed * 30 / 3.14159265f, e.fired, e.sparks, lastGear, lastDriver.antiLag,
+                         lastDriver.launchControl);
+        });
+    }
     if (game.empty()) {
         SyntheticDrive(bus);
     } else if (!curvePath.empty()) {
