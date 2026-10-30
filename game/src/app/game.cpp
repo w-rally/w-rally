@@ -195,9 +195,11 @@ StageEnd RunStage(Shell& sh, const Options& o, bool fromMenu, std::string& error
     // cards are lit by the renderer's legacy profile (B unless NGG_LEGACY_PROFILE says; the Debug menu switches it).
     const bool imported = !_stricmp(std::filesystem::path(o.ngg).extension().string().c_str(), ".lbs");
     int legacyProfile = !imported ? -1 : std::getenv("NGG_LEGACY_PROFILE") ? std::atoi(std::getenv("NGG_LEGACY_PROFILE")) : 2;
+    // The road's wetness, as the physics has it: 0 dry, 1 damp, 2 wet. It picks an import's textures and how wet the
+    // renderer draws every surface (FrameDesc::wetness: 0, 0.5, 1 - puddles from damp on).
+    const int wet = o.session.physics.wetness >= 0 ? o.session.physics.wetness : static_cast<int>(o.session.physics.weather / 3);
     if (imported) {
         assets::LegacyImport imp;
-        const int wet = o.session.physics.wetness >= 0 ? o.session.physics.wetness : static_cast<int>(o.session.physics.weather / 3);
         if (const std::string e = assets::ImportLegacyStage(o.ngg, wet, imp); !e.empty()) return fail(e);
         std::printf("%s", imp.log.c_str());
         bytes.assign(imp.ngg.begin(), imp.ngg.end());
@@ -605,6 +607,7 @@ StageEnd RunStage(Shell& sh, const Options& o, bool fromMenu, std::string& error
             fd.camera.farZ = 8000.0f;
             fd.camera.fovY = view.fovY;
             fd.weatherPreset = weatherPreset;   // the .ngg's preset (0 its own weather)
+            fd.wetness = 0.5f * static_cast<float>(std::clamp(wet, 0, 2));   // the road's: dry 0, damp 0.5, wet 1
             fd.instances = instances.data();
             fd.instanceCount = static_cast<uint32_t>(instances.size());
             fd.stageObjects = moved.data();

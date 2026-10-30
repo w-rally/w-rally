@@ -585,6 +585,7 @@ Status WRALLY_CALL RenderFrame(Renderer* r, const FrameDesc* f)
         for (uint32_t i = 0; f->stageObjects && i < f->stageObjectCount; ++i) MoveStageObject(*r, f->stageObjects[i]);
         for (uint32_t i = 0; f->instances && i < f->instanceCount; ++i) Place(*r, f->instances[i]);
         ApplyFrameWeather(*r, *f);
+        r->scene.SetWetness(f->wetness);
         if (f->lineVertexCount && f->lines) {
             static_assert(sizeof(LineVertex) == sizeof(ngg::core::Scene::OverlayVertex), "uploaded raw");
             r->scene.SetOverlayLines(r->dev.device.Get(), 0, reinterpret_cast<const ngg::core::Scene::OverlayVertex*>(f->lines),

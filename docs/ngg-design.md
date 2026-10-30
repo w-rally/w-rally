@@ -2858,6 +2858,41 @@ order. RBR's glass is single sheets, drawn two-sided, so a pixel is covered once
 taillight lens filtering what is behind it) needs dual-source blending; this tint is grey. Wallaby's `NggWriter`
 mirrors the flags and should learn bit 3 when the editor gets glass.
 
+### 5.0v Wet surfaces and puddles (2026-10-30, in WRally)
+
+The presets carried `rain` from the start (5.0q), and the physics drove a wet road (`--road wet`), but nothing looked
+wet. The wetness the picture shows is the **road's**, not the sky's: rain that has stopped still leaves the road
+wet, and a light shower on a dry road is not yet a wet one. So it comes from the game, which knows the road: renderer
+interface **v4** adds `FrameDesc::wetness` (0 dry .. 1 wet), and the game sends its road state (dry 0, damp 0.5, wet
+1). It reaches the shader through the camera constants' former pad (`gWetness`), so no buffer layout changed.
+
+**The shading** (opaque, non-foliage materials; after Lagarde's "Water drop 2b"):
+- **Exposure to rain:** an upward face takes it all, a wall half, an overhang none. Sheltered surfaces (the
+  ray-traced AO's dark: a canopy, the car over the road) take as little as 0.35.
+- **Darker where porous:** water fills the pores and traps light. Porosity is taken from roughness (the rough are
+  the porous: asphalt, gravel), and albedo scales to 0.45 there, 0.85 on smooth surfaces.
+- **Glossier:** the water film puts a ceiling on roughness, 0.25 when fully wet. With the sky's reflection, which
+  the environment's split sum already gives, that is most of the wet look, the sheen of sky down a wet road.
+- **Puddles** on the ground layer, from damp on: a world-fixed two-octave value noise (cells of ~3 m and ~1 m) above
+  a threshold that falls as it gets wetter (0.74 damp, 0.62 wet), on flat ground only (N.y > 0.93). A puddle is
+  dark (albedo 0.35x), near-mirror (roughness 0.02) and LEVEL: its normal turns to straight up.
+- **Not on grass:** green ground soaks the water up, so it neither pools nor turns to a mirror. RBR's materials
+  carry no tag, but the albedo tells: green-dominant ground gets no puddles, and its wet roughness only falls to
+  0.6. Without this the lawns went to blue-grey mirror sheets.
+
+**Measured** on stage 41 at the start, same frame: Wallaby's `.ngg` dry, damp and wet under the sun ("after the
+rain"), and the imported `.lbs` under `41O_M_lightrain_heavycloud`, dry vs wet. The wet road darkens, reflects the
+overcast sky down its length and catches the sun where it is lit. The import's own wet textures (RBR's wet set)
+and this shading stack sensibly. All fast CTests pass at interface 4.
+
+**Not done:**
+- The puddles reflect **only the sky**: the environment map is the sky. Under a canopy that is wrong: it should be
+  the dark trees. Ray-traced reflections for the mirror-like pixels (puddles, glass) are the cure, and they are
+  measurable against the RT budget (5.0m).
+- Rain itself: drops, spray and splashes (particles, design.md 3.2), rain on the glass.
+- Drying: wetness is a step today (dry, damp, wet), with no time in it.
+- Snow cover, and the cloud shapes (item 29).
+
 ### 5.1 Renderer implications
 
 A track at night wants hundreds of small emitters (street lamps, windows, marshal posts, spectator torches, car
@@ -3748,7 +3783,7 @@ Items parked deliberately, with the reason, so "later" does not become "lost".
 | 25 | ~~Multiple scattering in the atmosphere~~ **DONE - 5.0j** | Hillaire 2020 Psi_ms table, verified to fp16 against numpy; sky light +32 %; physical + multiple scattering measured 10.6:1 sun:sky in the lab (clean clear air) and made the DEFAULT | done |
 | 27 | ~~One frame, in `ngg-core`, for every client~~ **DONE - 5.0n** (game host verification is in-game) | the RT path (depth prepass, trace, denoise, AO, the jitter-before-prepass ordering) exists only in the viewer; the game host still renders cascades with no prepass, no AO, and Wallaby's API the same (5.0m). Move frame orchestration into ngg-core - one `RecordFrame` the viewer, the game host and the API all call - so "what the viewer shows" and "what the game shows" stop being two code paths. Prerequisite for item 23's in-game measurement | nothing |
 | 28 | ~~The bridge passes the event's weather preset~~ **DONE - 5.0s** (in-game check pending) | RBRTM reads the weather it set back from the game, names it as RBR's TrackSettings section (`108M_crisp_clear`), and passes it through `nggSetWeather` -> `FrameState.weatherName` (IPC v4); the host selects that preset, logging any fallback to the default. Fixed on the way: single-digit maps (`04M_...`) imported nothing | in-game run |
-| 29 | **Weather v2: cloud shapes, rain, snow, night** | v1 (5.0q) does fog, haze and cloud COVER. Partly cloudy is a uniform blend; RBR's cloud textures vs volumetric clouds is undecided. Rain and snow are carried in the presets but not rendered (wet surfaces, particles). Night presets render dark - no moon or artificial light yet | user's choice on clouds |
+| 29 | **Weather v2: cloud shapes, rain, snow, night** - WET SURFACES DONE (5.0v): the road's wetness darkens, glosses and puddles the ground | v1 (5.0q) does fog, haze and cloud COVER. Partly cloudy is a uniform blend; RBR's cloud textures vs volumetric clouds is undecided. Left of rain: drops, spray, rain on glass, reflections of more than the sky, drying. Snow is carried in the presets but not drawn. Night: RBR has none (its N is NOON, 2026-10-30) - night stages are WRally's own design question | user's choice on clouds; night design |
 | 26 | **Delete the established lighting balance** | `sunDiffuse`, `skyAmbient`, `kSpecScale`, the albedo*E convention and the lerp ambient. Kept behind `Z` for one round so the physical default can be compared in-game | the user's in-game look at the physical default |
 | 21 | ~~Aerial perspective is the last per-pixel atmosphere march~~ **DONE - 5.0f** | 64x64x32 froxel table of in-scatter + transmittance, filled per frame with the same `AtmScatter` and the same 8x3 quadrature; the march stays as the exact reference (`L`). Aerial's share of the main pass 1.9 -> 0.5 ms at the start camera, max 1/255 difference to the march | done |
 

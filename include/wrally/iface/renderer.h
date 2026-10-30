@@ -35,7 +35,8 @@ namespace wrally::iface {
 //    renderer's readout, sceneKeyStats; models and textures belong to the
 //    loaded scene.
 // 3: setLegacyProfile (the lighting of an automatic .lbs import's cards).
-constexpr uint32_t kRendererInterfaceVer = 3;
+// 4: FrameDesc::wetness (wet surfaces and puddles).
+constexpr uint32_t kRendererInterfaceVer = 4;
 
 struct Renderer;                     // the module's instance, opaque
 typedef uint32_t SceneHandle;        // a loaded .ngg stage
@@ -212,6 +213,11 @@ struct FrameDesc {
     // it (NGGW; 0 its default). -1: `weather`.
     int32_t                  weatherPreset;
     WeatherDesc              weather;
+    // How wet the surfaces are, 0 dry .. 1 wet: darker, glossier, and from
+    // ~0.5 puddles on the ground. The ROAD's state, which the game knows (rain
+    // that has stopped still leaves it wet), not the sky's - so separate from
+    // the weather's `rain`.
+    float                    wetness;
     float                    time;            // seconds, the game's: animated materials, wind
     const InstanceUpdate*    instances;
     uint32_t                 instanceCount;
