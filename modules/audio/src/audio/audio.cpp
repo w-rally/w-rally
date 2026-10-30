@@ -458,10 +458,7 @@ void Audio::Produce(float* out, uint32_t frames, double rate)
             // A grain at every cylinder the crank passes: one that burnt its charge as the throttle blends off / on, one
             // that did not (the physics' overrun and low-charge skips, a misfire, the limiter's cut) as the overrun -
             // the engine still pumps its air through the exhaust.
-            // Random jumps keep a short loop from repeating audibly - at low revs, where a grain is a whole pulse; at
-            // high revs a grain is one period and consecutive ones must continue each other's phase, or the harmonics
-            // smear (-1.5 to -2.5 dB of definition at 6200-6800 rpm against a recording): fewer jumps up there.
-            m_grains.jumps = m_mix.grainJumps * std::clamp((5000 - m_grainRpm) / 2500, 0.2f, 1.0f);
+            m_grains.jumps = m_mix.grainJumps;
             if (passed && m_useGrains && m_grainRpm > 300) {
                 const float spacing = kRate * 120.0f / (m_grainRpm * float(m_hasInfo && m_info.cylinders ? m_info.cylinders : 4));
                 // One combustion to the next is never the same: a little at random, firing to firing. And an idle

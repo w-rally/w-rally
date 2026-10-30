@@ -26,9 +26,8 @@ struct Mix {
     float grains = 1;
     // The idle's wander (a real idle hunts: its firings drift early and late and swell a few times a second): x this.
     float idleWander = 1;
-    // The share of firings whose grain jumps to a random place in its loop (else the next in the recording's order), up
-    // to 2500 rpm; a fifth of it from 5000 up.
-    float grainJumps = 0.5f;
+    // The grains' random jumps per pass through a loop (on average; else the next in the recording's order).
+    float grainJumps = 2;
     // The anti-lag: the share of firings that set off a bang in the exhaust - 0.4, by ear against a Rally1 recording (over
     // 0.15 and 0.25; an onset count saturates at ~11-13 a second, overlapping bangs uncounted).
     float antiLagBangs = 0.4f;

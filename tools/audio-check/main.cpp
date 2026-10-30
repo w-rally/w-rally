@@ -7,6 +7,9 @@
 //   audio-check --game <RBR folder> --stage track-41_M --replay <run.phr> [--ticks n] [--eng Focus03-08] [--wav <out.wav>]
 //       the records of a recording replayed through the physics module (WPhysicsRBR.dll), RBR's sounds - the linked
 //       sound reads them from the folder, the module through the game's VFS
+//   audio-check --game <RBR folder> --rpm-curve <file> [--eng Focus03-08] [--wav <out.wav>]
+//       made-up records along a recording's revs: lines of "<seconds> <rpm> <throttle 0..1>", in third gear - our
+//       engine beside the recording it was made from, at the same revs
 //
 // Both sounds hear one signals::Bus: the linked one connected to it as phys-drive connected it, the module through the
 // game's own wrally::sound::Sound (every record forwarded). Prints the frames rendered and where they first differ.
@@ -14,6 +17,7 @@
 
 #include <windows.h>
 
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -48,8 +52,23 @@ std::filesystem::path ExeDir()
     return std::filesystem::path(exe).parent_path();
 }
 
+struct CurvePoint {
+    float t, rpm, throttle;
+};
+
+std::vector<CurvePoint> ReadCurve(const std::string& path)
+{
+    std::vector<CurvePoint> v;
+    if (FILE* f = std::fopen(path.c_str(), "r")) {
+        for (CurvePoint p; std::fscanf(f, "%f %f %f", &p.t, &p.rpm, &p.throttle) == 3;) v.push_back(p);
+        std::fclose(f);
+    }
+    return v;
+}
+
 // Made-up records: 6000 ticks of 0.007 s - idle, revs up through four gears, a lift with the turbo spinning, back down.
-void SyntheticDrive(signals::Bus& bus)
+// With a curve: its revs and throttle (linear between its points), third gear, for as long as it lasts.
+void SyntheticDrive(signals::Bus& bus, const std::vector<CurvePoint>& curve = {})
 {
     constexpr float kDt = 0.007f, kPi = 3.14159265f;
     signals::CarInfo info;
@@ -67,17 +86,28 @@ void SyntheticDrive(signals::Bus& bus)
 
     float angle = 0, rpm = 1000, speed = 0;
     int gear = 0;
-    for (uint32_t tick = 1; tick <= 6000; ++tick) {
+    const uint32_t ticks = curve.empty() ? 6000 : static_cast<uint32_t>(curve.back().t / kDt);
+    size_t at = 0;
+    for (uint32_t tick = 1; tick <= ticks; ++tick) {
         const float t = tick * kDt;
-        const bool lift = std::fmod(t, 6.0f) > 4.5f;
-        const float pedal = t < 2 ? 0.0f : lift ? 0.0f : 1.0f;
+        bool lift = std::fmod(t, 6.0f) > 4.5f;
+        float pedal = t < 2 ? 0.0f : lift ? 0.0f : 1.0f;
+        if (!curve.empty()) {
+            while (at + 2 < curve.size() && curve[at + 1].t <= t) ++at;
+            const CurvePoint &a = curve[at], &b = curve[at + 1];
+            const float u = std::clamp((t - a.t) / std::fmax(b.t - a.t, 1e-6f), 0.0f, 1.0f);
+            pedal = a.throttle + (b.throttle - a.throttle) * u;
+            lift = pedal < 0.5f;
+            rpm = a.rpm + (b.rpm - a.rpm) * u;
+            gear = 3;
+        }
         signals::DriverTick driver;
         driver.stamp = {0, tick - 1};
         driver.pedal = driver.throttle = pedal;
         bus.Emit(driver);
         // The revs: up on the throttle, a gear at 7000, down off it.
-        rpm += pedal > 0 ? 2600 * kDt : -1800 * kDt;
-        if (rpm > 7000 && gear < 5) {
+        if (curve.empty()) rpm += pedal > 0 ? 2600 * kDt : -1800 * kDt;
+        if (curve.empty() && rpm > 7000 && gear < 5) {
             rpm = 4800;
             ++gear;
             signals::GearChange g;
@@ -176,6 +206,7 @@ int main(int argc, char** argv)
     std::setvbuf(stdout, nullptr, _IONBF, 0);
     const std::string game = Arg(argc, argv, "--game", ""), wav = Arg(argc, argv, "--wav", "");
     const std::string engine = game.empty() ? "none" : Arg(argc, argv, "--eng", "Focus03-08");
+    const std::string curvePath = Arg(argc, argv, "--rpm-curve", "");
     signals::Bus bus;   // first: both sounds disconnect from it as they go
     // --mix <file>: one mix for both - the linked sound reads it, the module gets its text (setCarMix).
     const std::string mixPath = Arg(argc, argv, "--mix", "");
@@ -220,6 +251,10 @@ int main(int argc, char** argv)
     module.Connect(&bus);
     if (game.empty()) {
         SyntheticDrive(bus);
+    } else if (!curvePath.empty()) {
+        const std::vector<CurvePoint> curve = ReadCurve(curvePath);
+        if (curve.size() < 2) return std::fprintf(stderr, "%s: no curve\n", curvePath.c_str()), 2;
+        SyntheticDrive(bus, curve);
     } else if (std::string e = ReplayDrive(bus, argc, argv, game); !e.empty()) {
         return std::fprintf(stderr, "%s\n", e.c_str()), 2;
     }
