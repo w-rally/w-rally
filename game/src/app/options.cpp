@@ -220,6 +220,7 @@ int Parse(const std::vector<std::string>& args, Options& o)
     // The co-driver (sound/codriver.h): on unless --no-codriver; --codriver-lead s how far ahead it calls (the speed
     // times it), --codriver-volume its bus.
     o.codriver = !HasFlag(args, "--no-codriver");
+    o.codriverReplay = HasFlag(args, "--codriver-replay");   // a replay: only with it (the calls are the live game's)
     o.codriverLead = std::clamp(static_cast<float>(std::atof(Arg(args, "--codriver-lead", "3").c_str())), 0.5f, 10.0f);
     o.codriverVolume = std::clamp(static_cast<float>(std::atof(Arg(args, "--codriver-volume", "1").c_str())), 0.0f, 1.0f);
     o.audioId = Arg(args, "--audio", "waudio");

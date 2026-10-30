@@ -32,6 +32,7 @@ template <class F> void Fields(Settings& s, F&& f)
     f("codriver", s.codriver);
     f("codriver_volume", s.codriverVolume);
     f("codriver_lead", s.codriverLead);
+    f("codriver_replay", s.codriverReplay);
     f("quick_stage", s.stage);
     f("quick_car", s.car);
     f("quick_setup", s.setup);

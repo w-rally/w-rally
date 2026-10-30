@@ -290,6 +290,8 @@ SettingsChoice SettingsUi(const ImGuiLayer& ui, app::Settings& s, bool inStage, 
         ImGui::SeparatorText("Co-driver");
         ImGui::BeginDisabled(!s.sound);
         Check("Pacenotes", s.codriver);
+        ImGui::SameLine();
+        Check("in replays too", s.codriverReplay);
         ImGui::SliderFloat("Volume", &s.codriverVolume, 0.0f, 1.0f, "%.2f");
         ImGui::SliderFloat("Call ahead", &s.codriverLead, 1.0f, 6.0f, "%.1f s at the speed");
         ImGui::TextDisabled("   more: called earlier; at least 60 m ahead (from the next stage)");

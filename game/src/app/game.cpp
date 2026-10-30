@@ -190,9 +190,10 @@ StageEnd RunStage(Shell& sh, const Options& o, bool fromMenu, std::string& error
         }
     }
     // The co-driver: the stage's pacenotes read out (sound/codriver.h), with RBR's voice - loaded on its own thread while
-    // the stage loads here; it starts calling once ready (its report then, in the frame loop).
+    // the stage loads here; it starts calling once ready (its report then, in the frame loop). The live game's: a replay
+    // has it only with --codriver-replay.
     sound::CoDriver codriver;
-    if (soundOn && o.codriver) {
+    if (soundOn && o.codriver && (!sim.Replaying() || o.codriverReplay)) {
         try {
             codriver.LoadAsync(sound, o.game, phys::data::ReadDls(o.session.dls).pacenotes);
             sound.SetVolume(sound::Sound::Bus::CoDriver, o.codriverVolume);
@@ -709,6 +710,7 @@ std::vector<std::string> QuickArgs(const Settings& s, const assets::Catalog& cat
     if (!car->engine.empty()) a.insert(a.end(), {"--eng", car->engine});
     if (!s.sound) a.push_back("--no-sound");
     if (!s.codriver) a.push_back("--no-codriver");
+    if (s.codriverReplay) a.push_back("--codriver-replay");
     a.insert(a.end(), {"--codriver-lead", std::to_string(s.codriverLead), "--codriver-volume", std::to_string(s.codriverVolume)});
     return a;
 }
