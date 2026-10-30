@@ -728,6 +728,9 @@ private:
     // The above with back faces culled, for the one-sided materials:
     // [prepass][alpha test][mirroring transform]. Null: drawn two-sided.
     Microsoft::WRL::ComPtr<ID3D12PipelineState>  m_psoCulled[2][2][2];
+    // The blended materials' (kMaterialBlend, glass), drawn after the opaque: [cull] none (two-sided), back, front
+    // (a mirroring transform). Premultiplied (ONE, INV_SRC_ALPHA), depth tested, not written.
+    Microsoft::WRL::ComPtr<ID3D12PipelineState>  m_psoBlend[3];
     Microsoft::WRL::ComPtr<ID3D12Resource>       m_normal;
     Microsoft::WRL::ComPtr<ID3D12Resource>       m_motion;
     Microsoft::WRL::ComPtr<ID3D12Resource>       m_plantTarget;      // R32_UINT, plant + 1

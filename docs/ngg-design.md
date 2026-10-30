@@ -2820,6 +2820,44 @@ and the track renders its built-in default. Only local test files ever had the J
 selection, live edit and the JSON round trip. The game's `C:\Brb\ngg\track-108.ngg` is re-injected; the
 pristine original is kept as `track-108.ngg.orig`.
 
+### 5.0u Glass: blended materials (2026-10-30, in WRally)
+
+`kMaterialBlend` existed in WRally's renderer interface and nothing drew it: the car's transparent material went in
+as alpha-TESTED, so a window was either solid or a hole. The i20's glass texture (DXT3, 2048²) is dark tint, rgb
+~34/255, at alpha ~85/255 over the windows (53 % of its texels). Below the 170/255 cutoff that made every window a
+clean hole: the cabin behind, black, and **no reflection at all**.
+
+**What a blended material is now:**
+- **Format:** `kMaterialBlend` = bit 3. Bit 2 stays unused: it was v2's single-stage, and the v2 upgrade masks it,
+  but a reused bit is a misread waiting to happen. The interface keeps its bit 2, and the module maps it. Blend wins
+  over the alpha test.
+- **Its own pass, after everything opaque:** sorted far to near by the box centre, depth tested (GREATER_EQUAL,
+  reverse-Z), no depth write. It is drawn over the sky too, which comes first. It has no part in the prepass, so
+  the depth, normals and motion that the ray tracer and TAA read are those of what lies behind the pane.
+- **PREMULTIPLIED** (ONE, INV_SRC_ALPHA). The shader's `BLEND` variant scales the tint's light (diffuse, baked
+  colour, aerial in-scatter) by coverage (base colour alpha × vertex alpha × factor). The reflection (sun GGX and
+  the environment's split sum) stays whole. A clear pane reflects as much sky as a tinted one does; only the tint
+  is partial. glTF's `BLEND` alpha mode scales everything, reflection included, which reads as a matt film.
+- **Lit without the screen buffers:** the ray-traced sun visibility and AO are per *pixel*, and the pixel is the
+  opaque surface's behind the glass. So glass takes AO 1, and under RT the sun unshadowed. Under the cascades it
+  looks its world position up as anything else does.
+- **No shadow, not in the BVH:** the cascade pass skips it, and so do `DescribeRt` and the world BLAS. The sun
+  reaches the seats through the windows.
+- **The car:** `assets::CarRender` sends the `.sgc`'s transparent materials as `kMaterialBlend | TwoSided` with
+  roughness 0.05 (smooth glass; the body stays 0.45).
+
+**Measured** (stage 41, imported, chase camera, tick 162, lockstep, the same frame before and after): every changed
+pixel lies inside the car's windows (a 410×252 box, 37,792 pixels). The rear window's centre went from 0–5 (the
+black cabin through a hole) to ~85: the sky's reflection, ~10 % of it at that angle, which is what Fresnel gives a
+dielectric there. It is physically right, but it reads lighter than RBR's own dark windows, so it is the first
+thing to judge when driving. `ngg-check`'s made-up scene carries a blended material (round trip and the renderer's
+loader); all fast CTests pass.
+
+**Not done:** within one object, faces are not sorted, so a closed glass shell draws its two layers in index
+order. RBR's glass is single sheets, drawn two-sided, so a pixel is covered once. Coloured transmission (a red
+taillight lens filtering what is behind it) needs dual-source blending; this tint is grey. Wallaby's `NggWriter`
+mirrors the flags and should learn bit 3 when the editor gets glass.
+
 ### 5.1 Renderer implications
 
 A track at night wants hundreds of small emitters (street lamps, windows, marshal posts, spectator torches, car

@@ -421,7 +421,13 @@ float SunVis(float3 wpos, float2 pixel, float3 N)
         csm = SunVisibility(wpos, dot(wpos - gCamPos, gCamFwd), N, gSunTowards);
     gDbgCsmVis = csm;
     if (!useRt) return csm;
+#ifdef BLEND
+    // Glass has no pixel of its own in the ray tracer's visibility - that is the opaque surface's behind it - and the
+    // cascades are not drawn under ray tracing: it takes the sun whole.
+    return 1.0;
+#else
     return gRtVis.Load(int3(pixel, 0));
+#endif
 }
 
 // PREPASS. Depth is the rasteriser's; this writes the GEOMETRIC normal -
@@ -551,6 +557,12 @@ float4 PSMain(VSOut i, bool frontFace : SV_IsFrontFace) : SV_Target
     // RBR's default, and an authored texture has no reason to share it.
     clip(t0.a * i.col.a * gBaseColourFactor.a - gPbrB.y);
 #endif
+#ifdef BLEND
+    // Glass (kMaterialBlend): the same alpha is COVERAGE - how much of the tint lies over what is behind. The output
+    // is premultiplied (below): the tint's light scales with it, the reflection does not, so a clear pane still
+    // reflects the sky.
+    const float coverage = saturate(t0.a * i.col.a * gBaseColourFactor.a);
+#endif
 
     // Vertex alpha is the terrain BLEND WEIGHT on ground meshes and COVERAGE on
     // object meshes - the same channel meaning two different things, which is
@@ -574,6 +586,9 @@ float4 PSMain(VSOut i, bool frontFace : SV_IsFrontFace) : SV_Target
     // this point can actually see. Until now that was "all of it", everywhere,
     // which is most of why props read as pasted onto the terrain.
     float rtAo = (gAoReady > 0.5 && gAoOn > 0.5) ? gRtAo.Load(int3(i.pos.xy, 0)) : 1.0;
+#ifdef BLEND
+    rtAo = 1.0;   // the AO buffer is the opaque surface's behind the glass, not the glass's
+#endif
     matAo *= rtAo;
 #ifdef ALPHA_TEST
     // A plant's AO rays skip its own cards (rt.cpp Occluded) for the same
@@ -632,6 +647,9 @@ float4 PSMain(VSOut i, bool frontFace : SV_IsFrontFace) : SV_Target
     if (gLightMode < 0.5)
     {
         lit = albedo * i.col.rgb * gBakedScale;
+#ifdef BLEND
+        lit *= coverage;   // premultiplied, as the lit path is
+#endif
     }
     else
     {
@@ -894,9 +912,16 @@ float4 PSMain(VSOut i, bool frontFace : SV_IsFrontFace) : SV_Target
         }
         gProbeAmbSpec = ambSpec;
 
+#ifdef BLEND
+        // Premultiplied: the tint's light by its coverage, the reflection whole.
+        lit = diffuseCol * (sunColour * ndl * vis + ambient * matAo) * coverage
+            + spec * kSpecScale * sunColour * ndl * vis
+            + ambSpec;
+#else
         lit = diffuseCol * (sunColour * ndl * vis + ambient * matAo)
             + spec * kSpecScale * sunColour * ndl * vis
             + ambSpec;
+#endif
 #endif
         lit += emissive;
     }
@@ -942,6 +967,9 @@ float4 PSMain(VSOut i, bool frontFace : SV_IsFrontFace) : SV_Target
                                    gTurbidity, gSunIntensity, 8, 3, tr);
         }
         gProbeDist = dist; gProbeTr = tr; gProbeInscatter = inscatter;
+#ifdef BLEND
+        inscatter *= coverage;           // premultiplied: the air in front of the tint, as much as the tint covers
+#endif
         lit = lit * tr + inscatter;      // linear; exposure is applied below
     }
 
@@ -1079,7 +1107,11 @@ float4 PSMain(VSOut i, bool frontFace : SV_IsFrontFace) : SV_Target
         return float4(0.5, 0.5, 0.5, 1.0);
     }
 
+#ifdef BLEND
+    return float4(lit, coverage);   // premultiplied: ONE, INV_SRC_ALPHA over what is behind
+#else
     return float4(lit, 1.0);
+#endif
 }
 )";
 
@@ -1576,8 +1608,10 @@ void Scene::DescribeRt(std::vector<uint64_t>& meshes, std::vector<RtInstanceDesc
     for (size_t i = 0; i < m_objects.size(); ++i)
     {
         const DrawItem& o = m_objects[i];
-        // Far scenery is a backdrop, not part of the lit world (kLayerFarScenery).
-        if (o.removed || !o.visible || o.layerId == kLayerFarScenery) continue;
+        // Far scenery is a backdrop, not part of the lit world (kLayerFarScenery). Glass (kMaterialBlend) is not
+        // in the ray-traced scene: it neither shadows nor occludes - the sun reaches a car's seats through its
+        // windows.
+        if (o.removed || !o.visible || o.layerId == kLayerFarScenery || (o.matFlags & kMaterialBlend)) continue;
         if (o.meshId == 0)
         {
             if (InRtWorld(i)) continue;                     // in the world
@@ -1612,6 +1646,7 @@ bool Scene::BuildRtMesh(uint64_t key, RtMeshData& out) const
 
     auto addStatic = [&](const DrawItem& o) {
         if (o.firstIndex + o.indexCount > m_staticIndices.size()) return;
+        if (o.matFlags & kMaterialBlend) return;   // glass: not in the ray-traced scene (DescribeRt)
         const uint32_t* src = m_staticIndices.data() + o.firstIndex;
         const bool alphaTested = (o.matFlags & kMaterialAlphaTest) != 0;
         std::vector<uint32_t>& dst = alphaTested ? out.alpha : out.opaque;
@@ -2467,6 +2502,7 @@ void Scene::RenderShadows(ID3D12GraphicsCommandList* list,
             // of metres, so it should touch a tiny fraction of the stage - this
             // is where most of the shadow cost disappears.
             if (m_cull && AabbOutside(cplanes, o.bmin, o.bmax)) continue;
+            if (m_materials[o.materialId].flags & kMaterialBlend) continue;   // glass casts no shadow
             const bool wantAlpha = (m_materials[o.materialId].flags & kMaterialAlphaTest) != 0;
             if (wantAlpha && !m_psoShadowAlpha) continue;
             if (wantAlpha != alphaBound)
@@ -3270,6 +3306,14 @@ bool Scene::LoadFromMemory(ID3D12Device* dev, ID3D12CommandQueue* queue,
         Log("scene: PS(alpha-test) compile: %s", err ? (const char*)err->GetBufferPointer() : "?");
         return false;
     }
+    const D3D_SHADER_MACRO blendDefs[] = { { "BLEND", "1" }, { nullptr, nullptr } };
+    ComPtr<ID3DBlob> psBlend;
+    if (FAILED(D3DCompile(src.c_str(), src.size(), "ngg_scene", blendDefs, nullptr,
+                          "PSMain", "ps_5_1", flags, 0, &psBlend, &err)))
+    {
+        Log("scene: PS(blend) compile: %s", err ? (const char*)err->GetBufferPointer() : "?");
+        return false;
+    }
 
     D3D12_INPUT_ELEMENT_DESC layout[] = {
         { "POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0,  0, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
@@ -3424,6 +3468,30 @@ bool Scene::LoadFromMemory(ID3D12Device* dev, ID3D12CommandQueue* queue,
             if (FAILED(dev->CreateGraphicsPipelineState(&cp, IID_PPV_ARGS(&m_psoCulled[0][alpha][c]))))
                 Log("scene: culled PSO creation failed - drawn two-sided");
         }
+
+    // The blended materials (glass): over everything opaque, PREMULTIPLIED (the shader scales the tint's light by its
+    // coverage and leaves the reflection whole), tested against the opaque depth but not writing it - what is behind
+    // a pane must stay drawn and other panes behind it must still pass.
+    {
+        D3D12_GRAPHICS_PIPELINE_STATE_DESC bp = pso;
+        bp.PS = { psBlend->GetBufferPointer(), psBlend->GetBufferSize() };
+        bp.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ZERO;
+        D3D12_RENDER_TARGET_BLEND_DESC& b = bp.BlendState.RenderTarget[0];
+        b.BlendEnable = TRUE;
+        b.SrcBlend = D3D12_BLEND_ONE;
+        b.DestBlend = D3D12_BLEND_INV_SRC_ALPHA;
+        b.BlendOp = D3D12_BLEND_OP_ADD;
+        b.SrcBlendAlpha = D3D12_BLEND_ONE;
+        b.DestBlendAlpha = D3D12_BLEND_INV_SRC_ALPHA;
+        b.BlendOpAlpha = D3D12_BLEND_OP_ADD;
+        const D3D12_CULL_MODE culls[3] = { D3D12_CULL_MODE_NONE, D3D12_CULL_MODE_BACK, D3D12_CULL_MODE_FRONT };
+        for (int c = 0; c < 3; ++c)
+        {
+            bp.RasterizerState.CullMode = culls[c];
+            if (FAILED(dev->CreateGraphicsPipelineState(&bp, IID_PPV_ARGS(&m_psoBlend[c]))))
+                Log("scene: blend PSO creation failed - glass not drawn");
+        }
+    }
 
     if (!CreateDepth(dev, width, height))
         return false;
@@ -5409,21 +5477,10 @@ void Scene::RecordPass(ID3D12GraphicsCommandList* list, D3D12_CPU_DESCRIPTOR_HAN
     int  xformState = -1;
     int  geomState = 0;              // the static buffers are bound just above
     uint32_t drawn = 0, culled = 0;
-    for (const DrawItem& o : m_objects)
-    {
-        if (!o.visible) continue;              // editor hide; see SetObjectVisible
-        if (o.materialId >= m_materials.size())
-            continue;
-        if (m_cull && AabbOutside(planes, o.bmin, o.bmax)) { ++culled; continue; }
-        ++drawn;
-
-        const uint32_t matFlags = m_materials[o.materialId].flags;
-        const bool wantAlphaTest = (matFlags & kMaterialAlphaTest) != 0;
-        ID3D12PipelineState* want = prepass ? (wantAlphaTest ? m_psoPrepassAlpha.Get() : m_psoPrepass.Get())
-                                            : (wantAlphaTest ? m_psoAlphaTest.Get() : m_pso.Get());
-        if (!(matFlags & kMaterialTwoSided))
-            if (ID3D12PipelineState* c = m_psoCulled[prepass ? 1 : 0][wantAlphaTest ? 1 : 0][Mirrors(o.xform) ? 1 : 0].Get())
-                want = c;
+    // The glass (kMaterialBlend) waits for everything opaque: it is drawn over it, after this loop. It has no part in
+    // the prepass - no depth, no normal: what the ray tracer and TAA see through a window is what is behind it.
+    std::vector<std::pair<float, const DrawItem*>> blended;
+    auto draw = [&](const DrawItem& o, ID3D12PipelineState* want) {
         if (want != bound)
         {
             list->SetPipelineState(want);
@@ -5460,6 +5517,48 @@ void Scene::RecordPass(ID3D12GraphicsCommandList* list, D3D12_CPU_DESCRIPTOR_HAN
         BindGeometry(list, o.meshId != 0, geomState,
                      o.meshId ? m_dynVbv : m_vbv, o.meshId ? m_dynIbv : m_ibv);
         list->DrawIndexedInstanced(o.indexCount, 1, o.firstIndex, o.baseVertex, 0);
+    };
+    for (const DrawItem& o : m_objects)
+    {
+        if (!o.visible) continue;              // editor hide; see SetObjectVisible
+        if (o.materialId >= m_materials.size())
+            continue;
+        if (m_cull && AabbOutside(planes, o.bmin, o.bmax)) { ++culled; continue; }
+        ++drawn;
+
+        const uint32_t matFlags = m_materials[o.materialId].flags;
+        if (matFlags & kMaterialBlend)
+        {
+            if (!prepass && m_psoBlend[0])
+            {
+                // Far to near by the box's centre: a pane over a pane is drawn after it.
+                float d2 = 0.0f;
+                for (int k = 0; k < 3; ++k)
+                {
+                    const float c = 0.5f * (o.bmin[k] + o.bmax[k]) - camPos[k];
+                    d2 += c * c;
+                }
+                blended.emplace_back(d2, &o);
+            }
+            continue;
+        }
+        const bool wantAlphaTest = (matFlags & kMaterialAlphaTest) != 0;
+        ID3D12PipelineState* want = prepass ? (wantAlphaTest ? m_psoPrepassAlpha.Get() : m_psoPrepass.Get())
+                                            : (wantAlphaTest ? m_psoAlphaTest.Get() : m_pso.Get());
+        if (!(matFlags & kMaterialTwoSided))
+            if (ID3D12PipelineState* c = m_psoCulled[prepass ? 1 : 0][wantAlphaTest ? 1 : 0][Mirrors(o.xform) ? 1 : 0].Get())
+                want = c;
+        draw(o, want);
+    }
+    // The glass, over the opaque world (and the sky, drawn before this pass), far to near.
+    std::sort(blended.begin(), blended.end(),
+              [](const std::pair<float, const DrawItem*>& a, const std::pair<float, const DrawItem*>& b) { return a.first > b.first; });
+    for (const auto& [d2, o] : blended)
+    {
+        (void)d2;
+        const uint32_t matFlags = m_materials[o->materialId].flags;
+        const int cull = (matFlags & kMaterialTwoSided) ? 0 : Mirrors(o->xform) ? 2 : 1;
+        draw(*o, m_psoBlend[cull] ? m_psoBlend[cull].Get() : m_psoBlend[0].Get());
     }
 
     if (prepass)

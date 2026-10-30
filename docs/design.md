@@ -203,8 +203,9 @@ environment → prepass → sun visibility (RT or cascades) → AO → sky → s
 
 - One scene at a time. Scene textures and models belong to the loaded scene, and loading another releases them.
   UI textures (`createTextureRgba`) are the renderer's and stay.
-- Windowed only (`ErrNotSupported` for borderless and fullscreen). `renderScale` is ignored, and `kMaterialBlend`
-  is not drawn blended.
+- Windowed only (`ErrNotSupported` for borderless and fullscreen). `renderScale` is ignored.
+- `kMaterialBlend` (glass) is drawn blended since 2026-10-30: after the opaque, far to near, premultiplied, no
+  shadow and not ray traced (NGG design 5.0u). The car's glass uses it.
 - UI textures carry a high bit in their handle (`UiPass::kTextureBit`). A UI command naming any other texture draws
   white.
 - Released models and destroyed instances leave their meshes in ngg-core's dynamic pool until the scene goes.
@@ -212,7 +213,8 @@ environment → prepass → sun visibility (RT or cascades) → AO → sky → s
 
 ### 3.2 New work inside the renderer
 
-- **Models**: node-hierarchy rendering (no skinning), blended materials (glass), per-instance node transforms.
+- **Models**: node-hierarchy rendering (no skinning), blended materials (glass, done: §3.1a), per-instance node
+  transforms.
   `ngg-core` today draws only static scenes plus the dynamic pool.
 - **Dynamic objects in RT**: already handled by ngg-core (found in phase 6). `Renderer::KeepRtCurrent` keeps a
   BLAS per mesh and, when only transforms change, updates just the instances and the TLAS. The moving car and stage
