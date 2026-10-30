@@ -16,10 +16,10 @@ const char* kLightsHlsl = R"(
 // them in different places).
 struct Light
 {
-    float3 pos;    float range;
+    float3 pos;    float invRange2;  // 1 / range^2
     float3 colour; float radius;     // tint x intensity, irradiance units at 1 m
     float3 dir;    float cosOuter;
-    float  cosInner; float outerRad; uint type; uint flags;
+    float  spotScale; float invOuterRad; uint type; uint flags;   // 1 / (cos inner - cos outer), 1 / outer angle
     float  profile[16];
 };
 StructuredBuffer<Light> gLights     : register(NGG_LIGHTS_T0);
@@ -42,24 +42,22 @@ uint LightCluster(float2 px, float viewZ, float4 params)
 // A light's record but its profile, READ AT ONCE: every field from the buffer by index - never through a copy of the
 // struct, which indexed by a variable (its profile) is an indexable temporary in scratch memory, ~1.5 ms per light at
 // 1080p on the development GPU - and every one of them used whatever the light's type (LightIrradiance selects, it
-// does not branch), so the compiler issues them as one clause. Read field by field where each was needed, a light
-// cost the shader four dependent round trips to memory - index, position, a spot's cone, the highlight's radius - and
-// at the scene pass's occupancy (4 waves per SIMD on the development GPU) little of that latency hides: three lights
-// over the whole screen cost the main pass ~4 ms at 1080p (design 5.4 N2).
+// does not branch), so the compiler issues them as one clause (one round trip, not four), and with a wave-uniform
+// index as scalar loads (the scene pass's light loop, design 5.4 N2).
 struct LightRec
 {
-    float3 pos;    float range;
+    float3 pos;    float invRange2;
     float3 colour; float radius;
     float3 dir;    float cosOuter;
-    float  cosInner; float outerRad; uint type; uint flags;
+    float  spotScale; float invOuterRad; uint type; uint flags;
 };
 LightRec LightLoad(uint li)
 {
     LightRec L;
-    L.pos = gLights[li].pos;           L.range = gLights[li].range;
+    L.pos = gLights[li].pos;           L.invRange2 = gLights[li].invRange2;
     L.colour = gLights[li].colour;     L.radius = gLights[li].radius;
     L.dir = gLights[li].dir;           L.cosOuter = gLights[li].cosOuter;
-    L.cosInner = gLights[li].cosInner; L.outerRad = gLights[li].outerRad;
+    L.spotScale = gLights[li].spotScale; L.invOuterRad = gLights[li].invOuterRad;
     L.type = gLights[li].type;         L.flags = gLights[li].flags;
     return L;
 }
@@ -69,18 +67,22 @@ LightRec LightLoad(uint li)
 // its range (a window, so the clusters' cut-off never shows); a spot's cone, and its beam profile over the cone.
 float3 LightIrradiance(uint li, LightRec L, float3 p, out float3 l, out float dist)
 {
+    // Per light per pixel, so the divisions the light alone decides are made on the CPU (invRange2, spotScale,
+    // invOuterRad) and the distance and direction come from one rsqrt.
     const float3 d = L.pos - p;
     const float d2 = dot(d, d);
-    dist = sqrt(d2);
-    l = d / max(dist, 1e-4);
-    const float r2 = L.range * L.range;
-    const float w = saturate(1.0 - (d2 * d2) / (r2 * r2));
+    const float inv = rsqrt(max(d2, 1e-8));
+    dist = d2 * inv;
+    l = d * inv;
+    const float x = d2 * L.invRange2;
+    const float w = saturate(1.0 - x * x);
     float atten = w * w / max(d2, L.radius * L.radius);
     const float cd = dot(-l, L.dir);
-    atten *= L.type == 1u ? smoothstep(L.cosOuter, L.cosInner, cd) : 1.0;
+    const float s = saturate((cd - L.cosOuter) * L.spotScale);   // smoothstep(cosOuter, cosInner, cd)
+    atten *= L.type == 1u ? s * s * (3.0 - 2.0 * s) : 1.0;
     if (L.type == 1u && (L.flags & kLightProfile))   // the profile alone is read only where it is used
     {
-        const float t = saturate(acos(clamp(cd, -1.0, 1.0)) / max(L.outerRad, 1e-4)) * 15.0;
+        const float t = saturate(acos(clamp(cd, -1.0, 1.0)) * L.invOuterRad) * 15.0;
         const uint i = min((uint)t, 14u);
         atten *= lerp(gLights[li].profile[i], gLights[li].profile[i + 1u], t - (float)i);
     }
@@ -181,9 +183,12 @@ bool Lights::Build(ID3D12GraphicsCommandList* list, const float* view, const flo
         return (uint32_t)(std::min)((std::max)(s, 0.0f), (float)kClustersZ - 1.0f);
     };
 
-    // Each light to the GPU's form, and the box of clusters its range touches.
+    // Each light to the GPU's form, the box of clusters its range touches, and its shape in view space for the test of
+    // each cluster in that box (Touches).
     struct Box { uint32_t x0, x1, y0, y1, z0, z1; };
+    struct Shape { float c[3], range, dir[3], cosOuter, sinOuter; bool spot; };
     std::vector<Box> boxes;
+    std::vector<Shape> shapes;
     const uint32_t n = (uint32_t)(std::min<size_t>)(m_lights.size(), kMaxLights);
     uint32_t live = 0;
     for (uint32_t i = 0; i < n; ++i) {
@@ -202,13 +207,13 @@ bool Lights::Build(ID3D12GraphicsCommandList* list, const float* view, const flo
             g.colour[k] = L.colour[k] * L.intensity * kCandelaToUnits;
             g.dir[k] = L.direction[k] / len;
         }
-        g.range = range;
+        g.invRange2 = 1.0f / (range * range);
         g.radius = (std::max)(L.radius, 0.005f);
         const float outer = (std::min)((std::max)(L.outerDeg, 0.5f), 179.0f) * 3.14159265f / 180.0f;
         const float inner = (std::min)((std::max)(L.innerDeg, 0.0f) * 3.14159265f / 180.0f, outer * 0.999f);
         g.cosOuter = std::cos(outer);
-        g.cosInner = std::cos(inner);
-        g.outerRad = outer;
+        g.spotScale = 1.0f / (std::max)(std::cos(inner) - g.cosOuter, 1e-4f);
+        g.invOuterRad = 1.0f / outer;
         g.type = L.type;
         g.flags = (L.shadows ? 1u : 0u) | (L.hasProfile ? 2u : 0u);
         for (int k = 0; k < 16; ++k) g.profile[k] = L.hasProfile ? L.profile[k] : 1.0f;
@@ -237,16 +242,77 @@ bool Lights::Build(ID3D12GraphicsCommandList* list, const float* view, const flo
             b.y1 = tile(-y0, kClustersY);
         }
         boxes.push_back(b);
+        Shape sh{};
+        for (int k = 0; k < 3; ++k) {
+            sh.c[k] = c[k];
+            sh.dir[k] = g.dir[0] * view[0 * 4 + k] + g.dir[1] * view[1 * 4 + k] + g.dir[2] * view[2 * 4 + k];
+        }
+        sh.range = range;
+        sh.spot = L.type == LightDesc::kSpot && outer < 3.14159265f * 0.5f;   // wider: a hemisphere, the sphere will do
+        sh.cosOuter = g.cosOuter;
+        sh.sinOuter = std::sin(outer);
+        shapes.push_back(sh);
         ++live;
     }
     if (!live) return false;
 
+    // Each cluster's bounding sphere in view space - its eight corners, from the tile's NDC rectangle at the slice's
+    // near and far depth - and whether a light's sphere of reach, or a spot's CONE, touches it. The box above is the
+    // sphere's; a spot's cone is much less (a 30-degree headlight beam reaches 300 m and every cluster ahead in its
+    // box), and every light a cluster lists is shaded by every pixel in it (design 5.4 N2).
+    m_clusterSpheres.resize(kClusters);
+    for (uint32_t z = 0; z < kClustersZ; ++z) {
+        const float zn = z == 0 ? 0.0f : kNear * std::exp((float)z / sliceScale);
+        const float zf = kNear * std::exp((float)(z + 1) / sliceScale);
+        for (uint32_t y = 0; y < kClustersY; ++y)
+            for (uint32_t x = 0; x < kClustersX; ++x) {
+                const float nx[2] = { (float)x / kClustersX * 2.0f - 1.0f, (float)(x + 1) / kClustersX * 2.0f - 1.0f };
+                const float ny[2] = { 1.0f - (float)(y + 1) / kClustersY * 2.0f, 1.0f - (float)y / kClustersY * 2.0f };
+                float pts[8][3], mid[3] = { 0.0f, 0.0f, 0.0f };
+                int k = 0;
+                for (float d : { zn, zf })
+                    for (float ndcx : nx)
+                        for (float ndcy : ny) {
+                            pts[k][0] = (ndcx - proj[8]) * d / proj[0];
+                            pts[k][1] = (ndcy - proj[9]) * d / proj[5];
+                            pts[k][2] = d;
+                            for (int j = 0; j < 3; ++j) mid[j] += pts[k][j] * 0.125f;
+                            ++k;
+                        }
+                float r2 = 0.0f;
+                for (auto& p : pts) {
+                    const float dx = p[0] - mid[0], dy = p[1] - mid[1], dz = p[2] - mid[2];
+                    r2 = (std::max)(r2, dx * dx + dy * dy + dz * dz);
+                }
+                ClusterSphere& cs = m_clusterSpheres[(z * kClustersY + y) * kClustersX + x];
+                cs = { { mid[0], mid[1], mid[2] }, std::sqrt(r2) };
+            }
+    }
+    auto touches = [&](const Shape& sh, uint32_t ci) {
+        const ClusterSphere& cs = m_clusterSpheres[ci];
+        const float v[3] = { cs.c[0] - sh.c[0], cs.c[1] - sh.c[1], cs.c[2] - sh.c[2] };
+        const float v2 = v[0] * v[0] + v[1] * v[1] + v[2] * v[2];
+        const float reach = sh.range + cs.r;
+        if (v2 > reach * reach) return false;
+        if (!sh.spot) return true;
+        // Cone against sphere: the sphere's distance from the cone's surface, along the axis and across it.
+        const float along = v[0] * sh.dir[0] + v[1] * sh.dir[1] + v[2] * sh.dir[2];
+        const float across = std::sqrt((std::max)(v2 - along * along, 0.0f));
+        if (sh.cosOuter * across - along * sh.sinOuter > cs.r) return false;   // outside the cone's side
+        return along > -cs.r;                                                  // not behind its apex
+    };
+
     // Two passes: count per cluster, then fill at prefix-summed offsets.
     std::vector<uint32_t> count(kClusters, 0);
-    for (const Box& b : boxes)
+    for (uint32_t li = 0; li < live; ++li) {
+        const Box& b = boxes[li];
         for (uint32_t z = b.z0; z <= b.z1; ++z)
             for (uint32_t y = b.y0; y <= b.y1; ++y)
-                for (uint32_t x = b.x0; x <= b.x1; ++x) ++count[(z * kClustersY + y) * kClustersX + x];
+                for (uint32_t x = b.x0; x <= b.x1; ++x) {
+                    const uint32_t c = (z * kClustersY + y) * kClustersX + x;
+                    if (touches(shapes[li], c)) ++count[c];
+                }
+    }
     uint32_t total = 0;
     for (uint32_t i = 0; i < kClusters; ++i) {
         const uint32_t take = (std::min)(count[i], kMaxIndices - total);
@@ -261,7 +327,8 @@ bool Lights::Build(ID3D12GraphicsCommandList* list, const float* view, const flo
             for (uint32_t y = b.y0; y <= b.y1; ++y)
                 for (uint32_t x = b.x0; x <= b.x1; ++x) {
                     const uint32_t c = (z * kClustersY + y) * kClustersX + x;
-                    if (count[c] < m_clusterMap[2 * c + 1]) m_indexMap[m_clusterMap[2 * c] + count[c]++] = li;
+                    if (touches(shapes[li], c) && count[c] < m_clusterMap[2 * c + 1])
+                        m_indexMap[m_clusterMap[2 * c] + count[c]++] = li;
                 }
     }
 

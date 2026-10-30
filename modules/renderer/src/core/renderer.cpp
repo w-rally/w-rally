@@ -146,6 +146,7 @@ void Renderer::RecordFrame(Device& dev, D3D12_CPU_DESCRIPTOR_HANDLE outRtv,
                            const float* view, const float* proj, UINT width, UINT height,
                            const SkyParams& sky)
 {
+    PixFrame();
     ID3D12GraphicsCommandList* list = dev.list.Get();
     if (!list) return;
 

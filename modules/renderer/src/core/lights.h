@@ -47,10 +47,10 @@ struct LightDesc
 // One light as the GPU reads it (kLightsHlsl's Light), 128 bytes.
 struct GpuLight
 {
-    float    pos[3];    float range;
+    float    pos[3];    float invRange2;   // 1 / range^2
     float    colour[3]; float radius;      // colour: tint x intensity, in irradiance units at 1 m
     float    dir[3];    float cosOuter;
-    float    cosInner;  float outerRad;  uint32_t type; uint32_t flags;
+    float    spotScale; float invOuterRad; uint32_t type; uint32_t flags;   // 1 / (cos inner - cos outer), 1 / outer
     float    profile[16];
 };
 static_assert(sizeof(GpuLight) == 128, "GpuLight - keep kLightsHlsl in step");
@@ -100,6 +100,8 @@ private:
     uint32_t* m_indexMap = nullptr;
     float     m_tileW = 1.0f, m_tileH = 1.0f;
     float     m_camPos[3] = {}, m_camFwd[3] = { 0.0f, 0.0f, 1.0f };
+    struct ClusterSphere { float c[3], r; };          // view space
+    std::vector<ClusterSphere> m_clusterSpheres;
     bool      m_active = false;
 };
 

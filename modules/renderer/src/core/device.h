@@ -78,5 +78,8 @@ struct Device
     ~Device() { Destroy(); }
 };
 
+// NGG_PIX=<frame> (device.cpp): once per frame, before it is recorded - the PIX capture of that frame.
+void PixFrame();
+
 } // namespace core
 } // namespace ngg

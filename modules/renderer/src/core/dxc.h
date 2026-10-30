@@ -15,15 +15,18 @@
 // unsigned DXIL unless the machine is in developer mode - which is exactly the
 // kind of works-here-only failure worth spending a file copy to avoid.
 //
-// FXC stays for everything else on purpose. It works, the shaders it compiles
-// are written against it, and porting them wholesale to prove a point would be
-// a large diff with no user-visible change.
+// The scene's shaders came over too (design 5.4 N2): their light loop wants
+// wave intrinsics, so they compile here first and with FXC only as the
+// fallback. FXC stays for everything else on purpose. It works, the shaders it
+// compiles are written against it, and porting them wholesale to prove a point
+// would be a large diff with no user-visible change.
 // ---------------------------------------------------------------------------
 #pragma once
 
 #include <windows.h>
 #include <d3d12.h>
 #include <wrl/client.h>
+#include <initializer_list>
 #include <string>
 
 namespace ngg {
@@ -40,10 +43,13 @@ public:
     // `target` is a full profile, e.g. "cs_6_5". Returns the DXIL blob, or null
     // after logging the compiler's own diagnostics - which are far better than
     // anything this wrapper could invent.
+    //
+    // `extra`: further arguments as they are, e.g. L"-DALPHA_TEST=1".
     Microsoft::WRL::ComPtr<ID3DBlob> Compile(const std::string& source,
                                              const wchar_t* entry,
                                              const wchar_t* target,
-                                             const char* nameForLog);
+                                             const char* nameForLog,
+                                             std::initializer_list<const wchar_t*> extra = {});
 
 private:
     HMODULE m_dll = nullptr;

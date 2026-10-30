@@ -202,51 +202,82 @@ float VisSmith(float ndv, float ndl, float a)
 // roughness for sphere lights, without the representative point - the lobe blurred, its energy kept). A point's
 // highlight on a wet road (roughness at its 0.002 floor) would peak near 1e5 x the irradiance, past half floats.
 //
-// COST: three lights over the whole screen add ~4 ms to the main pass at 1080p on the development GPU (Radeon 780M),
-// and it is not the arithmetic (a cheaper BRDF changed nothing) nor registers (Radeon GPU Analyzer: the same 128
-// VGPRs, no spills, with or without the lights). It is memory latency: the cluster, the index and the record are
-// dependent loads per pixel per light, and at this shader's occupancy (4 waves per SIMD) little of it hides. The cure
-// is a wave-uniform loop - a wave's lights walked with scalar loads - which needs wave intrinsics, i.e. this shader
-// on DXC / SM 6 (design 5.4 N2).
+// HOW A WAVE WALKS ITS LIGHTS. A wave's pixels mostly share one cluster, so under shader model 6 the wave takes its
+// clusters in turn - the first remaining lane's (WaveReadLaneFirst), shaded by every lane that has it - and within
+// one the cluster, the indices and the records are WAVE-UNIFORM: scalar loads through the scalar cache, no per-lane
+// waits and no vector registers for them. Bounded at 4 clusters a wave; what is left - a wave across more depth
+// slices or tiles, and helper lanes, which wave intrinsics may not count as active - takes the per-pixel loop. FXC's
+// fallback (5.1) has only that.
+//
+// WHAT A LIGHT COSTS here is its arithmetic, per FRAGMENT: ~130 vector instructions in one dependent chain, which at
+// this shader's occupancy (4 waves per SIMD on the development GPU, a Radeon 780M - 117 VGPRs) stalls more than it
+// computes. PIX's per-draw timings put it where the fragments are: three lights reaching most of the screen add ~3 ms
+// to the main pass at 1080p, in proportion to each draw's pixel shader invocations - foliage's overdraw included.
+// Scalar loads (above), the cone culling of the clusters (lights.cpp) and the early exit below each took little
+// off it (design 5.4 N2).
+void ShadeLocalLight(uint li, LightRec L, float3 p, float3 N, float3 V, float ndv, float3 diffuseCol, float3 f0,
+                     float a, float specScale, float wrap, bool withSpec, inout float3 shadowed, inout float3 open)
+{
+    float3 l;
+    float dist;
+    const float3 E = LightIrradiance(li, L, p, l, dist);
+    const float ndl = saturate((dot(N, l) + wrap) / (1.0 + wrap));
+    // Nothing from it here - outside a spot's cone or past its range, or facing away: the rest is skipped (a cone's
+    // edge on screen is a coherent boundary, so whole waves skip together).
+    if (ndl <= 0.0 || max(E.r, max(E.g, E.b)) <= 0.0) return;
+    float3 c3 = diffuseCol * E * ndl;
+    if (withSpec)
+    {
+        // GGX with Schlick by multiplies and the joint Smith term's sqrt-free approximation (Hammon 2017), D and V
+        // under one reciprocal.
+        const float3 H = normalize(V + l);
+        const float aw = saturate(a + L.radius / (2.0 * max(dist, 1e-3)));
+        const float aw2 = aw * aw;
+        const float ndlTrue = saturate(dot(N, l));
+        const float ndh = saturate(dot(N, H));
+        const float x = 1.0 - saturate(dot(V, H)), x2 = x * x;
+        const float3 F = f0 + (1.0 - f0) * (x2 * x2 * x);
+        const float d = ndh * ndh * (aw2 - 1.0) + 1.0;
+        const float vden = lerp(2.0 * ndlTrue * ndv, ndlTrue + ndv, aw);
+        const float dv = aw2 / max(1e-6, 3.14159265 * d * d * 2.0 * vden);
+        c3 += F * (dv * specScale * ndlTrue) * E;
+    }
+    if (L.flags & kLightShadows) shadowed += c3;
+    else open += c3;
+}
+
+void ShadeLightCluster(uint ci, float3 p, float3 N, float3 V, float ndv, float3 diffuseCol, float3 f0, float a,
+                       float specScale, float wrap, bool withSpec, inout float3 shadowed, inout float3 open)
+{
+    const uint2 c = gClusters[ci];
+    for (uint k = 0; k < c.y; ++k)
+    {
+        const uint li = gLightIndex[c.x + k];
+        ShadeLocalLight(li, LightLoad(li), p, N, V, ndv, diffuseCol, f0, a, specScale, wrap, withSpec, shadowed, open);
+    }
+}
+
 float3 LocalLights(float3 p, float3 N, float3 V, float3 diffuseCol, float3 f0, float a, float specScale, float2 px,
                    float wrap, bool withSpec)
 {
     if (gLightsOn < 0.5) return float3(0.0, 0.0, 0.0);
-    const uint2 c = gClusters[LightCluster(px, dot(p - gCamPos, gCamFwd), gClusterParams)];
+    const uint ci = LightCluster(px, dot(p - gCamPos, gCamFwd), gClusterParams);
     const float ndv = saturate(dot(N, V)) + 1e-5;
     float3 shadowed = float3(0.0, 0.0, 0.0), open = float3(0.0, 0.0, 0.0);
-    // The next light's index is fetched while this one is shaded: one round trip to memory per light, not two.
-    uint next = c.y > 0u ? gLightIndex[c.x] : 0u;
-    for (uint k = 0; k < c.y; ++k)
+    bool done = false;
+#if __SHADER_TARGET_MAJOR >= 6
+    [loop] for (uint turn = 0; turn < 4u && !done; ++turn)
     {
-        const uint li = next;
-        const LightRec L = LightLoad(li);
-        if (k + 1u < c.y) next = gLightIndex[c.x + k + 1u];   // after the record: the loads wait in issue order
-        float3 l;
-        float dist;
-        const float3 E = LightIrradiance(li, L, p, l, dist);
-        const float ndl = saturate((dot(N, l) + wrap) / (1.0 + wrap));
-        if (ndl <= 0.0) continue;
-        float3 c3 = diffuseCol * E * ndl;
-        if (withSpec)
+        const uint cu = WaveReadLaneFirst(ci);   // wave-uniform
+        [branch] if (cu == ci)
         {
-            // GGX with Schlick by multiplies and the joint Smith term's sqrt-free approximation (Hammon 2017), D and V
-            // under one reciprocal: the highlight is most of this loop's arithmetic, and it runs per light per pixel.
-            const float3 H = normalize(V + l);
-            const float aw = saturate(a + L.radius / (2.0 * max(dist, 1e-3)));
-            const float aw2 = aw * aw;
-            const float ndlTrue = saturate(dot(N, l));
-            const float ndh = saturate(dot(N, H));
-            const float x = 1.0 - saturate(dot(V, H)), x2 = x * x;
-            const float3 F = f0 + (1.0 - f0) * (x2 * x2 * x);
-            const float d = ndh * ndh * (aw2 - 1.0) + 1.0;
-            const float vden = lerp(2.0 * ndlTrue * ndv, ndlTrue + ndv, aw);
-            const float dv = aw2 / max(1e-6, 3.14159265 * d * d * 2.0 * vden);
-            c3 += F * (dv * specScale * ndlTrue) * E;
+            ShadeLightCluster(cu, p, N, V, ndv, diffuseCol, f0, a, specScale, wrap, withSpec, shadowed, open);
+            done = true;
         }
-        if (L.flags & kLightShadows) shadowed += c3;
-        else open += c3;
     }
+#endif
+    [branch] if (!done)
+        ShadeLightCluster(ci, p, N, V, ndv, diffuseCol, f0, a, specScale, wrap, withSpec, shadowed, open);
 #ifdef BLEND
     const float vis = 1.0;
 #else
@@ -3433,61 +3464,77 @@ bool Scene::LoadFromMemory(ID3D12Device* dev, ID3D12CommandQueue* queue,
         return false;
 
     // --- shaders -----------------------------------------------------------
+    // DXC, shader model 6.0 (dxc.h): the local lights' loop walks a wave's lights with scalar loads, which takes wave
+    // intrinsics (LocalLights, design 5.4 N2). FXC (5.1) stays as the fallback - a machine without dxcompiler.dll, or
+    // a source DXC refuses - so the source compiles under both, the wave path behind __SHADER_TARGET_MAJOR. A
+    // pipeline cannot mix DXIL and DXBC, so the whole set goes through one compiler. -HV 2018: the language FXC
+    // speaks (2021 changed what && || ?: do on vectors).
     UINT flags = 0;
 #ifdef _DEBUG
     flags |= D3DCOMPILE_DEBUG | D3DCOMPILE_SKIP_OPTIMIZATION;
 #endif
-    ComPtr<ID3DBlob> vs, ps;
     // The local lights' HLSL (lights.h) and their buffers, ahead of the shader that shades them.
     std::string src = std::string(kAtmosphereHlsl) +
         "#define NGG_LIGHTS_T0 t12\n#define NGG_LIGHTS_T1 t13\n#define NGG_LIGHTS_T2 t14\n" + kLightsHlsl +
         "Texture2D<float>        gRtLights : register(t15);\n" + kShaderSrc;
 
-    if (FAILED(D3DCompile(src.c_str(), src.size(), "ngg_scene", nullptr, nullptr,
-                          "VSMain", "vs_5_1", flags, 0, &vs, &err)))
+    enum Variant { kOpaque, kAlphaTest, kBlend };
+    bool dxil = m_dxc.Load();
+    auto compile = [&](const char* entry, bool vertex, Variant v) -> ComPtr<ID3DBlob> {
+        if (dxil)
+        {
+            const std::wstring we(entry, entry + strlen(entry));
+            const wchar_t* model = vertex ? L"vs_6_0" : L"ps_6_0";
+            if (v == kOpaque) return m_dxc.Compile(src, we.c_str(), model, "ngg_scene", { L"-HV", L"2018" });
+            return m_dxc.Compile(src, we.c_str(), model, "ngg_scene",
+                                 { L"-HV", L"2018", v == kAlphaTest ? L"-DALPHA_TEST=1" : L"-DBLEND=1" });
+        }
+        const D3D_SHADER_MACRO alphaTestDefs[] = { { "ALPHA_TEST", "1" }, { nullptr, nullptr } };
+        const D3D_SHADER_MACRO blendDefs[] = { { "BLEND", "1" }, { nullptr, nullptr } };
+        ComPtr<ID3DBlob> out, e;
+        if (FAILED(D3DCompile(src.c_str(), src.size(), "ngg_scene",
+                              v == kAlphaTest ? alphaTestDefs : v == kBlend ? blendDefs : nullptr, nullptr, entry,
+                              vertex ? "vs_5_1" : "ps_5_1", flags, 0, &out, &e)))
+        {
+            Log("scene: %s (%s) compile: %s", entry, v == kAlphaTest ? "alpha-test" : v == kBlend ? "blend" : "opaque",
+                e ? (const char*)e->GetBufferPointer() : "?");
+            return nullptr;
+        }
+        return out;
+    };
+    ComPtr<ID3DBlob> vs, ps, psAlpha, psBlend, psPre, psPreAlpha, psShadowAlpha;   // (the opaque shadow pass: no PS)
+    auto compileAll = [&]() {
+        vs = compile("VSMain", true, kOpaque);
+        ps = compile("PSMain", false, kOpaque);
+        psAlpha = compile("PSMain", false, kAlphaTest);
+        psBlend = compile("PSMain", false, kBlend);
+        psPre = compile("PSPrepass", false, kOpaque);
+        psPreAlpha = compile("PSPrepass", false, kAlphaTest);
+        psShadowAlpha = compile("PSShadow", false, kAlphaTest);
+        return vs && ps && psAlpha && psBlend && psPre && psPreAlpha && psShadowAlpha;
+    };
+    if (!compileAll() && dxil)
     {
-        Log("scene: VS compile: %s", err ? (const char*)err->GetBufferPointer() : "?");
-        return false;
+        Log("scene: DXC failed on the scene's shaders - compiled with FXC (5.1) instead, the lights' loop per pixel");
+        dxil = false;
+        compileAll();
     }
-    if (FAILED(D3DCompile(src.c_str(), src.size(), "ngg_scene", nullptr, nullptr,
-                          "PSMain", "ps_5_1", flags, 0, &ps, &err)))
-    {
-        Log("scene: PS compile: %s", err ? (const char*)err->GetBufferPointer() : "?");
-        return false;
-    }
-    // NGG_DUMP_PS=<path>: the opaque pixel shader for offline analysis - its DXBC disassembly at <path>, and what
-    // Radeon GPU Analyzer needs to compile the pipeline for a given GPU (registers, occupancy, ISA): the PS and VS
-    // blobs, the root signature and the source (<path>.ps.dxbc, .vs.dxbc, .rs.bin, .hlsl). How the local lights'
-    // cost was taken apart (design 5.4 N2).
+    if (!vs || !ps || !psAlpha || !psBlend) return false;
+    Log("scene: shaders compiled with %s", dxil ? "DXC (shader model 6.0)" : "FXC (shader model 5.1)");
+
+    // NGG_DUMP_PS=<path>: the opaque pixel shader for offline analysis - what Radeon GPU Analyzer needs to compile the
+    // pipeline for a given GPU (registers, occupancy, ISA): the PS and VS blobs (DXIL, or DXBC from the fallback), the
+    // root signature and the source (<path>.ps.obj, .vs.obj, .rs.bin, .hlsl). How the local lights' cost was taken
+    // apart (design 5.4 N2).
     if (const char* dump = std::getenv("NGG_DUMP_PS"))
     {
-        ComPtr<ID3DBlob> dis;
-        if (SUCCEEDED(D3DDisassemble(ps->GetBufferPointer(), ps->GetBufferSize(), 0, nullptr, &dis)))
-            if (FILE* f = fopen(dump, "wb")) { fwrite(dis->GetBufferPointer(), 1, dis->GetBufferSize(), f); fclose(f); }
         auto put = [&](const char* ext, const void* p, size_t n) {
             if (FILE* f = fopen((std::string(dump) + ext).c_str(), "wb")) { fwrite(p, 1, n, f); fclose(f); }
         };
-        put(".ps.dxbc", ps->GetBufferPointer(), ps->GetBufferSize());
-        put(".vs.dxbc", vs->GetBufferPointer(), vs->GetBufferSize());
+        put(".ps.obj", ps->GetBufferPointer(), ps->GetBufferSize());
+        put(".vs.obj", vs->GetBufferPointer(), vs->GetBufferSize());
         put(".rs.bin", sig->GetBufferPointer(), sig->GetBufferSize());
         put(".hlsl", src.data(), src.size());
-    }
-
-    const D3D_SHADER_MACRO alphaTestDefs[] = { { "ALPHA_TEST", "1" }, { nullptr, nullptr } };
-    ComPtr<ID3DBlob> psAlpha;
-    if (FAILED(D3DCompile(src.c_str(), src.size(), "ngg_scene", alphaTestDefs, nullptr,
-                          "PSMain", "ps_5_1", flags, 0, &psAlpha, &err)))
-    {
-        Log("scene: PS(alpha-test) compile: %s", err ? (const char*)err->GetBufferPointer() : "?");
-        return false;
-    }
-    const D3D_SHADER_MACRO blendDefs[] = { { "BLEND", "1" }, { nullptr, nullptr } };
-    ComPtr<ID3DBlob> psBlend;
-    if (FAILED(D3DCompile(src.c_str(), src.size(), "ngg_scene", blendDefs, nullptr,
-                          "PSMain", "ps_5_1", flags, 0, &psBlend, &err)))
-    {
-        Log("scene: PS(blend) compile: %s", err ? (const char*)err->GetBufferPointer() : "?");
-        return false;
     }
 
     D3D12_INPUT_ELEMENT_DESC layout[] = {
@@ -3537,11 +3584,6 @@ bool Scene::LoadFromMemory(ID3D12Device* dev, ID3D12CommandQueue* queue,
 
     // --- prepass PSOs: depth + geometric normal, nothing else ---------------
     {
-        ComPtr<ID3DBlob> psPre, psPreAlpha, err2;
-        D3DCompile(src.c_str(), src.size(), "ngg_scene", nullptr, nullptr,
-                   "PSPrepass", "ps_5_1", flags, 0, &psPre, &err2);
-        D3DCompile(src.c_str(), src.size(), "ngg_scene", alphaTestDefs, nullptr,
-                   "PSPrepass", "ps_5_1", flags, 0, &psPreAlpha, &err2);
         if (psPre && psPreAlpha)
         {
             D3D12_GRAPHICS_PIPELINE_STATE_DESC pp = pso;
@@ -3567,18 +3609,11 @@ bool Scene::LoadFromMemory(ID3D12Device* dev, ID3D12CommandQueue* queue,
                 }
         }
         else
-            Log("scene: prepass shader failed to compile: %s",
-                err2 ? (const char*)err2->GetBufferPointer() : "?");
+            Log("scene: prepass shader failed to compile");
     }
 
     // --- shadow PSOs: depth only, no render target -------------------------
     {
-        ComPtr<ID3DBlob> psShadow, psShadowAlpha, err2;
-        D3DCompile(src.c_str(), src.size(), "ngg_scene", nullptr, nullptr,
-                   "PSShadow", "ps_5_1", flags, 0, &psShadow, &err2);
-        D3DCompile(src.c_str(), src.size(), "ngg_scene", alphaTestDefs, nullptr,
-                   "PSShadow", "ps_5_1", flags, 0, &psShadowAlpha, &err2);
-
         D3D12_GRAPHICS_PIPELINE_STATE_DESC sp = pso;
         sp.NumRenderTargets = 0;
         sp.RTVFormats[0] = DXGI_FORMAT_UNKNOWN;

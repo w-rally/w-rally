@@ -67,7 +67,8 @@ bool Dxc::Load()
 }
 
 ComPtr<ID3DBlob> Dxc::Compile(const std::string& source, const wchar_t* entry,
-                              const wchar_t* target, const char* nameForLog)
+                              const wchar_t* target, const char* nameForLog,
+                              std::initializer_list<const wchar_t*> extra)
 {
     if (!Ready()) return nullptr;
 
@@ -100,6 +101,7 @@ ComPtr<ID3DBlob> Dxc::Compile(const std::string& source, const wchar_t* entry,
         L"-O3",
 #endif
     };
+    args.insert(args.end(), extra.begin(), extra.end());
 
     ComPtr<IDxcResult> result;
     if (FAILED(compiler->Compile(&src, args.data(), (UINT32)args.size(),

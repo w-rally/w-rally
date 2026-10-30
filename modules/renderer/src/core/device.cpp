@@ -2,6 +2,8 @@
 #include "log.h"
 
 #include <dxgi1_6.h>
+#include <cstdlib>
+#include <string>
 #include <vector>
 
 #pragma comment(lib, "d3d12.lib")
@@ -43,10 +45,54 @@ ComPtr<IDXGIAdapter1> PickAdapter(IDXGIFactory4* factory)
     return nullptr;
 }
 
+// NGG_PIX=<frame>: PIX's GPU capturer loaded before the device exists (it must be), and the renderer's frame
+// <frame> captured to ngg-frame-<frame>.wpix in the working directory (PixFrame) - to open in PIX, or for
+// `pixtool open-capture <file> save-event-list <csv> --counters=*` to time every draw. The newest PIX installed
+// under Program Files.
+void LoadPixCapturer()
+{
+    const char* on = std::getenv("NGG_PIX");
+    if (!on || !*on || GetModuleHandleW(L"WinPixGpuCapturer.dll")) return;
+    wchar_t pf[MAX_PATH];
+    if (!GetEnvironmentVariableW(L"ProgramFiles", pf, MAX_PATH)) return;
+    const std::wstring dir = std::wstring(pf) + L"\\Microsoft PIX\\";
+    std::wstring newest;
+    WIN32_FIND_DATAW fd;
+    HANDLE h = FindFirstFileW((dir + L"*").c_str(), &fd);
+    if (h != INVALID_HANDLE_VALUE)
+    {
+        do
+            if ((fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) && fd.cFileName[0] != L'.' && newest < fd.cFileName)
+                newest = fd.cFileName;
+        while (FindNextFileW(h, &fd));
+        FindClose(h);
+    }
+    if (!newest.empty() && LoadLibraryW((dir + newest + L"\\WinPixGpuCapturer.dll").c_str()))
+        Log("core: PIX GPU capturer loaded (%ls)", newest.c_str());
+    else
+        Log("core: NGG_PIX set, but no PIX GPU capturer found");
+}
+
 } // namespace
+
+void PixFrame()
+{
+    static uint32_t frame = 0;
+    static const uint32_t at = std::getenv("NGG_PIX") ? (uint32_t)std::strtoul(std::getenv("NGG_PIX"), nullptr, 10) : 0;
+    if (++frame != at || at < 2) return;
+    using CaptureNextFrame = HRESULT(WINAPI*)(PCWSTR, UINT32);
+    HMODULE m = GetModuleHandleW(L"WinPixGpuCapturer.dll");
+    auto fn = m ? reinterpret_cast<CaptureNextFrame>(GetProcAddress(m, "CaptureNextFrame")) : nullptr;
+    const std::wstring file = L"ngg-frame-" + std::to_wstring(at) + L".wpix";
+    if (fn && SUCCEEDED(fn(file.c_str(), 1)))
+        Log("core: PIX capture of the next frame to %ls", file.c_str());
+    else
+        Log("core: PIX capture of frame %u failed", at);
+}
 
 bool Device::Create(const LUID* luid, bool enableDebugLayer)
 {
+    LoadPixCapturer();
     // DRED - Device Removed Extended Data - before the device exists: it is a
     // debug-interface setting that only takes effect at creation. Breadcrumbs
     // record each command as the GPU completes it, so a hang names the command
