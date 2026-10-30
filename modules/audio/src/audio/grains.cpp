@@ -17,6 +17,7 @@ std::vector<GrainLoop> CutGrains(const std::vector<EngineLoop>& loops, uint32_t 
     std::vector<GrainLoop> out;
     for (const EngineLoop& l : loops) {
         GrainLoop g;
+        g.cylinders = std::max(1u, cylinders);
         g.sample = &l.sample;
         g.rpm = l.rpm;
         g.load = l.load;
@@ -108,8 +109,11 @@ std::vector<GrainLoop> CutGrains(const std::vector<EngineLoop>& loops, uint32_t 
             };
             const float floor = 0.5f * middle(level), ceiling = 2.5f * middle(bright);
             std::vector<uint32_t> kept;
-            for (size_t i = 0; i < g.marks.size(); ++i)
-                if (level[i] >= floor && bright[i] <= ceiling) kept.push_back(g.marks[i]);
+            for (size_t i = 0; i < g.marks.size(); ++i) {
+                const bool keep = level[i] >= floor && bright[i] <= ceiling;
+                g.firings.push_back(keep ? static_cast<int32_t>(kept.size()) : -1);
+                if (keep) kept.push_back(g.marks[i]);
+            }
             g.marks = std::move(kept);
             // The slow level around each grain, against the loop's median of it.
             const long reachSlow = static_cast<long>(0.25f * l.sample.rate);
@@ -175,16 +179,29 @@ void GrainEngine::Fire(float rpm, float load, float onGain, float offGain, float
         const float on = load, off = 1 - load, loadNorm = 1 / std::sqrt(on * on + off * off);
         w *= g.load > 0.5f ? on * loadNorm * onGain : off * loadNorm * offGain;
         if (w < 1e-3f) continue;
-        // Half the time on in the recording's order, half a jump to a random grain at least 8 away: grains played in
-        // order round a short loop repeat its small irregularities every pass - heard as a noise once a pass (the
-        // user, about once a second on a 1.75 s idle); jumping, no sequence comes back.
+        // On in the recording's order, `jumps` times a pass a jump to a random place at least two cycles away: grains
+        // played in order round a short loop repeat its small irregularities every pass - heard as a noise once a pass
+        // (the user, about once a second on a 1.75 s idle); jumping, no sequence comes back. Not more often: each jump
+        // puts a cycle from elsewhere in the recording next to this one - jumps on half the firings took the cycle's
+        // periodicity from 0.72 to 0.53 at 4000 rpm (heard as noise; a Rally1 recording's: 0.79). Jumps and the wrap
+        // round go by whole cycles, and a dropped firing gives the same cylinder's grain a cycle on: the cylinders keep
+        // their order.
+        const uint32_t cyl = g.cylinders, cycles = static_cast<uint32_t>(g.firings.size()) / cyl;
+        uint32_t& f = m_cursor[k];
         m_random = m_random * 1664525u + 1013904223u;
-        if (float(m_random >> 8) / float(1 << 24) < jumps && g.marks.size() > 16) {
+        if (float(m_random >> 8) / float(1 << 24) < jumps / float(g.firings.size()) && cycles > 4) {
             m_random = m_random * 1664525u + 1013904223u;
-            m_cursor[k] += 8 + (m_random >> 8) % static_cast<uint32_t>(g.marks.size() - 16);
+            f += cyl * (2 + (m_random >> 8) % (cycles - 4));
         }
-        const size_t pick = m_cursor[k]++ % g.marks.size();
-        const float mark = static_cast<float>(g.marks[pick]);
+        int32_t pick = -1;
+        for (uint32_t tries = 0; pick < 0 && tries < cycles; ++tries) {
+            if (f >= cycles * cyl) f %= cycles * cyl;
+            pick = g.firings[f];
+            if (pick < 0) f += cyl;
+        }
+        if (pick < 0) continue;
+        ++f;
+        const float mark = static_cast<float>(g.marks[size_t(pick)]);
         w *= g.gains.empty() ? 1.0f : g.gains[pick];
         // The grain's span is a share of the firings' spacing when they come closer than the loop's own (revs above
         // its rpm): the quiet between the recording's pulses shrinks with the period, as a faster engine's does -

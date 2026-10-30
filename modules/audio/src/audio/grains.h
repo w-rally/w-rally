@@ -33,6 +33,10 @@ struct GrainLoop {
     float periodicity = 0;          // the envelope's autocorrelation at it (1 regular .. 0 none)
     std::vector<uint32_t> marks;    // each firing's peak
     std::vector<float> gains;       // each grain's: the recording's slow level (a fade, a car coming closer) evened out
+    // The firings in the recording's order (one per mark found, the dropped ones too): each one's grain (its index in
+    // `marks`), -1 a dropped one. A grain's place in the cylinders' order is its firing's number mod the cylinders.
+    std::vector<int32_t> firings;
+    uint32_t cylinders = 4;
 };
 
 // The grains of an engine's loops (four cylinders recorded).
@@ -46,14 +50,16 @@ public:
     void Set(const std::vector<GrainLoop>* loops);
     // A firing now at `rpm`: a grain from each of the loops around the revs (crossfaded by the revs' place between
     // their rpm) and off / on the throttle (`load` 0..1), times onGain / offGain. `firingSpacing`: the samples (48 kHz)
-    // between firings at these revs - closer than the loop's own, the grain's span shrinks with them. Half the firings
-    // jump to a random grain (8 or more away), so the recording's sequence never loops round audibly.
+    // between firings at these revs - closer than the loop's own, the grain's span shrinks with them. Each loop's grains
+    // play in the recording's firing order - a real engine's cycles follow on from each other, its cylinders each a
+    // little different. A couple of times a pass through the loop (`jumps`) they jump to a random place, two cycles or
+    // more away and by whole cycles (the same cylinder's grain), so the recording's sequence never loops round audibly.
     void Fire(float rpm, float load, float onGain, float offGain, float firingSpacing, float rpmBlend = 1, float delay = 0);
     // rpmBlend: the share of the way between two loops' rpm over which both give grains (the mix's engine.rpmBlend).
     // delay: samples (48 kHz) before the grains start.
     float Next();   // one output sample (48 kHz)
 
-    float jumps = 0.5f;   // the share of firings whose grain jumps to a random place in its loop
+    float jumps = 2;   // random jumps per pass through a loop, on average
 
 private:
     struct Voice {
@@ -66,7 +72,7 @@ private:
     };
     const std::vector<GrainLoop>* m_loops = nullptr;
     std::vector<float> m_rpm[2];       // the loops' rpm points off [0] and on [1] the throttle, sorted, unique
-    std::vector<uint32_t> m_cursor;    // each loop's next grain
+    std::vector<uint32_t> m_cursor;    // each loop's next firing (GrainLoop::firings)
     uint32_t m_random = 0x2545f491;
     std::array<Voice, 48> m_voices{};
 };
