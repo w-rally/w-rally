@@ -477,8 +477,11 @@ void Audio::Produce(float* out, uint32_t frames, double rate)
                         // (neutral) its own set, building up over its first 3 s (a Rally1's: +2 dB to +15 over its engine).
                         const bool standing = after->body.speed < 1 && after->drive.gear == 0;
                         if (after->driver.antiLag && Random() < (standing ? m_mix.antiLagIdleBangs : m_mix.antiLagBangs)) {
+                            // Without bang files, RBR's short pops (15-90 ms, as the recorded bangs it was tuned on: 25-45
+                            // ms) - not its Bang samples, half-second backfires at full scale: on 40 % of the firings
+                            // dozens overlapped into a wall the limiter flattened (the game's anti-lag "loud, aggressive").
                             const std::vector<Sample>& set = standing && !m_bank->antiLagIdleBangs.empty() ? m_bank->antiLagIdleBangs
-                                                             : !m_bank->antiLagBangs.empty() ? m_bank->antiLagBangs : m_bank->bangs;
+                                                             : !m_bank->antiLagBangs.empty() ? m_bank->antiLagBangs : m_bank->pops;
                             const float build = standing ? std::min(1.0f, 0.25f + m_antiLagIdle / 4) : 1.0f;
                             Play(set, kAntiLagGain * m_mix.Gain(Mix::kBangs) * build * (0.6f + 0.4f * Random()));
                         }

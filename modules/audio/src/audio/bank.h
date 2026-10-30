@@ -20,7 +20,7 @@ struct Bank {
     float lowShelfGain = 2.0f, lowShelfFrequency = 200.0f;
     Sample turbo, valve, transmission, wind;
     std::vector<Sample> gearChanges, dogRings, pops, bangs;
-    std::vector<Sample> antiLagBangs;      // the anti-lag's exhaust bangs (LoadBangs); none: `bangs`
+    std::vector<Sample> antiLagBangs;      // the anti-lag's exhaust bangs (LoadBangs); none: `pops` (short, as bangs are)
     std::vector<Sample> antiLagIdleBangs;  // its bangs at standstill (the bubbling idle); none: antiLagBangs
     Sample roll[3], skid[3];   // by signals::CarInfo::Surface
 

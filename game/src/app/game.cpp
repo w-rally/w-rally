@@ -761,7 +761,10 @@ std::vector<std::string> QuickArgs(const Settings& s, const assets::Catalog& cat
     if (!s.weather.empty()) a.insert(a.end(), {"--weather", s.weather});
     static const char* const kRoad[3] = {"dry", "damp", "wet"};
     a.insert(a.end(), {"--road", kRoad[s.road ? std::min(s.road, 3u) - 1 : assets::RoadOfWeather(s.weather)]});
-    if (!car->engine.empty()) a.insert(a.end(), {"--eng", car->engine});
+    if (!s.devEngine.empty()) a.insert(a.end(), {"--eng", s.devEngine});
+    else if (!car->engine.empty()) a.insert(a.end(), {"--eng", car->engine});
+    if (!s.devBangs.empty()) a.insert(a.end(), {"--als-bangs", s.devBangs});
+    if (!s.devIdleBangs.empty()) a.insert(a.end(), {"--als-idle-bangs", s.devIdleBangs});
     if (!s.sound) a.push_back("--no-sound");
     if (!s.codriver) a.push_back("--no-codriver");
     if (s.codriverReplay) a.push_back("--codriver-replay");

@@ -28,6 +28,8 @@ struct Settings {
     float codriverLead = 3.0f;          // seconds ahead at the speed: earlier (more) or later (less)
     bool codriverReplay = false;        // the pacenotes in replays too (normally the live game only)
     float pacenoteNext = 8.0f;          // the HUD: the next call shown this many seconds before it (live only)
+    // Development sounds over every car's ("" none): an .eng path, folders of anti-lag bang .wavs (moving, standing)
+    std::string devEngine, devBangs, devIdleBangs;
 
     // Controls: the keys (key_<action> = its scan code, hex)
     input::Bindings keys;
