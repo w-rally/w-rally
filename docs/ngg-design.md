@@ -2964,6 +2964,18 @@ Four decisions, the user's:
    switches them from the car's state: the brake pedal, reverse gear, the indicator and hazard keys, high beam,
    the pod. Damage (a broken lamp goes dark) comes with body damage (design.md phase 6).
 
+   **Every car's lights are different, and every LAMP has a character** (the user, 2026-10-30). A rally car carries
+   up to **8** auxiliary lamps (the bonnet pod plus roof or bumper lamps), and they are not copies of one another:
+   pencil/spot beams for reach down the road, driving beams, wide floods, cornering ("ditch") lamps aimed off to
+   the side, each with its own colour temperature (halogen warm, HID, LED cold) and intensity. So the spec is per
+   LAMP, never per car: position, aim, a beam profile (an IES-like intensity table, or a named preset: `pencil`,
+   `driving`, `flood`, `ditch`, `low`, `high`), colour temperature, intensity, which switch it is on (high beam,
+   pod, separately switched lamps) and its glowing mesh. RBR's `.ini` gives the positions and aims and nothing of
+   the character: the i20's six pod lamps (`_bon1..6`) aim 20 degrees out to each side in two groups of three (normal
+   x = ±0.342), and the derived default must give them a sensible mix of profiles (the outer ones flood or ditch,
+   the inner ones driving or pencil), not six identical beams. The look of real rally lamps at night is the
+   reference: the user collects screenshots, and the profiles are tuned against them.
+
 **Phases, each ending in something to look at:**
 - **N1 - time and the night sky.** Astronomy (sun, moon, phase), the moon as a second, dim, cool directional
   light, stars and airglow in the sky pass, exposure that reaches night (the auto exposure's ±3 EV around the
