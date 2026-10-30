@@ -3047,15 +3047,36 @@ Four decisions, the user's:
     23:30, lockstep, TAA off in both: a fresh build's settings had it on, which looked like a difference).
   - **What it costs** (1080p, the development GPU, a Radeon 780M; three lights covering the whole screen): the
     light rays 3.2 ms (0.4 with none occluded), their denoising +0.8 ms, and **the scene pass about +4 ms** (7.0-7.4
-    -> 10.7-11.9). That last is not the arithmetic (a cheaper BRDF changed nothing) nor registers (Radeon GPU Analyzer
-    on the pass's pipeline: 128 VGPRs, no spills, the same without the lights: 4 waves per SIMD). It is memory
-    latency: per pixel and light, the cluster, the light's index and its record are dependent loads, and at that
-    occupancy little of the wait hides (the cluster load alone measured ~1.4 ms). Reading a light's record in
-    one clause (`LightLoad`, every field used whatever the type) took two round trips per light out of the loop
-    (four or five -> two; 4.4 -> 3.9 ms); hoisting the cluster load to the top of the shader did nothing (the
-    driver's compiler sinks it back to its use). **Open:** the cure is a wave-uniform loop - a wave's lights
-    walked with scalar loads (`WaveReadLaneFirst`) - which needs wave intrinsics, i.e. the scene shader on DXC /
-    SM 6 (it is FXC / 5.1 today; the ray tracer is DXC already). Its own step, before N3 adds lamps.
+    -> 10.7-11.9). Measured apart (N2b, below), it is the lights' arithmetic per FRAGMENT.
+  - **N2b - DONE 2026-10-30: the scene's shaders on DXC, and what the lights' cost is.**
+    - **DXC (shader model 6.0)** compiles the scene's whole set (VS, the three PS variants, prepass, shadow - a
+      pipeline cannot mix DXIL and DXBC), `-HV 2018` for FXC's language; FXC (5.1) is the fallback when
+      dxcompiler.dll is missing or DXC refuses the source, which compiles under both (the wave path behind
+      `__SHADER_TARGET_MAJOR`). The picture is the same: without lights night is identical, noon differs by 1/255
+      on 0.1% of the pixels (rounding).
+    - **A wave-uniform light loop:** the wave takes its clusters in turn (`WaveReadLaneFirst`, at most 4, the rest
+      and helper lanes per pixel) and reads the cluster, the indices and the records with scalar loads (RGA: all
+      scalar, 117 VGPRs from 122).
+    - **Clusters cull a spot by its CONE** (each cluster's bounding sphere against the cone, a point light's sphere
+      against the cluster's): half the list entries in the test view (8784 -> 4734), the picture the same (1/255 on
+      0.1%, the ray tracer's light pick). The shader skips a light that gives nothing (outside its cone or range,
+      facing away), and the divisions a light alone decides are made on the CPU (`invRange2`, `spotScale`,
+      `invOuterRad`; one rsqrt for distance and direction): 140 -> 130 instructions, 10 -> 6 transcendental.
+    - **What the cost IS** - PIX per-draw timings (`NGG_PIX=<frame>` captures that frame; `pixtool open-capture
+      <file> --disable-gpu-plugins save-event-list <csv> --counters=EOP*to*EOP* --counters=PS*Invocations`): the
+      lights' time is in the main pass's draws, in proportion to each draw's pixel shader invocations - foliage's
+      overdraw included (without a prepass, 12.3 M invocations for 2 M pixels). Per light per fragment ~130 vector
+      instructions in one dependent chain, at 4 waves per SIMD stalled more than computing (RGA: 52 `s_delay_alu`
+      in the loop). Not memory: scalar loads changed nothing measurable, nor did the cone culling (in the test view
+      the three lights do reach most of the screen) or the cheaper arithmetic: three lights still add ~3 ms to the
+      main pass at 1080p on the 780M (7.3 -> 10.1-10.6 ms).
+    - **Open - the remedy is fewer fragments per light, not cheaper loads:** the local lights out of the main pass
+      into one full-screen pass after it (deferred: per PIXEL once, no overdraw and no 2x2 quads' helper lanes, a
+      small shader at full occupancy), from the material the main pass leaves in a target (diffuse colour, f0,
+      roughness) and the prepass's normals, times the aerial transmittance. Geometry LOD (foliage cards above all)
+      cuts the overdraw for everything the main pass shades, the lights included. Decided with the user before N3.
+    - PIX: per-draw timings work only with GPU plugins disabled - with AMD's counter plugin the replay hung the GPU
+      (TDR, three times).
   - **Lessons.** A buffer the shaders read from the UPLOAD heap is CPU-visible memory the GPU barely caches -
     copy to a default-heap buffer (no gain measured here, but it is the rule). A struct copied from a buffer and
     indexed by a variable (the profile) is an indexable temporary, i.e. scratch memory (~1.5 ms per light): read
