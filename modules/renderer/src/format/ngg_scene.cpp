@@ -197,8 +197,9 @@ std::string Read(const void* bytes, size_t n, SceneData& out)
                 sizeof wh + uint64_t(wh.count) * wh.recordSize > size)
                 return "NGGW is not understood (version " + std::to_string(wh.version) + ")";
             for (uint32_t k = 0; k < wh.count; ++k) {
-                WeatherRecord r;
-                std::memcpy(&r, d + sizeof wh + size_t(k) * wh.recordSize, sizeof r);
+                // Over the defaults: a shorter (older) record leaves the newer fields at theirs.
+                WeatherRecord r = DefaultWeatherRecord();
+                std::memcpy(&r, d + sizeof wh + size_t(k) * wh.recordSize, wh.recordSize < sizeof r ? wh.recordSize : sizeof r);
                 r.name[sizeof r.name - 1] = 0;
                 out.weather.push_back(r);
             }

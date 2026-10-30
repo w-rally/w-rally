@@ -2977,6 +2977,18 @@ Four decisions, the user's:
    reference: the user collects screenshots, and the profiles are tuned against them.
 
 **Phases, each ending in something to look at:**
+- **N1a - DONE 2026-10-30: the sun from the time and place.** `core/astronomy.*` (Meeus: the sun's low-accuracy
+  method, the moon's main terms, its lit fraction, sidereal time; x east, y up, z north turned by `northDeg`),
+  checked by CTest `astronomy-check` against Meeus's worked examples (the sun to 0.00001 degrees, the moon's
+  longitude to 0.0007, its distance to 29 km, its lit fraction to 0.002) and the solstice's noon sun at 50 N
+  (63.44 degrees, due south, 13:04 CEST). The weather record grows by appending (124 -> 160 bytes:
+  `timeFlags`, date, local hour, UTC offset, latitude, longitude, north); readers take min(recordSize, sizeof)
+  over the defaults, so a 124-byte record reads as no time set (checked on track-108's). The JSON gains
+  `"time": {"date", "local", "utcOffset"}` and `"place": {"latitude", "longitude", "north"}`. Renderer interface
+  **5**: `FrameDesc::skyTime` puts the sun there over any weather; the game's `--time HH:MM [--date]
+  [--utc-offset] [--latitude] [--longitude] [--north]`. Stage 41 on 21 June at 50 N: noon, a low evening sun at
+  20:30, civil dusk at 21:30 lit by the sky alone, and black at 22:30 - what the moon and the night exposure
+  (N1b, N1c) are for.
 - **N1 - time and the night sky.** Astronomy (sun, moon, phase), the moon as a second, dim, cool directional
   light, stars and airglow in the sky pass, exposure that reaches night (the auto exposure's ±3 EV around the
   dial is not enough: the preset's EV and a wider range), twilight as the atmosphere already gives it. The

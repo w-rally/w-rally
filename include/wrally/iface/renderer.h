@@ -36,7 +36,8 @@ namespace wrally::iface {
 //    loaded scene.
 // 3: setLegacyProfile (the lighting of an automatic .lbs import's cards).
 // 4: FrameDesc::wetness (wet surfaces and puddles).
-constexpr uint32_t kRendererInterfaceVer = 4;
+// 5: FrameDesc::skyTime (the sun from a date, a time and a place).
+constexpr uint32_t kRendererInterfaceVer = 5;
 
 struct Renderer;                     // the module's instance, opaque
 typedef uint32_t SceneHandle;        // a loaded .ngg stage
@@ -109,6 +110,19 @@ struct WeatherDesc {
     float exposure;
 };
 static_assert(sizeof(WeatherDesc) == 60, "WeatherDesc layout");
+
+// The time and place (NGG design 5.4). With `set`, the sun follows from them astronomically, over whatever the
+// weather (a preset or a WeatherDesc) says - any stage at any hour.
+struct SkyTimeDesc {
+    uint32_t set;            // 0: the weather's own sun
+    int32_t  year, month, day;
+    float    localHour;      // the stage's clock, 0..24
+    float    utcOffset;      // hours: local = UTC + utcOffset
+    float    latitude;       // degrees, north positive
+    float    longitude;      // degrees, east positive
+    float    northDeg;       // where north lies in the world: degrees from +z towards +x
+};
+static_assert(sizeof(SkyTimeDesc) == 36, "SkyTimeDesc layout");
 
 // ------------------------------------------------------------------ models
 //
@@ -218,6 +232,7 @@ struct FrameDesc {
     // that has stopped still leaves it wet), not the sky's - so separate from
     // the weather's `rain`.
     float                    wetness;
+    SkyTimeDesc              skyTime;         // the time and place: the sun from them (set), else the weather's
     float                    time;            // seconds, the game's: animated materials, wind
     const InstanceUpdate*    instances;
     uint32_t                 instanceCount;

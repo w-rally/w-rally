@@ -149,6 +149,22 @@ int Parse(const std::vector<std::string>& args, Options& o)
     // default the car's own for the surface.
     c.setup = Arg(args, "--setup", "");
     o.weather = Arg(args, "--weather", "");
+    // The time and place: the sun from them (NGG design 5.4).
+    if (const std::string t = Arg(args, "--time", ""); !t.empty()) {
+        int h = 0, m = 0;
+        if (std::sscanf(t.c_str(), "%d:%d", &h, &m) < 1 || h < 0 || h > 24 || m < 0 || m > 59)
+            return std::fprintf(stderr, "--time %s: HH:MM, the stage's local time\n", t.c_str()), 2;
+        o.skyTimeSet = true;
+        o.skyHour = h + m / 60.0;
+        if (const std::string d = Arg(args, "--date", ""); !d.empty() &&
+            (std::sscanf(d.c_str(), "%d-%d-%d", &o.skyYear, &o.skyMonth, &o.skyDay) != 3 || o.skyMonth < 1 || o.skyMonth > 12 ||
+             o.skyDay < 1 || o.skyDay > 31))
+            return std::fprintf(stderr, "--date %s: YYYY-MM-DD\n", d.c_str()), 2;
+        o.skyUtcOffset = std::atof(Arg(args, "--utc-offset", "1").c_str());
+        o.skyLatitude = std::atof(Arg(args, "--latitude", "50").c_str());
+        o.skyLongitude = std::atof(Arg(args, "--longitude", "14.4").c_str());
+        o.skyNorth = std::atof(Arg(args, "--north", "0").c_str());
+    }
     // The surface and the tyre type: the stage's unless given.
     {
         std::string from = "--surface";

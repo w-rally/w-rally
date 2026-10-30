@@ -118,6 +118,19 @@ std::string Escaped(const std::string& s)
 
 } // namespace
 
+// The time and place as JSON members (with their leading comma), or "" when the preset has none.
+static std::string TimeJson(const WeatherPreset& w)
+{
+    if (!w.timeSet) return std::string();
+    char buf[256];
+    _snprintf_s(buf, sizeof(buf), _TRUNCATE,
+        ",\n  \"time\":          { \"date\": \"%04d-%02d-%02d\", \"local\": %.6g, \"utcOffset\": %.6g },\n"
+        "  \"place\":         { \"latitude\": %.6g, \"longitude\": %.6g, \"north\": %.6g }",
+        w.time.year, w.time.month, w.time.day, w.time.localHour, w.time.utcOffset,
+        w.time.latitude, w.time.longitude, w.time.northDeg);
+    return buf;
+}
+
 bool WeatherFromJson(const char* text, WeatherPreset& out)
 {
     Parser ps{ text };
@@ -149,6 +162,30 @@ bool WeatherFromJson(const char* text, WeatherPreset& out)
     Num(root.Get("precipitation"), "rain", out.rain);
     Num(root.Get("precipitation"), "snow", out.snow);
     Num(root.Get("exposure"), "value", out.sky.exposure);
+
+    // "time": { "date": "2026-06-21", "local": 22.5, "utcOffset": 2 }, "place": { "latitude": 50, "longitude":
+    // 14.4, "north": 0 } - both or neither (NGG design 5.4).
+    const Json* tm = root.Get("time");
+    const Json* pl = root.Get("place");
+    if (tm && pl)
+    {
+        const Json* date = tm->Get("date");
+        int y = 0, m = 0, d = 0;
+        if (date && date->kind == Json::kString && sscanf_s(date->str.c_str(), "%d-%d-%d", &y, &m, &d) == 3)
+        {
+            float hour = (float)out.time.localHour, utc = (float)out.time.utcOffset;
+            float lat = (float)out.time.latitude, lon = (float)out.time.longitude, north = (float)out.time.northDeg;
+            Num(tm, "local", hour);
+            Num(tm, "utcOffset", utc);
+            Num(pl, "latitude", lat);
+            Num(pl, "longitude", lon);
+            Num(pl, "north", north);
+            out.timeSet = true;
+            out.time.year = y, out.time.month = m, out.time.day = d;
+            out.time.localHour = hour, out.time.utcOffset = utc;
+            out.time.latitude = lat, out.time.longitude = lon, out.time.northDeg = north;
+        }
+    }
     return true;
 }
 
@@ -165,13 +202,13 @@ std::string WeatherToJson(const WeatherPreset& w)
         "  \"clouds\":        { \"cover\": %.6g },\n"
         "  \"fog\":           { \"visibility\": %.6g, \"height\": %.6g },\n"
         "  \"precipitation\": { \"rain\": %.6g, \"snow\": %.6g },\n"
-        "  \"exposure\":      { \"value\": %.6g }\n"
+        "  \"exposure\":      { \"value\": %.6g }%s\n"
         "}\n",
         Escaped(w.name).c_str(), Escaped(w.source).c_str(),
         w.sky.sunDir[0], w.sky.sunDir[1], w.sky.sunDir[2], w.sky.sunIntensity,
         w.sky.turbidity, w.sky.groundAlbedo,
         w.sky.groundColour[0], w.sky.groundColour[1], w.sky.groundColour[2],
-        w.cloudCover, w.fogVisibility, w.fogHeight, w.rain, w.snow, w.sky.exposure);
+        w.cloudCover, w.fogVisibility, w.fogHeight, w.rain, w.snow, w.sky.exposure, TimeJson(w).c_str());
     return buf;
 }
 
@@ -216,6 +253,12 @@ static_assert(kRec.sunDirection[0] == kSky.sunDir[0] && kRec.sunDirection[1] == 
               kRec.fogVisibility == kSky.fogVisibility && kRec.fogHeight == kSky.fogHeight &&
               kRec.exposure == kSky.exposure,
               "ngg_format.h's DefaultWeatherRecord() and sky.h's SkyParams defaults disagree");
+constexpr SkyTime kTime{};
+static_assert(kRec.year == kTime.year && kRec.month == kTime.month && kRec.day == kTime.day &&
+              kRec.localHour == (float)kTime.localHour && kRec.utcOffset == (float)kTime.utcOffset &&
+              kRec.latitude == (float)kTime.latitude && kRec.longitude == (float)kTime.longitude &&
+              kRec.northDeg == (float)kTime.northDeg && kRec.timeFlags == 0,
+              "ngg_format.h's DefaultWeatherRecord() and astronomy.h's SkyTime defaults disagree");
 } // namespace
 
 bool ParseWeatherChunk(const void* payload, size_t bytes, std::vector<WeatherPreset>& out)
@@ -241,8 +284,9 @@ bool ParseWeatherChunk(const void* payload, size_t bytes, std::vector<WeatherPre
     }
     for (uint32_t i = 0; i < h.count; ++i)
     {
-        WeatherRecord r;
-        memcpy(&r, p + sizeof(h) + (size_t)i * h.recordSize, sizeof(r));   // recordSize >= sizeof(r)
+        // What the record has, over the defaults: a shorter (older) record leaves the newer fields at theirs.
+        WeatherRecord r = DefaultWeatherRecord();
+        memcpy(&r, p + sizeof(h) + (size_t)i * h.recordSize, h.recordSize < sizeof(r) ? h.recordSize : sizeof(r));
         r.name[sizeof(r.name) - 1] = 0;
 
         WeatherPreset w;
@@ -257,6 +301,10 @@ bool ParseWeatherChunk(const void* payload, size_t bytes, std::vector<WeatherPre
         w.fogHeight        = r.fogHeight;
         w.rain             = r.rain;
         w.snow             = r.snow;
+        w.timeSet          = (r.timeFlags & kWeatherTimeSet) != 0;
+        w.time.year = r.year, w.time.month = r.month, w.time.day = r.day;
+        w.time.localHour = r.localHour, w.time.utcOffset = r.utcOffset;
+        w.time.latitude = r.latitude, w.time.longitude = r.longitude, w.time.northDeg = r.northDeg;
         out.push_back(w);
     }
     return true;
@@ -274,7 +322,7 @@ std::vector<uint8_t> PackWeatherChunk(const std::vector<WeatherPreset>& presets)
     for (size_t i = 0; i < presets.size(); ++i)
     {
         const WeatherPreset& w = presets[i];
-        WeatherRecord r = {};
+        WeatherRecord r = DefaultWeatherRecord();
         if (w.name.size() >= sizeof(r.name))
             Log("weather: preset name '%s' is longer than %zu bytes - truncated", w.name.c_str(), sizeof(r.name) - 1);
         strncpy_s(r.name, sizeof(r.name), w.name.c_str(), _TRUNCATE);
@@ -288,6 +336,10 @@ std::vector<uint8_t> PackWeatherChunk(const std::vector<WeatherPreset>& presets)
         r.fogHeight     = w.fogHeight;
         r.rain          = w.rain;
         r.snow          = w.snow;
+        r.timeFlags     = w.timeSet ? kWeatherTimeSet : 0u;
+        r.year = w.time.year, r.month = w.time.month, r.day = w.time.day;
+        r.localHour = (float)w.time.localHour, r.utcOffset = (float)w.time.utcOffset;
+        r.latitude = (float)w.time.latitude, r.longitude = (float)w.time.longitude, r.northDeg = (float)w.time.northDeg;
         memcpy(out.data() + sizeof(h) + i * sizeof(r), &r, sizeof(r));
     }
     return out;
@@ -303,6 +355,14 @@ void ApplyWeather(const WeatherPreset& w, SkyParams& sky)
     sky.cloudCover    = w.cloudCover;
     sky.fogVisibility = w.fogVisibility;
     sky.fogHeight     = w.fogHeight;
+    if (w.timeSet) ApplySkyTime(w.time, sky);
+}
+
+SkyBodies ApplySkyTime(const SkyTime& t, SkyParams& sky)
+{
+    const SkyBodies b = ComputeSkyBodies(t);
+    for (int k = 0; k < 3; ++k) sky.sunDir[k] = -b.sunTowards[k];   // the direction the light travels
+    return b;
 }
 
 } // namespace core
