@@ -3018,9 +3018,52 @@ Four decisions, the user's:
     difference 0.03/255 against the frame before N1). `PHYS_DRIVE_LOOK_UP=<deg>` tilts the view to the sky.
   - Not done: the moon's phase is too small to see at its true size (as to the eye); twinkling; the Milky Way; a
     stage's real latitude and north (stage metadata).
-- **N2 - the light system.** A per-frame light list (renderer interface), clustered culling, one shadow ray per
-  pixel through RIS/ReSTIR over the lights, denoised with the RT filter that exists. Point and spot lights with
-  profiles.
+- **N2 - DONE 2026-10-30: the light system.**
+  - **The interface (renderer 6):** `FrameDesc::lights` / `lightCount`, a list per frame of `iface::LightDesc`
+    (128 bytes): point or spot, position and axis, a linear tint and an intensity in **candela**, a range (0: from
+    the intensity, to where it gives 0.1 lux, at most 300 m), the emitter's radius (how soft its shadows and its
+    highlight are), a spot's inner and outer half-angles, and an optional 16-entry beam profile over the cone
+    (`kLightProfile`; what N3's lamp characters fill). `kLightNoShadows` for a lamp nothing should shadow.
+    `RenderStats` gains `lightsMs` and `lightCount`. A candela at a metre is a lux, 2e-4 of the sun's irradiance
+    unit (22 = a clear day's ~110,000 lux).
+  - **Clusters** (`core/lights.*`): the view cut into 16 x 9 tiles x 24 depth slices (exponential, 0.25-1000 m),
+    each with the list of lights whose range touches it, built on the CPU per frame (a conservative screen box
+    and slice span per light), uploaded and copied to GPU-local buffers that the scene pass and the ray tracer
+    both read - so both see exactly the same lights. Up to 512 lights and 65,536 list entries.
+  - **Every light ray traced, at one ray per pixel however many there are** - the ratio estimator (Heitz, Hill
+    and McGuire 2018). The scene pass sums every light's UNSHADOWED light exactly (Lambert, and GGX for the
+    highlight); the ray tracer picks one light per pixel in proportion to what it gives there (a one-pass
+    weighted reservoir) and traces one ray to a random point on its emitter's disc; that 0/1 is an unbiased
+    estimate of the shadowed fraction of the sum - smooth, like the sun's visibility - so it goes through the
+    same denoiser, and the light is the sum times it. Foliage cards take the wrapped cosine and no highlight, as
+    for the sun; glass takes the fraction as 1.
+  - **The highlight is the emitter's**, its lobe widened by the disc's angular size (Karis 2013's widened
+    roughness, the lobe blurred and its energy kept): a point's highlight on a wet road (roughness at its 0.002
+    floor) would peak near 1e5 x the irradiance.
+  - Checked on stage 41 at 23:30 with `PHYS_DRIVE_TEST_LIGHTS` (two 40,000 cd headlight spots and a 2,000 cd lamp
+    above and behind the car; `=lamp` the lamp alone, `=noshadow` none occluded): the beams on the road, and the
+    lamp's light with the car's own shadow on the road ahead (a wedge the roof casts; without the rays the road
+    there was evenly lit). Fast tests pass. Without lights a frame is bit-identical to the one before N2 (noon and
+    23:30, lockstep, TAA off in both: a fresh build's settings had it on, which looked like a difference).
+  - **What it costs** (1080p, the development GPU, a Radeon 780M; three lights covering the whole screen): the
+    light rays 3.2 ms (0.4 with none occluded), their denoising +0.8 ms, and **the scene pass about +4 ms** (7.0-7.4
+    -> 10.7-11.9). That last is not the arithmetic (a cheaper BRDF changed nothing) nor registers (Radeon GPU Analyzer
+    on the pass's pipeline: 128 VGPRs, no spills, the same without the lights: 4 waves per SIMD). It is memory
+    latency: per pixel and light, the cluster, the light's index and its record are dependent loads, and at that
+    occupancy little of the wait hides (the cluster load alone measured ~1.4 ms). Reading a light's record in
+    one clause (`LightLoad`, every field used whatever the type) took two round trips per light out of the loop
+    (four or five -> two; 4.4 -> 3.9 ms); hoisting the cluster load to the top of the shader did nothing (the
+    driver's compiler sinks it back to its use). **Open:** the cure is a wave-uniform loop - a wave's lights
+    walked with scalar loads (`WaveReadLaneFirst`) - which needs wave intrinsics, i.e. the scene shader on DXC /
+    SM 6 (it is FXC / 5.1 today; the ray tracer is DXC already). Its own step, before N3 adds lamps.
+  - **Lessons.** A buffer the shaders read from the UPLOAD heap is CPU-visible memory the GPU barely caches -
+    copy to a default-heap buffer (no gain measured here, but it is the rule). A struct copied from a buffer and
+    indexed by a variable (the profile) is an indexable temporary, i.e. scratch memory (~1.5 ms per light): read
+    fields from the buffer by index. Under PowerShell 7.6, `$env:X = ''` can leave X defined but empty, so the
+    game reads an empty value as unset. Probing a shader's cost with a runtime switch measures what the
+    COMPILER made of the switch: zeroing a result after computing it removes nothing, and a select by a constant
+    may become a branch that skips the work - check the ISA (`NGG_DUMP_PS` writes what Radeon GPU Analyzer needs:
+    the blobs, the root signature, the source).
 - **N3 - car lights.** The spec and its fallbacks (above), lit meshes as emissive, the game's switching (brake,
   reverse, indicators, hazard, beams, pod).
 - **N4 - stage lights.** A light chunk in the `.ngg` (with `provenance=auto|authored`, 5.3), emissive texture

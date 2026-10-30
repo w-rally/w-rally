@@ -36,6 +36,7 @@
 
 #include "device.h"
 #include "dxc.h"
+#include "lights.h"
 #include "scene.h"
 
 namespace ngg {
@@ -89,12 +90,14 @@ public:
                ID3D12Resource* normal, ID3D12Resource* motion, ID3D12Resource* plant,
                const float* viewProj, const float* unjitteredViewProj,
                const float* camPos, const float* sunTowards, float tMax, float sunAngle,
-               bool ao, float aoRadius, uint32_t aoRays, UINT width, UINT height);
+               bool ao, float aoRadius, uint32_t aoRays, UINT width, UINT height,
+               const Lights* lights = nullptr);
 
     // Filled by ReadStats after the caller has waited for the GPU - the same
     // contract as Scene::LogProbe and ReadOverlayStats, and for the same reason.
     void ReadStats();
-    double  LastMs() const     { return m_lastMs; }       // shadow + AO traces
+    double  LastMs() const     { return m_lastMs; }       // shadow + AO + local-light traces
+    double  LightsMs() const   { return m_lightsMs; }     // the local lights' trace alone
     double  AoMs() const       { return m_aoMs; }         // the AO trace alone
     double  DenoiseMs() const  { return m_denoiseMs; }    // both denoises
     uint32_t ShadowedPixels() const { return m_shadowed; }
@@ -108,6 +111,8 @@ public:
     // lighting should read. Result() is the raw per-frame trace, for diagnostics.
     ID3D12Resource* Filtered() const { return m_filtered; }
     ID3D12Resource* FilteredAo() const { return m_filteredAo; }    // null unless traced this frame
+    // The local lights' denoised shadowed fraction (lights.h; RGBA16F, R): null unless traced this frame.
+    ID3D12Resource* FilteredLights() const { return m_filteredLights; }
     // This frame's AO denoise before the wide pass, the RGBA16F layout Filtered
     // has (z: the moved-object distrust); null unless traced this frame.
     ID3D12Resource* AoDenoised() const { return m_filteredAo ? m_aoHist[(m_frame - 1) & 1].Get() : nullptr; }
@@ -168,6 +173,13 @@ private:
     Microsoft::WRL::ComPtr<ID3D12Resource>       m_aoWide;
     D3D12_RESOURCE_STATES m_aoWideState = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
     bool                  m_aoHistValid = false;
+    // The local lights' (lights.h): its trace, output, counters, histories.
+    Microsoft::WRL::ComPtr<ID3D12PipelineState>  m_psoLights;
+    Microsoft::WRL::ComPtr<ID3D12Resource>       m_lightResult, m_lightCounters;
+    Microsoft::WRL::ComPtr<ID3D12Resource>       m_lightHist[2];
+    D3D12_RESOURCE_STATES m_lightHistState[2] = {};
+    ID3D12Resource*       m_filteredLights = nullptr;
+    bool                  m_lightHistValid = false;
     void Denoise(ID3D12GraphicsCommandList* list, const DenoiseCB& base, ID3D12Resource* raw,
                  UINT pair0, UINT pair1, UINT uav0, UINT uav1,
                  Microsoft::WRL::ComPtr<ID3D12Resource>* hist, D3D12_RESOURCE_STATES* histState,
@@ -193,7 +205,7 @@ private:
     UINT   m_stride = 0;
     UINT   m_width = 0, m_height = 0;
     UINT64 m_timestampHz = 0;
-    double m_lastMs = 0.0, m_aoMs = 0.0, m_denoiseMs = 0.0;
+    double m_lastMs = 0.0, m_aoMs = 0.0, m_lightsMs = 0.0, m_denoiseMs = 0.0;
     uint32_t m_shadowed = 0, m_traced = 0, m_leafHits = 0, m_leafMisses = 0;
     bool   m_resultReadable = false;
     uint32_t m_frame = 0;        // the cone sample's decorrelation counter

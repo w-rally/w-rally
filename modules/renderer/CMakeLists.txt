@@ -6,7 +6,7 @@
 add_library(ngg-core STATIC src/core/device.cpp src/core/aerial.cpp src/core/renderer.cpp src/core/atmosphere_ms.cpp
             src/core/dxc.cpp src/core/env.cpp src/core/log.cpp src/core/mipgen.cpp src/core/post.cpp src/core/rt.cpp
             src/core/scene.cpp src/core/shadow.cpp src/core/sky.cpp src/core/weather.cpp
-            src/core/astronomy.cpp)
+            src/core/astronomy.cpp src/core/lights.cpp)
 target_include_directories(ngg-core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src/core)
 target_link_libraries(ngg-core PUBLIC d3d12 dxgi d3dcompiler)
 target_compile_definitions(ngg-core PRIVATE _CRT_SECURE_NO_WARNINGS)

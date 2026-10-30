@@ -587,6 +587,31 @@ Status WRALLY_CALL RenderFrame(Renderer* r, const FrameDesc* f)
         for (uint32_t i = 0; f->instances && i < f->instanceCount; ++i) Place(*r, f->instances[i]);
         ApplyFrameWeather(*r, *f);
         r->scene.SetWetness(f->wetness);
+        // The frame's local lights, as the core takes them (NGG design 5.4 N2).
+        {
+            std::vector<ngg::core::LightDesc> lights;
+            lights.reserve(f->lightCount);
+            for (uint32_t i = 0; f->lights && i < f->lightCount; ++i) {
+                const LightDesc& in = f->lights[i];
+                ngg::core::LightDesc l;
+                l.type = in.type == kLightSpot ? ngg::core::LightDesc::kSpot : ngg::core::LightDesc::kPoint;
+                for (int k = 0; k < 3; ++k) {
+                    l.position[k] = in.position[k];
+                    l.direction[k] = in.direction[k];
+                    l.colour[k] = in.colour[k];
+                }
+                l.intensity = in.intensity;
+                l.range = in.range;
+                l.radius = in.radius;
+                l.innerDeg = in.innerDeg;
+                l.outerDeg = in.outerDeg;
+                l.shadows = (in.flags & kLightNoShadows) == 0;
+                l.hasProfile = (in.flags & kLightProfile) != 0;
+                for (int k = 0; k < 16; ++k) l.profile[k] = in.profile[k];
+                lights.push_back(l);
+            }
+            r->scene.SetLights(lights);
+        }
         if (f->lineVertexCount && f->lines) {
             static_assert(sizeof(LineVertex) == sizeof(ngg::core::Scene::OverlayVertex), "uploaded raw");
             r->scene.SetOverlayLines(r->dev.device.Get(), 0, reinterpret_cast<const ngg::core::Scene::OverlayVertex*>(f->lines),
@@ -679,6 +704,8 @@ Status WRALLY_CALL Stats(Renderer* r, RenderStats* out)
         out->rtMs = (float)rt.LastMs();
         out->aoMs = (float)rt.AoMs();
         out->denoiseMs = (float)rt.DenoiseMs();
+        out->lightsMs = (float)rt.LightsMs();
+        out->lightCount = (uint32_t)r->scene.GetLights().Count();
         out->rtPixels = rt.TracedPixels();
         out->rtShadowed = rt.ShadowedPixels();
     } else if (const char* why = r->core.RtFallbackReason()) {

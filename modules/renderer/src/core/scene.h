@@ -31,6 +31,7 @@
 #include "shadow.h"
 #include "env.h"
 #include "aerial.h"
+#include "lights.h"
 #include "atmosphere_ms.h"
 #include "weather.h"
 
@@ -272,6 +273,18 @@ public:
     // its use without unbinding it, for A/B.
     void SetRtAo(ID3D12Resource* tex) { m_rtAo = tex; m_aoSrvReady = false; }   // see SetRtVisibility
     void ClearRtAo() { m_rtAo = nullptr; m_aoSrvReady = false; }
+
+    // LOCAL LIGHTS (lights.h, design 5.4 N2): this frame's lights, their clusters for this view (before the ray
+    // tracer reads them), and the ray tracer's denoised shadowed fraction of their light (Rt::FilteredLights; none:
+    // unshadowed).
+    void SetLights(const std::vector<LightDesc>& lights) { m_lights.Set(lights); }
+    void PrepareLights(ID3D12GraphicsCommandList* list, const float* view, const float* proj, UINT width, UINT height)
+    {
+        m_lights.Build(list, view, proj, width, height);
+    }
+    const Lights& GetLights() const { return m_lights; }
+    void SetRtLights(ID3D12Resource* tex) { m_rtLights = tex; }
+    void ClearRtLights() { m_rtLights = nullptr; }
     void SetAmbientOcclusion(bool on) { m_aoOn = on; }
     bool AmbientOcclusion() const { return m_aoOn; }
     bool AmbientSpecular() const { return m_ambientSpecular; }
@@ -839,6 +852,12 @@ private:
     // The froxel aerial-perspective table: two SRVs (in-scatter, transmittance)
     // in consecutive slots. Fixed-size volumes, so written once per heap.
     AerialLut                m_aerialLut;
+    // Local lights: their buffers and clusters, the ray tracer's shadowed fraction, and the four heap slots the
+    // scene shader reads them from (t12 lights, t13 clusters, t14 indices, t15 the fraction).
+    Lights                   m_lights;
+    bool                     m_lightsReady = false;
+    ID3D12Resource*          m_rtLights = nullptr;
+    UINT                     m_lightSrvSlot = 0;
     UINT                     m_aerialSrvSlot = 0;
     bool                     m_aerialSrvReady = false;
     bool                     m_aoOn = true;

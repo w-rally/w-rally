@@ -37,7 +37,8 @@ namespace wrally::iface {
 // 3: setLegacyProfile (the lighting of an automatic .lbs import's cards).
 // 4: FrameDesc::wetness (wet surfaces and puddles).
 // 5: FrameDesc::skyTime (the sun from a date, a time and a place).
-constexpr uint32_t kRendererInterfaceVer = 5;
+// 6: FrameDesc::lights (point and spot lights, every one ray-traced).
+constexpr uint32_t kRendererInterfaceVer = 6;
 
 struct Renderer;                     // the module's instance, opaque
 typedef uint32_t SceneHandle;        // a loaded .ngg stage
@@ -123,6 +124,28 @@ struct SkyTimeDesc {
     float    northDeg;       // where north lies in the world: degrees from +z towards +x
 };
 static_assert(sizeof(SkyTimeDesc) == 36, "SkyTimeDesc layout");
+
+// A local light (NGG design 5.4, N2): a point or a spot, in the world (render axes, y up), in PHYSICAL units -
+// candela on its axis, metres, degrees. Every one casts ray-traced shadows (unless kLightNoShadows); a car's lamps
+// are lights like any other, sent each frame where the car has them.
+constexpr uint32_t kLightPoint = 0;
+constexpr uint32_t kLightSpot  = 1;
+constexpr uint32_t kLightNoShadows = 1u << 0;   // never occluded (a dashboard lamp)
+constexpr uint32_t kLightProfile   = 1u << 1;   // `profile` holds the beam
+struct LightDesc {
+    uint32_t type;           // kLightPoint, kLightSpot
+    uint32_t flags;
+    float    position[3];
+    float    direction[3];   // a spot's axis, unit
+    float    colour[3];      // linear tint
+    float    intensity;      // candela, on the axis
+    float    range;          // metres: beyond it, nothing; 0 from the intensity
+    float    radius;         // the emitter's size, metres: how soft its shadows are
+    float    innerDeg;       // a spot's full-intensity half-angle
+    float    outerDeg;       // and its cut-off half-angle
+    float    profile[16];    // the beam over angle, 0 .. outerDeg, relative to the axis (kLightProfile)
+};
+static_assert(sizeof(LightDesc) == 128, "LightDesc layout");
 
 // ------------------------------------------------------------------ models
 //
@@ -233,6 +256,8 @@ struct FrameDesc {
     // the weather's `rain`.
     float                    wetness;
     SkyTimeDesc              skyTime;         // the time and place: the sun from them (set), else the weather's
+    const LightDesc*         lights;          // this frame's local lights (design 5.4 N2)
+    uint32_t                 lightCount;
     float                    time;            // seconds, the game's: animated materials, wind
     const InstanceUpdate*    instances;
     uint32_t                 instanceCount;
@@ -272,6 +297,8 @@ struct RenderStats {
     float    exposure;                     // applied last frame
     float    meteredEv, adaptedEv;         // auto exposure: log2 luminance, this frame / adapted
     char     rtFallback[96];               // why RT is not active, "" when it is
+    float    lightsMs;                     // the local lights' ray trace (GPU ms), part of rtMs (design 5.4 N2)
+    uint32_t lightCount;                   // the local lights this frame
 };
 
 #pragma pack(pop)
