@@ -8,8 +8,8 @@
 //          [--time HH:MM [--date YYYY-MM-DD] [--utc-offset h] [--latitude deg] [--longitude deg] [--north deg]]
 //          [--skip-to <tick>] [--pause-at <tick>] [--exit-at <tick>] [--step <seconds>] [--camera-angle <degrees>]
 //          [--chase-distance <metres>] [--chase-pull <metres per 100 km/h>] [--entry <seconds>] [--quick-start]
-//          [--no-sound] [--no-codriver] [--codriver-lead 3] [--codriver-volume 1] [--eng Focus03-08]
-//          [--mix sound-mix.ini] [--overrides cars/s_i2003.ini | none]
+//          [--no-sound] [--no-codriver] [--codriver-replay] [--codriver-lead 3] [--codriver-volume 1]
+//          [--eng Focus03-08] [--mix sound-mix.ini] [--overrides cars/s_i2003.ini | none]
 //          [--launch-rpm 7400] [--als-crack 0.25] [--als-bangs <folder of .wav>] [--als-idle-bangs <folder>]
 //
 // The stage (Maps/<stage>.*: the physics' ground) defaults to the .ngg's: track-34_E.ngg that one, track-34.ngg the
@@ -53,6 +53,7 @@ struct Options {
     std::string rendererId = "wrenderer";
     bool sound = true;
     bool codriver = true;                // the pacenotes read out (--no-codriver: not)
+    bool codriverReplay = false;         // and in a replay too (--codriver-replay; normally the live game only)
     float codriverLead = 3.0f;           // --codriver-lead: seconds ahead at the speed
     float codriverVolume = 1.0f;         // --codriver-volume: 0..1
     std::string audioId = "waudio", engine = "Focus03-08", bangs, idleBangs, mix;

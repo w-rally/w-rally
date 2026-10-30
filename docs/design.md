@@ -411,6 +411,8 @@ Interface: [`audio.h`](../include/wrally/iface/audio.h). Implementation: `plugin
     play one after another on the CoDriver bus, held with the stage.
   - **Settings:** Sound → Co-driver (on, volume, how far ahead), or `--no-codriver`, `--codriver-lead`,
     `--codriver-volume`. F1's readout shows the last call. Stage 41: 79 calls from 112 notes, 97 recordings.
+  - **The live game's:** a replay plays without the co-driver unless asked (`--codriver-replay`, or Settings →
+    Sound → "in replays too", `codriver_replay`).
   - **Loaded on its own thread** (`CoDriver::LoadAsync`): `CoDriver.ini`, the recordings' decoding and the
     phrases, while the stage loads. Nothing is called until it is ready. Stage 41: 68 ms, ready before the scene.
   - **Not yet:** the Czech voice (`audio/Speech/Czh`, other file names); RBR's own timing rules beyond the lead;
