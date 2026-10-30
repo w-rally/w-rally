@@ -31,7 +31,7 @@
 // file (default game/config/sound-mix.ini) read again whenever it is saved. Launch control (--launch-rpm, 0 off) and
 // the anti-lag (--als-crack, 0 off; N arms it at standstill) sit between the pedal and the engine.
 //
-// The environment: PHYS_DRIVE_READOUT the readout on from the start, PHYS_DRIVE_OFF=taa,ao,shadows,rt those off from the
+// The environment: PHYS_DRIVE_READOUT the readout on from the start, PHYS_DRIVE_OFF=taa,ao,shadows,rt,vsync those off from the
 // start, PHYS_DRIVE_SHOTS=<n> a capture every n ticks, PHYS_DRIVE_JITTER=<tick> how steadily the car sits in the
 // picture up to that tick (then quit), PHYS_DRIVE_NGGLOG the renderer's log on stdout, PHYS_DRIVE_MATERIALS the car's
 // materials listed, PHYS_DRIVE_LOOK_UP=<degrees> every view tilted up by that much (the sky), PHYS_DRIVE_TEST_LIGHTS
