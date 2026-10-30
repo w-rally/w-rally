@@ -703,10 +703,15 @@ Each phase ends with a game you can drive. phys-drive works on day one, and ever
       - **The cache, deferred:** an import takes about 0.5 s (stage 41), and the server's copies will replace most
         imports, so caching the automatic import is not worth it now.
       - **Coverage** (sweep of every `.lbs` with a `.trk` in the stock RBR folder, `ngg-check --lbs`, 2026-10-30):
-        164 of 197 import and load; 33 fail in the `.lbs` reader (`formats/lbs_geometry.*`), and the menu offers them
-        anyway. Causes: 18 meshes of an unknown vertex type (13 the most, also 1, 20, 33, 38, 42, 55), 7 whose indices
-        run past their block, 2 files with no geometry. 32 stages have no `TrackSettings.ini` section at all and draw
-        the default sky with no weathers to pick.
+        every plain stage imports and loads (164); the 31 failures were all **protected stages**, encrypted (maps 10
+        overcast, 95, 96, 105, 488-499: every geometry block version 88 or 89, ciphertext at 8.00 bits a byte). The
+        reader skipped their encrypted ground, then read their encrypted scenery as garbage ("unknown vertex type").
+        Now `formats::LbsEncryptedVersion` finds them from the block headers alone: the reader refuses such a file
+        whole ("encrypted - a protected stage ..., not imported", CTest `legacy-import-protected`), and the catalog
+        leaves them out (`Catalog::protectedStages`). They are never imported in part either: decrypting is a
+        licensed install's job, and a plain `.ngg` of one would leak it (NGG design 3.7). The menu: 163 stages, 4 from
+        `.ngg` files, 159 imported. (The other 2 sweep failures were `Clouds.lbs` and `skyboxes.lbs`, not stages.) 32
+        stages have no `TrackSettings.ini` section at all and draw the default sky with no weathers to pick.
 9. **Game.** Menus, car/stage selection, settings, wheels + FFB, replays, results.
 10. **WPhysics.** Fork, JSON config, higher tick rate, then extend. Multi-car and save-state come with their
     interface bump.

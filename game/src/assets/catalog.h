@@ -5,7 +5,8 @@
 //            track-41_M.ngg that one), with the stage's weathers - the TrackSettings.ini sections for its map and time
 //            of day (41M_crisp_clear, 41O_M_heavyrain_heavycloud, ...), or the .ngg's own presets when it has some
 //            (rbrtm --import-weather writes them under those names); then every other stage in Maps (an .lbs and its
-//            .trk), imported when it is driven (legacy_stage.h), its weathers TrackSettings.ini's, drawn
+//            .trk), imported when it is driven (legacy_stage.h), its weathers TrackSettings.ini's, drawn - except a
+//            protected (encrypted) one, which is never imported and so not offered (protectedStages)
 //   cars     EVERY car folder in Cars (one with an .sgc), not only the eight Cars.ini slots. Its physics, in order:
 //              - its own: Cars/<folder>/physics/ (common.lsp, <surface>.lsp, r_<surface>.lsp, setups/)
 //              - a slot car's: its physics.rbz folder (Car00 c_xsara ... Car07 s_i2000, the game's table)
@@ -57,6 +58,7 @@ public:
     // Returns "" or what is missing (no RBR folder, no stages...).
     std::string Scan(const app::Settings& s);
     std::vector<Stage> stages;
+    std::vector<std::string> protectedStages;   // encrypted, so not offered (no .ngg draws them, none is imported)
     std::vector<Car> cars;
     std::vector<Setup> SetupsFor(const Car& car) const;
     const Stage* FindStage(const std::string& key) const;
