@@ -225,7 +225,11 @@ environment → prepass → sun visibility (RT or cascades) → AO → sky → s
 - **Wet surfaces** (interface 4, 2026-10-30): `FrameDesc::wetness`, the road's state from the game (dry 0, damp 0.5,
   wet 1): darker porous surfaces, glossier everything, puddles on the ground from damp on (NGG design 5.0v).
 - Later, each as an interface bump: particles (dust, gravel, spray), skid marks, decals, damage deformation (vertex
-  offsets on model meshes), rain on glass, headlights (NGG §5 night lighting).
+  offsets on model meshes), rain on glass.
+- **Night** (decided 2026-10-30, NGG design 5.4): any stage at any hour from date + time + place (sun, moon,
+  stars astronomically); every light ray traced through many-light sampling; car lights the car's own (`car.json`,
+  else derived from RBR's car `.ini` light points, else a default), with brake, reverse, indicators and hazard;
+  stage lights in the `.ngg`. Phases N1 sky and time, N2 light system, N3 car lights, N4 stage lights.
 
 ### 3.3 Frame flow and threads
 

@@ -2919,9 +2919,9 @@ Tracks have no authored light sources, so we derive candidates and let a human c
 
 1. **Emissive texture detection** — textures whose name or content reads as lamp/window/sign become emissive
    materials automatically.
-2. **The `_N` baked variant as a light map.** The night vertex colours are literally where the original artists
-   painted light pools. Fit hot-spots in the `_N` photometric residual to produce **candidate point lights with
-   position, colour and rough intensity**, emitted into `NGGP` marked `provenance=auto`.
+2. ~~**The `_N` baked variant as a light map.**~~ **WITHDRAWN 2026-10-30: there is no night variant.** RBR's `N`
+   is NOON (its suns stand ~50 degrees up; RBR has no night stages at all), so `_N` holds no painted light pools.
+   Stage lights come from (1) and (3) only; see 5.4.
 3. **Manual placement in Wallaby** — a light-placement mode with live preview through `ngg-host`, producing
    `provenance=authored` entries that survive reconversion.
 
@@ -2934,6 +2934,48 @@ hand-polishing the tracks people actually race. So P3 owes a real editing mode �
 through `ngg-host`, and a reconversion path that never clobbers `provenance=authored` entries. That last property
 is a format and tooling requirement, not a UI nicety: if reconverting a track silently destroys a night an artist
 spent a day on, nobody will use the editor twice.
+
+### 5.4 Night in WRally - decided 2026-10-30
+
+RBR has no night stages, so night is WRally's own, and with dynamic lighting **any stage can be driven at any hour**.
+Four decisions, the user's:
+
+1. **Scope: car lights, the night sky, and stage lights** in the first version, not car lights alone.
+2. **Time of day = date + time + place.** A preset (or the menu, or an event) gives a date, a local time and the
+   stage's latitude/longitude. The sun's and the moon's positions, the moon's phase and the stars follow
+   astronomically, so dusk, night and dawn come out right on every stage. RBR's stages carry no location: a
+   default latitude stands in until a stage's own metadata (stage.json, design.md 7) says where it is.
+3. **Every light is ray traced:** shadows for all of them, made affordable by many-light sampling (ReSTIR-style
+   reservoir resampling, 5.1), not a shadow map or a "few shadowed, the rest fill" split. The VR tier (P4) and
+   min-spec are the risk, measured, not designed around.
+4. **Car lights are the CAR's,** in this order:
+   1. the car's own WRally light specification (`car.json`, design.md decision 9: JSON with a schema). Per
+      lamp: role, position and aim on the car, beam shape (an IES-like profile), colour and intensity, and the mesh
+      that glows when it is lit;
+   2. else **derived from RBR's car `.ini`**, which already names the lamps: `Point_light_lf/rf` headlights,
+      `_bon1..6` the bonnet pod, `_lb/rb` tail, `_brake_lb/rb` brake, `_reverse_lb/rb` reverse, `_lit_c` a centre
+      lamp, each with a position and a direction. The `.sgc` has a lit and an unlit mesh per lamp
+      (`e_light_lf` / `e_light_lf_lit`, switched by the `.ini`'s `SwitchBox = light`). 80 car `.ini`s in 44 car
+      folders of the stock install have them. Per-role defaults fill what the `.ini` lacks: photometry, and the
+      **indicators**, which no RBR car has, placed at the corners beside the head and tail lamps;
+   3. else a generic default, placed from the model's size.
+
+   The roles: low beam, high beam, pod, tail, **brake, reverse, left and right indicator, hazard**. The game
+   switches them from the car's state: the brake pedal, reverse gear, the indicator and hazard keys, high beam,
+   the pod. Damage (a broken lamp goes dark) comes with body damage (design.md phase 6).
+
+**Phases, each ending in something to look at:**
+- **N1 - time and the night sky.** Astronomy (sun, moon, phase), the moon as a second, dim, cool directional
+  light, stars and airglow in the sky pass, exposure that reaches night (the auto exposure's ±3 EV around the
+  dial is not enough: the preset's EV and a wider range), twilight as the atmosphere already gives it. The
+  weather record gains date/time/place by appending (5.0t's growth rule).
+- **N2 - the light system.** A per-frame light list (renderer interface), clustered culling, one shadow ray per
+  pixel through RIS/ReSTIR over the lights, denoised with the RT filter that exists. Point and spot lights with
+  profiles.
+- **N3 - car lights.** The spec and its fallbacks (above), lit meshes as emissive, the game's switching (brake,
+  reverse, indicators, hazard, beams, pod).
+- **N4 - stage lights.** A light chunk in the `.ngg` (with `provenance=auto|authored`, 5.3), emissive texture
+  detection for the automatic part, Wallaby's light-placement mode for the authored part (its own task).
 
 ---
 
