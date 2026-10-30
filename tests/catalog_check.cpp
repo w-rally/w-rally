@@ -1,6 +1,6 @@
 // catalog-check: what the Quick rally menu offers (assets::Catalog) from an RBR folder, checked against what it must
-// hold - every RBR stage, the ones no .ngg draws imported from their .lbs with their weathers drawn, and the
-// TrackSettings.ini weathers of a map under 10 found under their two-digit names ("04E_...").
+// hold - every RBR stage, the ones no .ngg draws imported from their .lbs with their weathers drawn, but no protected
+// (encrypted) one, and the TrackSettings.ini weathers of a map under 10 found under their two-digit names ("04E_...").
 //
 //   catalog-check <RBR folder> [<.ngg folders>]
 //
@@ -12,6 +12,7 @@
 
 #include "app/settings.h"
 #include "assets/catalog.h"
+#include "formats/lbs_geometry.h"
 
 namespace {
 
@@ -45,8 +46,12 @@ int main(int argc, char** argv)
         drawn += st.weathersDrawn;
         if (st.imported && !st.weathersDrawn) return Fail(st.stage + ": imported, but its weathers are not drawn");
     }
-    std::printf("%zu stages: %zu from .ngg files, %zu imported from .lbs; %zu with drawn weathers; %zu cars\n",
-                c.stages.size(), c.stages.size() - imported, imported, drawn, c.cars.size());
+    std::printf("%zu stages: %zu from .ngg files, %zu imported from .lbs; %zu with drawn weathers; %zu protected (encrypted, "
+                "not offered); %zu cars\n", c.stages.size(), c.stages.size() - imported, imported, drawn,
+                c.protectedStages.size(), c.cars.size());
+    // No encrypted stage offered for import (it would fail when picked, and must not be imported anyway).
+    for (const wrally::assets::Stage& st : c.stages)
+        if (st.imported && wrally::formats::LbsEncryptedVersion(st.ngg)) return Fail(st.stage + ": encrypted, but offered");
 
     // A map under 10, imported (no .ngg draws it in a stock RBR folder): its evening weathers, two-digit names.
     const wrally::assets::Stage* four = Find(c, "track-4_E");

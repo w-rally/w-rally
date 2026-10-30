@@ -76,10 +76,11 @@ set_target_properties(car-parts PROPERTIES CXX_STANDARD 17)
 add_test(NAME car-parts COMMAND car-parts)
 
 # What the Quick rally menu offers (game/src/assets/catalog.cpp) from the RBR folder: every stage, those no .ngg draws
-# imported from their .lbs with drawn weathers, and a map under 10's weathers under their two-digit names.
+# imported from their .lbs with drawn weathers, no protected (encrypted) one, and a map under 10's weathers under their
+# two-digit names.
 add_executable(catalog-check catalog_check.cpp ${GAME_SRC}/assets/catalog.cpp ${GAME_SRC}/app/settings.cpp
                ${GAME_SRC}/app/options.cpp ${GAME_SRC}/input/bindings.cpp ${GAME_SRC}/rules/stage.cpp
-               ${GAME_SRC}/formats/track_settings.cpp)
+               ${GAME_SRC}/formats/track_settings.cpp ${GAME_SRC}/formats/lbs_geometry.cpp)
 target_include_directories(catalog-check PRIVATE ${GAME_SRC})
 target_link_libraries(catalog-check PRIVATE phys-data wrally-modules wrally-signals)
 target_compile_definitions(catalog-check PRIVATE _CRT_SECURE_NO_WARNINGS NOMINMAX WRALLY_SOURCE_DIR="${PROJECT_SOURCE_DIR}")
@@ -108,6 +109,12 @@ if(EXISTS ${WRALLY_TEST_RBR_DIR}/Maps/track-4_E.lbs)
     add_test(NAME legacy-import-weather-4 COMMAND ngg-check --lbs ${WRALLY_TEST_RBR_DIR}/Maps/track-4_E.lbs)
     set_tests_properties(legacy-import-weather-4 PROPERTIES PASS_REGULAR_EXPRESSION
         "weather: 43 presets from TrackSettings.ini, default 04E_crisp_clear .*ngg-check: all good")
+endif()
+# A protected (encrypted) stage is refused whole, never imported in part (NGG design 3.7).
+if(EXISTS ${WRALLY_TEST_RBR_DIR}/Maps/track-96_E.lbs)
+    add_test(NAME legacy-import-protected COMMAND ngg-check --lbs ${WRALLY_TEST_RBR_DIR}/Maps/track-96_E.lbs)
+    set_tests_properties(legacy-import-protected PROPERTIES PASS_REGULAR_EXPRESSION
+        "encrypted - a protected stage \\(block \\(1,[0-9]\\) version 8[89]\\), not imported")
 endif()
 
 # The physics' libraries depend downwards only (docs/design.md 4.3a): each linked WHOLE into an empty program with only

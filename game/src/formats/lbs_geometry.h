@@ -5,7 +5,7 @@
 // A .lbs is a flat run of blocks, each a 16-byte header {version, type, subtype, size} and `size` payload bytes. The
 // geometry's blocks:
 //   (0,23) texture names   u32 n, then n x {u32 x4, cstr name}
-//   (1,0)  ground          version 8 only (88/89 are encrypted): u32 regions, f32; per region five meshes in fixed
+//   (1,0)  ground          version 8 only (88/89: encrypted, below): u32 regions, f32; per region five meshes in fixed
 //                          layouts (4, then 32 bytes, then 8, 14, 11, 17), u32 n render chunks of 112 bytes (sub-mesh,
 //                          index range, two textures, visibility), a 24-byte box
 //   (1,1)  vegetation      u32 regions; per region an i32 (0: empty), two lists of items: an attribute record, i32,
@@ -67,10 +67,20 @@ struct LbsGeometry {
     std::vector<std::string> textureNames;
     std::vector<LbsGroundRegion> ground;
     std::vector<LbsPlaced> vegetation, scenery, movable;
-    std::vector<std::string> notes;    // blocks left out and why (an encrypted ground)
+    std::vector<std::string> notes;    // blocks left out and why (a ground of another version)
 };
 
-// The file's geometry blocks. Throws std::runtime_error naming the block whose layout does not add up.
+// The file's geometry blocks. Throws std::runtime_error naming the block whose layout does not add up - or saying the
+// file is encrypted (LbsEncryptedVersion), which is not read at all.
 LbsGeometry ReadLbsGeometry(const std::vector<uint8_t>& file);
+
+// A PROTECTED stage: a geometry block of version 88 or 89 is encrypted (its payload is ciphertext: 8.00 bits a byte),
+// and every geometry block of such a file is. Returns that version, or 0 for a plain file (also for one it cannot
+// open). It reads only the block headers, so the catalog can ask it of every stage.
+//
+// An encrypted stage is never imported, not even its readable parts: decrypting is the licensed install's job, and an
+// importer that turned a protected stage into a plain .ngg would leak it (NGG design 3.7). In the stock RBR folder: 31
+// stage files, maps 10 (overcast), 95, 96, 105 and 488-499.
+uint32_t LbsEncryptedVersion(const std::string& path);
 
 } // namespace wrally::formats

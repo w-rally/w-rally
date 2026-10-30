@@ -1,11 +1,24 @@
 #include "formats/lbs_geometry.h"
 
 #include <cstring>
+#include <fstream>
 #include <stdexcept>
 
 namespace wrally::formats {
 
 namespace {
+
+// The geometry blocks, as type * 100 + subtype: ground, vegetation, scenery, movable.
+bool IsGeometry(uint32_t kind)
+{
+    return kind == 100 || kind == 101 || kind == 103 || kind == 106;
+}
+
+// Versions 88 and 89: an encrypted block (a protected stage's).
+bool IsEncrypted(uint32_t version)
+{
+    return version == 88 || version == 89;
+}
 
 // The vertex layouts by type: where each channel sits, in words (-1 none). Every type has its position at 0.
 struct Layout {
@@ -264,13 +277,12 @@ LbsGeometry ReadLbsGeometry(const std::vector<uint8_t>& file)
         at = payload + h[3];
         Cursor c{file.data() + payload, h[3]};
         const uint32_t kind = h[1] * 100 + h[2];
+        if (IsGeometry(kind) && IsEncrypted(h[0]))   // the whole file is, and none of it is read (LbsEncryptedVersion)
+            throw std::runtime_error(".lbs: encrypted - a protected stage (block (" + std::to_string(h[1]) + "," +
+                                     std::to_string(h[2]) + ") version " + std::to_string(h[0]) + "), not imported");
         switch (kind) {
         case 23: c.what = "(0,23) texture names", TextureNames(c, g); break;
         case 100:
-            if (h[0] == 88 || h[0] == 89) {
-                g.notes.push_back("the ground is encrypted (version " + std::to_string(h[0]) + "): left out");
-                continue;
-            }
             if (h[0] != 8) {
                 g.notes.push_back("the ground's version " + std::to_string(h[0]) + " is not read (8 is): left out");
                 continue;
@@ -284,6 +296,17 @@ LbsGeometry ReadLbsGeometry(const std::vector<uint8_t>& file)
         }
     }
     return g;
+}
+
+uint32_t LbsEncryptedVersion(const std::string& path)
+{
+    std::ifstream f(path, std::ios::binary);
+    uint32_t h[4];   // version, type, subtype, size
+    while (f.read(reinterpret_cast<char*>(h), sizeof h)) {
+        if (IsGeometry(h[1] * 100 + h[2]) && IsEncrypted(h[0])) return h[0];
+        f.seekg(static_cast<std::streamoff>(h[3]), std::ios::cur);
+    }
+    return 0;
 }
 
 } // namespace wrally::formats

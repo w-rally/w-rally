@@ -10,6 +10,7 @@
 #include <map>
 
 #include "data/lsp.h"
+#include "formats/lbs_geometry.h"
 #include "formats/track_settings.h"
 #include "rules/stage.h"
 
@@ -187,16 +188,22 @@ std::string Catalog::Scan(const app::Settings& s)
     // .ngg above draws. Its weathers are drawn, since the import writes TrackSettings.ini's sections as presets.
     // Where a stage comes from, best first: an .ngg in the folders (a Wallaby conversion), then this import. A
     // hand-finished .ngg from the stage server goes before both when there is one (not yet).
+    // A protected (encrypted) stage is left out: it is never imported (formats::LbsEncryptedVersion); only an .ngg
+    // made from it on a licensed install, or the server's, can draw it.
     std::vector<std::string> drawn;   // lower-case stage names an .ngg covers
     for (const Stage& st : stages) drawn.push_back(Lower(st.stage));
     std::vector<fs::path> lbss;
+    protectedStages.clear();
     for (const auto& e : fs::directory_iterator(maps, ec)) {
         const std::string stem = e.path().stem().string();
-        if (e.is_regular_file() && Lower(e.path().extension().string()) == ".lbs" && rules::StageMap(stem) >= 0 &&
-            stem.find('_') != std::string::npos && fs::exists(maps + stem + ".trk", ec) &&
-            std::find(drawn.begin(), drawn.end(), Lower(stem)) == drawn.end())
-            lbss.push_back(e.path());
+        if (!e.is_regular_file() || Lower(e.path().extension().string()) != ".lbs" || rules::StageMap(stem) < 0 ||
+            stem.find('_') == std::string::npos || !fs::exists(maps + stem + ".trk", ec) ||
+            std::find(drawn.begin(), drawn.end(), Lower(stem)) != drawn.end())
+            continue;
+        if (formats::LbsEncryptedVersion(e.path().string())) protectedStages.push_back(stem);
+        else lbss.push_back(e.path());
     }
+    std::sort(protectedStages.begin(), protectedStages.end());
     std::sort(lbss.begin(), lbss.end(), [](const fs::path& a, const fs::path& b) {
         const int ma = rules::StageMap(a.stem().string()), mb = rules::StageMap(b.stem().string());
         return ma != mb ? ma < mb : a.stem().string() < b.stem().string();
