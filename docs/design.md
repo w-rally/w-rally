@@ -222,6 +222,8 @@ environment → prepass → sun visibility (RT or cascades) → AO → sky → s
 - **UI pass**: ImGui's `ImDrawData` maps 1:1 onto `UiDrawList` (vertex/index buffers, commands with texture and clip
   rect). Textured 2D triangles after the tonemap, scissored, alpha-blended.
 - **Display modes**: borderless/fullscreen, vsync, render scale. VR (OpenXR) later behind `kRendererCapVr`.
+- **Wet surfaces** (interface 4, 2026-10-30): `FrameDesc::wetness`, the road's state from the game (dry 0, damp 0.5,
+  wet 1): darker porous surfaces, glossier everything, puddles on the ground from damp on (NGG design 5.0v).
 - Later, each as an interface bump: particles (dust, gravel, spray), skid marks, decals, damage deformation (vertex
   offsets on model meshes), rain on glass, headlights (NGG §5 night lighting).
 

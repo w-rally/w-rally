@@ -115,7 +115,7 @@ cbuffer Camera : register(b0)
     float              gCloud;         // weather (5.0q): cloud cover
     float              gFogBeta;       //                 ground fog extinction, 1/m
     float              gFogH;          //                 fog scale height, m
-    float              gWeatherPad;
+    float              gWetness;       // wet surfaces (5.0v): 0 dry .. 1 wet
     // Motion (the prepass's second target). Both WITHOUT the TAA jitter, for
     // the reason Scene::LastViewProj gives: a motion vector carrying the
     // jitter would drag the history along the Halton pattern.
@@ -145,6 +145,24 @@ cbuffer Camera : register(b0)
 #define NGG_MAT_NORMAL_MAP   512u
 
 // --- microfacet specular, metallic-roughness ------------------------------
+// Value noise on the world's xz, for where puddles lie (design 5.0v): fixed to the ground, so a puddle stays put as the
+// camera moves. The hash takes the cell's integer coordinates mod 4096 (puddle cells are metres: kilometres of stage
+// repeat nowhere a driver can see), so it stays exact in float far from the origin.
+float WetHash(float2 c)
+{
+    c = fmod(c, 4096.0) + 0.5;
+    float3 p = frac(float3(c.xyx) * 0.1031);
+    p += dot(p, p.yzx + 33.33);
+    return frac((p.x + p.y) * p.z);
+}
+float WetNoise(float2 p)
+{
+    float2 c = floor(p), f = frac(p);
+    f = f * f * (3.0 - 2.0 * f);
+    return lerp(lerp(WetHash(c), WetHash(c + float2(1, 0)), f.x),
+                lerp(WetHash(c + float2(0, 1)), WetHash(c + float2(1, 1)), f.x), f.y);
+}
+
 // Standard GGX: Trowbridge-Reitz distribution, height-correlated Smith
 // visibility, Schlick Fresnel. Nothing bespoke here on purpose - the value of a
 // standard BRDF is that an authored glTF material looks the same in Blender.
@@ -708,6 +726,38 @@ float4 PSMain(VSOut i, bool frontFace : SV_IsFrontFace) : SV_Target
             }
         }
 
+#if !defined(ALPHA_TEST) && !defined(BLEND)
+        // WET SURFACES (design 5.0v; after Lagarde, "Water drop 2b"). Water in a POROUS surface's pores traps light
+        // - wet asphalt and gravel go darker - and a film of it on top is smooth: everything wet is glossier, and
+        // then the sky's reflection does the rest. Rain reaches what faces up and is open; walls take half, and
+        // what something stands over (the AO's dark: a canopy, the car) stays drier. Above half wet (damp -> wet),
+        // the ground's flat spots fill: PUDDLES, dark, near-mirror water whose surface is level, wherever a
+        // world-fixed noise lies low enough.
+        if (gWetness > 0.001)
+        {
+            const float exposed = saturate(0.5 + 0.5 * N.y) * lerp(0.35, 1.0, rtAo);
+            const float wet = gWetness * exposed;
+            const float porosity = saturate((roughness - 0.3) / 0.5);    // the rough are porous: road, gravel
+            // GREEN ground is grass: water soaks in and stands on the blades in drops, so it neither pools nor
+            // turns to a mirror. RBR's materials carry no such tag, and the albedo's own colour tells it well:
+            // grass is green-dominant, asphalt, gravel and dirt are not.
+            const float green = saturate((albedo.g - max(albedo.r, albedo.b)) / max(albedo.g, 0.01) * 3.0);
+            albedo *= lerp(1.0, lerp(0.85, 0.45, porosity), wet);
+            roughness = lerp(roughness, min(roughness, lerp(0.25, 0.6, green)), wet);
+            if (gObjectLayer == 0 && gWetness > 0.5)
+            {
+                const float level = (gWetness - 0.5) * 2.0;                // 0 at damp .. 1 wet
+                const float n = WetNoise(i.wpos.xz * 0.30) * 0.65 + WetNoise(i.wpos.xz * 1.10) * 0.35;
+                const float edge = lerp(0.74, 0.62, level);                // more of the road under water as it gets wetter
+                const float puddle = smoothstep(edge, edge + 0.05, n)
+                                   * saturate((N.y - 0.93) / 0.05) * exposed * (1.0 - green);
+                albedo *= lerp(1.0, 0.35, puddle);
+                roughness = lerp(roughness, 0.02, puddle);
+                N = normalize(lerp(N, float3(0.0, 1.0, 0.0), puddle));
+            }
+        }
+#endif
+
         // PHYSICAL balance needs the irradiance map, which comes with the
         // environment; without one it falls back to the established balance
         // rather than to a guess.
@@ -1164,7 +1214,7 @@ struct CameraCB
     float cascadeSplit[4];
     float lightViewProj[4][16];
     float shadowParams[4];
-    float cloudCover, fogBeta, fogHeight, weatherPad;
+    float cloudCover, fogBeta, fogHeight, wetness;   // wetness: the former pad (Scene::SetWetness)
     float viewProjNoJitter[16];
     float prevViewProj[16];
 };
@@ -5144,6 +5194,7 @@ void Scene::RecordPass(ID3D12GraphicsCommandList* list, D3D12_CPU_DESCRIPTOR_HAN
     cb.cloudCover = m_atmosphere.cloudCover;
     cb.fogBeta    = FogBeta(m_atmosphere);
     cb.fogHeight  = m_atmosphere.fogHeight;
+    cb.wetness    = m_wetness;
 
     // Last frame's timings. The frame is synchronous (see the note at the end
     // of this function), so last frame's queries have certainly resolved.

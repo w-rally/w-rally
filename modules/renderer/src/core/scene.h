@@ -193,6 +193,10 @@ public:
     enum { kLegacyProfileCount = 3 };
     void SetLegacyProfile(int mode) { m_legacyProfile = WrapMode(mode, kLegacyProfileCount); }
     int  LegacyProfile() const { return m_legacyProfile; }
+    // How wet the surfaces are, 0 dry .. 1 wet (design 5.0v): porous ones darker, all glossier, and above ~0.5
+    // puddles on the ground layer. The road's state, set per frame by the client.
+    void  SetWetness(float w) { m_wetness = w < 0.0f ? 0.0f : w > 1.0f ? 1.0f : w; }
+    float Wetness() const { return m_wetness; }
     bool LegacyImport() const { return m_legacyImport; }
 
     // Smooth split normals at load. FALLBACK for assets whose normals were
@@ -902,6 +906,7 @@ private:
     // reference against RBR's own look, not as a fallback.
     int                      m_lightMode = 1;
     int                      m_legacyProfile = 2;    // B until compared (SetLegacyProfile)
+    float                    m_wetness = 0.0f;       // SetWetness: 0 dry .. 1 wet
     bool                     m_legacyImport = false; // the loaded scene's kSceneFlagLegacyImport
     bool                     m_weldNormals = true;
     bool                     m_singleStageFix = true;
