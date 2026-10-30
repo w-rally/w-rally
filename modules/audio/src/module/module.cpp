@@ -8,7 +8,9 @@
 //
 // Files: through the game's HostServices::files (audio/files.h's reader) - the bank's paths are VFS paths.
 //
-// One car voice (audio::Audio plays one car); the game's one-shots (loadSound / play) are not in yet.
+// One car voice (audio::Audio plays one car). The game's one-shots (loadSound / play: the co-driver's calls, the UI's)
+// are audio::Voices, mixed in after the car in real time; offline renders the car alone. Not placed yet (positional is
+// ignored: in the head).
 
 #include <algorithm>
 #include <cstdio>
@@ -22,6 +24,8 @@
 #include "audio/device.h"
 #include "audio/files.h"
 #include "audio/mix.h"
+#include "audio/sample.h"
+#include "audio/voices.h"
 #include "signals/bus.h"
 #include "signals/convert.h"
 #include "wrally/iface/audio.h"
@@ -37,6 +41,7 @@ struct AudioModule {
     AudioSettings settings{};
     bool paused = false;
     audio::Bank bank;
+    audio::Voices voices;              // the one-shots (real time: the car's Audio mixes them in)
     std::unique_ptr<audio::Audio> sound;
     audio::Device device;
     signals::Bus bus;
@@ -74,12 +79,16 @@ void InstallReader(AudioModule& m)
 
 std::string Str(const char* s) { return s ? s : ""; }
 
-// The settings into the playing sound: one gain (the master bus times the car's), muted while muted or paused.
+// The settings into the playing sound: the car's one gain (the master bus times the car's), muted while muted or
+// paused; the one-shots' gains by bus, the world's held while paused.
 void Apply(AudioModule& m)
 {
     if (!m.sound) return;
     m.sound->volume = m.settings.volume[uint32_t(AudioBus::Master)] * m.settings.volume[uint32_t(AudioBus::Car)];
     m.sound->muted = m.settings.muted != 0 || m.paused;
+    for (uint32_t b = 0; b < uint32_t(AudioBus::Count); ++b)
+        m.voices.SetGain(static_cast<audio::Voices::Bus>(b), b == uint32_t(AudioBus::Master) && m.settings.muted ? 0.0f : m.settings.volume[b]);
+    m.voices.SetPaused(m.paused);
 }
 
 std::vector<std::string> Paths(const char* const* list, uint32_t n)
@@ -189,22 +198,34 @@ Status WRALLY_CALL SetCarMix(AudioModule* m, CarVoiceHandle v, const char* mix)
     return SetMix(*m, mix);
 }
 
-Status WRALLY_CALL LoadSound(AudioModule* m, const char*, SoundHandle* out)
+Status WRALLY_CALL LoadSound(AudioModule* m, const char* path, SoundHandle* out)
 {
     if (out) *out = 0;
-    if (m) m->error = "loadSound: not in yet";
-    return Status::ErrNotSupported;
+    if (!m || !path || !out) return Status::ErrInvalidArg;
+    audio::Sample s;
+    if (const std::string e = audio::ReadSound(path, s); !e.empty()) return m->error = e, Status::ErrIo;
+    *out = m->voices.Add(std::move(s));
+    return Status::Ok;
 }
-void WRALLY_CALL ReleaseSound(AudioModule*, SoundHandle) {}
-Status WRALLY_CALL Play(AudioModule* m, SoundHandle, const PlayDesc*, PlayHandle* out)
+void WRALLY_CALL ReleaseSound(AudioModule* m, SoundHandle s)
+{
+    if (m && s) m->voices.Remove(s);
+}
+Status WRALLY_CALL Play(AudioModule* m, SoundHandle s, const PlayDesc* d, PlayHandle* out)
 {
     if (out) *out = 0;
-    if (m) m->error = "play: not in yet";
-    return Status::ErrNotSupported;
+    if (!m || !d || d->bus >= AudioBus::Count) return Status::ErrInvalidArg;
+    const uint32_t p = m->voices.Play(s, static_cast<audio::Voices::Bus>(d->bus), d->gain, d->pitch > 0 ? d->pitch : 1.0f, d->loop != 0);
+    if (!p) return m->error = "play: no such sound", Status::ErrInvalidArg;
+    if (out) *out = p;
+    return Status::Ok;
 }
-void WRALLY_CALL Stop(AudioModule*, PlayHandle) {}
+void WRALLY_CALL Stop(AudioModule* m, PlayHandle p)
+{
+    if (m && p) m->voices.Stop(p);
+}
 Status WRALLY_CALL SetPlayPosition(AudioModule*, PlayHandle, const float*) { return Status::ErrNotSupported; }
-uint32_t WRALLY_CALL IsPlaying(AudioModule*, PlayHandle) { return 0; }
+uint32_t WRALLY_CALL IsPlaying(AudioModule* m, PlayHandle p) { return m && p && m->voices.Playing(p) ? 1 : 0; }
 void WRALLY_CALL SetListener(AudioModule*, const Listener*) {}   // one mono mix so far (no placed sources)
 
 uint32_t WRALLY_CALL RenderOffline(AudioModule* m, float* out, uint32_t frames)
@@ -256,6 +277,7 @@ WRALLY_EXPORT Status WRALLY_CALL InitWInterface(uint32_t gameVersion, const Stru
                 raw->rendered.insert(raw->rendered.end(), stereo, stereo + 2 * size_t(frames));
             };
         }
+        if (!m->offline) m->sound->overlay = &m->voices;   // (offline: the car alone)
         Apply(*m);
         InstallReader(*m);
 

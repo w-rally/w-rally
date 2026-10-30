@@ -4,7 +4,13 @@
 #include <algorithm>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
+
+// stb_vorbis's declarations (its code: library stb-vorbis).
+#define STB_VORBIS_HEADER_ONLY
+#define STB_VORBIS_NO_PUSHDATA_API
+#include "stb_vorbis.c"
 
 namespace audio {
 
@@ -78,6 +84,36 @@ std::string ReadWav(const std::string& path, Sample& out)
         at = body + size + (size & 1);
     }
     return path + ": no data";
+}
+
+std::string ReadOgg(const std::string& path, Sample& out)
+{
+    std::vector<uint8_t> d;
+    if (std::string e = ReadFile(path, d); !e.empty()) return e;
+    int channels = 0, rate = 0;
+    short* pcm = nullptr;
+    const int frames = stb_vorbis_decode_memory(d.data(), static_cast<int>(d.size()), &channels, &rate, &pcm);
+    if (frames < 0 || !pcm || channels <= 0) {
+        std::free(pcm);
+        return path + ": not an Ogg Vorbis file";
+    }
+    out.rate = static_cast<float>(rate);
+    out.data.assign(static_cast<size_t>(frames), 0.0f);
+    for (int i = 0; i < frames; ++i) {
+        float sum = 0;
+        for (int c = 0; c < channels; ++c) sum += pcm[size_t(i) * channels + c] / 32768.0f;
+        out.data[size_t(i)] = sum / channels;
+    }
+    std::free(pcm);   // (stb_vorbis allocates with malloc)
+    return "";
+}
+
+std::string ReadSound(const std::string& path, Sample& out)
+{
+    std::vector<uint8_t> d;
+    if (std::string e = ReadFile(path, d); !e.empty()) return e;
+    if (d.size() >= 4 && !std::memcmp(d.data(), "OggS", 4)) return ReadOgg(path, out);
+    return ReadWav(path, out);
 }
 
 std::string ReadEng(const std::string& path, std::vector<EngineLoop>& out, std::string* warning)

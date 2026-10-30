@@ -46,6 +46,18 @@ public:
     std::string SetMix(const std::string& text);
     void SetMuted(bool muted);
     bool Muted() const { return m_muted; }
+    // The game's pause: the world's sounds (the car, the co-driver) held.
+    void SetPaused(bool paused);
+
+    // One-shot sounds (the co-driver's calls): a file under the root (.ogg or .wav) loaded once, played on a bus.
+    enum class Bus : uint32_t { Master = 0, Car = 1, World = 2, CoDriver = 3, Ui = 4 };
+    // The sound's handle (0: it could not be loaded - `error` says why).
+    uint32_t LoadSound(const std::string& path, std::string* error = nullptr);
+    // A play's handle (0: none).
+    uint32_t Play(uint32_t sound, Bus bus, float gain = 1.0f);
+    bool Playing(uint32_t play) const;
+    void Stop(uint32_t play);
+    void SetVolume(Bus bus, float volume);   // 0..1
     // Offline: up to `frames` stereo frames (interleaved) rendered so far; returns how many.
     uint32_t RenderOffline(float* out, uint32_t frames);
     // What the module logged since the last call (its Info and Warn lines).

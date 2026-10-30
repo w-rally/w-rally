@@ -31,6 +31,7 @@
 #include "audio/bank.h"
 #include "audio/grains.h"
 #include "audio/mix.h"
+#include "audio/voices.h"
 #include "signals/car.h"
 
 namespace audio {
@@ -61,6 +62,9 @@ public:
 
     std::atomic<float> volume{0.8f};
     std::atomic<bool> muted{false};
+    // Real time: the game's one-shots (audio/voices.h), mixed in after the car's sound (null: none). The car's samples
+    // stay as they were - the voices only add.
+    std::atomic<Voices*> overlay{nullptr};
 
 private:
     using Msg = std::variant<signals::CarInfo, signals::EngineInfo, signals::EngineTick, signals::DriveTick, signals::WheelsTick,
