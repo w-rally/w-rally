@@ -32,7 +32,7 @@
 // The environment: PHYS_DRIVE_READOUT the readout on from the start, PHYS_DRIVE_OFF=taa,ao,shadows,rt those off from the
 // start, PHYS_DRIVE_SHOTS=<n> a capture every n ticks, PHYS_DRIVE_JITTER=<tick> how steadily the car sits in the
 // picture up to that tick (then quit), PHYS_DRIVE_NGGLOG the renderer's log on stdout, PHYS_DRIVE_MATERIALS the car's
-// materials listed.
+// materials listed, PHYS_DRIVE_LOOK_UP=<degrees> every view tilted up by that much (the sky).
 
 #include <cstdint>
 #include <filesystem>

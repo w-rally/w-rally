@@ -365,9 +365,25 @@ float3 Agx(float3 x)
     return pow(max(v, 0.0), 2.2);      // back to linear; the OETF follows
 }
 
+// NIGHT VISION (design 5.4, N1c): in dim light the rods take over from the cones - colour drains away and what is
+// left shifts to blue-green (the Purkinje shift), which is most of why a moonlit scene reads as night. Per pixel, on
+// the scene's own luminance BEFORE exposure, against the day's reference grey: full colour down to ~8 EV under it
+// (late twilight), rods alone from ~17 EV under (moonlight), mesopic between. A surface in a headlight's beam stays
+// in colour while the moonlit verge beside it does not - as it is to the eye.
+float3 NightVision(float3 c)
+{
+    const float kRefLog2 = -2.025;          // kReferenceLog2: the day's metered grey
+    const float under = kRefLog2 - log2(max(dot(c, float3(0.2126, 0.7152, 0.0722)), 1e-30));
+    const float rods = smoothstep(8.0, 17.0, under);
+    if (rods <= 0.0) return c;
+    const float scotopic = dot(c, float3(0.046, 0.454, 0.5));   // the rods' response: they peak near 507 nm
+    return lerp(c, scotopic * float3(0.72, 0.86, 1.08), rods);
+}
+
 // Exposure and curve: HDR radiance -> display-linear 0..1, before the encode.
 float3 ToneDisplay(float3 c)
 {
+    c = NightVision(c);
     c *= FrameExposure();
     if (gCurve < 2.5) return 1.0 - exp(-c);
     if (gCurve < 3.5) return Aces(c);
@@ -434,7 +450,8 @@ cbuffer Meter : register(b0)
     float  gLowPct;         // percentile window of the mean
     float  gHighPct;
     float  gSnap;           // 1 = no adaptation this frame
-    float2 gPad;
+    float  gNightKnee;      // EV darker than the reference made up in full (design 5.4, N1c)
+    float  gNightSlope;     // the share of the rest made up
 };
 
 #define BINS 128
@@ -532,7 +549,12 @@ void CSAdapt(uint gi : SV_GroupIndex)
         adapted += (metered - adapted) * (1.0 - exp(-gDt * speed));
     }
 
-    const float ev = clamp(gRefLog2 - adapted, -gEvDown, gEvUp);
+    // How much darker than the reference this is, and how much of that the exposure makes up: all of it within
+    // gNightKnee EV, then gNightSlope of the rest - the night stays darker than the day, as it does to adapted
+    // eyes, instead of being exposed to the day's grey (design 5.4, N1c).
+    const float darker = gRefLog2 - adapted;
+    const float madeUp = darker > gNightKnee ? gNightKnee + (darker - gNightKnee) * gNightSlope : darker;
+    const float ev = clamp(madeUp, -gEvDown, gEvUp);
     gState[0] = adapted;
     gState[1] = metered;
     gState[2] = 1.0;
@@ -546,13 +568,21 @@ void CSAdapt(uint gi : SV_GroupIndex)
 // exposure applies the dial unchanged. It was measured, not chosen - see 5.0g:
 // the track-108 start camera, the scene the current dial (0.8) was tuned on,
 // meters at this value, so turning auto exposure on leaves that view as it was.
-const float kMinLog2       = -12.0f;   // 2^-12: well below anything lit
-const float kLog2Range     = 20.0f;    // to 2^8: above that is the sun disc
+// The meter reaches down to 2^-32 for the night (design 5.4, N1c): a moonlit stage meters near 2^-21, a moonless
+// one near 2^-28 - both below the day's floor of 2^-12, where they counted as black and the meter froze.
+const float kMinLog2       = -32.0f;
+const float kLog2Range     = 40.0f;    // to 2^8: above that is the sun disc
 const float kReferenceLog2 = -2.025f;  // MEASURED, 5.0g: track-108 start camera
 const float kSpeedBright   = 3.0f;     // 1/e in ~0.33 s - closing down to glare
 const float kSpeedDark     = 1.2f;     // 1/e in ~0.8 s - opening up to shade
 const float kEvDown        = 3.0f;     // dial / 8 at most
-const float kEvUp          = 3.0f;     // dial * 8 at most: night stays night
+// The day's adaptation is +-3 EV round the dial; the NIGHT gets more, but not all of it: beyond kNightKnee EV darker
+// than the reference only kNightSlope of the rest is made up. A full moon (~19 EV under the day) then sits ~4 EV
+// under the day's grey, a moonless night (~26 EV) ~6 EV under: dark, readable - and headlights, when they come,
+// will meter the lit road back up.
+const float kEvUp          = 24.0f;
+const float kNightKnee     = 3.0f;
+const float kNightSlope    = 0.75f;
 const float kLowPct        = 0.40f;
 const float kHighPct       = 0.90f;
 
@@ -560,7 +590,7 @@ struct MeterCB
 {
     uint32_t size[2];
     float minLog2, log2Range, dt, speedBright, speedDark, exposure;
-    float refLog2, evDown, evUp, lowPct, highPct, snap, pad[2];
+    float refLog2, evDown, evUp, lowPct, highPct, snap, nightKnee, nightSlope;
 };
 static_assert(sizeof(MeterCB) == 64, "MeterCB is 16 root constants");
 
@@ -907,6 +937,8 @@ void PostFx::Meter(ID3D12GraphicsCommandList* list, ID3D12Resource* image,
     cb.refLog2 = kReferenceLog2;
     cb.evDown = kEvDown;
     cb.evUp = kEvUp;
+    cb.nightKnee = kNightKnee;
+    cb.nightSlope = kNightSlope;
     cb.lowPct = kLowPct;
     cb.highPct = kHighPct;
     cb.snap = m_snapExposure ? 1.0f : 0.0f;

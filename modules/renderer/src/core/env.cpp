@@ -26,7 +26,9 @@ cbuffer EnvCB : register(b0)
     float  gCloud;           // weather (5.0q)
     float  gFogBeta;
     float  gFogH;
-    float  gEnvPad;
+    float  gNightGlow;       // design 5.4: the moonless sky's own radiance
+    float3 gLight2;          // ... and the other body's sky
+    float  gLight2I;
 };
 
 Texture2D    gSrc  : register(t0);
@@ -47,6 +49,8 @@ VSOut VSMain(uint id : SV_VertexID)
 float4 PSSky(VSOut i) : SV_Target
 {
     AtmSetWeather(gCloud, gFogBeta, gFogH, gGroundAlbedo);
+    AtmSetNight(gNightGlow);
+    AtmSetLight2(gLight2, gLight2I);
     float3 dir = AtmOctDecode(i.uv);
     float3 col = AtmSkyRadiance(dir, gSunDir, gTurbidity, gSunIntensity,
                                 gGroundAlbedo, 16, 4);
@@ -107,7 +111,8 @@ struct EnvCB
     float turbidity;
     float groundAlbedo;
     float srcTexel[2];
-    float cloudCover, fogBeta, fogHeight, pad;
+    float cloudCover, fogBeta, fogHeight, nightGlow;
+    float light2[3], light2Intensity;
 };
 static_assert(sizeof(EnvCB) % 16 == 0, "EnvCB must be whole float4s - see scene.cpp");
 
@@ -457,6 +462,9 @@ void Environment::Record(ID3D12GraphicsCommandList* list, const SkyParams& p,
     cb.cloudCover   = p.cloudCover;
     cb.fogBeta      = FogBeta(p);
     cb.fogHeight    = p.fogHeight;
+    cb.nightGlow    = p.nightGlow;
+    for (int k = 0; k < 3; ++k) cb.light2[k] = p.light2Towards[k];
+    cb.light2Intensity = p.light2Intensity;
 
     list->SetGraphicsRootSignature(m_rootSig.Get());
     list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);

@@ -89,6 +89,18 @@ static float gAtmFogBeta = 0.0;     // ground-level fog extinction, 1/m; 0 = non
 static float gAtmFogH    = 150.0;   // fog layer scale height, m
 static float gAtmGround  = 0.1;     // ground albedo, for light bounced into fog
 
+// The night's own sky (design 5.4, N1b): airglow and starlight, a radiance that is there whatever the sun and the
+// moon do - what lights a moonless night. 0 by day (it is ~1e-9 of it). Brighter towards the horizon (more
+// glowing layer along the line of sight: the van Rhijn effect), dimmed by cloud.
+static float gAtmGlow = 0.0;
+void AtmSetNight(float glow) { gAtmGlow = glow; }
+
+// A second body lighting the sky (design 5.4): the moon's sky at dusk, the sun's twilight at night - added to the
+// light's own in AtmSkyRadiance, so the sky passes from one body to the other without a jump. 0: none.
+static float3 gAtmLight2Dir = float3(0.0, -1.0, 0.0);   // towards it
+static float  gAtmLight2I   = 0.0;
+void AtmSetLight2(float3 towards, float intensity) { gAtmLight2Dir = towards; gAtmLight2I = intensity; }
+
 void AtmSetWeather(float cloud, float fogBeta, float fogHeight, float groundAlbedo)
 {
     gAtmCloud = saturate(cloud);
@@ -320,9 +332,9 @@ float3 AtmScatter(float3 ray, float3 sunDir, float maxDist, float turbidity,
 // THE SUN DISC IS DELIBERATELY NOT HERE. The environment map feeds a specular
 // term that already has its own direct sun lobe, and a disc in both would count
 // the sun twice - as a hard bright spot in every reflection.
-float3 AtmSkyRadiance(float3 ray, float3 sunDir, float turbidity,
-                      float sunIntensity, float groundAlbedo,
-                      int viewSteps, int lightSteps)
+float3 AtmSkyRadianceOf(float3 ray, float3 sunDir, float turbidity,
+                        float sunIntensity, float groundAlbedo,
+                        int viewSteps, int lightSteps)
 {
     float3 tr;
     float3 col = AtmScatter(ray, sunDir, 1e9, turbidity, sunIntensity,
@@ -334,6 +346,22 @@ float3 AtmSkyRadiance(float3 ray, float3 sunDir, float turbidity,
         float3 up = AtmScatter(float3(ray.x, abs(ray.y), ray.z), sunDir, 1e9,
                                turbidity, sunIntensity, viewSteps, lightSteps, utr);
         col = lerp(col, up * groundAlbedo, saturate(-ray.y * 6.0));
+    }
+    return col;
+}
+
+float3 AtmSkyRadiance(float3 ray, float3 sunDir, float turbidity,
+                      float sunIntensity, float groundAlbedo,
+                      int viewSteps, int lightSteps)
+{
+    float3 col = AtmSkyRadianceOf(ray, sunDir, turbidity, sunIntensity, groundAlbedo, viewSteps, lightSteps);
+    if (gAtmLight2I > 0.0)
+        col += AtmSkyRadianceOf(ray, gAtmLight2Dir, turbidity, gAtmLight2I, groundAlbedo, viewSteps, lightSteps);
+    if (gAtmGlow > 0.0)
+    {
+        const float3 glow = gAtmGlow * float3(0.85, 0.95, 1.0) * (1.0 + 1.5 * (1.0 - saturate(abs(ray.y))))
+                          * lerp(1.0, 0.3, gAtmCloud);
+        col += ray.y >= 0.0 ? glow : lerp(glow, glow * groundAlbedo, saturate(-ray.y * 6.0));
     }
     return col;
 }

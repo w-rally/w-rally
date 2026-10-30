@@ -1,5 +1,7 @@
 #include "weather.h"
 #include "log.h"
+
+#include <cmath>
 #include "../format/ngg_format.h"
 
 #include <windows.h>
@@ -361,7 +363,71 @@ void ApplyWeather(const WeatherPreset& w, SkyParams& sky)
 SkyBodies ApplySkyTime(const SkyTime& t, SkyParams& sky)
 {
     const SkyBodies b = ComputeSkyBodies(t);
-    for (int k = 0; k < 3; ++k) sky.sunDir[k] = -b.sunTowards[k];   // the direction the light travels
+    const float day = sky.sunIntensity;            // the weather's sun: everything at night is scaled from it
+    const double kPi = 3.14159265358979323846, kRad = kPi / 180.0;
+
+    // The moon. Its full disc's radiance is its albedo (0.12) times the sun's irradiance over pi; its light on the
+    // ground is the full moon's 2.3e-6 of the sun's (0.25 lux against 110,000), times how bright it is at its phase:
+    // the Krisciunas-Schaefer magnitude 0.026 a + 4e-9 a^4 over the phase angle a (a quarter moon ~8 % of a full).
+    const double k = b.moonIlluminated, phase = std::acos(2.0 * k - 1.0) / kRad;   // 0 full .. 180 new
+    const double phaseFactor = std::pow(10.0, -0.4 * (0.026 * phase + 4e-9 * phase * phase * phase * phase));
+    for (int i = 0; i < 3; ++i) {
+        sky.trueSunTowards[i] = b.sunTowards[i];
+        sky.moonTowards[i] = b.moonTowards[i];
+    }
+    sky.moonRadiance = day * 0.12f / (float)kPi;
+    // The stars: a magnitude-0 star gives 2.5e-6 lux (the sun 110,000): 2.3e-11 of the sun's irradiance.
+    sky.starIrradiance = day * 2.3e-11f;
+    // Airglow and starlight: a moonless clear night's ~0.001 lux, as a sky radiance (E = pi L over the hemisphere).
+    sky.nightGlow = day * 9e-9f / (float)kPi;
+
+    // The stars' frame: world -> horizon (east, north, up; north turned by northDeg) -> equatorial (x towards
+    // right ascension 0, z the celestial pole), for the local sidereal time and the latitude.
+    {
+        const double n = t.northDeg * kRad, phi = t.latitude * kRad, H = b.localSiderealDeg * kRad;
+        // Equatorial axes in (east, north, up).
+        const double X[3] = { -std::sin(H), -std::sin(phi) * std::cos(H), std::cos(phi) * std::cos(H) };
+        const double Z[3] = { 0.0, std::cos(phi), std::sin(phi) };
+        const double Y[3] = { Z[1] * X[2] - Z[2] * X[1], Z[2] * X[0] - Z[0] * X[2], Z[0] * X[1] - Z[1] * X[0] };
+        // World (x, y, z) -> (east, north, up): east = x cos n - z sin n, north = x sin n + z cos n, up = y.
+        const double* axes[3] = { X, Y, Z };
+        for (int r = 0; r < 3; ++r) {
+            const double* a = axes[r];
+            sky.worldToEquatorial[r * 3 + 0] = (float)(a[0] * std::cos(n) + a[1] * std::sin(n));
+            sky.worldToEquatorial[r * 3 + 1] = (float)a[2];
+            sky.worldToEquatorial[r * 3 + 2] = (float)(-a[0] * std::sin(n) + a[1] * std::cos(n));
+        }
+    }
+
+    // THE NIGHT'S LIGHT. The renderer has one directional light, and it feeds everything - the aerial table, the
+    // direct light and its ray-traced shadows. Until the end of civil twilight (the sun 6 degrees down) it is the
+    // sun; after it, the MOON - its direction, its intensity, its shadows. The sun's direct light is gone behind the
+    // earth well before then, so the handover shows nothing on the ground. The SKY is both: the other body lights
+    // it too (light2), the moon's sky through the dusk and the sun's twilight into the night, so the sky never jumps
+    // from one to the other - at dusk under a full moon both are there, as they are outside. It is only worth its
+    // cost while it shows: not the moon's by day, not the sun's 20 degrees down. A moon below the horizon lights
+    // nothing, and the night is its glow and its stars.
+    const float kSunGivesWay = -6.0f;
+    const float moonIntensity = day * 2.3e-6f * (float)phaseFactor;
+    if (b.sunElevationDeg > kSunGivesWay)
+    {
+        for (int i = 0; i < 3; ++i) {
+            sky.sunDir[i] = -b.sunTowards[i];   // the direction the light travels
+            sky.light2Towards[i] = b.moonTowards[i];
+        }
+        sky.light2Intensity = b.sunElevationDeg < 0.0f ? moonIntensity : 0.0f;
+        sky.lightIsMoon = 0.0f;
+    }
+    else
+    {
+        for (int i = 0; i < 3; ++i) {
+            sky.sunDir[i] = -b.moonTowards[i];
+            sky.light2Towards[i] = b.sunTowards[i];
+        }
+        sky.sunIntensity = moonIntensity;
+        sky.light2Intensity = b.sunElevationDeg > -20.0f ? day : 0.0f;
+        sky.lightIsMoon = 1.0f;
+    }
     return b;
 }
 
