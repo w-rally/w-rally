@@ -407,12 +407,24 @@ Interface: [`audio.h`](../include/wrally/iface/audio.h). Implementation: `plugin
     the gap to the next call (once per call).
   - **Voice:** RBR's: `audio/CoDriver.ini` names each call's recordings in `audio/Speech/PaceNote`, and one is
     picked at random each time.
-  - **Timing:** a phrase is called when the car is the speed × the lead time from it (at least 60 m). Its sounds
-    play one after another on the CoDriver bus, held with the stage.
+  - **Timing:** a phrase is called when the car is the speed × the lead time from it (at least 60 m), and only
+    while the stage time runs: from GO (the first call comes with it) to the finish, never in the countdown. Its
+    sounds play one after another on the CoDriver bus, held with the stage.
   - **Settings:** Sound → Co-driver (on, volume, how far ahead), or `--no-codriver`, `--codriver-lead`,
     `--codriver-volume`. F1's readout shows the last call. Stage 41: 79 calls from 112 notes, 97 recordings.
   - **The live game's:** a replay plays without the co-driver unless asked (`--codriver-replay`, or Settings →
     Sound → "in replays too", `codriver_replay`).
+  - **On the HUD (live only):** the calls ahead at the top centre (`ui::DrawPacenotes`, `CoDriver::Upcoming`):
+    - **Current:** the first call ahead, from when the voice starts saying it until 5 m past it, so the HUD and the
+      voice agree. Its timing is the call's (Call ahead, `--codriver-lead`); without a voice, when it is called.
+    - **Next:** the one after it, when it is within 8 s at the car's speed (`--pacenote-next`, `hud_pacenote_next`),
+      with a current only; centred under it, smaller and dimmer.
+    - **Tuning:** the next call's time is in Settings → Sound → Pacenotes on the HUD.
+    - **Text:** temporary plain text until the HUD's design. Corners are L1/R1 (flat) .. L7/R7 (hairpin) as
+      Wallaby's editor names them, the rest short words (`crest`, `long`, `don't cut`, `>` for into), a distance
+      its number.
+    - **Without the voice:** with the sound or the co-driver off, it still shows. CTest `codriver-41` checks it on
+      stage 41.
   - **Loaded on its own thread** (`CoDriver::LoadAsync`): `CoDriver.ini`, the recordings' decoding and the
     phrases, while the stage loads. Nothing is called until it is ready. Stage 41: 68 ms, ready before the scene.
   - **Not yet:** the Czech voice (`audio/Speech/Czh`, other file names); RBR's own timing rules beyond the lead;

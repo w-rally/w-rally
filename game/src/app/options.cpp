@@ -223,6 +223,8 @@ int Parse(const std::vector<std::string>& args, Options& o)
     o.codriverReplay = HasFlag(args, "--codriver-replay");   // a replay: only with it (the calls are the live game's)
     o.codriverLead = std::clamp(static_cast<float>(std::atof(Arg(args, "--codriver-lead", "3").c_str())), 0.5f, 10.0f);
     o.codriverVolume = std::clamp(static_cast<float>(std::atof(Arg(args, "--codriver-volume", "1").c_str())), 0.0f, 1.0f);
+    // The HUD's pacenotes (live only): the current call while it is spoken, the next --pacenote-next s before it.
+    o.pacenoteNext = std::clamp(static_cast<float>(std::atof(Arg(args, "--pacenote-next", "8").c_str())), 0.0f, 60.0f);
     o.audioId = Arg(args, "--audio", "waudio");
     o.engine = Arg(args, "--eng", "Focus03-08");
     o.bangs = Arg(args, "--als-bangs", "");

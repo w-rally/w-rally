@@ -136,3 +136,18 @@ foreach(layer rbr-collision rbr-tyre rbr-world rbr-car)
     endforeach()
     add_test(NAME physics-layer-${layer} COMMAND physics-layer-${layer})
 endforeach()
+
+# The co-driver on stage 41's pacenotes without a voice (tests/codriver.cpp): the HUD's calls as they are called, and
+# nothing called before the stage time runs.
+add_executable(codriver codriver.cpp ${GAME_SRC}/sound/codriver.cpp ${GAME_SRC}/sound/sound.cpp)
+target_include_directories(codriver PRIVATE ${GAME_SRC})
+target_link_libraries(codriver PRIVATE phys-data wrally-modules wrally-signals)
+target_compile_definitions(codriver PRIVATE _CRT_SECURE_NO_WARNINGS NOMINMAX)
+set_target_properties(codriver PROPERTIES CXX_STANDARD 17)
+foreach(cfg "" _DEBUG _RELEASE _RELWITHDEBINFO _MINSIZEREL)
+    set_target_properties(codriver PROPERTIES RUNTIME_OUTPUT_DIRECTORY${cfg} ${CMAKE_BINARY_DIR}/tests-bin)
+endforeach()
+if(EXISTS ${WRALLY_TEST_RBR_DIR}/Maps/track-41_M.dls)
+    add_test(NAME codriver-41 COMMAND codriver ${WRALLY_TEST_RBR_DIR}/Maps/track-41_M.dls)
+    set_tests_properties(codriver-41 PROPERTIES PASS_REGULAR_EXPRESSION "codriver: [0-9]+ calls; all good")
+endif()

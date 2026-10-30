@@ -66,6 +66,38 @@ std::vector<std::string> WordsOf(const phys::data::DlsPacenote& n)
     return w;
 }
 
+// A word as the HUD shows it (a temporary text until the HUD has its pacenote graphics): the corners as Wallaby's
+// pacenotes editor names them - L1 / R1 flat .. L7 / R7 hairpin -, the rest a short word, a distance its number.
+std::string ShortOf(const std::string& w)
+{
+    static const std::pair<const char*, const char*> kShort[] = {
+        {"FLATLEFT", "L1"},     {"EASYLEFT", "L2"},     {"FASTLEFT", "L3"},       {"MEDIUMLEFT", "L4"},
+        {"KLEFT", "L5"},        {"90_LEFT", "L6"},      {"HAIRPINLEFT", "L7"},    {"FLATRIGHT", "R1"},
+        {"EASYRIGHT", "R2"},    {"FASTRIGHT", "R3"},    {"MEDIUMRIGHT", "R4"},    {"KRIGHT", "R5"},
+        {"90_RIGHT", "R6"},     {"HAIRPINRIGHT", "R7"}, {"TWISTY", "twisty"},     {"OVERCREST", "crest"},
+        {"FORD", "ford"},       {"CAUTION", "caution"}, {"BUMP", "bump"},         {"JUMP", "jump"},
+        {"FINISH", "finish"},   {"BRIDGE", "bridge"},   {"GOSTRAIGHT", "straight"}, {"KEEPRIGHT", "keep R"},
+        {"KEEPLEFT", "keep L"}, {"KEEPMIDDLE", "keep middle"}, {"CAUTION_WATER", "water"}, {"MAYBE", "maybe"},
+        {"PLUS", "+"},          {"MINUS", "-"},         {"LONG", "long"},         {"NARROWS", "narrows"},
+        {"WIDEOUT", "opens"},   {"TIGHTENS", "tightens"}, {"TIGHTENSBAD", "tightens bad"}, {"CUT", "cut"},
+        {"DONTCUT", "don't cut"}, {"INTO", ">"}};
+    if (!w.empty() && w[0] == '#') return w.substr(1);
+    for (const auto& [word, text] : kShort)
+        if (w == word) return text;
+    return w;
+}
+
+std::string Display(const std::vector<std::string>& words)
+{
+    std::string s;
+    for (const std::string& w : words) {
+        const std::string t = ShortOf(w);
+        // (A grade's + / - right on it: "L4+".)
+        s += (s.empty() || t == "+" || t == "-" ? "" : " ") + t;
+    }
+    return s;
+}
+
 std::string Ini(const std::string& file, const std::string& section, const std::string& key)
 {
     char v[256] = {};
@@ -75,21 +107,23 @@ std::string Ini(const std::string& file, const std::string& section, const std::
 
 } // namespace
 
-std::string CoDriver::Load(Sound& sound, const std::string& rbrRoot, const std::vector<phys::data::DlsPacenote>& notes)
+std::string CoDriver::Load(Sound* sound, const std::string& rbrRoot, const std::vector<phys::data::DlsPacenote>& notes)
 {
-    m_sound = &sound;
+    m_sound = sound;
     m_words.clear();
     m_phrases.clear();
     m_queue.clear();
     m_next = 0;
+    m_spoken = 0;
     m_playing = 0;
     std::string missing;
     const std::string ini = rbrRoot + "\\audio\\CoDriver.ini";
-    if (GetFileAttributesA(ini.c_str()) == INVALID_FILE_ATTRIBUTES) return "no " + ini + ": no co-driver";
+    const bool voice = sound && GetFileAttributesA(ini.c_str()) != INVALID_FILE_ATTRIBUTES;   // (none: the calls shown only)
+    if (sound && !voice) missing = "no " + ini + ": no voice ";
 
     // The calls' recordings, as CoDriver.ini names them.
     std::vector<char> names(64 * 1024);
-    const DWORD n = GetPrivateProfileSectionNamesA(names.data(), static_cast<DWORD>(names.size()), ini.c_str());
+    const DWORD n = voice ? GetPrivateProfileSectionNamesA(names.data(), static_cast<DWORD>(names.size()), ini.c_str()) : 0;
     size_t loaded = 0;
     for (DWORD at = 0; at < n && names[at];) {
         const std::string section(&names[at]);
@@ -101,14 +135,15 @@ std::string CoDriver::Load(Sound& sound, const std::string& rbrRoot, const std::
             const std::string snd = Ini(ini, section, "Snd" + std::to_string(k));
             if (snd.empty()) continue;
             std::string e;
-            if (const uint32_t h = sound.LoadSound("audio/Speech/PaceNote/" + snd + ".ogg", &e)) variants.push_back(h), ++loaded;
+            if (const uint32_t h = sound->LoadSound("audio/Speech/PaceNote/" + snd + ".ogg", &e)) variants.push_back(h), ++loaded;
             else missing += snd + " ";
         }
         m_words.emplace_back(section.substr(10), std::move(variants));
     }
     for (int d : kNumbers) {
+        if (!voice) break;
         std::vector<uint32_t> v;
-        if (const uint32_t h = sound.LoadSound("audio/Speech/PaceNote/" + std::to_string(d) + ".ogg")) v.push_back(h), ++loaded;
+        if (const uint32_t h = sound->LoadSound("audio/Speech/PaceNote/" + std::to_string(d) + ".ogg")) v.push_back(h), ++loaded;
         m_words.emplace_back("#" + std::to_string(d), std::move(v));
     }
 
@@ -178,12 +213,12 @@ CoDriver::~CoDriver()
     if (m_loader.joinable()) m_loader.join();
 }
 
-void CoDriver::LoadAsync(Sound& sound, std::string rbrRoot, std::vector<phys::data::DlsPacenote> notes)
+void CoDriver::LoadAsync(Sound* sound, std::string rbrRoot, std::vector<phys::data::DlsPacenote> notes)
 {
     if (m_loader.joinable()) m_loader.join();
     m_ready.store(false, std::memory_order_relaxed);
     m_reported = false;
-    m_loader = std::thread([this, &sound, root = std::move(rbrRoot), list = std::move(notes)] {
+    m_loader = std::thread([this, sound, root = std::move(rbrRoot), list = std::move(notes)] {
         const auto t0 = std::chrono::steady_clock::now();
         const std::string missing = Load(sound, root, list);
         const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
@@ -202,24 +237,43 @@ std::string CoDriver::TakeReport()
     return m_report;
 }
 
-void CoDriver::Update(float distance, float speed, float leadSeconds)
+void CoDriver::Update(float distance, float speed, float leadSeconds, bool running)
 {
-    if (!Ready() || !m_sound) return;
+    if (!Ready()) return;
     const float lead = std::max(kMinLead, speed * leadSeconds);
-    for (; m_next < m_phrases.size() && m_phrases[m_next].distance - distance <= lead; ++m_next) {
+    for (; running && m_next < m_phrases.size() && m_phrases[m_next].distance - distance <= lead; ++m_next) {
         const Phrase& p = m_phrases[m_next];
         if (p.distance < distance - 5.0f) continue;   // already passed (a run started further on)
         m_last.clear();
+        // its first word marks the phrase spoken when it starts (a word without a recording: 0, nothing played)
         for (const std::string& w : p.words) {
-            if (const uint32_t s = SoundOf(w)) m_queue.push_back(s);
+            m_queue.push_back({m_sound ? SoundOf(w) : 0u, m_next});
             m_last += (m_last.empty() ? "" : " ") + w;
         }
     }
     while (m_queue.size() > 24) m_queue.pop_front();   // (far behind: the oldest dropped)
-    if (!m_queue.empty() && !m_sound->Playing(m_playing)) {
-        m_playing = m_sound->Play(m_queue.front(), Sound::Bus::CoDriver);
+    while (!m_queue.empty() && !(m_sound && m_sound->Playing(m_playing))) {
+        const Queued q = m_queue.front();
         m_queue.pop_front();
+        m_spoken = std::max(m_spoken, q.phrase + 1);
+        if (q.sound) m_playing = m_sound->Play(q.sound, Sound::Bus::CoDriver);
     }
+}
+
+void CoDriver::Upcoming(float distance, float speed, float nextSeconds, std::string& current, std::string& next) const
+{
+    current.clear();
+    next.clear();
+    if (!Ready()) return;
+    // The first phrase ahead (passed by 5 m: gone) once its speech has started, and the next by the time to it at the
+    // speed (standing: never).
+    size_t i = 0;
+    while (i < m_phrases.size() && m_phrases[i].distance < distance - 5.0f) ++i;
+    if (i >= m_phrases.size() || i >= m_spoken) return;
+    current = Display(m_phrases[i].words);
+    if (i + 1 >= m_phrases.size()) return;
+    const float ahead = std::max(0.0f, m_phrases[i + 1].distance - distance);
+    if (speed > 0.1f ? ahead / speed <= nextSeconds : ahead <= 0.0f) next = Display(m_phrases[i + 1].words);
 }
 
 } // namespace wrally::sound

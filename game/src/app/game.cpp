@@ -190,18 +190,21 @@ StageEnd RunStage(Shell& sh, const Options& o, bool fromMenu, std::string& error
         }
     }
     // The co-driver: the stage's pacenotes read out (sound/codriver.h), with RBR's voice - loaded on its own thread while
-    // the stage loads here; it starts calling once ready (its report then, in the frame loop). The live game's: a replay
-    // has it only with --codriver-replay.
+    // the stage loads here; it starts calling once ready (its report then, in the frame loop). The live game's: there it
+    // always runs, for the HUD's pacenotes, with the voice when the sound and the co-driver are on; a replay has it only
+    // with --codriver-replay (the voice, no HUD).
     sound::CoDriver codriver;
-    if (soundOn && o.codriver && (!sim.Replaying() || o.codriverReplay)) {
+    const bool live = !sim.Replaying(), voice = soundOn && o.codriver;
+    if (live || (voice && o.codriverReplay)) {
         try {
-            codriver.LoadAsync(sound, o.game, phys::data::ReadDls(o.session.dls).pacenotes);
-            sound.SetVolume(sound::Sound::Bus::CoDriver, o.codriverVolume);
+            codriver.LoadAsync(voice ? &sound : nullptr, o.game, phys::data::ReadDls(o.session.dls).pacenotes);
+            if (voice) sound.SetVolume(sound::Sound::Bus::CoDriver, o.codriverVolume);
         } catch (const std::exception& ex) {
             std::printf("no co-driver: %s\n", ex.what());
         }
     }
     bool soundPaused = false;
+    std::string lastLogged;   // (WRALLY_CODRIVER_LOG's)
     sim.Connect(&bus);
     const std::vector<phys::data::RecMesh> collision =
         phys::data::CarCollisionMeshes(phys::data::ReadSgcCollision(o.session.physics.sgc));
@@ -441,15 +444,22 @@ StageEnd RunStage(Shell& sh, const Options& o, bool fromMenu, std::string& error
         simThread.Post(in);
         simThread.Latest(snap);
         // The co-driver's calls ahead of the car; held with the stage (a pause, the menu), the world's sound with them.
-        if (soundOn) {
+        {
             if (const std::string r = codriver.TakeReport(); !r.empty()) {
                 std::printf("%s\n", r.c_str());
                 // WRALLY_CODRIVER_LIST=<n>: the first n calls in the log.
                 if (const char* n = std::getenv("WRALLY_CODRIVER_LIST")) std::printf("%s", codriver.Describe(std::strtoul(n, nullptr, 0)).c_str());
             }
             const bool hold = paused || menu != StageMenu::None;
-            if (hold != soundPaused) sound.SetPaused(soundPaused = hold);
-            if (!hold) codriver.Update(snap.distance, snap.dash.speed, o.codriverLead);
+            if (soundOn && hold != soundPaused) sound.SetPaused(soundPaused = hold);
+            if (!hold) codriver.Update(snap.distance, std::fabs(snap.dash.speed), o.codriverLead,
+                                       snap.clock.GetState() == rules::StageClock::State::Running);   // (from GO to the finish)
+            // WRALLY_CODRIVER_LOG: each call in the log, with its tick and the car's place.
+            static const bool logCalls = std::getenv("WRALLY_CODRIVER_LOG") != nullptr;
+            if (logCalls && codriver.LastCall() != lastLogged) {
+                lastLogged = codriver.LastCall();
+                std::printf("call at tick %u, %.0f m: %s\n", snap.tick, snap.distance, lastLogged.c_str());
+            }
         }
         if (snap.failed) quit = true, end = fromMenu ? StageEnd::ExitToMenu : StageEnd::Failed, error = "the physics failed";
         // A replay's end ends the run (its check reported, as at a quit), unless --hold keeps its last frame up.
@@ -491,6 +501,11 @@ StageEnd RunStage(Shell& sh, const Options& o, bool fromMenu, std::string& error
         ui.NewFrame();
         ui::DrawDashboard(ui, snap.dash, shownWidth, shownHeight);
         ui::DrawStageClock(ui, snap.clock, shownWidth, shownHeight);
+        if (live) {   // (the live game's): the call being spoken, and the next when close at the speed
+            std::string current, next;
+            codriver.Upcoming(snap.distance, std::fabs(snap.dash.speed), o.pacenoteNext, current, next);
+            ui::DrawPacenotes(ui, current, next, shownWidth, shownHeight);
+        }
         {   // the readout: last frame's numbers (the renderer's are read after its frame)
             LARGE_INTEGER tn;
             QueryPerformanceCounter(&tn);
@@ -711,6 +726,7 @@ std::vector<std::string> QuickArgs(const Settings& s, const assets::Catalog& cat
     if (!s.sound) a.push_back("--no-sound");
     if (!s.codriver) a.push_back("--no-codriver");
     if (s.codriverReplay) a.push_back("--codriver-replay");
+    a.insert(a.end(), {"--pacenote-next", std::to_string(s.pacenoteNext)});
     a.insert(a.end(), {"--codriver-lead", std::to_string(s.codriverLead), "--codriver-volume", std::to_string(s.codriverVolume)});
     return a;
 }

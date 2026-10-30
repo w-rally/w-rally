@@ -27,6 +27,7 @@ struct Settings {
     float codriverVolume = 1.0f;        // 0..1
     float codriverLead = 3.0f;          // seconds ahead at the speed: earlier (more) or later (less)
     bool codriverReplay = false;        // the pacenotes in replays too (normally the live game only)
+    float pacenoteNext = 8.0f;          // the HUD: the next call shown this many seconds before it (live only)
 
     // Controls: the keys (key_<action> = its scan code, hex)
     input::Bindings keys;

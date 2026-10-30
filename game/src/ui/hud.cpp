@@ -49,6 +49,19 @@ void DrawDashboard(const ImGuiLayer& ui, const physics::Dashboard& d, int width,
     put(0.90f, -0.68f, gear, 0xf040d0ff, gearPx);
 }
 
+void DrawPacenotes(const ImGuiLayer& ui, const std::string& current, const std::string& next, int width, int height)
+{
+    if (current.empty() && next.empty()) return;
+    // Each line centred: the current call, the next one under it, smaller.
+    const float px = height * 0.06f, nextPx = px * 0.6f;
+    const float y = height * 0.03f;
+    auto centred = [&](const std::string& s, float size, float at, uint32_t colour) {
+        Text(ui, size, (static_cast<float>(width) - Width(ui, size, s.c_str())) * 0.5f, at, s.c_str(), colour);
+    };
+    if (!current.empty()) centred(current, px, y, 0xf0ffffff);
+    if (!next.empty()) centred(next, nextPx, y + px * 1.15f, 0xe0d8d8d8);
+}
+
 void DrawStageClock(const ImGuiLayer& ui, const rules::StageClock& clock, int width, int height)
 {
     auto put = [&](const std::vector<std::string>& lines, const std::vector<uint32_t>& colours, float px, float right,
