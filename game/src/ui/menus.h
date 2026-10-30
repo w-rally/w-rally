@@ -7,13 +7,15 @@
 //   QuickRally   stage, car, setup, damage, weather, road - Start / Back (the choice kept in Settings)
 //   SettingsUi   tabs: the content (folders, base physics, Extract the slot cars' physics), graphics, sound, controls
 //   PauseMenu    the in-stage menu (Esc): Resume, Restart stage, Settings, Debug, Exit to main menu
-//   DebugMenu    what the keys switch (the renderer's, the cameras, the sound)
+//   DebugMenu    what the keys switch (the renderer's, the cameras, the sound), the sound mix
+//   MixPanel     the sound mix beside the stage while driving (the Debug menu turns it on)
 
 #include <string>
 #include <vector>
 
 #include "app/settings.h"
 #include "assets/catalog.h"
+#include "sound/mix_edit.h"
 
 namespace wrally::ui {
 
@@ -53,10 +55,19 @@ struct DebugSwitches {
     float chaseDistance = 5.2f;
     float orbitDegrees = 0;
     bool muted = false, antiLagIdle = false;
+    bool mixPanel = false;                       // the mix panel up while driving
+    std::vector<sound::MixValue>* mix = nullptr;   // the sound mix's values (none: no sound)
+    std::string mixStatus;                       // the last save / reload's report
 };
+// What the mix's controls did: a value changed (to the sound now), Save to the mix file, Reload it, the Defaults.
+enum class MixChoice { None, Changed, Save, Reload, Defaults };
 enum class DebugChoice { None, Back, Changed };
 // `views`: the renderer's debug views' names (0 off). `keys`: for the labels (each switch with its key).
+// `mixDone`: what its sound mix's controls did.
 DebugChoice DebugMenu(const ImGuiLayer& ui, DebugSwitches& d, const std::vector<std::string>& views, const input::Bindings& keys,
-                      int width, int height);
+                      int width, int height, MixChoice& mixDone);
+// The mix's controls in a panel at the window's right, over the stage while it runs (no keyboard navigation: the keys
+// drive). Its close box clears `open`.
+MixChoice MixPanel(std::vector<sound::MixValue>& values, const std::string& status, bool& open, int width, int height);
 
 } // namespace wrally::ui

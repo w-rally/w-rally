@@ -151,3 +151,12 @@ if(EXISTS ${WRALLY_TEST_RBR_DIR}/Maps/track-41_M.dls)
     add_test(NAME codriver-41 COMMAND codriver ${WRALLY_TEST_RBR_DIR}/Maps/track-41_M.dls)
     set_tests_properties(codriver-41 PROPERTIES PASS_REGULAR_EXPRESSION "codriver: [0-9]+ calls; all good")
 endif()
+
+# The Debug menu's sound mix (game/src/sound/mix_edit.cpp): what it sends and saves is what the audio module reads
+# (audio::Mix), and saving keeps the mix file's comments.
+add_executable(mix-edit mix_edit.cpp ${GAME_SRC}/sound/mix_edit.cpp)
+target_include_directories(mix-edit PRIVATE ${GAME_SRC})
+target_link_libraries(mix-edit PRIVATE game-audio)
+set_target_properties(mix-edit PROPERTIES CXX_STANDARD 17)
+add_test(NAME mix-edit COMMAND mix-edit ${PROJECT_SOURCE_DIR}/game/config/sound-mix.ini ${CMAKE_BINARY_DIR}/tests-bin/mix-edit.ini)
+set_tests_properties(mix-edit PROPERTIES PASS_REGULAR_EXPRESSION "mix-edit: all good")

@@ -168,6 +168,9 @@ StageEnd RunStage(Shell& sh, const Options& o, bool fromMenu, std::string& error
     // The sound plays from its device's thread, a few ticks behind the physics.
     std::string mixPath;   // the mix file, watched ("" none)
     FILETIME mixWritten{};
+    sound::MixEdit mixEdit;   // its values, as the Debug menu and the mix panel set them
+    std::string mixStatus;
+    bool mixPanel = false;    // the mix panel up while driving
     // The sound: a module DLL in modules/audio (--audio, "waudio" by default: WAudio.dll), every record on the bus
     // forwarded to it.
     sound::Sound sound;
@@ -390,8 +393,9 @@ StageEnd RunStage(Shell& sh, const Options& o, bool fromMenu, std::string& error
             if (GetFileAttributesExA(mixPath.c_str(), GetFileExInfoStandard, &a) && CompareFileTime(&a.ftLastWriteTime, &mixWritten)) {
                 mixWritten = a.ftLastWriteTime;
                 std::ifstream f(mixPath, std::ios::binary);
-                sound.SetMix(std::string(std::istreambuf_iterator<char>(f), std::istreambuf_iterator<char>()));
-                std::printf("mix %s\n%s", mixPath.c_str(), sound.TakeLog().c_str());
+                mixEdit.Load(std::string(std::istreambuf_iterator<char>(f), std::istreambuf_iterator<char>()));
+                const std::string e = sound.SetMix(mixEdit.Text());
+                std::printf("mix %s\n%s%s", mixPath.c_str(), sound.TakeLog().c_str(), e.empty() ? "" : (e + "\n").c_str());
             }
         }
         if (antiLagIdleKey(focused && keys.Down(Action::AntiLagIdle))) {
@@ -561,6 +565,26 @@ StageEnd RunStage(Shell& sh, const Options& o, bool fromMenu, std::string& error
         }
         ui::DrawReadout(ui, debugHud, lines, o.stageWarning, shownHeight);
 
+        // The sound mix from the Debug menu or its panel: to the sound at once; Save into the mix file (the watch above
+        // then reads it back), Reload it (the watch again), the module's defaults.
+        auto mixDone = [&](ui::MixChoice c) {
+            switch (c) {
+            case ui::MixChoice::Defaults: mixEdit.Defaults(); [[fallthrough]];
+            case ui::MixChoice::Changed: mixStatus = sound.SetMix(mixEdit.Text()); break;
+            case ui::MixChoice::Save:
+                mixStatus = mixPath.empty() ? "no mix file (game/config/sound-mix.ini)" : mixEdit.Save(mixPath);
+                if (mixStatus.empty()) mixStatus = "saved to " + mixPath;
+                break;
+            case ui::MixChoice::Reload:
+                mixWritten = {}, mixCheck = 1;
+                mixStatus = mixPath.empty() ? "no mix file (game/config/sound-mix.ini)" : "read again: " + mixPath;
+                break;
+            case ui::MixChoice::None: break;
+            }
+        };
+        if (soundOn && mixPanel && menu == StageMenu::None)
+            mixDone(ui::MixPanel(mixEdit.values, mixStatus, mixPanel, shownWidth, shownHeight));
+
         // Esc's menu over the stage.
         if (menu == StageMenu::Pause) {
             switch (ui::PauseMenu(ui, shownWidth, shownHeight)) {
@@ -572,6 +596,7 @@ StageEnd RunStage(Shell& sh, const Options& o, bool fromMenu, std::string& error
                 dbg.debugView = debugView, dbg.camera = cameraMode, dbg.cameras = cameras, dbg.chaseDistance = chaseDistance;
                 dbg.legacyProfile = legacyProfile;
                 dbg.orbitDegrees = orbit * 57.29578f, dbg.muted = sound.Muted(), dbg.antiLagIdle = antiLagIdle;
+                dbg.mixPanel = mixPanel, dbg.mix = soundOn ? &mixEdit.values : nullptr;
                 menu = StageMenu::Debug;
                 break;
             case ui::PauseChoice::ExitToMenu: quit = true, end = StageEnd::ExitToMenu; break;
@@ -589,7 +614,10 @@ StageEnd RunStage(Shell& sh, const Options& o, bool fromMenu, std::string& error
                 menu = StageMenu::Pause;
             }
         } else if (menu == StageMenu::Debug) {
-            const ui::DebugChoice c = ui::DebugMenu(ui, dbg, views, keys, shownWidth, shownHeight);
+            ui::MixChoice mixChoice;
+            dbg.mixStatus = mixStatus;
+            const ui::DebugChoice c = ui::DebugMenu(ui, dbg, views, keys, shownWidth, shownHeight, mixChoice);
+            mixDone(mixChoice);
             if (c == ui::DebugChoice::Changed) {
                 if (dbg.taa != taa) toggle(taa, settings.taa, 1, "TAA", "off");
                 if (dbg.ao != ao) toggle(ao, settings.quality, std::max(1u, std::min(sh.settings.quality, 2u)), "ambient occlusion", "off");
@@ -603,6 +631,7 @@ StageEnd RunStage(Shell& sh, const Options& o, bool fromMenu, std::string& error
                 orbit = dbg.orbitDegrees / 57.29578f;
                 if (dbg.muted != sound.Muted()) sound.SetMuted(dbg.muted);
                 antiLagIdle = dbg.antiLagIdle;
+                mixPanel = dbg.mixPanel;
             } else if (c == ui::DebugChoice::Back) {
                 menu = StageMenu::Pause;
             }

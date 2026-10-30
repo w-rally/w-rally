@@ -62,7 +62,61 @@ bool Text(const char* label, std::string& s, bool readOnly)
 
 bool Check(const char* label, bool& v) { return ImGui::Checkbox(label, &v); }
 
+// The sound mix's values: the engine's switches and amounts, then each layer's volume with its solo; Save / Reload /
+// Defaults under them, `status` after.
+MixChoice MixControls(std::vector<sound::MixValue>& values, const std::string& status)
+{
+    MixChoice c = MixChoice::None;
+    bool layers = false;
+    ImGui::SeparatorText("Engine and anti-lag");
+    for (size_t i = 0; i < values.size(); ++i) {
+        sound::MixValue& v = values[i];
+        ImGui::PushID(static_cast<int>(i));
+        bool ch = false;
+        if (v.kind == sound::MixValue::Switch) {
+            bool on = v.value >= 0.5f;
+            if (Check(v.label, on)) v.value = on ? 1.0f : 0.0f, ch = true;
+        } else {
+            if (v.kind == sound::MixValue::Volume && !layers) ImGui::SeparatorText("Layers (volume, solo)"), layers = true;
+            ch = ImGui::SliderFloat(v.label, &v.value, v.min, v.max, "%.2f");
+            if (ImGui::IsItemClicked(ImGuiMouseButton_Right)) v.value = v.init, ch = true;   // right click: its default
+            if (v.kind == sound::MixValue::Volume) {
+                ImGui::SameLine();
+                ch |= Check("solo", v.solo);
+            }
+        }
+        if (ch) c = MixChoice::Changed;
+        ImGui::PopID();
+    }
+    ImGui::TextDisabled("Right click a slider: its default.");
+    const float w = (ImGui::GetContentRegionAvail().x - 2 * ImGui::GetStyle().ItemSpacing.x) / 3;
+    if (ImGui::Button("Save to mix file", ImVec2(w, 0))) c = MixChoice::Save;
+    ImGui::SameLine();
+    if (ImGui::Button("Reload file", ImVec2(w, 0))) c = MixChoice::Reload;
+    ImGui::SameLine();
+    if (ImGui::Button("Defaults", ImVec2(w, 0))) c = MixChoice::Defaults;
+    if (!status.empty()) ImGui::TextWrapped("%s", status.c_str());
+    return c;
+}
+
 } // namespace
+
+MixChoice MixPanel(std::vector<sound::MixValue>& values, const std::string& status, bool& open, int width, int height)
+{
+    ImGui::SetNextWindowPos(ImVec2(width - 8.0f, 8.0f), ImGuiCond_Always, ImVec2(1, 0));
+    ImGui::SetNextWindowSizeConstraints(ImVec2(0, 0), ImVec2(width * 0.5f, height - 16.0f));
+    ImGui::SetNextWindowBgAlpha(0.85f);
+    MixChoice c = MixChoice::None;
+    constexpr ImGuiWindowFlags kPanel = ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoSavedSettings |
+                                        ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoNav | ImGuiWindowFlags_NoFocusOnAppearing;
+    if (ImGui::Begin("Sound mix", &open, kPanel)) {
+        ImGui::PushItemWidth(ImGui::GetFontSize() * 12.0f);
+        c = MixControls(values, status);
+        ImGui::PopItemWidth();
+    }
+    ImGui::End();
+    return c;
+}
 
 void DrawBackdrop(int width, int height)
 {
@@ -331,9 +385,10 @@ PauseChoice PauseMenu(const ImGuiLayer& ui, int width, int height)
 }
 
 DebugChoice DebugMenu(const ImGuiLayer& ui, DebugSwitches& d, const std::vector<std::string>& views, const input::Bindings& keys,
-                      int width, int height)
+                      int width, int height, MixChoice& mixDone)
 {
     DebugChoice c = DebugChoice::None;
+    mixDone = MixChoice::None;
     Screen(ui, "Debug", width, height, 560.0f, [&] {
         ImGui::PushItemWidth(-ImGui::GetFontSize() * 9.0f);
         bool ch = false;
@@ -365,6 +420,10 @@ DebugChoice DebugMenu(const ImGuiLayer& ui, DebugSwitches& d, const std::vector<
         ImGui::SeparatorText("Sound and driving");
         ch |= Check(k("Muted", Action::Mute).c_str(), d.muted);
         ch |= Check(k("Anti-lag armed at standstill", Action::AntiLagIdle).c_str(), d.antiLagIdle);
+        if (d.mix) {
+            ch |= Check("Sound mix panel while driving", d.mixPanel);
+            if (ImGui::CollapsingHeader("Sound mix")) mixDone = MixControls(*d.mix, d.mixStatus);
+        }
         ImGui::PopItemWidth();
         ImGui::Separator();
         if (Button("Back", true)) c = DebugChoice::Back;
