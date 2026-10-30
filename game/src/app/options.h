@@ -35,7 +35,7 @@
 // start, PHYS_DRIVE_SHOTS=<n> a capture every n ticks, PHYS_DRIVE_JITTER=<tick> how steadily the car sits in the
 // picture up to that tick (then quit), PHYS_DRIVE_NGGLOG the renderer's log on stdout, PHYS_DRIVE_MATERIALS the car's
 // materials listed, PHYS_DRIVE_LOOK_UP=<degrees> every view tilted up by that much (the sky), PHYS_DRIVE_TEST_LIGHTS
-// test lamps on the car (two headlight spots, a lamp behind it).
+// test lamps on the car (two headlight spots, a lamp behind it; =lamp the lamp alone, =noshadow none occluded).
 
 #include <cstdint>
 #include <filesystem>

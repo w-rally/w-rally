@@ -186,6 +186,9 @@ void Renderer::RecordFrame(Device& dev, D3D12_CPU_DESCRIPTOR_HANDLE outRtv,
     if (m_scene.Ready())
     {
         KeepRtCurrent(dev);
+        // The local lights' clusters for this view (lights.h), before anything reads them: the ray tracer below, the
+        // scene pass after it.
+        m_scene.PrepareLights(list, view, proj, width, height);
 
         // DEPTH + NORMAL PREPASS whenever there is a BVH: the main pass then
         // shades each pixel once, which pays for itself whatever the shadow
@@ -216,12 +219,14 @@ void Renderer::RecordFrame(Device& dev, D3D12_CPU_DESCRIPTOR_HANDLE outRtv,
                        m_scene.LastViewProjJittered(), m_scene.LastViewProj(),
                        m_scene.LastCameraPos(), sunTowards, 4000.0f,
                        0.00465f * sky.sunDiscSize,
-                       m_rt.AoAvailable() && m_ao, 3.0f, m_aoRays, width, height);
+                       m_rt.AoAvailable() && m_ao, 3.0f, m_aoRays, width, height, &m_scene.GetLights());
             m_rt.PrepareForRead(list);
             m_scene.SetRtVisibility(m_rt.Filtered());
             rtShadow = m_rt.Filtered();
             if (m_ao && m_rt.FilteredAo()) m_scene.SetRtAo(m_rt.FilteredAo()), rtAo = m_rt.AoDenoised(), rtAoPrev = m_rt.AoPrevDenoised();
             else                           m_scene.ClearRtAo();
+            if (m_rt.FilteredLights()) m_scene.SetRtLights(m_rt.FilteredLights());
+            else                       m_scene.ClearRtLights();
             m_scene.SetShadowSource(1);
         }
         else
@@ -229,6 +234,7 @@ void Renderer::RecordFrame(Device& dev, D3D12_CPU_DESCRIPTOR_HANDLE outRtv,
             m_scene.RenderShadows(list, view, proj, sky.sunDir);
             m_scene.ClearRtVisibility();
             m_scene.ClearRtAo();
+            m_scene.ClearRtLights();   // (local lights unshadowed without ray tracing)
             m_scene.SetShadowSource(0);
         }
     }

@@ -54,6 +54,9 @@ cbuffer K : register(b0)
     float  gAoRadius;       // metres; occluders beyond this do not count
     uint   gAoRays;         // rays per pixel per frame
     uint   gPad2;
+    float3 gCamFwd;         // the local lights' clusters: their depth axis (lights.h)
+    float  gLightsOn;
+    float4 gClusterParams;  // tile w, h (px), slices' near plane, their log scale
 };
 
 // A cheap, good integer hash (PCG-style). White noise per pixel per frame;
@@ -319,6 +322,71 @@ void CSMain(uint3 tid : SV_DispatchThreadID)
         touched = touched || onMoved;
     }
     gOut[tid.xy] = EncodeRaw(open / max(1.0, float(gAoRays)), touched);
+}
+)";
+
+// ---- local lights: one ray to one light, chosen by what it gives (lights.h) -
+// The RATIO ESTIMATOR's stochastic half: among the shadowed lights of this pixel's cluster, one chosen with a
+// probability in proportion to what it gives here (its irradiance's luminance times the cosine - the same terms the
+// scene pass sums), by a single weighted-reservoir pass; then one ray to a random point on its emitter. The 0/1 is
+// then an unbiased estimate of the shadowed fraction of the scene pass's sum, and the denoiser averages it as it does
+// the sun's. No light here: 1, which the scene multiplies into nothing.
+const char* kLightsRegsSrc = R"(
+#define NGG_LIGHTS_T0 t11
+#define NGG_LIGHTS_T1 t12
+#define NGG_LIGHTS_T2 t13
+)";
+
+const char* kLightMainSrc = R"(
+[numthreads(8, 8, 1)]
+void CSMain(uint3 tid : SV_DispatchThreadID)
+{
+    if (tid.x >= gSize.x || tid.y >= gSize.y) return;
+    float3 p, N;
+    uint plant;
+    if (!SurfaceAt(tid.xy, p, N, plant)) { gOut[tid.xy] = 1.0; return; }
+
+    const float viewZ = dot(p - gCamPos, gCamFwd);
+    const uint2 c = gClusters[LightCluster(float2(tid.xy) + 0.5, viewZ, gClusterParams)];
+    float total = 0.0;
+    uint chosen = 0xFFFFFFFFu;
+    for (uint k = 0; k < c.y; ++k)
+    {
+        const uint li = gLightIndex[c.x + k];
+        if ((gLights[li].flags & kLightShadows) == 0u) continue;
+        float3 l;
+        float dist;
+        const float3 E = LightIrradiance(li, p, l, dist);
+        // A plant's card takes light from both sides (its shading wraps), any other surface from its front.
+        const float w = dot(E, float3(0.2126, 0.7152, 0.0722)) * (plant != 0u ? 1.0 : saturate(dot(N, l)));
+        if (w <= 0.0) continue;
+        total += w;
+        if (Rand2(tid.xy, gFrame, 101u + k).x * total < w) chosen = li;
+    }
+    if (chosen == 0xFFFFFFFFu) { gOut[tid.xy] = 1.0; return; }
+
+    const float3 lpos = gLights[chosen].pos;
+    const float lradius = gLights[chosen].radius;
+    // A random point on the emitter, a disc of its radius facing this surface: the penumbra, per pixel per frame.
+    const float3 toL = lpos - p;
+    const float3 d0 = toL / max(length(toL), 1e-4);
+    float3 T, B; Basis(d0, T, B);
+    const float2 r = Rand2(tid.xy, gFrame, 7u);
+    const float rad = sqrt(r.x) * lradius, ang = r.y * 6.28318530;
+    const float3 target = lpos + T * (rad * cos(ang)) + B * (rad * sin(ang));
+
+    if (dot(N, d0) < 0.0) N = -N;
+    const float offset = gBias * (1.0 + length(p - gCamPos) * 0.002);
+    RayDesc ray;
+    ray.Origin = p + N * offset;
+    const float3 dv = target - ray.Origin;
+    const float len = length(dv);
+    ray.Direction = dv / max(len, 1e-4);
+    ray.TMin = 0.0;
+    ray.TMax = max(len - 0.02, 0.0);    // short of the emitter itself
+    bool onMoved;
+    const bool hit = Occluded(ray, false, plant, onMoved);
+    gOut[tid.xy] = EncodeRaw(hit ? 0.0 : 1.0, onMoved);
 }
 )";
 
@@ -630,6 +698,9 @@ struct TraceCB
     float    aoRadius;
     uint32_t aoRays;
     uint32_t pad2;
+    float    camFwd[3];
+    float    lightsOn;
+    float    clusterParams[4];
 };
 static_assert(sizeof(TraceCB) % 16 == 0, "TraceCB must be whole float4s - see scene.cpp");
 
@@ -759,7 +830,11 @@ enum { kSlotTlas = 0, kSlotDepth = 1, kSlotOut = 2, kSlotCounters = 3,
        // the prepass's plant per pixel, for the rays that must not hit their
        // own plant.
        kSlotTriPlant = 27, kSlotPlantId = 28,
-       kSlotTextures = 29 };
+       // Local lights (lights.h): their raw output (u0) and counters (u1), denoise pairs and history UAVs - the AO's
+       // shape.
+       kSlotLightOut = 29, kSlotLightCounters = 30,
+       kSlotLightPair0 = 31, kSlotLightPair1 = 33, kSlotLightHistUav0 = 35, kSlotLightHistUav1 = 36,
+       kSlotTextures = 37 };
 
 } // namespace
 
@@ -819,7 +894,7 @@ bool Rt::Create(Device& dev)
     D3D12_DESCRIPTOR_RANGE uavRange = ranges[1];
     uavRange.OffsetInDescriptorsFromTableStart = 0;
 
-    D3D12_ROOT_PARAMETER params[3] = {};
+    D3D12_ROOT_PARAMETER params[6] = {};
     params[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
     params[0].DescriptorTable.NumDescriptorRanges = 5;
     params[0].DescriptorTable.pDescriptorRanges = srvRanges;
@@ -829,6 +904,13 @@ bool Rt::Create(Device& dev)
     params[2].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
     params[2].Constants.ShaderRegister = 0;
     params[2].Constants.Num32BitValues = sizeof(TraceCB) / 4;
+    // The local lights (lights.h): root SRVs over the Lights buffers - t11 lights, t12 clusters, t13 indices.
+    for (int k = 0; k < 3; ++k)
+    {
+        params[3 + k].ParameterType = D3D12_ROOT_PARAMETER_TYPE_SRV;
+        params[3 + k].Descriptor.ShaderRegister = 11 + k;
+        params[3 + k].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+    }
 
     // Linear, WRAP: the same addressing the rasteriser uses for these textures
     // (scene.cpp's static samplers), so the cut-out matches the drawn leaf.
@@ -839,7 +921,7 @@ bool Rt::Create(Device& dev)
     samp.ShaderRegister = 0;
 
     D3D12_ROOT_SIGNATURE_DESC rs = {};
-    rs.NumParameters = 3;
+    rs.NumParameters = 6;
     rs.pParameters = params;
     rs.NumStaticSamplers = 1;
     rs.pStaticSamplers = &samp;
@@ -875,6 +957,16 @@ bool Rt::Create(Device& dev)
         if (FAILED(dev.device->CreateComputePipelineState(&pd, IID_PPV_ARGS(&m_psoAo))))
             Log("rt: AO pipeline creation failed - shadows still work, AO does not");
     }
+
+    ComPtr<ID3DBlob> lcs = m_dxc.Compile(std::string(kRtCommonSrc) + kLightsRegsSrc + kLightsHlsl + kLightMainSrc,
+                                         L"CSMain", L"cs_6_5", "ngg_rt_lights");
+    if (lcs)
+    {
+        pd.CS = { lcs->GetBufferPointer(), lcs->GetBufferSize() };
+        if (FAILED(dev.device->CreateComputePipelineState(&pd, IID_PPV_ARGS(&m_psoLights))))
+            m_psoLights.Reset();
+    }
+    if (!m_psoLights) Log("rt: local-light pipeline creation failed - local lights go unshadowed");
 
     // --- the denoiser: its own root signature, same heap --------------------
     {
@@ -941,9 +1033,9 @@ bool Rt::Create(Device& dev)
 
     D3D12_QUERY_HEAP_DESC qh = {};
     qh.Type = D3D12_QUERY_HEAP_TYPE_TIMESTAMP;
-    qh.Count = 4;     // start, after the shadow, after the AO, after the denoise
+    qh.Count = 5;     // start, after the shadow, after the AO, after the local lights, after the denoise
     dev.device->CreateQueryHeap(&qh, IID_PPV_ARGS(&m_timestamps));
-    m_timestampReadback = MakeBuffer(dev.device.Get(), 4 * sizeof(UINT64),
+    m_timestampReadback = MakeBuffer(dev.device.Get(), 5 * sizeof(UINT64),
                                      D3D12_HEAP_TYPE_READBACK, D3D12_RESOURCE_STATE_COPY_DEST);
     dev.queue->GetTimestampFrequency(&m_timestampHz);
 
@@ -958,6 +1050,9 @@ bool Rt::Create(Device& dev)
     m_aoCounters = MakeBuffer(dev.device.Get(), 4 * sizeof(uint32_t), D3D12_HEAP_TYPE_DEFAULT,
                               D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
                               D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
+    m_lightCounters = MakeBuffer(dev.device.Get(), 4 * sizeof(uint32_t), D3D12_HEAP_TYPE_DEFAULT,
+                                 D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                                 D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
     m_countersReadback = MakeBuffer(dev.device.Get(), 4 * sizeof(uint32_t),
                                     D3D12_HEAP_TYPE_READBACK, D3D12_RESOURCE_STATE_COPY_DEST);
     m_countersZero = MakeBuffer(dev.device.Get(), 4 * sizeof(uint32_t), D3D12_HEAP_TYPE_UPLOAD,
@@ -1408,6 +1503,67 @@ bool Rt::CreateTargets(ID3D12Device* dev, UINT width, UINT height)
     }
     m_aoHistValid = false;
 
+    // ---- and again for the local lights (no wide pass) ----------------------
+    m_lightResult.Reset();
+    if (FAILED(dev->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &d,
+                                            D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                                            nullptr, IID_PPV_ARGS(&m_lightResult))))
+        return false;
+    {
+        D3D12_UNORDERED_ACCESS_VIEW_DESC lu = {};
+        lu.Format = DXGI_FORMAT_R16_FLOAT;
+        lu.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
+        D3D12_CPU_DESCRIPTOR_HANDLE lh = m_heap->GetCPUDescriptorHandleForHeapStart();
+        lh.ptr += (SIZE_T)kSlotLightOut * m_stride;
+        dev->CreateUnorderedAccessView(m_lightResult.Get(), nullptr, &lu, lh);
+
+        D3D12_UNORDERED_ACCESS_VIEW_DESC lcv = {};
+        lcv.ViewDimension = D3D12_UAV_DIMENSION_BUFFER;
+        lcv.Buffer.NumElements = 4;
+        lcv.Buffer.StructureByteStride = sizeof(uint32_t);
+        lh = m_heap->GetCPUDescriptorHandleForHeapStart();
+        lh.ptr += (SIZE_T)kSlotLightCounters * m_stride;
+        dev->CreateUnorderedAccessView(m_lightCounters.Get(), nullptr, &lcv, lh);
+
+        D3D12_SHADER_RESOURCE_VIEW_DESC rs = {};
+        rs.Format = DXGI_FORMAT_R16_FLOAT;
+        rs.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+        rs.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        rs.Texture2D.MipLevels = 1;
+        lh = m_heap->GetCPUDescriptorHandleForHeapStart();
+        lh.ptr += (SIZE_T)kSlotLightPair0 * m_stride;
+        dev->CreateShaderResourceView(m_lightResult.Get(), &rs, lh);
+        lh = m_heap->GetCPUDescriptorHandleForHeapStart();
+        lh.ptr += (SIZE_T)kSlotLightPair1 * m_stride;
+        dev->CreateShaderResourceView(m_lightResult.Get(), &rs, lh);
+    }
+    for (int i = 0; i < 2; ++i)
+    {
+        m_lightHist[i].Reset();
+        if (FAILED(dev->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &hd2,
+                                                D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
+                                                nullptr, IID_PPV_ARGS(&m_lightHist[i]))))
+            return false;
+        m_lightHistState[i] = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+
+        D3D12_SHADER_RESOURCE_VIEW_DESC hs = {};
+        hs.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
+        hs.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+        hs.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        hs.Texture2D.MipLevels = 1;
+        D3D12_CPU_DESCRIPTOR_HANDLE sh = m_heap->GetCPUDescriptorHandleForHeapStart();
+        sh.ptr += (SIZE_T)((i == 0 ? kSlotLightPair0 : kSlotLightPair1) + 1) * m_stride;
+        dev->CreateShaderResourceView(m_lightHist[i].Get(), &hs, sh);
+
+        D3D12_UNORDERED_ACCESS_VIEW_DESC hu = {};
+        hu.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
+        hu.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
+        D3D12_CPU_DESCRIPTOR_HANDLE uh = m_heap->GetCPUDescriptorHandleForHeapStart();
+        uh.ptr += (SIZE_T)(i == 0 ? kSlotLightHistUav0 : kSlotLightHistUav1) * m_stride;
+        dev->CreateUnorderedAccessView(m_lightHist[i].Get(), nullptr, &hu, uh);
+    }
+    m_lightHistValid = false;
+
     // The AO's wide pass output: visibility only, read by the scene like the
     // histories (its SRV follows this format).
     m_aoWide.Reset();
@@ -1451,7 +1607,7 @@ void Rt::Trace(Device& dev, ID3D12GraphicsCommandList* list, ID3D12Resource* dep
                ID3D12Resource* normal, ID3D12Resource* motion, ID3D12Resource* plant,
                const float* viewProj, const float* unjitteredViewProj,
                const float* camPos, const float* sunTowards, float tMax, float sunAngle,
-               bool ao, float aoRadius, uint32_t aoRays, UINT width, UINT height)
+               bool ao, float aoRadius, uint32_t aoRays, UINT width, UINT height, const Lights* lights)
 {
     if (!Ready() || !HasScene() || !m_heap || !depth || !normal || !viewProj) return;
     if ((width != m_width || height != m_height) && !CreateTargets(dev.device.Get(), width, height))
@@ -1476,6 +1632,16 @@ void Rt::Trace(Device& dev, ID3D12GraphicsCommandList* list, ID3D12Resource* dep
     cb.frame = m_frame++;
     cb.aoRadius = aoRadius;
     cb.aoRays = aoRays ? aoRays : 1;
+    const bool doLights = lights && lights->Active() && m_psoLights && m_lightResult;
+    if (lights)
+    {
+        for (int k = 0; k < 3; ++k) cb.camFwd[k] = lights->CamFwd()[k];
+        cb.clusterParams[0] = lights->TileW();
+        cb.clusterParams[1] = lights->TileH();
+        cb.clusterParams[2] = Lights::kNear;
+        cb.clusterParams[3] = lights->SliceScale();
+    }
+    cb.lightsOn = doLights ? 1.0f : 0.0f;
 
     // Depth becomes a NON-pixel shader resource: this is a compute dispatch, and
     // naming the wrong stage is a validation error rather than a wrong picture.
@@ -1575,6 +1741,19 @@ void Rt::Trace(Device& dev, ID3D12GraphicsCommandList* list, ID3D12Resource* dep
     }
     if (m_timestamps) list->EndQuery(m_timestamps.Get(), D3D12_QUERY_TYPE_TIMESTAMP, 2);
 
+    // LOCAL LIGHTS: one ray per pixel to one of them (kLightMainSrc), into their own output.
+    if (!doLights) m_lightHistValid = false;
+    if (doLights)
+    {
+        list->SetPipelineState(m_psoLights.Get());
+        list->SetComputeRootDescriptorTable(1, gpuSlot(kSlotLightOut));
+        list->SetComputeRootShaderResourceView(3, lights->LightsVa());
+        list->SetComputeRootShaderResourceView(4, lights->ClustersVa());
+        list->SetComputeRootShaderResourceView(5, lights->IndicesVa());
+        list->Dispatch((width + 7) / 8, (height + 7) / 8, 1);
+    }
+    if (m_timestamps) list->EndQuery(m_timestamps.Get(), D3D12_QUERY_TYPE_TIMESTAMP, 3);
+
     // ---- denoise, once per feature ------------------------------------------
     DenoiseCB dc = {};
     {
@@ -1606,10 +1785,17 @@ void Rt::Trace(Device& dev, ID3D12GraphicsCommandList* list, ID3D12Resource* dep
     }
     else
         m_filteredAo = nullptr;
+    // The local lights' fraction: denoised as the sun's visibility is (the same constants: it is the same kind of
+    // signal, a binary coin per pixel whose mean is smooth).
+    if (doLights)
+        Denoise(list, dc, m_lightResult.Get(), kSlotLightPair0, kSlotLightPair1, kSlotLightHistUav0,
+                kSlotLightHistUav1, m_lightHist, m_lightHistState, m_lightHistValid, m_filteredLights);
+    else
+        m_filteredLights = nullptr;
     if (m_timestamps)
     {
-        list->EndQuery(m_timestamps.Get(), D3D12_QUERY_TYPE_TIMESTAMP, 3);
-        list->ResolveQueryData(m_timestamps.Get(), D3D12_QUERY_TYPE_TIMESTAMP, 0, 4,
+        list->EndQuery(m_timestamps.Get(), D3D12_QUERY_TYPE_TIMESTAMP, 4);
+        list->ResolveQueryData(m_timestamps.Get(), D3D12_QUERY_TYPE_TIMESTAMP, 0, 5,
                                m_timestampReadback.Get(), 0);
     }
 
@@ -1745,13 +1931,14 @@ void Rt::ReadStats()
 
     if (!m_timestampReadback || !m_timestampHz) return;
     UINT64* t = nullptr;
-    D3D12_RANGE ts = { 0, 4 * sizeof(UINT64) };
+    D3D12_RANGE ts = { 0, 5 * sizeof(UINT64) };
     if (SUCCEEDED(m_timestampReadback->Map(0, &ts, reinterpret_cast<void**>(&t))))
     {
         const double k = 1000.0 / (double)m_timestampHz;
-        if (t[2] > t[0]) m_lastMs = k * (double)(t[2] - t[0]);
+        if (t[3] > t[0]) m_lastMs = k * (double)(t[3] - t[0]);
         m_aoMs      = t[2] >= t[1] ? k * (double)(t[2] - t[1]) : 0.0;
-        m_denoiseMs = t[3] >= t[2] ? k * (double)(t[3] - t[2]) : 0.0;
+        m_lightsMs  = t[3] >= t[2] ? k * (double)(t[3] - t[2]) : 0.0;
+        m_denoiseMs = t[4] >= t[3] ? k * (double)(t[4] - t[3]) : 0.0;
         D3D12_RANGE none = { 0, 0 };
         m_timestampReadback->Unmap(0, &none);
     }

@@ -121,6 +121,11 @@ cbuffer Camera : register(b0)
     // jitter would drag the history along the Halton pattern.
     row_major float4x4 gViewProjNoJitter;
     row_major float4x4 gPrevViewProj;  // last frame's gViewProjNoJitter
+    // Local lights (lights.h): the clusters' tile (px), near plane and slice scale; lights on; their RT fraction on.
+    float4             gClusterParams;
+    float              gLightsOn;
+    float              gLightsVisOn;
+    float2             gLightPad;
 };
 
 // Cascaded shadow maps. A comparison sampler so the hardware does the depth
@@ -163,6 +168,10 @@ float WetNoise(float2 p)
                 lerp(WetHash(c + float2(0, 1)), WetHash(c + float2(1, 1)), f.x), f.y);
 }
 
+// Declared ahead of its use; defined after the BRDF helpers below.
+float3 LocalLights(float3 p, float3 N, float3 V, float3 diffuseCol, float3 f0, float a, float specScale, float2 px,
+                   float wrap, bool withSpec);
+
 // Standard GGX: Trowbridge-Reitz distribution, height-correlated Smith
 // visibility, Schlick Fresnel. Nothing bespoke here on purpose - the value of a
 // standard BRDF is that an authored glTF material looks the same in Blender.
@@ -182,6 +191,68 @@ float VisSmith(float ndv, float ndl, float a)
     float lv = ndl * sqrt(ndv * ndv * (1.0 - a2) + a2);
     float ll = ndv * sqrt(ndl * ndl * (1.0 - a2) + a2);
     return 0.5 / max(1e-6, lv + ll);
+}
+
+// THE LOCAL LIGHTS at this pixel (lights.h, design 5.4 N2): every light of its cluster, unshadowed - Lambert and GGX
+// as the sun's - then the shadowed ones times the ray tracer's denoised shadowed fraction (the ratio estimator: one
+// ray per pixel to one light chosen by what it gives here, lights.h). `wrap` softens the cosine (a foliage card's),
+// `withSpec` adds the highlight. Glass takes the fraction as 1: the traced pixel is what lies behind.
+//
+// The highlight is an EMITTER's, not a point's: the lobe widened by the disc's angular size (Karis 2013's widened
+// roughness for sphere lights, without the representative point - the lobe blurred, its energy kept). A point's
+// highlight on a wet road (roughness at its 0.002 floor) would peak near 1e5 x the irradiance, past half floats.
+//
+// COST: three lights over the whole screen add ~4 ms to the main pass at 1080p on the development GPU (Radeon 780M),
+// and it is not the arithmetic (a cheaper BRDF changed nothing) nor registers (Radeon GPU Analyzer: the same 128
+// VGPRs, no spills, with or without the lights). It is memory latency: the cluster, the index and the record are
+// dependent loads per pixel per light, and at this shader's occupancy (4 waves per SIMD) little of it hides. The cure
+// is a wave-uniform loop - a wave's lights walked with scalar loads - which needs wave intrinsics, i.e. this shader
+// on DXC / SM 6 (design 5.4 N2).
+float3 LocalLights(float3 p, float3 N, float3 V, float3 diffuseCol, float3 f0, float a, float specScale, float2 px,
+                   float wrap, bool withSpec)
+{
+    if (gLightsOn < 0.5) return float3(0.0, 0.0, 0.0);
+    const uint2 c = gClusters[LightCluster(px, dot(p - gCamPos, gCamFwd), gClusterParams)];
+    const float ndv = saturate(dot(N, V)) + 1e-5;
+    float3 shadowed = float3(0.0, 0.0, 0.0), open = float3(0.0, 0.0, 0.0);
+    // The next light's index is fetched while this one is shaded: one round trip to memory per light, not two.
+    uint next = c.y > 0u ? gLightIndex[c.x] : 0u;
+    for (uint k = 0; k < c.y; ++k)
+    {
+        const uint li = next;
+        const LightRec L = LightLoad(li);
+        if (k + 1u < c.y) next = gLightIndex[c.x + k + 1u];   // after the record: the loads wait in issue order
+        float3 l;
+        float dist;
+        const float3 E = LightIrradiance(li, L, p, l, dist);
+        const float ndl = saturate((dot(N, l) + wrap) / (1.0 + wrap));
+        if (ndl <= 0.0) continue;
+        float3 c3 = diffuseCol * E * ndl;
+        if (withSpec)
+        {
+            // GGX with Schlick by multiplies and the joint Smith term's sqrt-free approximation (Hammon 2017), D and V
+            // under one reciprocal: the highlight is most of this loop's arithmetic, and it runs per light per pixel.
+            const float3 H = normalize(V + l);
+            const float aw = saturate(a + L.radius / (2.0 * max(dist, 1e-3)));
+            const float aw2 = aw * aw;
+            const float ndlTrue = saturate(dot(N, l));
+            const float ndh = saturate(dot(N, H));
+            const float x = 1.0 - saturate(dot(V, H)), x2 = x * x;
+            const float3 F = f0 + (1.0 - f0) * (x2 * x2 * x);
+            const float d = ndh * ndh * (aw2 - 1.0) + 1.0;
+            const float vden = lerp(2.0 * ndlTrue * ndv, ndlTrue + ndv, aw);
+            const float dv = aw2 / max(1e-6, 3.14159265 * d * d * 2.0 * vden);
+            c3 += F * (dv * specScale * ndlTrue) * E;
+        }
+        if (L.flags & kLightShadows) shadowed += c3;
+        else open += c3;
+    }
+#ifdef BLEND
+    const float vis = 1.0;
+#else
+    const float vis = gLightsVisOn > 0.5 ? gRtLights.Load(int3(px, 0)) : 1.0;
+#endif
+    return shadowed * vis + open;
 }
 
 // Karis' analytic fit to the split-sum BRDF term. The alternative is a 2D LUT
@@ -765,6 +836,24 @@ float4 PSMain(VSOut i, bool frontFace : SV_IsFrontFace) : SV_Target
         const float3 sunE = gSunIntensity * AtmSunTransmittance(gSunTowards, 8);
         float3 sunColour = physical ? sunE : sunE * gSunDiffuse;
 
+        // THE LOCAL LIGHTS (lights.h, LocalLights): one block for the three variants, ahead of the sun-and-sky section
+        // below and added to `lit` at its end - their material terms recomputed here as that section computes them.
+        float3 localLight;
+        {
+            const float3 lf0   = lerp(float3(0.04, 0.04, 0.04), albedo, metallic);
+            const float3 ldiff = albedo * (1.0 - metallic) * (physical ? 1.0 / 3.14159265 : 1.0);
+            const float  la    = max(0.002, roughness * roughness);
+            const float3 lV    = normalize(gCamPos - i.wpos);
+            const float  lspec = physical ? 1.0 : 3.14159265;
+#if defined(ALPHA_TEST)
+            localLight = LocalLights(i.wpos, N, lV, ldiff, lf0, la, lspec, i.pos.xy, kFoliageWrap, false);
+#elif defined(BLEND)
+            localLight = LocalLights(i.wpos, N, lV, ldiff * coverage, lf0, la, lspec, i.pos.xy, 0.0, true);
+#else
+            localLight = LocalLights(i.wpos, N, lV, ldiff, lf0, la, lspec, i.pos.xy, 0.0, true);
+#endif
+        }
+
         // HEMISPHERE ambient: sky above, ground bounce below.
         //
         // A single sky sample was not enough, and the failure was specific: a
@@ -930,6 +1019,8 @@ float4 PSMain(VSOut i, bool frontFace : SV_IsFrontFace) : SV_Target
                 lit = diffuseCol * (sunColour * (ndl + trans) * vis
                                     + ambient * matAo * saturate(dot(bake, float3(0.299, 0.587, 0.114))));
         }
+        // The local lights on a card: wrapped as the sun is, no highlight (as for the sun, a card's normal is a fiction).
+        lit += localLight;   // (computed above, before the sun and the sky)
 #else
         float ndl = saturate(dot(N, gSunTowards));
         float vis = SunVis(i.wpos, i.pos.xy, N);
@@ -972,6 +1063,7 @@ float4 PSMain(VSOut i, bool frontFace : SV_IsFrontFace) : SV_Target
             + spec * kSpecScale * sunColour * ndl * vis
             + ambSpec;
 #endif
+        lit += localLight;   // (computed above, before the sun and the sky)
 #endif
         lit += emissive;
     }
@@ -1217,6 +1309,8 @@ struct CameraCB
     float cloudCover, fogBeta, fogHeight, wetness;   // wetness: the former pad (Scene::SetWetness)
     float viewProjNoJitter[16];
     float prevViewProj[16];
+    float clusterParams[4];
+    float lightsOn, lightsVisOn, lightPad[2];
 };
 static_assert(sizeof(CameraCB) % 16 == 0,
               "CameraCB must be a whole number of float4 registers - see the note above");
@@ -3155,7 +3249,7 @@ bool Scene::LoadFromMemory(ID3D12Device* dev, ID3D12CommandQueue* queue,
     srvRange.NumDescriptors = kMaterialSrvCount;   // t0..t4, contiguous per material
     srvRange.BaseShaderRegister = 0;
 
-    D3D12_ROOT_PARAMETER params[11] = {};
+    D3D12_ROOT_PARAMETER params[12] = {};
     params[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;
     params[0].Descriptor.ShaderRegister = 0;
     params[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
@@ -3253,6 +3347,17 @@ bool Scene::LoadFromMemory(ID3D12Device* dev, ID3D12CommandQueue* queue,
     params[10].DescriptorTable.pDescriptorRanges = &msRange;
     params[10].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
 
+    // The local lights (lights.h): their buffers and the ray tracer's shadowed fraction, four SRVs in the shared
+    // heap - one table, because this root signature is near its 64-DWORD limit and three root SRVs would pass it.
+    static D3D12_DESCRIPTOR_RANGE lightRange = {};
+    lightRange.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+    lightRange.NumDescriptors = 4;
+    lightRange.BaseShaderRegister = 12;          // t12 lights, t13 clusters, t14 indices, t15 the RT fraction
+    params[11].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+    params[11].DescriptorTable.NumDescriptorRanges = 1;
+    params[11].DescriptorTable.pDescriptorRanges = &lightRange;
+    params[11].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+
     // THREE samplers so the atlas-bleed diagnosis can be A/B'd live in the
     // viewer instead of argued about.
     //
@@ -3311,7 +3416,7 @@ bool Scene::LoadFromMemory(ID3D12Device* dev, ID3D12CommandQueue* queue,
     samp[5] = AtmosphereMs::MsSampler(D3D12_SHADER_VISIBILITY_PIXEL);   // s0 space1
 
     D3D12_ROOT_SIGNATURE_DESC rs = {};
-    rs.NumParameters = 11;
+    rs.NumParameters = 12;
     rs.pParameters = params;
     rs.NumStaticSamplers = 6;
     rs.pStaticSamplers = samp;
@@ -3333,7 +3438,10 @@ bool Scene::LoadFromMemory(ID3D12Device* dev, ID3D12CommandQueue* queue,
     flags |= D3DCOMPILE_DEBUG | D3DCOMPILE_SKIP_OPTIMIZATION;
 #endif
     ComPtr<ID3DBlob> vs, ps;
-    std::string src = std::string(kAtmosphereHlsl) + kShaderSrc;
+    // The local lights' HLSL (lights.h) and their buffers, ahead of the shader that shades them.
+    std::string src = std::string(kAtmosphereHlsl) +
+        "#define NGG_LIGHTS_T0 t12\n#define NGG_LIGHTS_T1 t13\n#define NGG_LIGHTS_T2 t14\n" + kLightsHlsl +
+        "Texture2D<float>        gRtLights : register(t15);\n" + kShaderSrc;
 
     if (FAILED(D3DCompile(src.c_str(), src.size(), "ngg_scene", nullptr, nullptr,
                           "VSMain", "vs_5_1", flags, 0, &vs, &err)))
@@ -3346,6 +3454,23 @@ bool Scene::LoadFromMemory(ID3D12Device* dev, ID3D12CommandQueue* queue,
     {
         Log("scene: PS compile: %s", err ? (const char*)err->GetBufferPointer() : "?");
         return false;
+    }
+    // NGG_DUMP_PS=<path>: the opaque pixel shader for offline analysis - its DXBC disassembly at <path>, and what
+    // Radeon GPU Analyzer needs to compile the pipeline for a given GPU (registers, occupancy, ISA): the PS and VS
+    // blobs, the root signature and the source (<path>.ps.dxbc, .vs.dxbc, .rs.bin, .hlsl). How the local lights'
+    // cost was taken apart (design 5.4 N2).
+    if (const char* dump = std::getenv("NGG_DUMP_PS"))
+    {
+        ComPtr<ID3DBlob> dis;
+        if (SUCCEEDED(D3DDisassemble(ps->GetBufferPointer(), ps->GetBufferSize(), 0, nullptr, &dis)))
+            if (FILE* f = fopen(dump, "wb")) { fwrite(dis->GetBufferPointer(), 1, dis->GetBufferSize(), f); fclose(f); }
+        auto put = [&](const char* ext, const void* p, size_t n) {
+            if (FILE* f = fopen((std::string(dump) + ext).c_str(), "wb")) { fwrite(p, 1, n, f); fclose(f); }
+        };
+        put(".ps.dxbc", ps->GetBufferPointer(), ps->GetBufferSize());
+        put(".vs.dxbc", vs->GetBufferPointer(), vs->GetBufferSize());
+        put(".rs.bin", sig->GetBufferPointer(), sig->GetBufferSize());
+        put(".hlsl", src.data(), src.size());
     }
 
     const D3D_SHADER_MACRO alphaTestDefs[] = { { "ALPHA_TEST", "1" }, { nullptr, nullptr } };
@@ -3550,6 +3675,8 @@ bool Scene::LoadFromMemory(ID3D12Device* dev, ID3D12CommandQueue* queue,
     // as it did before the table existed.
     if (!m_aerialLut.Ready() && !m_aerialLut.Create(dev))
         Log("scene: aerial table unavailable - aerial perspective will march per pixel");
+    if (!m_lightsReady && !(m_lightsReady = m_lights.Create(dev)))
+        Log("scene: local light buffers unavailable - no local lights");
     if (!m_ms.Ready() && !m_ms.Create(dev))
         Log("scene: multiple-scattering table unavailable - single scattering");
     if (!m_ownEnv.Ready() && !m_ownEnv.Create(dev))
@@ -5195,6 +5322,12 @@ void Scene::RecordPass(ID3D12GraphicsCommandList* list, D3D12_CPU_DESCRIPTOR_HAN
     cb.fogBeta    = FogBeta(m_atmosphere);
     cb.fogHeight  = m_atmosphere.fogHeight;
     cb.wetness    = m_wetness;
+    cb.clusterParams[0] = m_lights.TileW();
+    cb.clusterParams[1] = m_lights.TileH();
+    cb.clusterParams[2] = Lights::kNear;
+    cb.clusterParams[3] = m_lights.SliceScale();
+    cb.lightsOn    = (m_lightsReady && m_lights.Active()) ? 1.0f : 0.0f;
+    cb.lightsVisOn = (cb.lightsOn > 0.5f && m_rtLights) ? 1.0f : 0.0f;
 
     // Last frame's timings. The frame is synchronous (see the note at the end
     // of this function), so last frame's queries have certainly resolved.
@@ -5446,6 +5579,45 @@ void Scene::RecordPass(ID3D12GraphicsCommandList* list, D3D12_CPU_DESCRIPTOR_HAN
         D3D12_GPU_DESCRIPTOR_HANDLE ah = m_srvHeap->GetGPUDescriptorHandleForHeapStart();
         ah.ptr += (UINT64)(m_aoSrvReady ? m_aoSrvSlot : 0) * m_srvStride;
         list->SetGraphicsRootDescriptorTable(7, ah);
+
+        // The local lights' four descriptors, rewritten every frame (four writes): the buffers are fixed, but the
+        // ray tracer's fraction ping-pongs between histories, and a pointer is not an identity (5.0r). Null views
+        // where there is nothing, so the table is always whole; the CB flags decide what is read.
+        {
+            ID3D12Device* d = nullptr;
+            list->GetDevice(IID_PPV_ARGS(&d));
+            if (d)
+            {
+                D3D12_CPU_DESCRIPTOR_HANDLE at = m_srvHeap->GetCPUDescriptorHandleForHeapStart();
+                at.ptr += (SIZE_T)m_lightSrvSlot * m_srvStride;
+                if (m_lightsReady)
+                    m_lights.WriteSrvs(d, at, m_srvStride);
+                else
+                    for (int k = 0; k < 3; ++k)
+                    {
+                        D3D12_SHADER_RESOURCE_VIEW_DESC nd = {};
+                        nd.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
+                        nd.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+                        nd.Buffer.NumElements = 1;
+                        nd.Buffer.StructureByteStride = k == 0 ? sizeof(GpuLight) : k == 1 ? 8 : 4;
+                        D3D12_CPU_DESCRIPTOR_HANDLE h = at;
+                        h.ptr += (SIZE_T)k * m_srvStride;
+                        d->CreateShaderResourceView(nullptr, &nd, h);
+                    }
+                D3D12_SHADER_RESOURCE_VIEW_DESC td = {};
+                td.Format = m_rtLights ? m_rtLights->GetDesc().Format : DXGI_FORMAT_R16_FLOAT;
+                td.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+                td.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+                td.Texture2D.MipLevels = 1;
+                D3D12_CPU_DESCRIPTOR_HANDLE th = at;
+                th.ptr += (SIZE_T)3 * m_srvStride;
+                d->CreateShaderResourceView(m_rtLights, &td, th);
+                d->Release();
+            }
+            D3D12_GPU_DESCRIPTOR_HANDLE lh = m_srvHeap->GetGPUDescriptorHandleForHeapStart();
+            lh.ptr += (UINT64)m_lightSrvSlot * m_srvStride;
+            list->SetGraphicsRootDescriptorTable(11, lh);
+        }
 
         // The aerial table: two fixed-size volumes, so the descriptors are
         // written once per heap. Bound to slot 0 when absent so the table is
@@ -5880,7 +6052,7 @@ bool Scene::RebuildSrvHeap(ID3D12Device* dev)
     // cannot live in a heap of its own.
     // +2: the shadow cascade array and the label font both share this heap,
     // because only one CBV/SRV/UAV heap can be bound at a time.
-    hd.NumDescriptors = (UINT)(pairs * kMaterialSrvCount + 9);
+    hd.NumDescriptors = (UINT)(pairs * kMaterialSrvCount + 13);
     m_shadowSrvSlot = (UINT)(pairs * kMaterialSrvCount);
     m_fontSrvSlot = (UINT)(pairs * kMaterialSrvCount + 1);
     m_envSrvSlot  = (UINT)(pairs * kMaterialSrvCount + 2);
@@ -5889,6 +6061,7 @@ bool Scene::RebuildSrvHeap(ID3D12Device* dev)
     m_aerialSrvSlot = (UINT)(pairs * kMaterialSrvCount + 5);   // and +6
     m_irrSrvSlot    = (UINT)(pairs * kMaterialSrvCount + 7);
     m_msSrvSlot     = (UINT)(pairs * kMaterialSrvCount + 8);
+    m_lightSrvSlot  = (UINT)(pairs * kMaterialSrvCount + 9);    // and +10, +11, +12 (lights.h)
     hd.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
     if (FAILED(dev->CreateDescriptorHeap(&hd, IID_PPV_ARGS(&m_srvHeap))))
     {
