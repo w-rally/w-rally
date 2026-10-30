@@ -150,6 +150,41 @@ void Renderer::RecordFrame(Device& dev, D3D12_CPU_DESCRIPTOR_HANDLE outRtv,
     ID3D12GraphicsCommandList* list = dev.list.Get();
     if (!list) return;
 
+    // The whole frame's GPU time (LastFrameMs): last frame's, read now - the frame is synchronous, so it resolved.
+    if (!m_frameTimer && dev.device && dev.queue && SUCCEEDED(dev.queue->GetTimestampFrequency(&m_frameHz)))
+    {
+        D3D12_QUERY_HEAP_DESC qh = {};
+        qh.Type = D3D12_QUERY_HEAP_TYPE_TIMESTAMP;
+        qh.Count = 2;
+        D3D12_HEAP_PROPERTIES hp = {};
+        hp.Type = D3D12_HEAP_TYPE_READBACK;
+        D3D12_RESOURCE_DESC rd = {};
+        rd.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+        rd.Width = 2 * sizeof(UINT64);
+        rd.Height = 1;
+        rd.DepthOrArraySize = 1;
+        rd.MipLevels = 1;
+        rd.SampleDesc.Count = 1;
+        rd.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+        if (FAILED(dev.device->CreateQueryHeap(&qh, IID_PPV_ARGS(&m_frameTimer))) ||
+            FAILED(dev.device->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &rd, D3D12_RESOURCE_STATE_COPY_DEST,
+                                                       nullptr, IID_PPV_ARGS(&m_frameReadback))))
+            m_frameTimer.Reset();
+    }
+    if (m_frameTimer && m_framePending)
+    {
+        UINT64* t = nullptr;
+        D3D12_RANGE r = { 0, 2 * sizeof(UINT64) };
+        if (SUCCEEDED(m_frameReadback->Map(0, &r, reinterpret_cast<void**>(&t))))
+        {
+            if (t[1] >= t[0]) m_frameMs = double(t[1] - t[0]) * 1000.0 / double(m_frameHz);
+            D3D12_RANGE none = { 0, 0 };
+            m_frameReadback->Unmap(0, &none);
+        }
+        m_framePending = false;
+    }
+    if (m_frameTimer) list->EndQuery(m_frameTimer.Get(), D3D12_QUERY_TYPE_TIMESTAMP, 0);
+
     // Which tonemap this frame gets is a rule, not a free choice: the debug
     // views carry FALSE COLOUR, not radiance, and a curve would change the very
     // numbers they exist to show; baked lighting is display-referred already.
@@ -252,6 +287,13 @@ void Renderer::RecordFrame(Device& dev, D3D12_CPU_DESCRIPTOR_HANDLE outRtv,
         m_scene.Record(list, hdrRtv, view, proj, width, height);
 
     m_post.Resolve(list, outRtv, m_scene.Depth(), motion, rtShadow, rtAo, rtAoPrev, m_scene.LastViewProj(), width, height);
+
+    if (m_frameTimer)
+    {
+        list->EndQuery(m_frameTimer.Get(), D3D12_QUERY_TYPE_TIMESTAMP, 1);
+        list->ResolveQueryData(m_frameTimer.Get(), D3D12_QUERY_TYPE_TIMESTAMP, 0, 2, m_frameReadback.Get(), 0);
+        m_framePending = true;
+    }
 }
 
 } // namespace core

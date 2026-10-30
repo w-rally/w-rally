@@ -103,6 +103,9 @@ public:
 
     // ---- state, for readouts
     bool RayTracedShadowsActive() const { return m_rtActive; }   // this frame
+    // The whole frame's GPU time (RecordFrame, first command to last), last frame's. The one number a change of
+    // what the GPU does is judged by: a pass's own timestamps are not (design 5.4 N2c).
+    double LastFrameMs() const          { return m_frameMs; }
     bool RayTracingAvailable() const    { return m_rt.Ready(); }
     // Why RT shadows are not active this frame; null when they are.
     const char* RtFallbackReason() const;
@@ -141,6 +144,12 @@ private:
     bool        m_rtValid = false;            // the BVH represents the scene exactly
     bool        m_rtActive = false;
     const char* m_rtReason = "not built yet";
+
+    Microsoft::WRL::ComPtr<ID3D12QueryHeap> m_frameTimer;       // [0] the frame's first command, [1] its last
+    Microsoft::WRL::ComPtr<ID3D12Resource>  m_frameReadback;
+    UINT64      m_frameHz = 0;
+    bool        m_framePending = false;
+    double      m_frameMs = 0.0;
 };
 
 } // namespace core

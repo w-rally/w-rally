@@ -38,7 +38,8 @@ namespace wrally::iface {
 // 4: FrameDesc::wetness (wet surfaces and puddles).
 // 5: FrameDesc::skyTime (the sun from a date, a time and a place).
 // 6: FrameDesc::lights (point and spot lights, every one ray-traced).
-constexpr uint32_t kRendererInterfaceVer = 6;
+// 7: RenderStats::frameMs (the whole frame's GPU time).
+constexpr uint32_t kRendererInterfaceVer = 7;
 
 struct Renderer;                     // the module's instance, opaque
 typedef uint32_t SceneHandle;        // a loaded .ngg stage
@@ -299,6 +300,7 @@ struct RenderStats {
     char     rtFallback[96];               // why RT is not active, "" when it is
     float    lightsMs;                     // the local lights' ray trace (GPU ms), part of rtMs (design 5.4 N2)
     uint32_t lightCount;                   // the local lights this frame
+    float    frameMs;                      // the whole frame's GPU time, first command to last (GPU ms)
 };
 
 #pragma pack(pop)

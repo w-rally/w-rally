@@ -754,6 +754,14 @@ private:
     Microsoft::WRL::ComPtr<ID3D12Resource>       m_motion;
     Microsoft::WRL::ComPtr<ID3D12Resource>       m_plantTarget;      // R32_UINT, plant + 1
     Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> m_normalRtvHeap;   // normal, motion, plant
+    // The deferred local lights (PSDeferredLights): the surface's targets (normal, roughness and kind; albedo and
+    // metallic) and their RTVs; the opaque world's pipelines that write them ([alpha test][mirroring transform] the
+    // culled ones); the full-screen pass. Used while there are local lights.
+    Microsoft::WRL::ComPtr<ID3D12Resource>       m_gbuf[2];
+    Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> m_gbufRtvHeap;
+    Microsoft::WRL::ComPtr<ID3D12PipelineState>  m_psoG, m_psoAlphaTestG, m_psoCulledG[2][2], m_psoDeferred;
+    bool                     m_deferredReady = false;
+    UINT                     m_dsvStride = 0;                   // the read-only depth view is the DSV heap's second
     UINT                     m_prepassRtvStride = 0;
     bool                     m_prepassThisFrame = false;
     int                      m_shadowSource = 0;

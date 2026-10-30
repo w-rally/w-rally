@@ -696,6 +696,7 @@ Status WRALLY_CALL Stats(Renderer* r, RenderStats* out)
     ngg::core::Rt& rt = r->core.Raytracer();
     rt.ReadStats();
     out->passMs = (float)r->scene.LastPassMs();
+    out->frameMs = (float)r->core.LastFrameMs();
     out->envMs = (float)r->scene.LastEnvMs();
     out->aerialMs = (float)r->scene.LastAerialMs();
     out->rtActive = r->core.RayTracedShadowsActive() ? 1u : 0u;

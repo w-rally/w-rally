@@ -68,7 +68,7 @@ bool Dxc::Load()
 
 ComPtr<ID3DBlob> Dxc::Compile(const std::string& source, const wchar_t* entry,
                               const wchar_t* target, const char* nameForLog,
-                              std::initializer_list<const wchar_t*> extra)
+                              const std::vector<const wchar_t*>& extra)
 {
     if (!Ready()) return nullptr;
 
