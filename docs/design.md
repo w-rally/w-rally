@@ -673,7 +673,8 @@ Each phase ends with a game you can drive. phys-drive works on day one, and ever
         default). Their rays skip cards within 1.5 m. Switched by Debug → Legacy cards, `NGG_LEGACY_PROFILE` or
         renderer interface 3's `setLegacyProfile`.
    2. normals rebuilt, foliage cut out
-   3. weather presets from `TrackSettings.ini` (DONE 2026-10-29), the cache, every RBR stage in the menu catalog
+   3. weather presets from `TrackSettings.ini` (DONE 2026-10-29), every RBR stage in the menu catalog (DONE
+      2026-10-30); the cache **deferred** (below)
       - **Weather:** the importer writes every `TrackSettings.ini` section of the stage's map as an `NGGW` preset
         (`game/src/assets/legacy_weather.*`, reading through `game/src/formats/track_settings.*`), named as the section,
         so `--weather` and the menu select it. The stage's own time of day, crisp and clear, is the default. The
@@ -687,6 +688,25 @@ Each phase ends with a game you can drive. phys-drive works on day one, and ever
       - **Tests:** `legacy-import-41` also checks the weather line (7 presets, default `41M_crisp_clear`), and
         `legacy-import-weather-4` checks a map under 10 (43, `04E_crisp_clear`). `ngg-check` already compares the
         renderer's preset count with the file's.
+      - **`N` is noon** (2026-10-30), not night: its suns stand ~50 degrees up, and RBR has no night stages.
+        plugin-rbr's translation left 17 overcast noon presets with the sun 2.8 degrees up, drawn as dusk. Now every
+        preset's sun within ~3 degrees of the horizon is raised to ~10 degrees on its bearing (48 in all; stage 11's
+        `11O_N_hazy_partcloud`, stage 69's four).
+      - **Every stage in the menu** (2026-10-30): the catalog offers, after the stages an `.ngg` draws, every other
+        `Maps/<stage>.lbs` with its `.trk`, "imported from .lbs", its weathers `TrackSettings.ini`'s for its map and
+        time of day, drawn (`Stage::imported`). In the stock RBR folder: 194 stages, 4 from `.ngg` files and 190
+        imported. CTest `catalog-every-stage` (`tests/catalog_check.cpp`) checks that, and stage 4's evening weathers
+        under `04E_`.
+      - **Where a stage comes from, best first:** a hand-finished `.ngg` from the stage server (planned: tweaked by hand
+        in Wallaby, better than any automatic import), then an `.ngg` in the folders, then the automatic import. The
+        catalog has the seam for the first (`catalog.cpp`).
+      - **The cache, deferred:** an import takes about 0.5 s (stage 41), and the server's copies will replace most
+        imports, so caching the automatic import is not worth it now.
+      - **Coverage** (sweep of every `.lbs` with a `.trk` in the stock RBR folder, `ngg-check --lbs`, 2026-10-30):
+        164 of 197 import and load; 33 fail in the `.lbs` reader (`formats/lbs_geometry.*`), and the menu offers them
+        anyway. Causes: 18 meshes of an unknown vertex type (13 the most, also 1, 20, 33, 38, 42, 55), 7 whose indices
+        run past their block, 2 files with no geometry. 32 stages have no `TrackSettings.ini` section at all and draw
+        the default sky with no weathers to pick.
 9. **Game.** Menus, car/stage selection, settings, wheels + FFB, replays, results.
 10. **WPhysics.** Fork, JSON config, higher tick rate, then extend. Multi-car and save-state come with their
     interface bump.

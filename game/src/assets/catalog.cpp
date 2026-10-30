@@ -115,6 +115,22 @@ std::string Catalog::Scan(const app::Settings& s)
 
     // The weathers: TrackSettings.ini's sections, by their stage prefix.
     const std::vector<std::string> sections = IniSections(maps + "TrackSettings.ini");
+    // A stage's: its map's sections of its time of day, and the overcast ones of it ("41M_...", "41O_M_..."; the map
+    // in two digits at least, as TrackSettings.ini writes it: "04M_...", not "4M_...").
+    auto stageWeathers = [&](int map, char tod) {
+        const char t = static_cast<char>(std::toupper(static_cast<unsigned char>(tod)));
+        const std::string mapName = formats::TrackSettingsMap(map);
+        const std::string prefix = mapName + t + "_", overcast = mapName + "O_" + t + "_";
+        std::vector<std::string> out;
+        for (const std::string& sec : sections)
+            if (!_strnicmp(sec.c_str(), prefix.c_str(), prefix.size()) || !_strnicmp(sec.c_str(), overcast.c_str(), overcast.size()))
+                out.push_back(sec);
+        return out;
+    };
+    auto title = [](const std::string& stage, const std::string& from) {
+        const char* tod = TimeOfDay(stage.size() >= 2 ? stage.back() : ' ');
+        return stage + (tod[0] ? std::string(" (") + tod + ")" : "") + "  -  " + from;
+    };
 
     // Stages: every .ngg in the folders, each for the stages of its map it draws.
     std::string folders = s.NggFolders();
@@ -150,15 +166,8 @@ std::string Catalog::Scan(const app::Settings& s)
                 st.ngg = ngg.string();
                 st.stage = v;
                 st.map = map;
-                const char tod = v.size() >= 2 ? v.back() : ' ';
-                st.title = v + (TimeOfDay(tod)[0] ? std::string(" (") + TimeOfDay(tod) + ")" : "") + "  -  " + ngg.filename().string();
-                // (The map in two digits at least, as TrackSettings.ini writes it: "04M_...", not "4M_...".)
-                const std::string mapName = formats::TrackSettingsMap(map);
-                const std::string prefix = mapName + static_cast<char>(std::toupper(static_cast<unsigned char>(tod))) + "_";
-                const std::string overcast = mapName + "O_" + static_cast<char>(std::toupper(static_cast<unsigned char>(tod))) + "_";
-                for (const std::string& sec : sections)
-                    if (!_strnicmp(sec.c_str(), prefix.c_str(), prefix.size()) || !_strnicmp(sec.c_str(), overcast.c_str(), overcast.size()))
-                        st.weathers.push_back(sec);
+                st.title = title(v, ngg.filename().string());
+                st.weathers = stageWeathers(map, v.size() >= 2 ? v.back() : ' ');
                 // The .ngg's own presets, when it has some: those of this stage's time of day if any are named so,
                 // else all of them.
                 if (!drawn.empty()) {
@@ -172,6 +181,37 @@ std::string Catalog::Scan(const app::Settings& s)
                 stages.push_back(std::move(st));
             }
         }
+    }
+
+    // Every other RBR stage, imported when it is driven (assets/legacy_stage.h): an .lbs with its .trk in Maps that no
+    // .ngg above draws. Its weathers are drawn, since the import writes TrackSettings.ini's sections as presets.
+    // Where a stage comes from, best first: an .ngg in the folders (a Wallaby conversion), then this import. A
+    // hand-finished .ngg from the stage server goes before both when there is one (not yet).
+    std::vector<std::string> drawn;   // lower-case stage names an .ngg covers
+    for (const Stage& st : stages) drawn.push_back(Lower(st.stage));
+    std::vector<fs::path> lbss;
+    for (const auto& e : fs::directory_iterator(maps, ec)) {
+        const std::string stem = e.path().stem().string();
+        if (e.is_regular_file() && Lower(e.path().extension().string()) == ".lbs" && rules::StageMap(stem) >= 0 &&
+            stem.find('_') != std::string::npos && fs::exists(maps + stem + ".trk", ec) &&
+            std::find(drawn.begin(), drawn.end(), Lower(stem)) == drawn.end())
+            lbss.push_back(e.path());
+    }
+    std::sort(lbss.begin(), lbss.end(), [](const fs::path& a, const fs::path& b) {
+        const int ma = rules::StageMap(a.stem().string()), mb = rules::StageMap(b.stem().string());
+        return ma != mb ? ma < mb : a.stem().string() < b.stem().string();
+    });
+    for (const fs::path& lbs : lbss) {
+        Stage st;
+        st.ngg = lbs.string();
+        st.stage = lbs.stem().string();
+        st.key = st.ngg + "|" + st.stage;
+        st.map = rules::StageMap(st.stage);
+        st.title = title(st.stage, "imported from .lbs");
+        st.weathers = stageWeathers(st.map, st.stage.back());
+        st.weathersDrawn = true;
+        st.imported = true;
+        stages.push_back(std::move(st));
     }
 
     // Cars: every folder in Cars with an .sgc; Cars.ini names the slot cars.

@@ -75,6 +75,20 @@ target_compile_definitions(car-parts PRIVATE _CRT_SECURE_NO_WARNINGS NOMINMAX)
 set_target_properties(car-parts PROPERTIES CXX_STANDARD 17)
 add_test(NAME car-parts COMMAND car-parts)
 
+# What the Quick rally menu offers (game/src/assets/catalog.cpp) from the RBR folder: every stage, those no .ngg draws
+# imported from their .lbs with drawn weathers, and a map under 10's weathers under their two-digit names.
+add_executable(catalog-check catalog_check.cpp ${GAME_SRC}/assets/catalog.cpp ${GAME_SRC}/app/settings.cpp
+               ${GAME_SRC}/app/options.cpp ${GAME_SRC}/input/bindings.cpp ${GAME_SRC}/rules/stage.cpp
+               ${GAME_SRC}/formats/track_settings.cpp)
+target_include_directories(catalog-check PRIVATE ${GAME_SRC})
+target_link_libraries(catalog-check PRIVATE phys-data wrally-modules wrally-signals)
+target_compile_definitions(catalog-check PRIVATE _CRT_SECURE_NO_WARNINGS NOMINMAX WRALLY_SOURCE_DIR="${PROJECT_SOURCE_DIR}")
+set_target_properties(catalog-check PROPERTIES CXX_STANDARD 17)
+if(EXISTS ${WRALLY_TEST_RBR_DIR}/Maps/track-4_E.lbs)
+    add_test(NAME catalog-every-stage COMMAND catalog-check ${WRALLY_TEST_RBR_DIR})
+    set_tests_properties(catalog-every-stage PROPERTIES PASS_REGULAR_EXPRESSION "catalog-check: all good")
+endif()
+
 # The .ngg writer and its readers in step (tools/ngg-check, docs/design.md decision 2): a made-up scene written, read
 # back the same and loaded by the renderer; Wallaby's stage 41 .ngg (another producer) read, rewritten the same and
 # both loaded; WRally's legacy importer on RBR's stage 41 .lbs, loaded by the renderer. They open a hidden window.

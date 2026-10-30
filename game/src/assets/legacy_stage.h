@@ -17,7 +17,8 @@
 //     file has none are the faces' (area-weighted)
 //   - the weather presets (NGGW): every TrackSettings.ini section of the stage's map, translated, the stage's own time
 //     of day the default (assets/legacy_weather.h)
-// Not yet: welded normals, the start point, a cache (steps 2 and 3).
+// Not yet: welded normals, the start point (step 2). No cache: an import takes ~0.5 s, and the stage server's
+// hand-finished .ngg files are to replace most imports (docs/design.md phase 8 step 3).
 
 #include <cstdint>
 #include <string>

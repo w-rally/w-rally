@@ -4,7 +4,8 @@
 //   stages   every .ngg in the .ngg folders, for each stage of its map in Maps (track-41.ngg: track-41_M, ...; a
 //            track-41_M.ngg that one), with the stage's weathers - the TrackSettings.ini sections for its map and time
 //            of day (41M_crisp_clear, 41O_M_heavyrain_heavycloud, ...), or the .ngg's own presets when it has some
-//            (rbrtm --import-weather writes them under those names)
+//            (rbrtm --import-weather writes them under those names); then every other stage in Maps (an .lbs and its
+//            .trk), imported when it is driven (legacy_stage.h), its weathers TrackSettings.ini's, drawn
 //   cars     EVERY car folder in Cars (one with an .sgc), not only the eight Cars.ini slots. Its physics, in order:
 //              - its own: Cars/<folder>/physics/ (common.lsp, <surface>.lsp, r_<surface>.lsp, setups/)
 //              - a slot car's: its physics.rbz folder (Car00 c_xsara ... Car07 s_i2000, the game's table)
@@ -24,7 +25,7 @@ namespace wrally::assets {
 
 struct Stage {
     std::string key;                    // ngg path '|' stage: what Settings keeps
-    std::string ngg;                    // the .ngg file
+    std::string ngg;                    // the .ngg file, or the .lbs of an imported stage
     std::string stage;                  // track-41_M
     int map = -1;
     std::string title;                  // for the menu
@@ -33,6 +34,7 @@ struct Stage {
     // weather); the sky stays the .ngg's own.
     std::vector<std::string> weathers;
     bool weathersDrawn = false;         // the weathers are the .ngg's presets
+    bool imported = false;              // no .ngg: the .lbs is imported when the stage loads
 };
 
 struct Car {

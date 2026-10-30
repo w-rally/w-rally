@@ -48,15 +48,6 @@ bool HasWord(const std::string& name, const char* word)
     return false;
 }
 
-// The time of day a section lights: "41M_..." M, "108O_E_..." E.
-char TimeOfDay(const std::string& name)
-{
-    const size_t us = name.find('_');
-    if (us == std::string::npos || us == 0) return 'M';
-    const std::string rest = name.substr(us + 1);
-    return static_cast<char>(std::toupper(static_cast<unsigned char>(rest.size() >= 2 && rest[1] == '_' ? rest[0] : name[us - 1])));
-}
-
 ngg::WeatherRecord Translate(const TrackSettingsSection& s, bool& mirrored, bool& truncated)
 {
     ngg::WeatherRecord w = ngg::DefaultWeatherRecord();
@@ -69,11 +60,13 @@ ngg::WeatherRecord Translate(const TrackSettingsSection& s, bool& mirrored, bool
         if (std::sscanf(Dotted(it->second).c_str(), "%f %f %f", &d[0], &d[1], &d[2]) == 3)
             for (int k = 0; k < 3; ++k) w.sunDirection[k] = d[k];
     }
-    // A daytime sun at or below the horizon (y >= 0: the light travels upwards). RBR's hand-set ambient made the sun
-    // irrelevant on those (overcast ones mostly); a physical sky draws them as night. A low sun on the same bearing,
-    // at least ~10 degrees up, is what morning or evening means. Night keeps its own.
+    // A sun at, below or within ~3 degrees of the horizon (y > -0.05; y >= 0: the light travels upwards). RBR's hand-set
+    // ambient made the sun irrelevant on those, overcast ones mostly; a physical sky draws them as night or dusk. Every
+    // RBR stage is daytime - M morning, N NOON (not night: its suns stand ~50 degrees up), E evening - so each gets a
+    // low sun on the same bearing, at least ~10 degrees up. (plugin-rbr's translation took N for night and left 17
+    // overcast noon presets at 2.8 degrees.)
     mirrored = false;
-    if (TimeOfDay(s.name) != 'N' && w.sunDirection[1] > -0.05f) {
+    if (w.sunDirection[1] > -0.05f) {
         w.sunDirection[1] = -std::max(std::fabs(w.sunDirection[1]), 0.17f);
         mirrored = true;
     }
