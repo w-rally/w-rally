@@ -17,6 +17,7 @@ using iface::Status;
 struct Sound::Impl {
     modules::ModuleHost host;
     std::unique_ptr<modules::FileHost> files;
+    std::filesystem::path root;   // the files' root: the module reads paths relative to it (FileHost refuses a drive's)
     iface::AudioOutput out{};
     iface::AudioSettings settings{};
     iface::CarVoiceHandle voice = 0;
@@ -61,6 +62,17 @@ std::vector<std::string> WavFiles(const std::string& dir)
     return files;
 }
 
+// `path` as the module reads it: under the files' root (a car folder's .eng, development sounds elsewhere on the drive:
+// "../.."); a name or a relative path as it is.
+std::string ModulePath(const std::filesystem::path& root, const std::string& path)
+{
+    const std::filesystem::path p(path);
+    if (!p.is_absolute()) return path;
+    std::error_code ec;
+    const std::filesystem::path r = std::filesystem::relative(p, root, ec);
+    return ec || r.empty() ? path : r.generic_string();
+}
+
 } // namespace
 
 Sound::Sound() = default;
@@ -72,6 +84,7 @@ std::string Sound::Open(const std::filesystem::path& modulesDir, const std::stri
     m = std::make_unique<Impl>();
     m->host.Scan(modulesDir);
     Impl* impl = m.get();
+    m->root = root;
     m->files = std::make_unique<modules::FileHost>(root, modulesDir.parent_path().parent_path() / "cache",
                                                    [impl](iface::LogLevel level, const char* text) {
                                                        if (level < iface::LogLevel::Info) return;
@@ -122,13 +135,15 @@ std::string Sound::CreateCar(const CarSound& car)
         if (dir->empty()) continue;
         *list = WavFiles(*dir);
         if (list->empty()) missing += *dir + ": no .wav\n";
+        for (std::string& f : *list) f = ModulePath(m->root, f);
     }
     std::vector<const char*> bangPtrs, idlePtrs;
     for (const std::string& s : bangs) bangPtrs.push_back(s.c_str());
     for (const std::string& s : idle) idlePtrs.push_back(s.c_str());
     iface::CarSoundDesc d{};
     d.car = car.car;
-    d.engine = car.engine.c_str();
+    const std::string engine = ModulePath(m->root, car.engine);
+    d.engine = engine.c_str();
     d.bank = "";
     d.mix = car.mixText.c_str();
     d.bangs = bangPtrs.data(), d.bangCount = static_cast<uint32_t>(bangPtrs.size());
