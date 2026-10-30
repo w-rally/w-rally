@@ -50,6 +50,9 @@ static const DXGI_FORMAT kMotionFormat = DXGI_FORMAT_R16G16B16A16_FLOAT;
 // The prepass's third target: which PLANT a pixel is a card of (FindPlants),
 // + 1, or 0. The ray tracer compares it with the plant of what a ray hits.
 static const DXGI_FORMAT kPlantFormat = DXGI_FORMAT_R32_UINT;
+// The surface the deferred local lights read (Shade's GBufOut): the shading normal (octahedral), roughness and kind;
+// albedo and metallic. Only while there are local lights (the GBUF pipelines).
+static const DXGI_FORMAT kGbufFormats[2] = { DXGI_FORMAT_R10G10B10A2_UNORM, DXGI_FORMAT_R8G8B8A8_UNORM_SRGB };
 // A plant vertex's uv1.y is its size plus this times what it casts (Plant::shadow) - the same in the shaders.
 static const float kPlantShadowPack = 1000.0f;
 
@@ -126,6 +129,9 @@ cbuffer Camera : register(b0)
     float              gLightsOn;
     float              gLightsVisOn;
     float2             gLightPad;
+    // The deferred local lights' pass (PSDeferredLights): the jittered view-projection's inverse - the matrix the
+    // depth was written with.
+    row_major float4x4 gInvViewProj;
 };
 
 // Cascaded shadow maps. A comparison sampler so the hardware does the depth
@@ -214,7 +220,8 @@ float VisSmith(float ndv, float ndl, float a)
 // computes. PIX's per-draw timings put it where the fragments are: three lights reaching most of the screen add ~3 ms
 // to the main pass at 1080p, in proportion to each draw's pixel shader invocations - foliage's overdraw included.
 // Scalar loads (above), the cone culling of the clusters (lights.cpp) and the early exit below each took little
-// off it (design 5.4 N2).
+// off it - fewer fragments did: the opaque world's lights are shaded once per PIXEL by the deferred pass
+// (PSDeferredLights), only glass here (design 5.4 N2c).
 void ShadeLocalLight(uint li, LightRec L, float3 p, float3 N, float3 V, float ndv, float3 diffuseCol, float3 f0,
                      float a, float specScale, float wrap, bool withSpec, inout float3 shadowed, inout float3 open)
 {
@@ -623,8 +630,65 @@ PrepassOut PSPrepass(VSOut i, bool frontFace : SV_IsFrontFace)
     return o;
 }
 
-float4 PSMain(VSOut i, bool frontFace : SV_IsFrontFace) : SV_Target
+// Aerial perspective - the SAME scattering integral the sky uses, over the
+// camera-to-surface segment instead of the whole ray. Distant geometry is
+// both dimmed by transmittance and tinted by in-scatter; applying only the
+// tint is what makes cheap distance fog look like paint over the world
+// rather than air in front of it.
+//
+// Read from the froxel table (aerial.h) - one trilinear fetch per volume
+// where this used to be an 8x3 march on every geometry pixel, the largest
+// per-pixel cost left once the ambient march went (design 9b item 21).
+// The march stays as the reference path (gAerialLut = 0): same integral,
+// so a difference between the two is a table defect by definition.
+// The scene pass's and the deferred local lights' (their light reaches the camera through the same air).
+void AerialAt(float3 wpos, float2 px, out float3 tr, out float3 inscatter)
 {
+    float3 toSurf = wpos - gCamPos;
+    float  dist   = length(toSurf);
+    tr = float3(1.0, 1.0, 1.0);
+    inscatter = float3(0.0, 0.0, 0.0);
+    if (gAerialLut > 0.5)
+    {
+        float3 dims;
+        gAerialIn.GetDimensions(dims.x, dims.y, dims.z);
+        // The first slice CENTRE sits a few metres out, and clamping to it
+        // would put that much air between the camera and its own bonnet.
+        // Below it, scale towards (no in-scatter, full transmittance):
+        // both are linear in distance that close, so this is exact to
+        // first order rather than a fade chosen by eye.
+        float w  = sqrt(saturate(dist / gAerialMaxDist));
+        float w0 = 0.5 / dims.z;
+        float f  = 1.0;
+        if (w < w0) { f = (w * w) / (w0 * w0); w = w0; }
+        float3 uvw = float3(px * gInvScreen, w);
+        inscatter = gAerialIn.SampleLevel(gSampVolume, uvw, 0.0).rgb * f;
+        tr = lerp(float3(1.0, 1.0, 1.0),
+                  gAerialTr.SampleLevel(gSampVolume, uvw, 0.0).rgb, f);
+    }
+    else if (dist > 1.0)
+    {
+        inscatter = AtmScatter(toSurf / dist, gSunTowards, dist,
+                               gTurbidity, gSunIntensity, 8, 3, tr);
+    }
+}
+
+// What the deferred local lights' pass needs of a surface (GBUF; PSDeferredLights): its shading normal, its kind
+// (0 no surface, 1 opaque, 2 a foliage card) and roughness, albedo and metallic. Packed into two 32-bit targets
+// (kGbufFormats): every byte is written per FRAGMENT, foliage's overdraw included - a third target with the aerial
+// transmittance (and the normal in half floats) cost the opaque world +3.8 ms in PIX's replay; the transmittance is
+// computed again where it is used (AerialAt).
+struct GBufOut
+{
+    float3 n;
+    float  kind;
+    float  rough;
+    float4 albedoMetal;
+};
+
+float4 Shade(VSOut i, bool frontFace, out GBufOut g)
+{
+    g = (GBufOut)0;
     AtmSetWeather(gCloud, gFogBeta, gFogH, dot(gGroundColour, float3(0.3333, 0.3333, 0.3333)));
     // Deliberately plain: a single directional term plus ambient. Anything
     // fancier would make it harder to tell a lighting bug from a camera bug,
@@ -869,7 +933,18 @@ float4 PSMain(VSOut i, bool frontFace : SV_IsFrontFace) : SV_Target
 
         // THE LOCAL LIGHTS (lights.h, LocalLights): one block for the three variants, ahead of the sun-and-sky section
         // below and added to `lit` at its end - their material terms recomputed here as that section computes them.
-        float3 localLight;
+        float3 localLight = float3(0.0, 0.0, 0.0);
+#if defined(GBUF) && !defined(BLEND)
+        // DEFERRED (PSDeferredLights): the lights come after the pass, once per pixel - here only what they will need.
+        g.n = N;
+#if defined(ALPHA_TEST)
+        g.kind = 2.0;
+#else
+        g.kind = 1.0;
+#endif
+        g.rough = saturate(roughness);
+        g.albedoMetal = float4(saturate(albedo), saturate(metallic));
+#else
         {
             const float3 lf0   = lerp(float3(0.04, 0.04, 0.04), albedo, metallic);
             const float3 ldiff = albedo * (1.0 - metallic) * (physical ? 1.0 / 3.14159265 : 1.0);
@@ -884,6 +959,7 @@ float4 PSMain(VSOut i, bool frontFace : SV_IsFrontFace) : SV_Target
             localLight = LocalLights(i.wpos, N, lV, ldiff, lf0, la, lspec, i.pos.xy, 0.0, true);
 #endif
         }
+#endif
 
         // HEMISPHERE ambient: sky above, ground bounce below.
         //
@@ -1099,47 +1175,12 @@ float4 PSMain(VSOut i, bool frontFace : SV_IsFrontFace) : SV_Target
         lit += emissive;
     }
 
-    // Aerial perspective - the SAME scattering integral the sky uses, over the
-    // camera-to-surface segment instead of the whole ray. Distant geometry is
-    // both dimmed by transmittance and tinted by in-scatter; applying only the
-    // tint is what makes cheap distance fog look like paint over the world
-    // rather than air in front of it.
-    //
-    // Read from the froxel table (aerial.h) - one trilinear fetch per volume
-    // where this used to be an 8x3 march on every geometry pixel, the largest
-    // per-pixel cost left once the ambient march went (design 9b item 21).
-    // The march stays as the reference path (gAerialLut = 0): same integral,
-    // so a difference between the two is a table defect by definition.
+    // Aerial perspective (AerialAt).
     if (gAerial > 0.5)
     {
-        float3 toSurf = i.wpos - gCamPos;
-        float  dist   = length(toSurf);
-        float3 tr = float3(1.0, 1.0, 1.0);
-        float3 inscatter = float3(0.0, 0.0, 0.0);
-        if (gAerialLut > 0.5)
-        {
-            float3 dims;
-            gAerialIn.GetDimensions(dims.x, dims.y, dims.z);
-            // The first slice CENTRE sits a few metres out, and clamping to it
-            // would put that much air between the camera and its own bonnet.
-            // Below it, scale towards (no in-scatter, full transmittance):
-            // both are linear in distance that close, so this is exact to
-            // first order rather than a fade chosen by eye.
-            float w  = sqrt(saturate(dist / gAerialMaxDist));
-            float w0 = 0.5 / dims.z;
-            float f  = 1.0;
-            if (w < w0) { f = (w * w) / (w0 * w0); w = w0; }
-            float3 uvw = float3(i.pos.xy * gInvScreen, w);
-            inscatter = gAerialIn.SampleLevel(gSampVolume, uvw, 0.0).rgb * f;
-            tr = lerp(float3(1.0, 1.0, 1.0),
-                      gAerialTr.SampleLevel(gSampVolume, uvw, 0.0).rgb, f);
-        }
-        else if (dist > 1.0)
-        {
-            inscatter = AtmScatter(toSurf / dist, gSunTowards, dist,
-                                   gTurbidity, gSunIntensity, 8, 3, tr);
-        }
-        gProbeDist = dist; gProbeTr = tr; gProbeInscatter = inscatter;
+        float3 tr, inscatter;
+        AerialAt(i.wpos, i.pos.xy, tr, inscatter);
+        gProbeDist = length(i.wpos - gCamPos); gProbeTr = tr; gProbeInscatter = inscatter;
 #ifdef BLEND
         inscatter *= coverage;           // premultiplied: the air in front of the tint, as much as the tint covers
 #endif
@@ -1286,6 +1327,74 @@ float4 PSMain(VSOut i, bool frontFace : SV_IsFrontFace) : SV_Target
     return float4(lit, 1.0);
 #endif
 }
+
+#if defined(GBUF)
+struct PSOutG
+{
+    float4 colour : SV_Target0;
+    float4 n      : SV_Target1;   // R10G10B10A2: the normal octahedral, roughness, kind / 3
+    float4 albedo : SV_Target2;   // R8G8B8A8 sRGB: albedo, metallic
+};
+PSOutG PSMain(VSOut i, bool frontFace : SV_IsFrontFace)
+{
+    GBufOut g;
+    PSOutG o;
+    o.colour = Shade(i, frontFace, g);
+    o.n = float4(AtmOctEncode(normalize(g.n)), g.rough, g.kind / 3.0);
+    o.albedo = g.albedoMetal;
+    return o;
+}
+#else
+float4 PSMain(VSOut i, bool frontFace : SV_IsFrontFace) : SV_Target
+{
+    GBufOut g;
+    return Shade(i, frontFace, g);
+}
+#endif
+
+// THE DEFERRED LOCAL LIGHTS (design 5.4 N2c): one full-screen pass after the opaque world, each PIXEL's lights once -
+// in the main pass they were shaded per FRAGMENT, foliage's overdraw and every 2x2 quad's helper lanes included, at
+// the big shader's occupancy. The same LocalLights, from the surface the GBUF variants left (Shade), its position
+// from the depth; added (ONE, ONE) times the aerial transmittance, as the main pass added them before its aerial
+// perspective (AerialAt). Glass keeps its lights forward: drawn after this pass, over the lit world.
+Texture2D<float4> gGbufN      : register(t16);
+Texture2D<float4> gGbufAlbedo : register(t17);
+Texture2D<float>  gDepthTex   : register(t18);
+
+float4 VSFullscreen(uint id : SV_VertexID) : SV_Position
+{
+    const float2 uv = float2((id << 1) & 2, id & 2);
+    return float4(uv * float2(2.0, -2.0) + float2(-1.0, 1.0), 0.0, 1.0);
+}
+
+float4 PSDeferredLights(float4 pos : SV_Position) : SV_Target
+{
+    const int3 px = int3(pos.xy, 0);
+    const float4 n = gGbufN.Load(px);
+    const float kind = round(n.w * 3.0);
+    if (kind < 0.5) return float4(0.0, 0.0, 0.0, 0.0);   // no surface: the sky, glass, a debug view
+    const float roughness = n.z;
+    const float4 am = gGbufAlbedo.Load(px);
+    const float2 ndc = float2(pos.x * gInvScreen.x * 2.0 - 1.0, 1.0 - pos.y * gInvScreen.y * 2.0);
+    const float4 hp = mul(float4(ndc, gDepthTex.Load(px), 1.0), gInvViewProj);
+    const float3 p = hp.xyz / hp.w;
+    const bool physical = gPhysical > 0.5 && gEnvReady > 0.5;
+    const float3 N = AtmOctDecode(n.xy);
+    const float3 V = normalize(gCamPos - p);
+    const float3 lf0 = lerp(float3(0.04, 0.04, 0.04), am.rgb, am.a);
+    const float3 ldiff = am.rgb * (1.0 - am.a) * (physical ? 1.0 / 3.14159265 : 1.0);
+    const float la = max(0.002, roughness * roughness);
+    const float lspec = physical ? 1.0 : 3.14159265;
+    const bool foliage = kind > 1.5;
+    const float3 L = LocalLights(p, N, V, ldiff, lf0, la, lspec, pos.xy, foliage ? kFoliageWrap : 0.0, !foliage);
+    float3 tr = float3(1.0, 1.0, 1.0), inscatter;
+    if (gAerial > 0.5)
+    {
+        AtmSetWeather(gCloud, gFogBeta, gFogH, dot(gGroundColour, float3(0.3333, 0.3333, 0.3333)));
+        AerialAt(p, pos.xy, tr, inscatter);
+    }
+    return float4(L * tr, 0.0);
+}
 )";
 
 // The shader above carries its own copy of the flag, because a raw string
@@ -1342,6 +1451,7 @@ struct CameraCB
     float prevViewProj[16];
     float clusterParams[4];
     float lightsOn, lightsVisOn, lightPad[2];
+    float invViewProj[16];
 };
 static_assert(sizeof(CameraCB) % 16 == 0,
               "CameraCB must be a whole number of float4 registers - see the note above");
@@ -1494,6 +1604,34 @@ void Mul4x4(const float* a, const float* b, float* out)
             for (int k = 0; k < 4; ++k) sum += a[r*4+k] * b[k*4+c];
             out[r*4+c] = sum;
         }
+}
+
+// General 4x4 inverse (the view-projection is not affine), by cofactors - kept local as aerial.cpp, rt.cpp and
+// post.cpp keep theirs. False if singular.
+bool Invert4x4(const float* m, float* out)
+{
+    float inv[16];
+    inv[0]  =  m[5]*m[10]*m[15] - m[5]*m[11]*m[14] - m[9]*m[6]*m[15] + m[9]*m[7]*m[14] + m[13]*m[6]*m[11] - m[13]*m[7]*m[10];
+    inv[4]  = -m[4]*m[10]*m[15] + m[4]*m[11]*m[14] + m[8]*m[6]*m[15] - m[8]*m[7]*m[14] - m[12]*m[6]*m[11] + m[12]*m[7]*m[10];
+    inv[8]  =  m[4]*m[9]*m[15]  - m[4]*m[11]*m[13] - m[8]*m[5]*m[15] + m[8]*m[7]*m[13] + m[12]*m[5]*m[11] - m[12]*m[7]*m[9];
+    inv[12] = -m[4]*m[9]*m[14]  + m[4]*m[10]*m[13] + m[8]*m[5]*m[14] - m[8]*m[6]*m[13] - m[12]*m[5]*m[10] + m[12]*m[6]*m[9];
+    inv[1]  = -m[1]*m[10]*m[15] + m[1]*m[11]*m[14] + m[9]*m[2]*m[15] - m[9]*m[3]*m[14] - m[13]*m[2]*m[11] + m[13]*m[3]*m[10];
+    inv[5]  =  m[0]*m[10]*m[15] - m[0]*m[11]*m[14] - m[8]*m[2]*m[15] + m[8]*m[3]*m[14] + m[12]*m[2]*m[11] - m[12]*m[3]*m[10];
+    inv[9]  = -m[0]*m[9]*m[15]  + m[0]*m[11]*m[13] + m[8]*m[1]*m[15] - m[8]*m[3]*m[13] - m[12]*m[1]*m[11] + m[12]*m[3]*m[9];
+    inv[13] =  m[0]*m[9]*m[14]  - m[0]*m[10]*m[13] - m[8]*m[1]*m[14] + m[8]*m[2]*m[13] + m[12]*m[1]*m[10] - m[12]*m[2]*m[9];
+    inv[2]  =  m[1]*m[6]*m[15]  - m[1]*m[7]*m[14]  - m[5]*m[2]*m[15] + m[5]*m[3]*m[14] + m[13]*m[2]*m[7]  - m[13]*m[3]*m[6];
+    inv[6]  = -m[0]*m[6]*m[15]  + m[0]*m[7]*m[14]  + m[4]*m[2]*m[15] - m[4]*m[3]*m[14] - m[12]*m[2]*m[7]  + m[12]*m[3]*m[6];
+    inv[10] =  m[0]*m[5]*m[15]  - m[0]*m[7]*m[13]  - m[4]*m[1]*m[15] + m[4]*m[3]*m[13] + m[12]*m[1]*m[7]  - m[12]*m[3]*m[5];
+    inv[14] = -m[0]*m[5]*m[14]  + m[0]*m[6]*m[13]  + m[4]*m[1]*m[14] - m[4]*m[2]*m[13] - m[12]*m[1]*m[6]  + m[12]*m[2]*m[5];
+    inv[3]  = -m[1]*m[6]*m[11]  + m[1]*m[7]*m[10]  + m[5]*m[2]*m[11] - m[5]*m[3]*m[10] - m[9]*m[2]*m[7]   + m[9]*m[3]*m[6];
+    inv[7]  =  m[0]*m[6]*m[11]  - m[0]*m[7]*m[10]  - m[4]*m[2]*m[11] + m[4]*m[3]*m[10] + m[8]*m[2]*m[7]   - m[8]*m[3]*m[6];
+    inv[11] = -m[0]*m[5]*m[11]  + m[0]*m[7]*m[9]   + m[4]*m[1]*m[11] - m[4]*m[3]*m[9]  - m[8]*m[1]*m[7]   + m[8]*m[3]*m[5];
+    inv[15] =  m[0]*m[5]*m[10]  - m[0]*m[6]*m[9]   - m[4]*m[1]*m[10] + m[4]*m[2]*m[9]  + m[8]*m[1]*m[6]   - m[8]*m[2]*m[5];
+    const double det = (double)m[0] * inv[0] + (double)m[1] * inv[4] + (double)m[2] * inv[8] + (double)m[3] * inv[12];
+    if (det == 0.0) return false;
+    const float r = (float)(1.0 / det);
+    for (int i = 0; i < 16; ++i) out[i] = inv[i] * r;
+    return true;
 }
 
 #include "textures.inl"
@@ -2809,7 +2947,7 @@ bool Scene::CreateDepth(ID3D12Device* dev, UINT width, UINT height)
     {
         D3D12_DESCRIPTOR_HEAP_DESC hd = {};
         hd.Type = D3D12_DESCRIPTOR_HEAP_TYPE_DSV;
-        hd.NumDescriptors = 1;
+        hd.NumDescriptors = 2;                   // the depth, and its read-only view (the deferred lights)
         if (FAILED(dev->CreateDescriptorHeap(&hd, IID_PPV_ARGS(&m_dsvHeap))))
             return false;
     }
@@ -2875,6 +3013,41 @@ bool Scene::CreateDepth(ID3D12Device* dev, UINT width, UINT height)
     dev->CreateRenderTargetView(m_motion.Get(), nullptr, rtvs);
     rtvs.ptr += m_prepassRtvStride;
     dev->CreateRenderTargetView(m_plantTarget.Get(), nullptr, rtvs);
+
+    // The deferred local lights' surface (kGbufFormats), and the depth's READ-ONLY view: in that pass and the glass
+    // after it the depth is read (and tested) while bound, so no writes.
+    if (!m_gbufRtvHeap)
+    {
+        D3D12_DESCRIPTOR_HEAP_DESC hd = {};
+        hd.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
+        hd.NumDescriptors = 2;
+        if (FAILED(dev->CreateDescriptorHeap(&hd, IID_PPV_ARGS(&m_gbufRtvHeap))))
+            return false;
+    }
+    D3D12_CPU_DESCRIPTOR_HANDLE grtv = m_gbufRtvHeap->GetCPUDescriptorHandleForHeapStart();
+    for (int k = 0; k < 2; ++k)
+    {
+        D3D12_RESOURCE_DESC gd = nd;
+        gd.Format = kGbufFormats[k];
+        D3D12_CLEAR_VALUE gclear = {};
+        gclear.Format = kGbufFormats[k];
+        m_gbuf[k].Reset();
+        if (FAILED(dev->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &gd,
+                                                D3D12_RESOURCE_STATE_RENDER_TARGET,
+                                                &gclear, IID_PPV_ARGS(&m_gbuf[k]))))
+        {
+            Log("scene: deferred lights' target creation failed");
+            return false;
+        }
+        dev->CreateRenderTargetView(m_gbuf[k].Get(), nullptr, grtv);
+        grtv.ptr += m_prepassRtvStride;
+    }
+    D3D12_DEPTH_STENCIL_VIEW_DESC rdsv = dsv;
+    rdsv.Flags = D3D12_DSV_FLAG_READ_ONLY_DEPTH;
+    D3D12_CPU_DESCRIPTOR_HANDLE ro = m_dsvHeap->GetCPUDescriptorHandleForHeapStart();
+    m_dsvStride = dev->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_DSV);
+    ro.ptr += m_dsvStride;
+    dev->CreateDepthStencilView(m_depth.Get(), &rdsv, ro);
     return true;
 }
 
@@ -3382,8 +3555,9 @@ bool Scene::LoadFromMemory(ID3D12Device* dev, ID3D12CommandQueue* queue,
     // heap - one table, because this root signature is near its 64-DWORD limit and three root SRVs would pass it.
     static D3D12_DESCRIPTOR_RANGE lightRange = {};
     lightRange.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
-    lightRange.NumDescriptors = 4;
-    lightRange.BaseShaderRegister = 12;          // t12 lights, t13 clusters, t14 indices, t15 the RT fraction
+    lightRange.NumDescriptors = 7;
+    lightRange.BaseShaderRegister = 12;          // t12 lights, t13 clusters, t14 indices, t15 the RT fraction,
+                                                 // t16-t18 the deferred pass's surface and depth (PSDeferredLights)
     params[11].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
     params[11].DescriptorTable.NumDescriptorRanges = 1;
     params[11].DescriptorTable.pDescriptorRanges = &lightRange;
@@ -3480,29 +3654,34 @@ bool Scene::LoadFromMemory(ID3D12Device* dev, ID3D12CommandQueue* queue,
 
     enum Variant { kOpaque, kAlphaTest, kBlend };
     bool dxil = m_dxc.Load();
-    auto compile = [&](const char* entry, bool vertex, Variant v) -> ComPtr<ID3DBlob> {
+    // `gbuf`: the variant that leaves the surface for the deferred local lights (Shade, PSDeferredLights).
+    auto compile = [&](const char* entry, bool vertex, Variant v, bool gbuf = false) -> ComPtr<ID3DBlob> {
         if (dxil)
         {
             const std::wstring we(entry, entry + strlen(entry));
-            const wchar_t* model = vertex ? L"vs_6_0" : L"ps_6_0";
-            if (v == kOpaque) return m_dxc.Compile(src, we.c_str(), model, "ngg_scene", { L"-HV", L"2018" });
-            return m_dxc.Compile(src, we.c_str(), model, "ngg_scene",
-                                 { L"-HV", L"2018", v == kAlphaTest ? L"-DALPHA_TEST=1" : L"-DBLEND=1" });
+            std::vector<const wchar_t*> args = { L"-HV", L"2018" };
+            if (v == kAlphaTest) args.push_back(L"-DALPHA_TEST=1");
+            if (v == kBlend) args.push_back(L"-DBLEND=1");
+            if (gbuf) args.push_back(L"-DGBUF=1");
+            return m_dxc.Compile(src, we.c_str(), vertex ? L"vs_6_0" : L"ps_6_0", "ngg_scene", args);
         }
-        const D3D_SHADER_MACRO alphaTestDefs[] = { { "ALPHA_TEST", "1" }, { nullptr, nullptr } };
-        const D3D_SHADER_MACRO blendDefs[] = { { "BLEND", "1" }, { nullptr, nullptr } };
+        std::vector<D3D_SHADER_MACRO> defs;
+        if (v == kAlphaTest) defs.push_back({ "ALPHA_TEST", "1" });
+        if (v == kBlend) defs.push_back({ "BLEND", "1" });
+        if (gbuf) defs.push_back({ "GBUF", "1" });
+        defs.push_back({ nullptr, nullptr });
         ComPtr<ID3DBlob> out, e;
-        if (FAILED(D3DCompile(src.c_str(), src.size(), "ngg_scene",
-                              v == kAlphaTest ? alphaTestDefs : v == kBlend ? blendDefs : nullptr, nullptr, entry,
+        if (FAILED(D3DCompile(src.c_str(), src.size(), "ngg_scene", defs.data(), nullptr, entry,
                               vertex ? "vs_5_1" : "ps_5_1", flags, 0, &out, &e)))
         {
-            Log("scene: %s (%s) compile: %s", entry, v == kAlphaTest ? "alpha-test" : v == kBlend ? "blend" : "opaque",
-                e ? (const char*)e->GetBufferPointer() : "?");
+            Log("scene: %s (%s%s) compile: %s", entry, v == kAlphaTest ? "alpha-test" : v == kBlend ? "blend" : "opaque",
+                gbuf ? ", deferred" : "", e ? (const char*)e->GetBufferPointer() : "?");
             return nullptr;
         }
         return out;
     };
     ComPtr<ID3DBlob> vs, ps, psAlpha, psBlend, psPre, psPreAlpha, psShadowAlpha;   // (the opaque shadow pass: no PS)
+    ComPtr<ID3DBlob> psG, psAlphaG, vsFull, psDeferred;                              // the deferred local lights
     auto compileAll = [&]() {
         vs = compile("VSMain", true, kOpaque);
         ps = compile("PSMain", false, kOpaque);
@@ -3511,7 +3690,12 @@ bool Scene::LoadFromMemory(ID3D12Device* dev, ID3D12CommandQueue* queue,
         psPre = compile("PSPrepass", false, kOpaque);
         psPreAlpha = compile("PSPrepass", false, kAlphaTest);
         psShadowAlpha = compile("PSShadow", false, kAlphaTest);
-        return vs && ps && psAlpha && psBlend && psPre && psPreAlpha && psShadowAlpha;
+        psG = compile("PSMain", false, kOpaque, true);
+        psAlphaG = compile("PSMain", false, kAlphaTest, true);
+        vsFull = compile("VSFullscreen", true, kOpaque);
+        psDeferred = compile("PSDeferredLights", false, kOpaque);
+        return vs && ps && psAlpha && psBlend && psPre && psPreAlpha && psShadowAlpha &&
+               psG && psAlphaG && vsFull && psDeferred;
     };
     if (!compileAll() && dxil)
     {
@@ -3678,6 +3862,50 @@ bool Scene::LoadFromMemory(ID3D12Device* dev, ID3D12CommandQueue* queue,
             if (FAILED(dev->CreateGraphicsPipelineState(&cp, IID_PPV_ARGS(&m_psoCulled[0][alpha][c]))))
                 Log("scene: culled PSO creation failed - drawn two-sided");
         }
+
+    // THE DEFERRED LOCAL LIGHTS (PSDeferredLights): the opaque world's pipelines again with the surface's three targets
+    // (the GBUF variants, used while there are local lights), and the full-screen pass that lights it - added (ONE,
+    // ONE) into the HDR target, the depth read through its read-only view, not tested.
+    m_deferredReady = false;
+    if (psG && psAlphaG && vsFull && psDeferred)
+    {
+        D3D12_GRAPHICS_PIPELINE_STATE_DESC gp = pso;
+        gp.NumRenderTargets = 3;
+        for (int k = 0; k < 2; ++k) gp.RTVFormats[1 + k] = kGbufFormats[k];
+        bool ok = true;
+        gp.PS = { psG->GetBufferPointer(), psG->GetBufferSize() };
+        ok = ok && SUCCEEDED(dev->CreateGraphicsPipelineState(&gp, IID_PPV_ARGS(&m_psoG)));
+        gp.PS = { psAlphaG->GetBufferPointer(), psAlphaG->GetBufferSize() };
+        ok = ok && SUCCEEDED(dev->CreateGraphicsPipelineState(&gp, IID_PPV_ARGS(&m_psoAlphaTestG)));
+        for (int alpha = 0; alpha < 2; ++alpha)
+            for (int c = 0; c < 2; ++c)
+            {
+                gp.PS = alpha ? D3D12_SHADER_BYTECODE{ psAlphaG->GetBufferPointer(), psAlphaG->GetBufferSize() }
+                              : D3D12_SHADER_BYTECODE{ psG->GetBufferPointer(), psG->GetBufferSize() };
+                gp.RasterizerState.CullMode = c ? D3D12_CULL_MODE_FRONT : D3D12_CULL_MODE_BACK;
+                ok = ok && SUCCEEDED(dev->CreateGraphicsPipelineState(&gp, IID_PPV_ARGS(&m_psoCulledG[alpha][c])));
+            }
+
+        D3D12_GRAPHICS_PIPELINE_STATE_DESC dp = pso;
+        dp.InputLayout = { nullptr, 0 };
+        dp.VS = { vsFull->GetBufferPointer(), vsFull->GetBufferSize() };
+        dp.PS = { psDeferred->GetBufferPointer(), psDeferred->GetBufferSize() };
+        dp.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
+        dp.DepthStencilState.DepthEnable = FALSE;
+        dp.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ZERO;
+        D3D12_RENDER_TARGET_BLEND_DESC& b = dp.BlendState.RenderTarget[0];
+        b.BlendEnable = TRUE;
+        b.SrcBlend = D3D12_BLEND_ONE;
+        b.DestBlend = D3D12_BLEND_ONE;
+        b.BlendOp = D3D12_BLEND_OP_ADD;
+        b.SrcBlendAlpha = D3D12_BLEND_ZERO;
+        b.DestBlendAlpha = D3D12_BLEND_ONE;
+        b.BlendOpAlpha = D3D12_BLEND_OP_ADD;
+        ok = ok && SUCCEEDED(dev->CreateGraphicsPipelineState(&dp, IID_PPV_ARGS(&m_psoDeferred)));
+        m_deferredReady = ok;
+    }
+    if (!m_deferredReady)
+        Log("scene: the deferred local lights' pipelines failed - the lights shaded in the main pass");
 
     // The blended materials (glass): over everything opaque, PREMULTIPLIED (the shader scales the tint's light by its
     // coverage and leaves the reflection whole), tested against the opaque depth but not writing it - what is behind
@@ -5363,6 +5591,7 @@ void Scene::RecordPass(ID3D12GraphicsCommandList* list, D3D12_CPU_DESCRIPTOR_HAN
     cb.clusterParams[3] = m_lights.SliceScale();
     cb.lightsOn    = (m_lightsReady && m_lights.Active()) ? 1.0f : 0.0f;
     cb.lightsVisOn = (cb.lightsOn > 0.5f && m_rtLights) ? 1.0f : 0.0f;
+    if (!Invert4x4(m_lastViewProjJittered, cb.invViewProj)) memset(cb.invViewProj, 0, sizeof(cb.invViewProj));
 
     // Last frame's timings. The frame is synchronous (see the note at the end
     // of this function), so last frame's queries have certainly resolved.
@@ -5472,9 +5701,28 @@ void Scene::RecordPass(ID3D12GraphicsCommandList* list, D3D12_CPU_DESCRIPTOR_HAN
     }
 
     D3D12_CPU_DESCRIPTOR_HANDLE dsv = m_dsvHeap->GetCPUDescriptorHandleForHeapStart();
+    // THE DEFERRED LOCAL LIGHTS (PSDeferredLights) while there are local lights: the opaque world leaves its surface
+    // in three more targets, the lights are added after it, once per pixel. Not under a debug view (its false colour
+    // is not a surface to light).
+    // NGG_FORWARD_LIGHTS: the lights shaded in the main pass instead - the A/B for this pass's picture and cost.
+    static const bool forwardLights = std::getenv("NGG_FORWARD_LIGHTS") != nullptr;
+    const bool deferred = !prepass && m_deferredReady && cb.lightsOn > 0.5f && m_debugMode == 0 && !forwardLights;
     // The prepass writes three targets, normal, motion and plant, adjacent in
     // their heap - so `rtv` is the start of a three-descriptor range there.
-    list->OMSetRenderTargets(prepass ? 3 : 1, &rtv, prepass ? TRUE : FALSE, &dsv);
+    if (deferred)
+    {
+        D3D12_CPU_DESCRIPTOR_HANDLE targets[3] = { rtv };
+        for (int k = 0; k < 2; ++k)
+        {
+            targets[1 + k] = m_gbufRtvHeap->GetCPUDescriptorHandleForHeapStart();
+            targets[1 + k].ptr += (SIZE_T)k * m_prepassRtvStride;
+        }
+        list->OMSetRenderTargets(3, targets, FALSE, &dsv);
+        const float none[4] = { 0.0f, 0.0f, 0.0f, 0.0f };   // kind 0: no surface (the sky)
+        list->ClearRenderTargetView(targets[1], none, 0, nullptr);
+    }
+    else
+        list->OMSetRenderTargets(prepass ? 3 : 1, &rtv, prepass ? TRUE : FALSE, &dsv);
     // Depth is cleared by whichever pass comes FIRST this frame. After a
     // prepass the main pass must keep it: that depth is what it tests EQUAL
     // against, and what the ray tracer already traced from.
@@ -5647,6 +5895,19 @@ void Scene::RecordPass(ID3D12GraphicsCommandList* list, D3D12_CPU_DESCRIPTOR_HAN
                 D3D12_CPU_DESCRIPTOR_HANDLE th = at;
                 th.ptr += (SIZE_T)3 * m_srvStride;
                 d->CreateShaderResourceView(m_rtLights, &td, th);
+                // The deferred pass's surface (t16, t17) and the depth (t18).
+                for (int k = 0; k < 3; ++k)
+                {
+                    ID3D12Resource* r = k < 2 ? m_gbuf[k].Get() : m_depth.Get();
+                    D3D12_SHADER_RESOURCE_VIEW_DESC gd = {};
+                    gd.Format = k < 2 ? kGbufFormats[k] : DXGI_FORMAT_R32_FLOAT;
+                    gd.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+                    gd.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+                    gd.Texture2D.MipLevels = 1;
+                    D3D12_CPU_DESCRIPTOR_HANDLE gh = at;
+                    gh.ptr += (SIZE_T)(4 + k) * m_srvStride;
+                    d->CreateShaderResourceView(r, &gd, gh);
+                }
                 d->Release();
             }
             D3D12_GPU_DESCRIPTOR_HANDLE lh = m_srvHeap->GetGPUDescriptorHandleForHeapStart();
@@ -5806,8 +6067,39 @@ void Scene::RecordPass(ID3D12GraphicsCommandList* list, D3D12_CPU_DESCRIPTOR_HAN
         if (!(matFlags & kMaterialTwoSided))
             if (ID3D12PipelineState* c = m_psoCulled[prepass ? 1 : 0][wantAlphaTest ? 1 : 0][Mirrors(o.xform) ? 1 : 0].Get())
                 want = c;
+        if (deferred)
+        {
+            want = wantAlphaTest ? m_psoAlphaTestG.Get() : m_psoG.Get();
+            if (!(matFlags & kMaterialTwoSided))
+                want = m_psoCulledG[wantAlphaTest ? 1 : 0][Mirrors(o.xform) ? 1 : 0].Get();
+        }
         draw(o, want);
     }
+
+    // The deferred local lights, over the opaque world and under the glass: the surface's targets and the depth to
+    // shader resources, the depth bound read-only (the glass still tests it), one full-screen triangle.
+    D3D12_RESOURCE_BARRIER deferredBarriers[3] = {};
+    if (deferred)
+    {
+        for (int k = 0; k < 3; ++k)
+        {
+            D3D12_RESOURCE_BARRIER& b = deferredBarriers[k];
+            b.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+            b.Transition.pResource = k < 2 ? m_gbuf[k].Get() : m_depth.Get();
+            b.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+            b.Transition.StateBefore = k < 2 ? D3D12_RESOURCE_STATE_RENDER_TARGET : D3D12_RESOURCE_STATE_DEPTH_WRITE;
+            b.Transition.StateAfter = k < 2 ? D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE
+                                            : D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_DEPTH_READ;
+        }
+        list->ResourceBarrier(3, deferredBarriers);
+        D3D12_CPU_DESCRIPTOR_HANDLE roDsv = dsv;
+        roDsv.ptr += m_dsvStride;
+        list->OMSetRenderTargets(1, &rtv, FALSE, &roDsv);
+        list->SetPipelineState(m_psoDeferred.Get());
+        bound = m_psoDeferred.Get();
+        list->DrawInstanced(3, 1, 0, 0);
+    }
+
     // The glass, over the opaque world (and the sky, drawn before this pass), far to near.
     std::sort(blended.begin(), blended.end(),
               [](const std::pair<float, const DrawItem*>& a, const std::pair<float, const DrawItem*>& b) { return a.first > b.first; });
@@ -5817,6 +6109,12 @@ void Scene::RecordPass(ID3D12GraphicsCommandList* list, D3D12_CPU_DESCRIPTOR_HAN
         const uint32_t matFlags = m_materials[o->materialId].flags;
         const int cull = (matFlags & kMaterialTwoSided) ? 0 : Mirrors(o->xform) ? 2 : 1;
         draw(*o, m_psoBlend[cull] ? m_psoBlend[cull].Get() : m_psoBlend[0].Get());
+    }
+    if (deferred)
+    {
+        for (D3D12_RESOURCE_BARRIER& b : deferredBarriers)
+            std::swap(b.Transition.StateBefore, b.Transition.StateAfter);
+        list->ResourceBarrier(3, deferredBarriers);
     }
 
     if (prepass)
@@ -6087,7 +6385,7 @@ bool Scene::RebuildSrvHeap(ID3D12Device* dev)
     // cannot live in a heap of its own.
     // +2: the shadow cascade array and the label font both share this heap,
     // because only one CBV/SRV/UAV heap can be bound at a time.
-    hd.NumDescriptors = (UINT)(pairs * kMaterialSrvCount + 13);
+    hd.NumDescriptors = (UINT)(pairs * kMaterialSrvCount + 16);
     m_shadowSrvSlot = (UINT)(pairs * kMaterialSrvCount);
     m_fontSrvSlot = (UINT)(pairs * kMaterialSrvCount + 1);
     m_envSrvSlot  = (UINT)(pairs * kMaterialSrvCount + 2);
@@ -6096,7 +6394,7 @@ bool Scene::RebuildSrvHeap(ID3D12Device* dev)
     m_aerialSrvSlot = (UINT)(pairs * kMaterialSrvCount + 5);   // and +6
     m_irrSrvSlot    = (UINT)(pairs * kMaterialSrvCount + 7);
     m_msSrvSlot     = (UINT)(pairs * kMaterialSrvCount + 8);
-    m_lightSrvSlot  = (UINT)(pairs * kMaterialSrvCount + 9);    // and +10, +11, +12 (lights.h)
+    m_lightSrvSlot  = (UINT)(pairs * kMaterialSrvCount + 9);    // and +10 .. +15 (lights.h, the deferred pass)
     hd.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
     if (FAILED(dev->CreateDescriptorHeap(&hd, IID_PPV_ARGS(&m_srvHeap))))
     {

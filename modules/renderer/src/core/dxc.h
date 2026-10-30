@@ -26,8 +26,8 @@
 #include <windows.h>
 #include <d3d12.h>
 #include <wrl/client.h>
-#include <initializer_list>
 #include <string>
+#include <vector>
 
 namespace ngg {
 namespace core {
@@ -49,7 +49,7 @@ public:
                                              const wchar_t* entry,
                                              const wchar_t* target,
                                              const char* nameForLog,
-                                             std::initializer_list<const wchar_t*> extra = {});
+                                             const std::vector<const wchar_t*>& extra = {});
 
 private:
     HMODULE m_dll = nullptr;

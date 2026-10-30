@@ -537,7 +537,8 @@ StageEnd RunStage(Shell& sh, const Options& o, bool fromMenu, std::string& error
                 lines.emplace_back(b);
             };
             static const char* const kQuality[] = {"low", "medium", "high"};
-            line("%.1f fps   %ux%u   gpu main %.2f ms (env %.2f, aerial fill %.2f)", fpsSmooth, shownWidth, shownHeight, st.passMs,
+            line("%.1f fps   %ux%u   gpu frame %.2f ms, main %.2f ms (env %.2f, aerial fill %.2f)", fpsSmooth, shownWidth,
+                 shownHeight, st.frameMs, st.passMs,
                  st.envMs, st.aerialMs);
             line("tick %u%s   camera %d   chase %.1f m%s", snap.tick, paused ? " PAUSED" : "", cameraMode, chaseDistance,
                  o.fixedStep > 0.0 ? "   fixed step" : "");

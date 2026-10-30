@@ -3070,13 +3070,34 @@ Four decisions, the user's:
       in the loop). Not memory: scalar loads changed nothing measurable, nor did the cone culling (in the test view
       the three lights do reach most of the screen) or the cheaper arithmetic: three lights still add ~3 ms to the
       main pass at 1080p on the 780M (7.3 -> 10.1-10.6 ms).
-    - **Open - the remedy is fewer fragments per light, not cheaper loads:** the local lights out of the main pass
-      into one full-screen pass after it (deferred: per PIXEL once, no overdraw and no 2x2 quads' helper lanes, a
-      small shader at full occupancy), from the material the main pass leaves in a target (diffuse colour, f0,
-      roughness) and the prepass's normals, times the aerial transmittance. Geometry LOD (foliage cards above all)
-      cuts the overdraw for everything the main pass shades, the lights included. Decided with the user before N3.
+    - The remedy is fewer fragments per light, not cheaper loads: N2c.
     - PIX: per-draw timings work only with GPU plugins disabled - with AMD's counter plugin the replay hung the GPU
       (TDR, three times).
+  - **N2c - DONE 2026-10-31: the deferred local lights.** The opaque world's lights are shaded after it, once per
+    PIXEL, by one full-screen pass (`PSDeferredLights`) - in the main pass they were shaded per FRAGMENT, foliage's
+    overdraw and every 2x2 quad's helper lanes included.
+    - While there are local lights the opaque and alpha-tested draws use GBUF variants of their pipelines, which
+      leave the surface in two 32-bit targets: R10G10B10A2 (the shading normal octahedral, roughness, the kind:
+      opaque, or a foliage card - wrapped cosine, no highlight) and R8G8B8A8 sRGB (albedo, metallic). A first
+      version with a third target (the aerial transmittance) and the normal in half floats cost the opaque world
+      +3.8 ms in PIX's replay; packed, +0.3. The transmittance is computed again in the pass (`AerialAt`, the
+      scene pass's own, now one function).
+    - The pass runs under the scene's root signature (its light table grows by the two targets and the depth),
+      reads the depth through a READ-ONLY depth view, rebuilds the position with the jittered view-projection's
+      inverse and calls the same `LocalLights`; added (ONE, ONE) times the transmittance. Glass stays forward,
+      drawn after the pass, over the lit world. Day (no local lights): the old pipelines, nothing written or run.
+    - The picture: against the forward lights at most 4/255 (the 10-bit normal), mean 0.12/255; without lights
+      night identical, noon 1/255 on 0.1% of the pixels (rounding). `NGG_FORWARD_LIGHTS` shades them in the main
+      pass instead - the A/B.
+    - **The cost, by the whole frame's GPU time** (`RenderStats::frameMs`, renderer interface 7, in the readout as
+      "gpu frame"; 1080p, the 780M, the three test lights over the whole screen): no lights 21.8-22.7 ms, forward
+      29.3-33.1, deferred 27.2-27.9 - the lights' shading now ~1.2 ms of the +5.3, the rest their rays (3.1) and
+      denoising (0.8). PIX's replay: the opaque world 19.44 ms without lights, 25.88 forward, 19.71 deferred, the
+      pass 0.89.
+    - **Measuring, learned the hard way:** a pass's own timestamps do not isolate it on this GPU - "gpu main" kept
+      reading +3.7 ms with the lights shaded forward or deferred alike, and a timestamp pair round the deferred
+      draw read 0.00 ms. The frame's first-to-last time is the measure; PIX's per-draw replay (`NGG_PIX`) the
+      breakdown. The vsync quantises fps (30 or 20), so fps says nothing either.
   - **Lessons.** A buffer the shaders read from the UPLOAD heap is CPU-visible memory the GPU barely caches -
     copy to a default-heap buffer (no gain measured here, but it is the rule). A struct copied from a buffer and
     indexed by a variable (the profile) is an indexable temporary, i.e. scratch memory (~1.5 ms per light): read
