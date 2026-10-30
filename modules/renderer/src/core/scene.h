@@ -747,6 +747,9 @@ private:
     // The above with back faces culled, for the one-sided materials:
     // [prepass][alpha test][mirroring transform]. Null: drawn two-sided.
     Microsoft::WRL::ComPtr<ID3D12PipelineState>  m_psoCulled[2][2][2];
+    // The main pass's foliage after a prepass: the prepass's depth tested, not written, so tested BEFORE the shader
+    // despite its clip(). [forward, deferred][cull] none (two-sided), back, front (a mirroring transform).
+    Microsoft::WRL::ComPtr<ID3D12PipelineState>  m_psoAlphaKept[2][3];
     // The blended materials' (kMaterialBlend, glass), drawn after the opaque: [cull] none (two-sided), back, front
     // (a mirroring transform). Premultiplied (ONE, INV_SRC_ALPHA), depth tested, not written.
     Microsoft::WRL::ComPtr<ID3D12PipelineState>  m_psoBlend[3];
@@ -762,6 +765,10 @@ private:
     Microsoft::WRL::ComPtr<ID3D12PipelineState>  m_psoG, m_psoAlphaTestG, m_psoCulledG[2][2], m_psoDeferred;
     bool                     m_deferredReady = false;
     UINT                     m_dsvStride = 0;                   // the read-only depth view is the DSV heap's second
+    // A pass's opaque draws in the order they are drawn (RecordPass: the solid, then the alpha-tested, each near to
+    // far); kept to reuse its storage.
+    struct DrawOrder { bool alphaTest; float d2; const DrawItem* item; };
+    std::vector<DrawOrder>   m_drawOrder;
     UINT                     m_prepassRtvStride = 0;
     bool                     m_prepassThisFrame = false;
     int                      m_shadowSource = 0;

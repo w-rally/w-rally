@@ -299,8 +299,10 @@ StageEnd RunStage(Shell& sh, const Options& o, bool fromMenu, std::string& error
     LARGE_INTEGER freq, last, now, fpsLast{};
     QueryPerformanceFrequency(&freq);
     int shots = 0;
-    // PHYS_DRIVE_OFF=taa,ao,shadows,rt: any of them off from the start, as the keys would.
+    // PHYS_DRIVE_OFF=taa,ao,shadows,rt: any of them off from the start, as the keys would; vsync, the GPU's frame time
+    // measured at full clock (with the frame capped by the display, an integrated GPU clocks down into the slack).
     if (const char* off = std::getenv("PHYS_DRIVE_OFF")) {
+        if (std::strstr(off, "vsync")) settings.vsync = 0;
         if (std::strstr(off, "taa")) settings.taa = 0, taa = false;
         if (std::strstr(off, "ao")) settings.quality = 0, ao = false;
         if (std::strstr(off, "shadows")) settings.shadows = 0, shadows = false;

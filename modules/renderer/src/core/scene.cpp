@@ -1203,6 +1203,10 @@ float4 Shade(VSOut i, bool frontFace, out GBufOut g)
     // SV_Position is the pixel CENTRE - 812.5 for pixel 812 - so comparing
     // against the integer with a 0.5 tolerance never matched and the probe
     // silently reported zeros. Truncate both sides instead.
+    //
+    // Not in the alpha-tested variant: a UAV write makes the depth test wait for
+    // the shader (PSMain), and that variant cannot be told otherwise - it clips.
+#if !defined(ALPHA_TEST)
     if (gProbeOn > 0.5 && all(uint2(i.pos.xy) == uint2(gProbePixel)))
     {
         gProbe[0] = float4(albedo, weight);
@@ -1230,6 +1234,7 @@ float4 Shade(VSOut i, bool frontFace, out GBufOut g)
         // paid for once, in the first version of the transform test.
         gProbe[15] = float4(1.0, 0.0, 0.0, 0.0);
     }
+#endif
 
     // Debug views. Each isolates ONE input, so an artefact can be attributed
     // instead of guessed at: if the road seams survive in "tex0 only" they come
@@ -1328,6 +1333,17 @@ float4 Shade(VSOut i, bool frontFace, out GBufOut g)
 #endif
 }
 
+// THE DEPTH TEST BEFORE THE SHADER. The probe's UAV write (Shade) makes the default a test AFTER it - every fragment
+// the rasteriser makes ran the whole shader and only then failed: 6.4 per pixel on stage 41 at 1080p, with the
+// prepass's depth to test against or without (PIX's PS invocations, design 5.4 N2d). [earlydepthstencil] restores it
+// where it is exact - no clip, no SV_Depth, so testing and writing before the shader gives the same depth; the
+// alpha-tested variant clips, so it leaves out the probe instead and the driver tests early on its own.
+#if defined(ALPHA_TEST)
+#define NGG_EARLY_DEPTH
+#else
+#define NGG_EARLY_DEPTH [earlydepthstencil]
+#endif
+
 #if defined(GBUF)
 struct PSOutG
 {
@@ -1335,6 +1351,7 @@ struct PSOutG
     float4 n      : SV_Target1;   // R10G10B10A2: the normal octahedral, roughness, kind / 3
     float4 albedo : SV_Target2;   // R8G8B8A8 sRGB: albedo, metallic
 };
+NGG_EARLY_DEPTH
 PSOutG PSMain(VSOut i, bool frontFace : SV_IsFrontFace)
 {
     GBufOut g;
@@ -1345,6 +1362,7 @@ PSOutG PSMain(VSOut i, bool frontFace : SV_IsFrontFace)
     return o;
 }
 #else
+NGG_EARLY_DEPTH
 float4 PSMain(VSOut i, bool frontFace : SV_IsFrontFace) : SV_Target
 {
     GBufOut g;
@@ -3904,6 +3922,33 @@ bool Scene::LoadFromMemory(ID3D12Device* dev, ID3D12CommandQueue* queue,
         ok = ok && SUCCEEDED(dev->CreateGraphicsPipelineState(&dp, IID_PPV_ARGS(&m_psoDeferred)));
         m_deferredReady = ok;
     }
+
+    // Foliage after a prepass: the depth is final, so the main pass tests it and does NOT write it - which lets the
+    // GPU test BEFORE the shader in spite of the clip(); a shader that may discard AND writes depth is tested after
+    // it, every card of a canopy running the whole shader first. [kind] forward, deferred (the GBUF targets);
+    // [cull] none (two-sided), back, front (a mirroring transform).
+    {
+        const D3D12_CULL_MODE culls[3] = { D3D12_CULL_MODE_NONE, D3D12_CULL_MODE_BACK, D3D12_CULL_MODE_FRONT };
+        for (int kind = 0; kind < 2; ++kind)
+        {
+            if (kind == 1 && !m_deferredReady) break;
+            D3D12_GRAPHICS_PIPELINE_STATE_DESC kp = pso;
+            kp.PS = kind ? D3D12_SHADER_BYTECODE{ psAlphaG->GetBufferPointer(), psAlphaG->GetBufferSize() }
+                         : D3D12_SHADER_BYTECODE{ psAlpha->GetBufferPointer(), psAlpha->GetBufferSize() };
+            if (kind)
+            {
+                kp.NumRenderTargets = 3;
+                for (int k = 0; k < 2; ++k) kp.RTVFormats[1 + k] = kGbufFormats[k];
+            }
+            kp.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ZERO;
+            for (int c = 0; c < 3; ++c)
+            {
+                kp.RasterizerState.CullMode = culls[c];
+                if (FAILED(dev->CreateGraphicsPipelineState(&kp, IID_PPV_ARGS(&m_psoAlphaKept[kind][c]))))
+                    Log("scene: alpha-test PSO over the prepass's depth failed - the depth-writing one instead");
+            }
+        }
+    }
     if (!m_deferredReady)
         Log("scene: the deferred local lights' pipelines failed - the lights shaded in the main pass");
 
@@ -6037,6 +6082,12 @@ void Scene::RecordPass(ID3D12GraphicsCommandList* list, D3D12_CPU_DESCRIPTOR_HAN
                      o.meshId ? m_dynVbv : m_vbv, o.meshId ? m_dynIbv : m_ibv);
         list->DrawIndexedInstanced(o.indexCount, 1, o.firstIndex, o.baseVertex, 0);
     };
+    // THE OPAQUE WORLD FRONT TO BACK - the solid first, the alpha-tested (foliage) after, each nearest first, by the
+    // distance to the nearest point of the box (0 inside it: the terrain the camera stands on). What is drawn first
+    // fills the depth, and what lies behind it fails the test BEFORE its pixel shader runs: without a prepass (no ray
+    // tracing) that is the main pass's overdraw, with one the prepass's; the main pass after a prepass shades each
+    // pixel once whatever the order. The stage's file order was arbitrary.
+    m_drawOrder.clear();
     for (const DrawItem& o : m_objects)
     {
         if (!o.visible) continue;              // editor hide; see SetObjectVisible
@@ -6061,7 +6112,22 @@ void Scene::RecordPass(ID3D12GraphicsCommandList* list, D3D12_CPU_DESCRIPTOR_HAN
             }
             continue;
         }
-        const bool wantAlphaTest = (matFlags & kMaterialAlphaTest) != 0;
+        float d2 = 0.0f;
+        for (int k = 0; k < 3; ++k)
+        {
+            const float c = (std::max)((std::max)(o.bmin[k] - camPos[k], camPos[k] - o.bmax[k]), 0.0f);
+            d2 += c * c;
+        }
+        m_drawOrder.push_back({ (matFlags & kMaterialAlphaTest) != 0, d2, &o });
+    }
+    std::sort(m_drawOrder.begin(), m_drawOrder.end(), [](const DrawOrder& a, const DrawOrder& b) {
+        return a.alphaTest != b.alphaTest ? b.alphaTest : a.d2 < b.d2;
+    });
+    for (const DrawOrder& d : m_drawOrder)
+    {
+        const DrawItem& o = *d.item;
+        const uint32_t matFlags = m_materials[o.materialId].flags;
+        const bool wantAlphaTest = d.alphaTest;
         ID3D12PipelineState* want = prepass ? (wantAlphaTest ? m_psoPrepassAlpha.Get() : m_psoPrepass.Get())
                                             : (wantAlphaTest ? m_psoAlphaTest.Get() : m_pso.Get());
         if (!(matFlags & kMaterialTwoSided))
@@ -6072,6 +6138,13 @@ void Scene::RecordPass(ID3D12GraphicsCommandList* list, D3D12_CPU_DESCRIPTOR_HAN
             want = wantAlphaTest ? m_psoAlphaTestG.Get() : m_psoG.Get();
             if (!(matFlags & kMaterialTwoSided))
                 want = m_psoCulledG[wantAlphaTest ? 1 : 0][Mirrors(o.xform) ? 1 : 0].Get();
+        }
+        // Foliage over the prepass's depth: tested early, not written (m_psoAlphaKept).
+        if (!prepass && wantAlphaTest && m_prepassThisFrame)
+        {
+            const int cull = (matFlags & kMaterialTwoSided) ? 0 : Mirrors(o.xform) ? 2 : 1;
+            if (ID3D12PipelineState* k = m_psoAlphaKept[deferred ? 1 : 0][cull].Get())
+                want = k;
         }
         draw(o, want);
     }

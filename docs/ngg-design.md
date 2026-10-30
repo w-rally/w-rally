@@ -3098,6 +3098,28 @@ Four decisions, the user's:
       reading +3.7 ms with the lights shaded forward or deferred alike, and a timestamp pair round the deferred
       draw read 0.00 ms. The frame's first-to-last time is the measure; PIX's per-draw replay (`NGG_PIX`) the
       breakdown. The vsync quantises fps (30 or 20), so fps says nothing either.
+  - **N2d - DONE 2026-10-31: the depth test before the shader, and the draw order.** Every pass's cost before it.
+    - **The scene shader was depth-tested AFTER it ran.** Its debug probe writes a UAV (`gProbe`), and a pixel
+      shader with UAV writes is tested late unless it says otherwise - so every fragment the rasteriser made ran the
+      whole shader and only then failed the test: 6.4 per pixel on stage 41 at 1080p, the prepass's final depth
+      notwithstanding (PIX's PS invocations: 13.3 M in the main pass for 2.07 M pixels, with a prepass or without).
+      The opaque, glass and deferred variants are `[earlydepthstencil]` now (exact: no clip, no SV_Depth); the
+      alpha-tested one clips, so it leaves the probe out, and after a prepass draws over the prepass's depth without
+      writing it (`m_psoAlphaKept`), which lets the driver test it before the shader too. Main pass: 13.3 M ->
+      2.88 M invocations (1.39 per pixel), PIX's replay 16.2 -> 4.0 ms; real time 7.3 -> 2.2-2.4 ms.
+    - **Front to back**: the opaque draws sorted, the solid before the alpha-tested, each by the distance to the
+      nearest point of its box (they were in the stage file's order). The main pass does not care (the prepass's
+      depth is final); the prepass: 8.1 -> 7.4 M invocations. Ray tracing "off" still runs the prepass (it is there
+      whenever there is a BVH).
+    - Culling: per object, its box against the frustum (behind the camera and beside it) in every pass - but the
+      stage's objects are large, so on stage 41 only 299 of 2987 are culled. Finer objects, distance and occlusion
+      culling are open.
+    - The picture: identical (noon with and without ray tracing, the lit night; within the ray tracer's +-1).
+    - The GPU frame at full clock (`PHYS_DRIVE_OFF=vsync`: capped by the display, the integrated GPU clocks down
+      into the slack and every pass reads slower): 15.2-16.8 ms without local lights, 19.2-20.7 with the three test
+      lights (their rays 3.0, denoising +0.7, shading ~0.5). With the overdraw gone the forward lights cost about
+      what the deferred ones do (19.5-21.0); deferred stays - its cost does not grow with the overdraw that is left
+      and it runs in a small shader, which counts once N3 brings a dozen lamps.
   - **Lessons.** A buffer the shaders read from the UPLOAD heap is CPU-visible memory the GPU barely caches -
     copy to a default-heap buffer (no gain measured here, but it is the rule). A struct copied from a buffer and
     indexed by a variable (the profile) is an indexable temporary, i.e. scratch memory (~1.5 ms per light): read
