@@ -1,13 +1,13 @@
 # NGG renderer — design record
 
 > **Moved here from plugin-rbr** (`doc/rendering-overhaul-design.md`, last changed there in commit `e756b11`) on
-> 2026-10-29. The renderer now lives in WRally (`modules/renderer/`: ngg-core, the `.ngg` format, the WRenderer
-> module), and new renderer work is recorded **here**. "NGG design §N" in WRally's docs and "design N" in
+> 2026-10-29. The renderer now lives in W-Rally (`modules/renderer/`: ngg-core, the `.ngg` format, the WRenderer
+> module), and new renderer work is recorded **here**. "NGG design §N" in W-Rally's docs and "design N" in
 > ngg-core's comments mean the sections of this file.
 >
 > Everything up to the move is kept as written, so it describes the renderer **as an RBR plugin**: the d3d9 proxy
 > (`ngg/bridge`), the IPC block, `rbrtm.exe` as launcher and host, the RBRTM plugin, and paths in plugin-rbr's tree
-> (`ngg/...`, `tools/...`). Those parts stayed in plugin-rbr and are not in WRally (see `imported.md`).
+> (`ngg/...`, `tools/...`). Those parts stayed in plugin-rbr and are not in W-Rally (see `imported.md`).
 
 *Original title: Modern renderer for RBR — design*
 
@@ -2680,7 +2680,7 @@ hand-set ambient made the sun irrelevant). A physical sky renders those as night
   - the translation: `crisp`/`hazy` set turbidity 1/3; `lightfog`/`heavyfog` set fog visibility from
     `FogEnd`; `partcloud`/`lightcloud`/`heavycloud` set cover 0.35/0.6/0.95; rain and snow set visibility
     and precipitation; decimal commas are parsed; a daytime sun below the horizon is mirrored to a low sun on
-    the same bearing; night keeps its own. *(Corrected 2026-10-30, in WRally's port: `N` is NOON, not night -
+    the same bearing; night keeps its own. *(Corrected 2026-10-30, in W-Rally's port: `N` is NOON, not night -
     its suns stand ~50 degrees up, and RBR has no night stages. 17 overcast noon presets with the sun 2.8 degrees
     up were left as dusk; the port raises every preset's low sun, 48 in all.)*
 - **Selection:** the viewer's `--weather <name>`; the game host uses the file's default until the bridge
@@ -2820,9 +2820,9 @@ and the track renders its built-in default. Only local test files ever had the J
 selection, live edit and the JSON round trip. The game's `C:\Brb\ngg\track-108.ngg` is re-injected; the
 pristine original is kept as `track-108.ngg.orig`.
 
-### 5.0u Glass: blended materials (2026-10-30, in WRally)
+### 5.0u Glass: blended materials (2026-10-30, in W-Rally)
 
-`kMaterialBlend` existed in WRally's renderer interface and nothing drew it: the car's transparent material went in
+`kMaterialBlend` existed in W-Rally's renderer interface and nothing drew it: the car's transparent material went in
 as alpha-TESTED, so a window was either solid or a hole. The i20's glass texture (DXT3, 2048²) is dark tint, rgb
 ~34/255, at alpha ~85/255 over the windows (53 % of its texels). Below the 170/255 cutoff that made every window a
 clean hole: the cabin behind, black, and **no reflection at all**.
@@ -2858,7 +2858,7 @@ order. RBR's glass is single sheets, drawn two-sided, so a pixel is covered once
 taillight lens filtering what is behind it) needs dual-source blending; this tint is grey. Wallaby's `NggWriter`
 mirrors the flags and should learn bit 3 when the editor gets glass.
 
-### 5.0v Wet surfaces and puddles (2026-10-30, in WRally)
+### 5.0v Wet surfaces and puddles (2026-10-30, in W-Rally)
 
 The presets carried `rain` from the start (5.0q), and the physics drove a wet road (`--road wet`), but nothing looked
 wet. The wetness the picture shows is the **road's**, not the sky's: rain that has stopped still leaves the road
@@ -2935,9 +2935,9 @@ through `ngg-host`, and a reconversion path that never clobbers `provenance=auth
 is a format and tooling requirement, not a UI nicety: if reconverting a track silently destroys a night an artist
 spent a day on, nobody will use the editor twice.
 
-### 5.4 Night in WRally - decided 2026-10-30
+### 5.4 Night in W-Rally - decided 2026-10-30
 
-RBR has no night stages, so night is WRally's own, and with dynamic lighting **any stage can be driven at any hour**.
+RBR has no night stages, so night is W-Rally's own, and with dynamic lighting **any stage can be driven at any hour**.
 Four decisions, the user's:
 
 1. **Scope: car lights, the night sky, and stage lights** in the first version, not car lights alone.
@@ -2949,7 +2949,7 @@ Four decisions, the user's:
    reservoir resampling, 5.1), not a shadow map or a "few shadowed, the rest fill" split. The VR tier (P4) and
    min-spec are the risk, measured, not designed around.
 4. **Car lights are the CAR's,** in this order:
-   1. the car's own WRally light specification (`car.json`, design.md decision 9: JSON with a schema). Per
+   1. the car's own W-Rally light specification (`car.json`, design.md decision 9: JSON with a schema). Per
       lamp: role, position and aim on the car, beam shape (an IES-like profile), colour and intensity, and the mesh
       that glows when it is lit;
    2. else **derived from RBR's car `.ini`**, which already names the lamps: `Point_light_lf/rf` headlights,
@@ -3148,7 +3148,7 @@ Four decisions, the user's:
     normals (`Point_light_lf/rf`), the tail, brake and reverse positions. Bonnet lamps in 5 of them only
     (`Point_light_bon1-4`), their normals mostly sideways - positions, no aim; a ramp mesh (`e_ramp`,
     `e_ramp_light_lit`) in 4, switched off (`Predicate=NotUsed`): RBR modelled ramps and never used them. So the
-    beams' character, the layouts and most ramps are WRally's (car.json presets), RBR's positions where they exist.
+    beams' character, the layouts and most ramps are W-Rally's (car.json presets), RBR's positions where they exist.
   - **Decided (the user, 2026-10-31):**
     1. **Layouts per car, chosen in the setup:** car.json lists the configurations a car can run (e.g. 2 headlamps +
        a 2-lamp ramp, a 4-pod ramp, 2 LED bars, no ramp); the driver picks one; a car without its own spec gets a
@@ -3206,7 +3206,7 @@ Four decisions, the user's:
     ahead without the engine (the renderer's beam formula; a copy of the presets and the test layouts). The user's
     tuning there: each lamp its own spot - the main beams 10 degrees out (80 kcd), the outer pods 20 degrees out, the
     inner ones 5 out and 4 up; the pods' beams narrow with a harder edge, and a wide, dim spill around each (~7% of
-    its peak, +-25-30 x 10-12 degrees). `WRally --lab` (`assets::BuildLampLab`): the test lamps on a car standing in
+    its peak, +-25-30 x 10-12 degrees). `W-Rally --lab` (`assets::BuildLampLab`): the test lamps on a car standing in
     a synthetic scene - a floor, a wall 10 m ahead of the ramp, thin white poles at 5 and 8 m, a person-sized block -
     with no stage or physics; `--camera`, `--time`, `--exit-at`, `PHYS_DRIVE_SHOTS` as on a stage.
   - **"The shadows look like one lamp's."** Checked against an exact reference (`NGG_LIGHTS_REF=1`: a ray to every
@@ -3218,7 +3218,7 @@ Four decisions, the user's:
   - **N3b - DONE 2026-10-31: the car's lamps, switched.**
     - **Its lamps** (`assets::LoadCarLamps`): RBR's car .ini places (`Point_light_lf/rf/lb/rb/brake_*/reverse_*/
       bon<n>`, the model's frame made the car's - y and z swapped, less the centre of gravity), defaults where it has
-      none; the AIMS are WRally's, as tuned on the wall (RBR's lamp normals are no aims). The ramps a car offers:
+      none; the AIMS are W-Rally's, as tuned on the wall (RBR's lamp normals are no aims). The ramps a car offers:
       "ramp" (its own pods, with its ramp's meshes - the i20's six), "2 pods", "4 pods", "6 pods" (a count its own
       leaves out), "LED bars", "no ramp"; its own ramp the default, else four pods. The pods are halogen (3300 K -
       `halogen-pencil`, `halogen-driving`, the wall-tuned shapes of N3a's LED presets, their spots then made half as big again); the white LED look is the bars'.
@@ -3235,7 +3235,7 @@ Four decisions, the user's:
       the renderer's units (~1600 nits a unit: a headlamp ~100,000 nits, a brake lamp ~10,000, a tail lamp ~200) -
       not by its texture: RBR draws the twins with its CarLight shader on the tyre's texture sheet.
     - **Quick rally** (the setup editor's, once there is one): "Lamps" (the car's ramps), the ramp's spread and aim,
-      remembered per car (`lamps_<folder>` in wrally.ini), and the time of day (`quick_time`, on 15 October, summer
+      remembered per car (`lamps_<folder>` in W-Rally.ini), and the time of day (`quick_time`, on 15 October, summer
       time: dusk ~18:30). Command line: `--lamps <ramp> --lamp-aim <spread>,<pitch>`.
     - **Lamps on loose parts:** each lamp mesh sits on its part's node (the i20's ramp on the bonnet, by the .sgc's
       node tree) - one instance per group and side (`_lf` / `_rf` / `_lb` / `_rb` in the name), on the car's own
@@ -4099,7 +4099,7 @@ Items parked deliberately, with the reason, so "later" does not become "lost".
 | 25 | ~~Multiple scattering in the atmosphere~~ **DONE - 5.0j** | Hillaire 2020 Psi_ms table, verified to fp16 against numpy; sky light +32 %; physical + multiple scattering measured 10.6:1 sun:sky in the lab (clean clear air) and made the DEFAULT | done |
 | 27 | ~~One frame, in `ngg-core`, for every client~~ **DONE - 5.0n** (game host verification is in-game) | the RT path (depth prepass, trace, denoise, AO, the jitter-before-prepass ordering) exists only in the viewer; the game host still renders cascades with no prepass, no AO, and Wallaby's API the same (5.0m). Move frame orchestration into ngg-core - one `RecordFrame` the viewer, the game host and the API all call - so "what the viewer shows" and "what the game shows" stop being two code paths. Prerequisite for item 23's in-game measurement | nothing |
 | 28 | ~~The bridge passes the event's weather preset~~ **DONE - 5.0s** (in-game check pending) | RBRTM reads the weather it set back from the game, names it as RBR's TrackSettings section (`108M_crisp_clear`), and passes it through `nggSetWeather` -> `FrameState.weatherName` (IPC v4); the host selects that preset, logging any fallback to the default. Fixed on the way: single-digit maps (`04M_...`) imported nothing | in-game run |
-| 29 | **Weather v2: cloud shapes, rain, snow, night** - WET SURFACES DONE (5.0v): the road's wetness darkens, glosses and puddles the ground | v1 (5.0q) does fog, haze and cloud COVER. Partly cloudy is a uniform blend; RBR's cloud textures vs volumetric clouds is undecided. Left of rain: drops, spray, rain on glass, reflections of more than the sky, drying. Snow is carried in the presets but not drawn. Night: RBR has none (its N is NOON, 2026-10-30) - night stages are WRally's own design question | user's choice on clouds; night design |
+| 29 | **Weather v2: cloud shapes, rain, snow, night** - WET SURFACES DONE (5.0v): the road's wetness darkens, glosses and puddles the ground | v1 (5.0q) does fog, haze and cloud COVER. Partly cloudy is a uniform blend; RBR's cloud textures vs volumetric clouds is undecided. Left of rain: drops, spray, rain on glass, reflections of more than the sky, drying. Snow is carried in the presets but not drawn. Night: RBR has none (its N is NOON, 2026-10-30) - night stages are W-Rally's own design question | user's choice on clouds; night design |
 | 26 | **Delete the established lighting balance** | `sunDiffuse`, `skyAmbient`, `kSpecScale`, the albedo*E convention and the lerp ambient. Kept behind `Z` for one round so the physical default can be compared in-game | the user's in-game look at the physical default |
 | 21 | ~~Aerial perspective is the last per-pixel atmosphere march~~ **DONE - 5.0f** | 64x64x32 froxel table of in-scatter + transmittance, filled per frame with the same `AtmScatter` and the same 8x3 quadrature; the march stays as the exact reference (`L`). Aerial's share of the main pass 1.9 -> 0.5 ms at the start camera, max 1/255 difference to the march | done |
 

@@ -1,7 +1,7 @@
 #pragma once
-// WRally's command line (docs/design.md 6.5, wrally::app) - phase 1's phys-drive's, read into one Options.
+// W-Rally's command line (docs/design.md 6.5, wrally::app) - phase 1's phys-drive's, read into one Options.
 //
-//   WRally <game dir> <stage .ngg or .lbs> [--stage <the .ngg's>] [--sgc Cars/i20_R5/i20_R5.sgc] [--car s_i2003]
+//   W-Rally <game dir> <stage .ngg or .lbs> [--stage <the .ngg's>] [--sgc Cars/i20_R5/i20_R5.sgc] [--car s_i2003]
 //          [--surface <the stage's>] [--tyre-type <its>] [--tyres michelin] [--aids 0,0,0,0] [--camera 0] [--out drive.phr]
 //          [--replay run.phr [--hold]] [--physics rbr] [--audio waudio] [--renderer wrenderer]
 //          [--setup <file>] [--damage 0..3] [--weather <preset>] [--road dry|damp|wet]
@@ -10,7 +10,7 @@
 //          [--chase-distance <metres>] [--chase-pull <metres per 100 km/h>] [--entry <seconds>] [--quick-start]
 //          [--no-sound] [--no-codriver] [--codriver-replay] [--codriver-lead 3] [--codriver-volume 1]
 //          [--pacenote-next 8]
-//   WRally --lab [--camera 1] [--time HH:MM ...] [--exit-at <frame>]   the lamp lab: the test lamps in a synthetic scene
+//   W-Rally --lab [--camera 1] [--time HH:MM ...] [--exit-at <frame>]   the lamp lab: the test lamps in a synthetic scene
 //          (no stage, no physics; app/game.cpp RunLab, assets/lamp_lab.h)
 //          [--eng Focus03-08] [--mix sound-mix.ini] [--overrides cars/s_i2003.ini | none]
 //          [--launch-rpm 7400] [--als-crack 0.25] [--als-bangs <folder of .wav>] [--als-idle-bangs <folder>]
@@ -92,7 +92,7 @@ int ParseSkyTime(const std::vector<std::string>& args, Options& o, const char* d
 // The folder the exe is in.
 std::filesystem::path ExeDir();
 
-// One of WRally's own files (`rel` from the repository root: content/..., game/config/...): beside the exe as the game
+// One of W-Rally's own files (`rel` from the repository root: content/..., game/config/...): beside the exe as the game
 // ships, else in the source tree the build came from (WRALLY_SOURCE_DIR) - where editing it shows at once, as the
 // watched sound mix wants. "" if neither has it.
 std::string WRallyFile(const std::string& rel);

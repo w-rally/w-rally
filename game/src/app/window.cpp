@@ -41,7 +41,7 @@ std::string Window::Create(const wchar_t* title)
     wc.lpfnWndProc = WndProc;
     wc.hInstance = GetModuleHandleW(nullptr);
     wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
-    wc.lpszClassName = L"WRally";
+    wc.lpszClassName = L"W-Rally";
     RegisterClassW(&wc);
     // 3/4 of the screen's work area, 16:9
     RECT work;

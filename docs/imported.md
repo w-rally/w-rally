@@ -1,11 +1,11 @@
 # Code imported from plugin-rbr
 
-WRally is self-contained: it builds nothing from outside this repository. The code it shares with plugin-rbr
+W-Rally is self-contained: it builds nothing from outside this repository. The code it shares with plugin-rbr
 (`C:\Projects\onlineracing.cz\plugin-rbr`) was **copied** in on 2026-10-25 from plugin-rbr commit `e696c4f`
 ("M6 cleanup, step 2: the native physics self-contained"). From then on, the two copies evolve separately. A fix
 that matters to both is ported by hand.
 
-plugin-rbr keeps what WRally does not need: the classic physics (`phys/core`, `phys/model`, `phys/oracle`: RBR's
+plugin-rbr keeps what W-Rally does not need: the classic physics (`phys/core`, `phys/model`, `phys/oracle`: RBR's
 own code run in an arena), the in-game probe, the RE tooling, the d3d9 bridge and IPC, and the RBRTM plugin. The
 classic physics remains the oracle that the native port is checked against (`phys-native-check`, `phys-sim-check`).
 
@@ -22,7 +22,7 @@ classic physics remains the oracle that the native port is checked against (`phy
 | `modules/renderer/src/core/`, `api/`, `format/` | `ngg/core/`, `ngg/api/`, `ngg/format/` | none; the host, bridge, ipc and tools not imported |
 | `docs/ngg-design.md` | `doc/rendering-overhaul-design.md` (commit `e756b11`) | **moved** 2026-10-29, not copied: the renderer's design record continues here, and plugin-rbr keeps only a pointer. A move note heads the file |
 | `third_party/dxc/` | `ngg/api/build/bin/dxcompiler.dll`, `dxil.dll` | binaries (Microsoft DirectX Shader Compiler redistributables) |
-| `game/src/drive/` (split in phase 5, below) | `phys/drive/` (drive, car_model, replay_camera, launch_control, anti_lag) | `drive.cpp`: `--classic` removed; WRally's own files found by `WRallyFile` (beside the exe, else the source tree) |
+| `game/src/drive/` (split in phase 5, below) | `phys/drive/` (drive, car_model, replay_camera, launch_control, anti_lag) | `drive.cpp`: `--classic` removed; W-Rally's own files found by `WRallyFile` (beside the exe, else the source tree) |
 | `game/config/sound-mix.ini` | `phys/drive/sound-mix.ini` | none |
 | `content/cars/s_i2003.ini` | `cars/s_i2003.ini` | none |
 
@@ -58,7 +58,7 @@ native physics is bit-exact with RBR only under them.
   - ngg-core's `renderer.h` comment on RT fallbacks is corrected; the code already instanced moving objects.
 
 - Legacy stages (phase 8, step 1): `data/lsp.*` gains `ReadZip`, every member of a zip from one read (a stage's
-  texture archive). `ngg_format.h`'s note on who writes the layout now names WRally's writer, `ngg_scene.h`.
+  texture archive). `ngg_format.h`'s note on who writes the layout now names W-Rally's writer, `ngg_scene.h`.
 
 - Co-driver (2026-10-30), in the audio library:
   - `audio/sample.*` gains `ReadOgg` (stb_vorbis) and `ReadSound`.
@@ -97,9 +97,9 @@ native physics is bit-exact with RBR only under them.
 | here | what | from |
 |---|---|---|
 | `third_party/imgui/` | Dear ImGui 1.91.5 (MIT): core + `backends/imgui_impl_win32.*`, unchanged | github.com/ocornut/imgui, tag v1.91.5, downloaded 2026-10-25 |
-| `third_party/imgui_config/` | WRally's ImGui configuration (32-bit indices) | ours |
+| `third_party/imgui_config/` | W-Rally's ImGui configuration (32-bit indices) | ours |
 | `third_party/stb/stb_vorbis.c` | stb_vorbis v1.22 (public domain), the Ogg Vorbis decoder, unchanged | github.com/nothings/stb, master, downloaded 2026-10-30 (sha256 4c7cb2ff1f7011e9d67950446b7eb9ca044f2e464d76bfbb0b84dd2e23e65636) |
 | `third_party/dxc/` | DirectX Shader Compiler redistributables | see the table above |
 
-**Checked on import:** WRally.exe and plugin-rbr's `phys-drive.exe` with the same arguments (`C:\Brb`, track-108_M,
+**Checked on import:** W-Rally.exe and plugin-rbr's `phys-drive.exe` with the same arguments (`C:\Brb`, track-108_M,
 `--no-sound --step 0.0166 --quick-start --exit-at 2000 --overrides none`) write byte-identical `.phr` recordings.

@@ -63,7 +63,7 @@ struct AudioSettings {
 
 // One car's sound. Paths are VFS paths; "" for the module's default.
 //
-// The mix and the anti-lag's bangs are passed as DATA, not as places: the mix is WRally's own file and the bangs are a
+// The mix and the anti-lag's bangs are passed as DATA, not as places: the mix is W-Rally's own file and the bangs are a
 // folder of .wav files, and the VFS can neither reach the one (it is not under the game data root) nor list the other.
 struct CarSoundDesc {
     uint32_t           car;            // the physics' car index: records with this Stamp::car drive the voice

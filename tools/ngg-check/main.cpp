@@ -4,7 +4,7 @@
 //   ngg-check <file.ngg>...        another producer's files (Wallaby's): read, written again, read back and compared;
 //                                  the renderer loads the original and the rewrite
 //   ngg-check --lbs <file.lbs> [--surface dry|damp|wet] [--out <file.ngg>]
-//                                  WRally's legacy importer: the .lbs to an .ngg, read back, loaded by the renderer
+//                                  W-Rally's legacy importer: the .lbs to an .ngg, read back, loaded by the renderer
 //
 // "the renderer" is WRenderer.dll (bin/modules/renderer) on a hidden window - its own loader, not this library's
 // reader, so a writer and the renderer that disagree fail here. Prints "ngg-check: all good" at the end, or the first

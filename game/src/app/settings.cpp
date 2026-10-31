@@ -69,15 +69,18 @@ std::string Settings::NggFolders() const
     return rbrPath.empty() ? "" : rbrPath + "\\Ngg";
 }
 
-std::filesystem::path SettingsPath() { return UserDir() / "wrally.ini"; }
+std::filesystem::path SettingsPath() { return UserDir() / "W-Rally.ini"; }
 
 Settings LoadSettings()
 {
     Settings s;
-    // Unset, the RBR folder is the exe's own when WRally sits in one.
+    // Unset, the RBR folder is the exe's own when W-Rally sits in one.
     if (std::filesystem::exists(ExeDir() / "RichardBurnsRally_SSE.exe")) s.rbrPath = ExeDir().string();
-    // The installer's install.ini first (the RBR folder chosen at install), then the user's own wrally.ini over it.
-    for (const std::filesystem::path& path : {InstallIni(), SettingsPath()}) {
+    // The installer's install.ini first (the RBR folder chosen at install), then the user's own W-Rally.ini over it
+    // (none yet: the wrally.ini of before the rename, written as W-Rally.ini at the next save).
+    std::error_code e;
+    const std::filesystem::path own = std::filesystem::exists(SettingsPath(), e) ? SettingsPath() : UserDir() / "wrally.ini";
+    for (const std::filesystem::path& path : {InstallIni(), own}) {
         std::ifstream f(path);
         std::string line;
         while (std::getline(f, line)) {
@@ -107,7 +110,7 @@ std::string SaveSettings(const Settings& in)
 {
     Settings s = in;
     std::ostringstream out;
-    out << "# WRally's settings - written by the game (the Settings screen, Quick rally); edits by hand are kept.\n";
+    out << "# W-Rally's settings - written by the game (the Settings screen, Quick rally); edits by hand are kept.\n";
     Fields(s, [&](const char* name, auto& field) { out << name << " = " << Text(field) << "\n"; });
     for (int a = 0; a < input::kActions; ++a) {
         char hex[16];

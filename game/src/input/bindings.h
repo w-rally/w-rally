@@ -1,6 +1,6 @@
 #pragma once
 // The keys, bound to the game's actions (wrally::input): which key does what, set in Settings -> Controls and kept in
-// wrally.ini (key_<action> = its scan code). A key is held by its PLACE (scan code), whatever the layout prints on it:
+// W-Rally.ini (key_<action> = its scan code). A key is held by its PLACE (scan code), whatever the layout prints on it:
 // the brake's default is the key left of X on QWERTY (Z), QWERTZ (Y) and AZERTY (W) alike. An extended key (the arrows,
 // the right Ctrl) is its scan code with 0xE000. 0: unbound.
 //
@@ -22,7 +22,7 @@ enum class Action {
 constexpr int kActions = static_cast<int>(Action::Count);
 
 struct ActionInfo {
-    const char* id;        // wrally.ini's key_<id>
+    const char* id;        // W-Rally.ini's key_<id>
     const char* label;     // for the menu
     const char* group;     // the menu's heading it goes under
     UINT defaultScan;

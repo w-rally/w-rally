@@ -1,5 +1,5 @@
 #pragma once
-// WRally's settings (wrally::app): wrally.ini in the user folder (app/paths.h), `name = value` lines - where the content is, the graphics
+// W-Rally's settings (wrally::app): W-Rally.ini in the user folder (app/paths.h), `name = value` lines - where the content is, the graphics
 // and the sound, and what Quick rally chose last time. Read at the start, written when the Settings screen or Quick
 // rally changes them. A missing file or key is its default.
 
@@ -45,7 +45,7 @@ struct Settings {
     std::string time;                   // the time of day, "HH:MM" on kQuickDate ("" the weather's own sun)
 
     // The lamps each car runs (NGG design 5.4 N3b; in the setup editor once there is one): per car folder its ramp (a
-    // CarLamps layout's name, "" its first) and the ramp's aim - each pod further out, degrees; up, degrees. wrally.ini:
+    // CarLamps layout's name, "" its first) and the ramp's aim - each pod further out, degrees; up, degrees. W-Rally.ini:
     // lamps_<folder> = <ramp>|<spread>|<pitch>.
     struct Lamps {
         std::string layout;
@@ -57,7 +57,7 @@ struct Settings {
     std::string NggFolders() const;
 };
 
-std::filesystem::path SettingsPath();   // wrally.ini in the user folder (app/paths.h: beside the exe unless installed)
+std::filesystem::path SettingsPath();   // W-Rally.ini in the user folder (app/paths.h: beside the exe unless installed)
 Settings LoadSettings();
 // The date Quick rally's times of day are on: an autumn day, the clocks still on summer time (dusk about 18:30 at 50 N).
 inline const char* kQuickDate = "2026-10-15";

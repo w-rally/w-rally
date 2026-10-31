@@ -121,7 +121,7 @@ void DrawBackdrop(int width, int height)
 
 namespace {
 
-// The main menu's design (the WRally design system, "Factory black"): its colours, and its sizes in px at 1080p.
+// The main menu's design (the W-Rally design system, "Factory black"): its colours, and its sizes in px at 1080p.
 constexpr ImU32 kSurfaceBase = IM_COL32(10, 10, 11, 255), kSurfaceRaised = IM_COL32(20, 20, 22, 255),
                 kSurfaceOverlay = IM_COL32(30, 30, 33, 255), kLineStrong = IM_COL32(98, 98, 104, 255),
                 kInk = IM_COL32(255, 255, 255, 255), kInkSecondary = IM_COL32(196, 196, 200, 255),

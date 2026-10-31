@@ -111,7 +111,7 @@ iface::RenderSettings ToRender(const Settings& s)
 // The window, the renderer (module `rendererId`) on it and ImGui. Returns "" or what failed.
 std::string OpenShell(Shell& sh, const std::string& rendererId)
 {
-    if (std::string e = sh.window.Create(L"WRally"); !e.empty()) return e;
+    if (std::string e = sh.window.Create(L"W-Rally"); !e.empty()) return e;
     // The renderer: a module DLL in modules/renderer (--renderer, "wrenderer" by default: WRenderer.dll, NGG), on the
     // window. PHYS_DRIVE_NGGLOG: its log on stdout.
     sh.rendererLog = std::getenv("PHYS_DRIVE_NGGLOG") != nullptr;
@@ -835,7 +835,7 @@ StageEnd RunStage(Shell& sh, const Options& o, bool fromMenu, std::string& error
             title = 0;
             const float speed = std::sqrt(p.velocity[0] * p.velocity[0] + p.velocity[1] * p.velocity[1] + p.velocity[2] * p.velocity[2]);
             wchar_t text[128];
-            std::swprintf(text, 128, L"WRally - %.0f km/h - tick %u - %.0f fps", speed * 3.6f, snap.tick, frame > 0 ? 1.0 / frame : 0.0);
+            std::swprintf(text, 128, L"W-Rally - %.0f km/h - tick %u - %.0f fps", speed * 3.6f, snap.tick, frame > 0 ? 1.0 / frame : 0.0);
             if (tv) {
                 const size_t n = std::wcslen(text);
                 if (view.tvCamera >= 0) std::swprintf(text + n, 128 - n, L" - %.0f m, camera %d", tv->Distance(), view.tvCamera);
@@ -846,7 +846,7 @@ StageEnd RunStage(Shell& sh, const Options& o, bool fromMenu, std::string& error
     }
     simThread.Stop();   // (the steps posted so far done: the recording is whole)
     sim.Finish();
-    window.SetTitle(L"WRally");
+    window.SetTitle(L"W-Rally");
     return end;
 }
 
@@ -865,7 +865,7 @@ std::vector<std::string> QuickArgs(const Settings& s, const assets::Catalog& cat
         std::replace(physics.begin(), physics.end(), '/', '\\');
         while (physics.back() == '\\') physics.pop_back();
     }
-    std::vector<std::string> a = {"WRally", s.rbrPath, st->ngg, "--stage", st->stage, "--sgc", ec ? car->sgc : sgc, "--car", physics,
+    std::vector<std::string> a = {"W-Rally", s.rbrPath, st->ngg, "--stage", st->stage, "--sgc", ec ? car->sgc : sgc, "--car", physics,
                                   "--damage", std::to_string(std::min(s.damage, 3u)), "--out", (UserDir() / "drive.phr").string()};
     if (!s.setup.empty()) a.insert(a.end(), {"--setup", s.rbrPath + "\\" + s.setup});
     if (!s.weather.empty()) a.insert(a.end(), {"--weather", s.weather});
