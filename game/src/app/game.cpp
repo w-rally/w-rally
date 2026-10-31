@@ -867,6 +867,13 @@ std::vector<std::string> QuickArgs(const Settings& s, const assets::Catalog& cat
     if (!s.weather.empty()) a.insert(a.end(), {"--weather", s.weather});
     static const char* const kRoad[3] = {"dry", "damp", "wet"};
     a.insert(a.end(), {"--road", kRoad[s.road ? std::min(s.road, 3u) - 1 : assets::RoadOfWeather(s.weather)]});
+    if (!s.time.empty()) a.insert(a.end(), {"--time", s.time, "--date", kQuickDate, "--utc-offset", kQuickUtcOffset});
+    if (const auto it = s.lamps.find(car->folder); it != s.lamps.end()) {
+        if (!it->second.layout.empty()) a.insert(a.end(), {"--lamps", it->second.layout});
+        char aim[64];
+        std::snprintf(aim, sizeof aim, "%g,%g", it->second.spread, it->second.pitch);
+        a.insert(a.end(), {"--lamp-aim", aim});
+    }
     if (!s.devEngine.empty()) a.insert(a.end(), {"--eng", s.devEngine});
     else if (!car->engine.empty()) a.insert(a.end(), {"--eng", car->engine});
     if (!s.devBangs.empty()) a.insert(a.end(), {"--als-bangs", s.devBangs});
