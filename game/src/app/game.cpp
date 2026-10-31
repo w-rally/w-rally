@@ -265,6 +265,24 @@ StageEnd RunStage(Shell& sh, const Options& o, bool fromMenu, std::string& error
             std::printf("weather %s: not among the .ngg's presets - its default\n", o.weather.c_str());
         }
     }
+    // --sky: that preset's weather with its clouds, fog and rain replaced - drawn from the WeatherDesc, not the preset.
+    iface::WeatherDesc customSky{};
+    bool customSkySet = false;
+    if (o.skySet) {
+        const iface::RendererApi* api = renderer.Api();
+        char presetName[64];
+        if (api->weatherPresetCount(renderer.Instance(), scene) > static_cast<uint32_t>(weatherPreset) &&
+            api->weatherPreset(renderer.Instance(), scene, static_cast<uint32_t>(weatherPreset), &customSky, presetName,
+                               sizeof presetName) == iface::Status::Ok) {
+            customSky.cloudCover = o.skyClouds;
+            customSky.fogVisibility = o.skyFog > 0 ? 6000.0f * std::pow(150.0f / 6000.0f, o.skyFog) : 0.0f;   // 6 km .. 150 m
+            customSky.rain = o.skyRain;
+            customSkySet = true;
+            std::printf("sky: clouds %.2f, fog %.0f m, rain %.2f\n", customSky.cloudCover, customSky.fogVisibility, customSky.rain);
+        } else {
+            std::printf("sky: the .ngg has no weather presets to start from - its own weather\n");
+        }
+    }
     {
         uint32_t keyed = 0, solids = 0;
         renderer.Api()->sceneKeyStats(renderer.Instance(), scene, &keyed, &solids);
@@ -767,7 +785,8 @@ StageEnd RunStage(Shell& sh, const Options& o, bool fromMenu, std::string& error
             fd.camera.nearZ = 0.25f;
             fd.camera.farZ = 8000.0f;
             fd.camera.fovY = view.fovY;
-            fd.weatherPreset = weatherPreset;   // the .ngg's preset (0 its own weather)
+            fd.weatherPreset = customSkySet ? -1 : weatherPreset;   // the .ngg's preset (0 its own weather), or --sky's
+            if (customSkySet) fd.weather = customSky;
             fd.wetness = 0.5f * static_cast<float>(std::clamp(wet, 0, 2));   // the road's: dry 0, damp 0.5, wet 1
             if (o.skyTimeSet) {   // the time and place: the sun from them (NGG design 5.4)
                 fd.skyTime = {1, o.skyYear, o.skyMonth, o.skyDay, static_cast<float>(o.skyHour), static_cast<float>(o.skyUtcOffset),
@@ -869,9 +888,17 @@ std::vector<std::string> QuickArgs(const Settings& s, const assets::Catalog& cat
                                   "--damage", std::to_string(std::min(s.damage, 3u)), "--out", (UserDir() / "drive.phr").string()};
     if (!s.setup.empty()) a.insert(a.end(), {"--setup", s.rbrPath + "\\" + s.setup});
     if (!s.weather.empty()) a.insert(a.end(), {"--weather", s.weather});
+    // The road, the time of day and the sky: a preset's own, or the custom weather's over it.
     static const char* const kRoad[3] = {"dry", "damp", "wet"};
-    a.insert(a.end(), {"--road", kRoad[s.road ? std::min(s.road, 3u) - 1 : assets::RoadOfWeather(s.weather)]});
-    if (!s.time.empty()) a.insert(a.end(), {"--time", s.time, "--date", kQuickDate, "--utc-offset", kQuickUtcOffset});
+    const uint32_t road = s.weatherCustom ? std::min(s.road, 3u) : 0;
+    a.insert(a.end(), {"--road", kRoad[road ? road - 1 : assets::RoadOfWeather(s.weather)]});
+    const QuickDay day = QuickDate(s.season);
+    if (s.weatherCustom && !s.time.empty()) a.insert(a.end(), {"--time", s.time, "--date", day.date, "--utc-offset", day.utcOffset});
+    if (s.weatherCustom) {   // the preset's sky with these clouds, fog and rain
+        char sky[96];
+        std::snprintf(sky, sizeof sky, "%g,%g,%g", s.clouds, s.fog, s.rain);
+        a.insert(a.end(), {"--sky", sky});
+    }
     if (const auto it = s.lamps.find(car->folder); it != s.lamps.end()) {
         if (!it->second.layout.empty()) a.insert(a.end(), {"--lamps", it->second.layout});
         char aim[64];
@@ -910,7 +937,7 @@ int Menus(Shell& sh, std::string note)
     ui::MenuVideo video;
     if (const std::string e = video.Open(WRallyFile("content/video/menu.mp4")); !e.empty()) std::printf("%s\n", e.c_str());
     for (;;) {
-        if (screen != Screen::Quick) video.Update(sh.renderer);   // (outside the frame: the upload is its own)
+        video.Update(sh.renderer);   // (outside the frame: the upload is its own)
         bool start = false, exit = false;
         const UINT keyDown = sh.window.TakeKeyDown();   // (for Settings -> Controls)
         const bool capturing = ui::CapturingKey();      // (Esc then the binding's, not the menu's)
@@ -925,7 +952,7 @@ int Menus(Shell& sh, std::string note)
                 }
                 break;
             case Screen::Quick:
-                switch (ui::QuickRally(sh.ui, catalog, sh.settings, sh.width, sh.height)) {
+                switch (ui::QuickRally(sh.ui, catalog, sh.settings, sh.width, sh.height, video.Frame())) {
                 case ui::QuickChoice::Start: start = true; break;
                 case ui::QuickChoice::Back: screen = Screen::Main, SaveSettings(sh.settings); break;
                 case ui::QuickChoice::None: break;
@@ -958,7 +985,8 @@ int Menus(Shell& sh, std::string note)
                 }
                 break;
             }
-            if (sh.window.TakeEscape() && !capturing && screen != Screen::Main) {   // Esc: back, the settings kept as they are
+            // Esc: back, the settings kept as they are (Quick rally's own: its pages step back to it first).
+            if (sh.window.TakeEscape() && !capturing && screen == Screen::Settings) {
                 SaveSettings(sh.settings);
                 screen = Screen::Main;
             }

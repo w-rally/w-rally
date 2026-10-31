@@ -3,9 +3,10 @@
 // between ImGuiLayer::NewFrame and Render, returning what was chosen. The screens hold no state of their own beyond
 // ImGui's and Controls' wait for a key; what they edit is the caller's (Settings, the debug switches).
 //
-//   MainMenu     Quick rally, Settings, Exit (Season, Marketplace: not there yet): the whole window, drawn to the W-Rally design -
+//   MainMenu     Quick rally, Settings, Exit (Online events, Garage, Marketplace: not there yet): the whole window, drawn to the W-Rally design -
 //                W / S or the arrows slide the selection, Enter or Space picks it; the video loop in the livery
-//   QuickRally   stage, car, setup, damage, weather, road - Start / Back (the choice kept in Settings)
+//   QuickRally   stage, car, setup, damage, weather - Start / Back (the choice kept in Settings), and the pages they
+//                open: Stage, Garage, Car setup, Weather (ui/quick_rally.cpp)
 //   SettingsUi   tabs: the content (folders, base physics, Extract the slot cars' physics), graphics, sound, controls -
 //                the whole window, drawn to the W-Rally design: Q / E the tabs, W / S the rows, A / D the values
 //   PauseMenu    the in-stage menu (Esc): Resume, Restart stage, Settings, Debug, Exit to main menu
@@ -33,15 +34,18 @@ enum class MainChoice { None, QuickRally, Settings, Exit };
 MainChoice MainMenu(const ImGuiLayer& ui, int width, int height, const std::string& note, const VideoFrame& video);
 
 enum class QuickChoice { None, Start, Back };
-// `s`'s quick fields (stage, car, setup, damage, weather, road) are the choice, kept between runs.
-QuickChoice QuickRally(const ImGuiLayer& ui, const assets::Catalog& catalog, app::Settings& s, int width, int height);
+// `s`'s quick fields (stage, car, setup, damage, weather and the custom one's, the lamps) are the choice, kept between
+// runs. The screen and the pages it opens (ui/quick_rally.cpp): Stage, Garage, Car setup, Weather - Esc on one of them
+// back to Quick rally, on Quick rally Back. `video`: the main menu's loop, in the livery's window.
+QuickChoice QuickRally(const ImGuiLayer& ui, const assets::Catalog& catalog, app::Settings& s, int width, int height,
+                       const VideoFrame& video);
 
 enum class SettingsChoice { None, Back, Graphics, Rescan, Extract };
 // Graphics: a graphics field changed (to apply now). `inStage`: the content's part is shown but not editable.
 // `log`: the last Rescan / Extract's report.
 // The screen has tabs: Content, Graphics, Sound, Controls (the keys). `keyDown`: the key pressed this frame
-// (Window::TakeKeyDown), which Controls binds while it waits for one. `video`: the main menu's loop, veiled in the
-// livery's window, which holds the main menu's place (none: the window dark).
+// (Window::TakeKeyDown), which Controls binds while it waits for one. `video`: the main menu's loop, in the video's
+// stripe as it fades out (the screen's livery holds the main menu's place, without that stripe).
 SettingsChoice SettingsUi(const ImGuiLayer& ui, app::Settings& s, bool inStage, const std::string& log, UINT keyDown,
                           int width, int height, const VideoFrame& video = {});
 // Esc on the screen is Back. Whether Controls is waiting for a key or a text field has the keyboard: Esc is then

@@ -45,6 +45,11 @@ template <class F> void Fields(Settings& s, F&& f)
     f("quick_weather", s.weather);
     f("quick_road", s.road);
     f("quick_time", s.time);
+    f("quick_weather_custom", s.weatherCustom);
+    f("quick_season", s.season);
+    f("quick_clouds", s.clouds);
+    f("quick_fog", s.fog);
+    f("quick_rain", s.rain);
 }
 
 void Set(std::string& v, const std::string& text) { v = text; }
