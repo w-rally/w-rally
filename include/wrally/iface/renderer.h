@@ -39,7 +39,8 @@ namespace wrally::iface {
 // 5: FrameDesc::skyTime (the sun from a date, a time and a place).
 // 6: FrameDesc::lights (point and spot lights, every one ray-traced).
 // 7: RenderStats::frameMs (the whole frame's GPU time).
-constexpr uint32_t kRendererInterfaceVer = 7;
+// 8: LightDesc - beams (kLightBeam: lobes in the lamp's frame, its up), the radial profile gone.
+constexpr uint32_t kRendererInterfaceVer = 8;
 
 struct Renderer;                     // the module's instance, opaque
 typedef uint32_t SceneHandle;        // a loaded .ngg stage
@@ -131,22 +132,33 @@ static_assert(sizeof(SkyTimeDesc) == 36, "SkyTimeDesc layout");
 // are lights like any other, sent each frame where the car has them.
 constexpr uint32_t kLightPoint = 0;
 constexpr uint32_t kLightSpot  = 1;
+constexpr uint32_t kLightBeam  = 2;             // a lamp: the sum of its lobes in its own frame (design 5.4 N3a)
 constexpr uint32_t kLightNoShadows = 1u << 0;   // never occluded (a dashboard lamp)
-constexpr uint32_t kLightProfile   = 1u << 1;   // `profile` holds the beam
+constexpr uint32_t kMaxLightLobes = 4;
+// A beam's lobe: a peak that falls to half at the half-width across and the half-height up and down, centred `yawDeg`
+// towards the lamp's right and `pitchDeg` up. `sharpness` 2: a gaussian; higher: a flatter top, a harder edge.
+struct LightLobe {
+    float    candela;
+    float    halfWidthDeg, halfHeightDeg;
+    float    yawDeg, pitchDeg;
+    float    sharpness;
+};
 struct LightDesc {
-    uint32_t type;           // kLightPoint, kLightSpot
+    uint32_t type;           // kLightPoint, kLightSpot, kLightBeam
     uint32_t flags;
     float    position[3];
-    float    direction[3];   // a spot's axis, unit
+    float    direction[3];   // a spot's or a beam's axis, unit
+    float    up[3];          // a beam's up (squared to the axis by the renderer)
     float    colour[3];      // linear tint
-    float    intensity;      // candela, on the axis
-    float    range;          // metres: beyond it, nothing; 0 from the intensity
+    float    intensity;      // candela on the axis; a beam: its lobes' scale (1: as given)
+    float    range;          // metres: beyond it, nothing; 0 from the intensity (at most 1 km)
     float    radius;         // the emitter's size, metres: how soft its shadows are
     float    innerDeg;       // a spot's full-intensity half-angle
     float    outerDeg;       // and its cut-off half-angle
-    float    profile[16];    // the beam over angle, 0 .. outerDeg, relative to the axis (kLightProfile)
+    uint32_t lobeCount;      // a beam's, up to kMaxLightLobes
+    LightLobe lobes[kMaxLightLobes];
 };
-static_assert(sizeof(LightDesc) == 128, "LightDesc layout");
+static_assert(sizeof(LightDesc) == 176, "LightDesc layout");
 
 // ------------------------------------------------------------------ models
 //

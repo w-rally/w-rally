@@ -19,13 +19,16 @@ struct Light
     float3 pos;    float invRange2;  // 1 / range^2
     float3 colour; float radius;     // tint x intensity, irradiance units at 1 m
     float3 dir;    float cosOuter;
-    float  spotScale; float invOuterRad; uint type; uint flags;   // 1 / (cos inner - cos outer), 1 / outer angle
-    float  profile[16];
+    float3 up;     float spotScale;  // a beam's up; 1 / (cos inner - cos outer)
+    uint   type;   uint flags;  uint lobeCount; float pad;
+    float4 lobeA[4];                 // a beam's lobes: candela, 1/tan(half-width), 1/tan(half-height), sharpness/2
+    float4 lobeB[4];                 // and their centres: tan(yaw), tan(pitch)
 };
 StructuredBuffer<Light> gLights     : register(NGG_LIGHTS_T0);
 StructuredBuffer<uint2> gClusters   : register(NGG_LIGHTS_T1);   // per cluster: first index, count
 StructuredBuffer<uint>  gLightIndex : register(NGG_LIGHTS_T2);
-static const uint kLightShadows = 1u, kLightProfile = 2u;
+static const uint kLightShadows = 1u;
+static const uint kLightSpot = 1u, kLightBeam = 2u;
 static const uint kClustersX = 16u, kClustersY = 9u, kClustersZ = 24u;
 
 // The cluster of a pixel at a view depth. params: tile width and height in pixels, the slices' near plane, their
@@ -39,8 +42,8 @@ uint LightCluster(float2 px, float viewZ, float4 params)
     return (cz * kClustersY + cy) * kClustersX + cx;
 }
 
-// A light's record but its profile, READ AT ONCE: every field from the buffer by index - never through a copy of the
-// struct, which indexed by a variable (its profile) is an indexable temporary in scratch memory, ~1.5 ms per light at
+// A light's record but its lobes, READ AT ONCE: every field from the buffer by index - never through a copy of the
+// struct, which indexed by a variable (its lobes) is an indexable temporary in scratch memory, ~1.5 ms per light at
 // 1080p on the development GPU - and every one of them used whatever the light's type (LightIrradiance selects, it
 // does not branch), so the compiler issues them as one clause (one round trip, not four), and with a wave-uniform
 // index as scalar loads (the scene pass's light loop, design 5.4 N2).
@@ -49,7 +52,8 @@ struct LightRec
     float3 pos;    float invRange2;
     float3 colour; float radius;
     float3 dir;    float cosOuter;
-    float  spotScale; float invOuterRad; uint type; uint flags;
+    float3 up;     float spotScale;
+    uint   type;   uint flags;  uint lobeCount;
 };
 LightRec LightLoad(uint li)
 {
@@ -57,18 +61,19 @@ LightRec LightLoad(uint li)
     L.pos = gLights[li].pos;           L.invRange2 = gLights[li].invRange2;
     L.colour = gLights[li].colour;     L.radius = gLights[li].radius;
     L.dir = gLights[li].dir;           L.cosOuter = gLights[li].cosOuter;
-    L.spotScale = gLights[li].spotScale; L.invOuterRad = gLights[li].invOuterRad;
+    L.up = gLights[li].up;             L.spotScale = gLights[li].spotScale;
     L.type = gLights[li].type;         L.flags = gLights[li].flags;
+    L.lobeCount = gLights[li].lobeCount;
     return L;
 }
 
 // What light `li` (its record L) gives at p, as an irradiance on a surface facing it (rgb, before visibility and the
 // cosine), and the direction towards it. Inverse square, softened inside the emitter's radius and faded to nothing at
-// its range (a window, so the clusters' cut-off never shows); a spot's cone, and its beam profile over the cone.
+// its range (a window, so the clusters' cut-off never shows); a spot's cone; a beam's lobes.
 float3 LightIrradiance(uint li, LightRec L, float3 p, out float3 l, out float dist)
 {
-    // Per light per pixel, so the divisions the light alone decides are made on the CPU (invRange2, spotScale,
-    // invOuterRad) and the distance and direction come from one rsqrt.
+    // Per light per pixel, so the divisions the light alone decides are made on the CPU (invRange2, spotScale, the
+    // lobes' 1/tan) and the distance and direction come from one rsqrt.
     const float3 d = L.pos - p;
     const float d2 = dot(d, d);
     const float inv = rsqrt(max(d2, 1e-8));
@@ -79,12 +84,24 @@ float3 LightIrradiance(uint li, LightRec L, float3 p, out float3 l, out float di
     float atten = w * w / max(d2, L.radius * L.radius);
     const float cd = dot(-l, L.dir);
     const float s = saturate((cd - L.cosOuter) * L.spotScale);   // smoothstep(cosOuter, cosInner, cd)
-    atten *= L.type == 1u ? s * s * (3.0 - 2.0 * s) : 1.0;
-    if (L.type == 1u && (L.flags & kLightProfile))   // the profile alone is read only where it is used
+    atten *= L.type == kLightSpot ? s * s * (3.0 - 2.0 * s) : 1.0;
+    // A BEAM (design 5.4 N3a): the sum of its lobes, each an elliptical peak in the lamp's frame, measured in the
+    // tangent plane (across and up over along) - read only where it is used, the lobes from the buffer by index.
+    if (L.type == kLightBeam)
     {
-        const float t = saturate(acos(clamp(cd, -1.0, 1.0)) * L.invOuterRad) * 15.0;
-        const uint i = min((uint)t, 14u);
-        atten *= lerp(gLights[li].profile[i], gLights[li].profile[i + 1u], t - (float)i);
+        float beam = 0.0;
+        if (cd > 1e-3)
+        {
+            const float3 toP = -l;
+            const float2 t = float2(dot(toP, cross(L.up, L.dir)), dot(toP, L.up)) / cd;
+            [loop] for (uint k = 0; k < L.lobeCount; ++k)
+            {
+                const float4 a = gLights[li].lobeA[k];
+                const float2 q = (t - gLights[li].lobeB[k].xy) * a.yz;
+                beam += a.x * exp2(-pow(max(dot(q, q), 1e-12), a.w));
+            }
+        }
+        atten *= beam;
     }
     return L.colour * atten;
 }
@@ -196,9 +213,24 @@ bool Lights::Build(ID3D12GraphicsCommandList* list, const float* view, const flo
         if (L.intensity <= 0.0f) continue;
         GpuLight& g = m_lightMap[live];
         const float tintMax = (std::max)(L.colour[0], (std::max)(L.colour[1], L.colour[2]));
-        // Its reach: where it falls under ~0.1 lux, capped at 300 m (a beam that far is in the haze anyway).
+        // A beam's lobes, and what they decide: its peak (the reach) and how far off its axis it reaches (the
+        // clusters' cone) - a lobe out to where it falls to 1% of its peak, (log2 100)^(1/sharpness) half-widths.
+        const bool beam = L.type == LightDesc::kBeam && L.lobeCount > 0;
+        float peak = L.intensity, extent = 0.0f;
+        if (beam) {
+            peak = 0.0f;
+            for (uint32_t k = 0; k < (std::min)(L.lobeCount, LightDesc::kMaxLobes); ++k) {
+                const LightLobe& o = L.lobes[k];
+                peak = (std::max)(peak, o.candela * L.intensity);
+                const float f = std::pow(6.644f, 1.0f / (std::max)(o.sharpness, 0.5f));
+                const float dr = 3.14159265f / 180.0f;
+                extent = (std::max)(extent, (std::max)(std::fabs(std::tan(o.yawDeg * dr)) + std::tan(o.halfWidthDeg * dr) * f,
+                                                       std::fabs(std::tan(o.pitchDeg * dr)) + std::tan(o.halfHeightDeg * dr) * f));
+            }
+        }
+        // Its reach: where it falls under ~0.1 lux, at most kMaxRange (a pencil beam's).
         float range = L.range;
-        if (range <= 0.0f) range = (std::min)(std::sqrt(L.intensity * tintMax / 0.1f), 300.0f);
+        if (range <= 0.0f) range = (std::min)(std::sqrt(peak * tintMax / 0.1f), kMaxRange);
         float len = std::sqrt(L.direction[0] * L.direction[0] + L.direction[1] * L.direction[1] +
                               L.direction[2] * L.direction[2]);
         if (len < 1e-6f) len = 1.0f;
@@ -209,14 +241,35 @@ bool Lights::Build(ID3D12GraphicsCommandList* list, const float* view, const flo
         }
         g.invRange2 = 1.0f / (range * range);
         g.radius = (std::max)(L.radius, 0.005f);
-        const float outer = (std::min)((std::max)(L.outerDeg, 0.5f), 179.0f) * 3.14159265f / 180.0f;
+        // A beam's "outer" angle is its extent: the clusters' cone, not its shading.
+        const float outer = beam ? (std::min)(std::atan(extent), 3.1f)
+                                 : (std::min)((std::max)(L.outerDeg, 0.5f), 179.0f) * 3.14159265f / 180.0f;
         const float inner = (std::min)((std::max)(L.innerDeg, 0.0f) * 3.14159265f / 180.0f, outer * 0.999f);
         g.cosOuter = std::cos(outer);
         g.spotScale = 1.0f / (std::max)(std::cos(inner) - g.cosOuter, 1e-4f);
-        g.invOuterRad = 1.0f / outer;
-        g.type = L.type;
-        g.flags = (L.shadows ? 1u : 0u) | (L.hasProfile ? 2u : 0u);
-        for (int k = 0; k < 16; ++k) g.profile[k] = L.hasProfile ? L.profile[k] : 1.0f;
+        // The beam's up, square to its axis (a lobe's yaw is towards up x axis: the lamp's right).
+        float up[3] = { L.up[0], L.up[1], L.up[2] };
+        const float ud = up[0] * g.dir[0] + up[1] * g.dir[1] + up[2] * g.dir[2];
+        for (int k = 0; k < 3; ++k) up[k] -= ud * g.dir[k];
+        float ul = std::sqrt(up[0] * up[0] + up[1] * up[1] + up[2] * up[2]);
+        if (ul < 1e-6f) { up[0] = 0.0f; up[1] = 1.0f; up[2] = 0.0f; ul = 1.0f; }   // an axis straight up or down
+        for (int k = 0; k < 3; ++k) g.up[k] = up[k] / ul;
+        g.type = beam ? LightDesc::kBeam : L.type == LightDesc::kSpot ? LightDesc::kSpot : LightDesc::kPoint;
+        g.flags = L.shadows ? 1u : 0u;
+        g.lobeCount = beam ? (std::min)(L.lobeCount, LightDesc::kMaxLobes) : 0u;
+        g.pad = 0.0f;
+        for (uint32_t k = 0; k < LightDesc::kMaxLobes; ++k) {
+            const LightLobe& o = L.lobes[k];
+            const float dr = 3.14159265f / 180.0f;
+            const bool on = k < g.lobeCount;
+            g.lobeA[k][0] = on ? o.candela : 0.0f;
+            g.lobeA[k][1] = on ? 1.0f / std::tan((std::max)(o.halfWidthDeg, 0.1f) * dr) : 0.0f;
+            g.lobeA[k][2] = on ? 1.0f / std::tan((std::max)(o.halfHeightDeg, 0.1f) * dr) : 0.0f;
+            g.lobeA[k][3] = on ? 0.5f * (std::max)(o.sharpness, 0.5f) : 1.0f;
+            g.lobeB[k][0] = on ? std::tan(o.yawDeg * dr) : 0.0f;
+            g.lobeB[k][1] = on ? std::tan(o.pitchDeg * dr) : 0.0f;
+            g.lobeB[k][2] = g.lobeB[k][3] = 0.0f;
+        }
 
         // In view space: its sphere of reach, and the slices and tiles that sphere covers (conservative).
         float c[3];
@@ -248,7 +301,7 @@ bool Lights::Build(ID3D12GraphicsCommandList* list, const float* view, const flo
             sh.dir[k] = g.dir[0] * view[0 * 4 + k] + g.dir[1] * view[1 * 4 + k] + g.dir[2] * view[2 * 4 + k];
         }
         sh.range = range;
-        sh.spot = L.type == LightDesc::kSpot && outer < 3.14159265f * 0.5f;   // wider: a hemisphere, the sphere will do
+        sh.spot = (L.type == LightDesc::kSpot || beam) && outer < 3.14159265f * 0.5f;   // wider: the sphere will do
         sh.cosOuter = g.cosOuter;
         sh.sinOuter = std::sin(outer);
         shapes.push_back(sh);

@@ -3163,6 +3163,45 @@ Four decisions, the user's:
     lenses). N3c tuning on the references (intensities, spreads, aim, exposure). Later: haze, retroreflective
     materials, glare. Cost: shadows stay one ray per pixel however many lamps; shading ~0.15 ms per lamp over the
     whole screen on the 780M.
+  - **N3a - DONE 2026-10-31: the lamp model.**
+    - **Beams** (renderer interface 8): `kLightBeam`, a lamp's light as the sum of up to 4 LOBES (`iface::LightLobe`):
+      each an elliptical peak in candela in the lamp's own frame (its axis and its UP), falling to half at the
+      half-width across and the half-height up and down, centred a yaw and a pitch off the axis, with a sharpness
+      (2 a gaussian, higher a flatter top and a harder edge - a dipped beam's cut-off). In the shader the angle is
+      measured in the lamp's tangent plane, I = sum of candela x 2^-(q^(sharpness/2)). The radial profile of N2 is
+      gone (nothing used it). A light reaches up to 1 km (a pencil beam's 0.1 lux; it was 300 m), and the clusters
+      cull a beam by the cone its lobes reach (to 1% of their peaks).
+    - **The game's lamps** (`game/src/assets/car_lights.*`): a lamp is a BEAM preset at a place on the car (its
+      frame: x LEFT, -y forward, z up, from the centre of gravity) aimed yaw right and pitch up. The presets, round
+      figures until N3c tunes them on the references: `halogen-low` (3200 K, 16 kcd hot spot 2 degrees under the
+      axis, cut-off), `halogen-high` (3300 K, 50 kcd), `led-pencil` (5800 K, 350 kcd in +-3.5 x 2.5 degrees),
+      `led-driving` (5800 K, 150 kcd, a 22-degree spread), `led-bar` (5700 K, a flat flood +-30 degrees, 60 kcd, and a
+      +-60-degree spill), `ditch` (5800 K, 40 kcd, to be aimed off to the side). Colour temperature -> linear sRGB of
+      luminance 1 (Planckian locus, Kim et al.), so candela stay candela whatever the colour. The axes' swap into the
+      renderer mirrors the car's right, so a lobe's yaw takes its sign from where the car's right ends up.
+    - `PHYS_DRIVE_TEST_LIGHTS=ramp|bars|low` (`assets::TestLayout`): two main beams and a 4-pod ramp (pencils
+      inside, driving beams outside toed 2 degrees out, all 0.8 degrees down), two main beams and two LED bars, the
+      dipped beams. Checked from the bonnet camera on stage 41 at night: the pods' long, intense beam down the road;
+      the bars' wide flood over both verges and the spectators beside the road; the warm, short dipped beams.
+    - Cost (1080p, the 780M, full clock): the ramp layout's 6 lamps add 5.5-8 ms to the GPU frame - their light
+      rays 3.9 ms (the ray tracer weighs every lamp of a pixel's cluster to pick one: next to optimise), denoising
+      +1.0, shading ~1.2. The day is unchanged.
+    - **car.json's lamps (draft, N3b settles it):**
+      ```json
+      "lamps": {
+        "beams":   { "<name>": { "kelvin": 5800, "radius": 0.08,
+                                 "lobes": [ { "candela": 350000, "halfWidth": 3.5, "halfHeight": 2.5,
+                                              "yaw": 0, "pitch": 0, "sharpness": 2 } ] } },
+        "lamps":   [ { "name": "lf", "role": "main", "beam": "halogen-high", "at": [0.65, -2.0, 0.05],
+                       "yaw": 0, "pitch": -0.5, "mesh": "e_light_lf_lit" } ],
+        "layouts": { "4-pod ramp": { "mesh": "e_ramp", "lamps": [ { "beam": "led-pencil", "at": [0.12, -1.9, 0.3],
+                                                                    "pitch": -0.8 } ] },
+                     "no ramp":    { "lamps": [] } }
+      }
+      ```
+      `beams` adds the car's own beams beside the presets; `lamps` the ones every layout has (headlamps, tail,
+      brake, reverse, indicators: `role` says how the game switches them); `layouts` the choices for the setup (the
+      ramp's lamps, the mesh that is shown with them). The setup's aim (yaw, pitch) is added to a layout's lamps.
 - **N4 - stage lights.** A light chunk in the `.ngg` (with `provenance=auto|authored`, 5.3), emissive texture
   detection for the automatic part, Wallaby's light-placement mode for the authored part (its own task).
 

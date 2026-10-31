@@ -594,10 +594,12 @@ Status WRALLY_CALL RenderFrame(Renderer* r, const FrameDesc* f)
             for (uint32_t i = 0; f->lights && i < f->lightCount; ++i) {
                 const LightDesc& in = f->lights[i];
                 ngg::core::LightDesc l;
-                l.type = in.type == kLightSpot ? ngg::core::LightDesc::kSpot : ngg::core::LightDesc::kPoint;
+                l.type = in.type == kLightBeam ? ngg::core::LightDesc::kBeam
+                       : in.type == kLightSpot ? ngg::core::LightDesc::kSpot : ngg::core::LightDesc::kPoint;
                 for (int k = 0; k < 3; ++k) {
                     l.position[k] = in.position[k];
                     l.direction[k] = in.direction[k];
+                    l.up[k] = in.up[k];
                     l.colour[k] = in.colour[k];
                 }
                 l.intensity = in.intensity;
@@ -606,8 +608,11 @@ Status WRALLY_CALL RenderFrame(Renderer* r, const FrameDesc* f)
                 l.innerDeg = in.innerDeg;
                 l.outerDeg = in.outerDeg;
                 l.shadows = (in.flags & kLightNoShadows) == 0;
-                l.hasProfile = (in.flags & kLightProfile) != 0;
-                for (int k = 0; k < 16; ++k) l.profile[k] = in.profile[k];
+                l.lobeCount = (std::min)(in.lobeCount, kMaxLightLobes);
+                for (uint32_t k = 0; k < l.lobeCount; ++k) {
+                    const LightLobe& o = in.lobes[k];
+                    l.lobes[k] = { o.candela, o.halfWidthDeg, o.halfHeightDeg, o.yawDeg, o.pitchDeg, o.sharpness };
+                }
                 lights.push_back(l);
             }
             r->scene.SetLights(lights);

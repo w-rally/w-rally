@@ -17,6 +17,7 @@
 
 #include "app/settings.h"
 #include "app/window.h"
+#include "assets/car_lights.h"
 #include "assets/car_render.h"
 #include "assets/fences.h"
 #include "assets/catalog.h"
@@ -326,15 +327,22 @@ StageEnd RunStage(Shell& sh, const Options& o, bool fromMenu, std::string& error
     float orbit = o.cameraAngle;   // the beside camera's place round the car, radians from its left side toward its front
     // PHYS_DRIVE_LOOK_UP=<degrees>: every view tilted up by that much - the sky's moon and stars to look at.
     const float lookUp = std::getenv("PHYS_DRIVE_LOOK_UP") ? static_cast<float>(std::atof(std::getenv("PHYS_DRIVE_LOOK_UP"))) : 0.0f;
-    // PHYS_DRIVE_TEST_LIGHTS: test lamps on the car (the local lights' check, below).
-    // =lamp: the lamp behind alone (its shadow of the car, unmixed with the beams). =noshadow: all three never occluded
-    // (no light rays - the shading's cost alone).
+    // PHYS_DRIVE_TEST_LIGHTS: test lamps on the car until it carries its own (assets::TestLayout, design 5.4 N3).
+    // =ramp (or any other value) two main beams and a 4-pod ramp, =bars two main beams and two LED bars, =low the
+    // dipped beams; =lamp a lamp above and behind the car alone (its shadow of the car); =noshadow the ramp layout never
+    // occluded (no light rays - the shading's cost alone).
     // (An EMPTY value is off: a shell can leave a variable set to "" when it is cleared.)
     const char* const testLightsEnv = std::getenv("PHYS_DRIVE_TEST_LIGHTS");
     const bool testLights_ = testLightsEnv && *testLightsEnv;
     const bool testLampOnly = testLights_ && !std::strcmp(testLightsEnv, "lamp");
     const bool testNoShadow = testLights_ && !std::strcmp(testLightsEnv, "noshadow");
-    if (testLights_) std::printf("test lights: %s\n", testLampOnly ? "the lamp behind" : "two headlights and the lamp behind");
+    std::vector<assets::Lamp> testLamps;
+    if (testLights_ && !testLampOnly) {
+        testLamps = assets::TestLayout(testLightsEnv);
+        if (testLamps.empty()) testLamps = assets::TestLayout("ramp");
+    }
+    if (testLights_)
+        std::printf("test lights: %s\n", testLampOnly ? "the lamp behind" : (std::to_string(testLamps.size()) + " lamps").c_str());
     float chaseDistance = o.session.chaseDistance;
     bool chaseChanged = false;     // reported once the key is let go
     const uint32_t jitterTo = std::getenv("PHYS_DRIVE_JITTER") ? std::strtoul(std::getenv("PHYS_DRIVE_JITTER"), nullptr, 0) : 0;
@@ -708,32 +716,20 @@ StageEnd RunStage(Shell& sh, const Options& o, bool fromMenu, std::string& error
                 fd.skyTime = {1, o.skyYear, o.skyMonth, o.skyDay, static_cast<float>(o.skyHour), static_cast<float>(o.skyUtcOffset),
                               static_cast<float>(o.skyLatitude), static_cast<float>(o.skyLongitude), static_cast<float>(o.skyNorth)};
             }
-            // PHYS_DRIVE_TEST_LIGHTS: two headlight spots and a lamp behind and above, on the car - a check of the local
-            // lights (NGG design 5.4 N2) before the car's own lamps (N3). In the car's frame: x right, -y forward, z up,
-            // from its centre of gravity (the pose's origin).
+            // PHYS_DRIVE_TEST_LIGHTS: the test lamps on the car at its pose (above), or the lamp above and behind it.
             std::vector<iface::LightDesc> testLights;
-            if (testLights_) {
-                auto light = [&](uint32_t type, V3 at, V3 aim, float candela, float inner, float outer, V3 tint, float radius) {
-                    iface::LightDesc l{};
-                    l.type = type;
-                    const V3 wp = V3{p.position[0], p.position[1], p.position[2]} + math::Rotate(p.rotation, at);
-                    if (testNoShadow) l.flags |= iface::kLightNoShadows;
-                    const V3 r = math::ToRender(wp), d = math::ToRender(math::Rotate(p.rotation, aim));
-                    l.position[0] = r.x, l.position[1] = r.y, l.position[2] = r.z;
-                    l.direction[0] = d.x, l.direction[1] = d.y, l.direction[2] = d.z;
-                    l.colour[0] = tint.x, l.colour[1] = tint.y, l.colour[2] = tint.z;
-                    l.intensity = candela;
-                    l.radius = radius;
-                    l.innerDeg = inner;
-                    l.outerDeg = outer;
-                    testLights.push_back(l);
-                };
-                const V3 warm{1.0f, 0.9f, 0.75f}, ahead{0.0f, -1.0f, -0.04f};
-                if (!testLampOnly) {
-                    light(iface::kLightSpot, {-0.6f, -2.3f, 0.1f}, ahead, 40000.0f, 8.0f, 30.0f, warm, 0.08f);
-                    light(iface::kLightSpot, {0.6f, -2.3f, 0.1f}, ahead, 40000.0f, 8.0f, 30.0f, warm, 0.08f);
-                }
-                light(iface::kLightPoint, {0.0f, 4.0f, 2.0f}, {0.0f, 0.0f, -1.0f}, 2000.0f, 0.0f, 90.0f, {1.0f, 0.8f, 0.55f}, 0.15f);
+            for (const assets::Lamp& lamp : testLamps) testLights.push_back(assets::LampLight(lamp, p, !testNoShadow));
+            if (testLampOnly) {
+                // In the car's frame: x left, -y forward, z up, from its centre of gravity (the pose's origin).
+                iface::LightDesc l{};
+                l.type = iface::kLightPoint;
+                const V3 r = math::ToRender(V3{p.position[0], p.position[1], p.position[2]} +
+                                            math::Rotate(p.rotation, V3{0.0f, 4.0f, 2.0f}));
+                l.position[0] = r.x, l.position[1] = r.y, l.position[2] = r.z;
+                assets::KelvinToRgb(2700.0f, l.colour);
+                l.intensity = 2000.0f;
+                l.radius = 0.15f;
+                testLights.push_back(l);
             }
             fd.lights = testLights.data();
             fd.lightCount = static_cast<uint32_t>(testLights.size());
