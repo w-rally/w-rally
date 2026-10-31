@@ -26,6 +26,7 @@ add_executable(W-Rally
     src/physics/physics.cpp
     src/ui/imgui_layer.cpp src/ui/hud.cpp src/ui/menus.cpp src/ui/menu_video.cpp)
 target_include_directories(W-Rally PRIVATE src)
+wrally_build_info(W-Rally)   # the version and commit in the screens' corner
 # Media Foundation: the main menu's video loop.
 target_link_libraries(W-Rally PRIVATE phys-data ngg-format wrally-modules wrally-signals imgui mfplat mfreadwrite mfuuid)
 # Not linked: loaded at run time from bin/modules - but built with the game.
