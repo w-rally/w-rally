@@ -549,7 +549,7 @@ StageEnd RunStage(Shell& sh, const Options& o, bool fromMenu, std::string& error
             lit[assets::kLampReverse] = on && lampSwitch.reverse;
             lit[assets::kLampRamp] = on && lampSwitch.beam == 2 && lampSwitch.ramp;
             const bool housing = carLampsLoaded && !testLights_ && carLamps.layouts[lampLayout].name == "ramp";
-            car.PlaceLamps(lit, housing, instances);
+            car.PlaceLamps(lit, housing, parts, instances);
         }
         for (const iface::InstanceUpdate& u : fences.Step(in.seconds, p, snap.centerOfGravity)) instances.push_back(u);
         const V3 chaseEye = snap.before.chase.eye + (snap.after.chase.eye - snap.before.chase.eye) * t;
@@ -795,7 +795,9 @@ StageEnd RunStage(Shell& sh, const Options& o, bool fromMenu, std::string& error
                 lampSwitch.brake = in.brake || (lampsForced && std::strstr(lampsEnv, "brake"));
                 lampSwitch.reverse = snap.dash.gear < 0 || (lampsForced && std::strstr(lampsEnv, "reverse"));
                 lampSwitch.seconds += in.seconds;
-                assets::CarLights(carLamps, lampLayout, o.lampSpread, o.lampPitch, lampSwitch, p, testLights);
+                assets::LampMounts mounts;
+                car.Mounts(parts, mounts);   // a lamp on a part that came off is dark; on one that hangs, it moves with it
+                assets::CarLights(carLamps, lampLayout, o.lampSpread, o.lampPitch, lampSwitch, p, testLights, &mounts);
             }
             if (testLampOnly) {
                 // In the car's frame: x left, -y forward, z up, from its centre of gravity (the pose's origin).

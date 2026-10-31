@@ -33,8 +33,11 @@ const LampBeam kBeams[] = {
     {"led-driving", 5800.0f, 0.08f, 3,
      {{150000.0f, 5.0f, 3.0f, 0.0f, 0.0f, 3.0f}, {15000.0f, 12.0f, 5.0f, 0.0f, -1.0f, 2.0f},
       {12000.0f, 30.0f, 12.0f, 0.0f, -1.0f, 2.0f}}},
-    {"led-bar", 5700.0f, 0.25f, 2,
-     {{60000.0f, 30.0f, 4.5f, 0.0f, 0.0f, 4.0f}, {15000.0f, 60.0f, 9.0f, 0.0f, -2.0f, 2.0f}}},
+    // A combo LED bar: a spot in the middle, a wide flood round it, smooth - no cut-off (the halogens' and the pods'
+    // tuning not its).
+    {"led-bar", 5700.0f, 0.25f, 3,
+     {{150000.0f, 6.0f, 3.5f, 0.0f, 0.0f, 2.0f}, {30000.0f, 18.0f, 6.0f, 0.0f, -0.5f, 2.0f},
+      {10000.0f, 40.0f, 10.0f, 0.0f, -1.0f, 2.0f}}},
     {"ditch", 5800.0f, 0.08f, 1,
      {{40000.0f, 20.0f, 6.0f, 0.0f, -2.0f, 2.0f}}},
     // The small lamps, as their regulations have them in round figures: a tail lamp some 5-10 cd, a brake lamp ~100,
@@ -85,18 +88,28 @@ void KelvinToRgb(float kelvin, float rgb[3])
     rgb[2] = static_cast<float>(b / lum);
 }
 
-iface::LightDesc LampLight(const Lamp& lamp, const physics::Pose& pose, bool shadows)
+iface::LightDesc LampLight(const Lamp& lamp, const physics::Pose& pose, bool shadows, const float* delta)
 {
     const LampBeam& beam = Beam(lamp.kind);
     const float cy = std::cos(lamp.yawDeg * kDeg), sy = std::sin(lamp.yawDeg * kDeg);
     const float cp = std::cos(lamp.pitchDeg * kDeg), sp = std::sin(lamp.pitchDeg * kDeg);
-    // Its axis and up in the car's frame (forward -y, LEFT +x, up +z), then the world's and the renderer's.
-    const math::V3 axisCar{-sy * cp, -cy * cp, sp}, upCar{sy * sp, cy * sp, cp};
-    const math::V3 world = math::V3{pose.position[0], pose.position[1], pose.position[2]} + math::Rotate(pose.rotation, lamp.at);
+    // Its place, axis, up and right in the car's frame (forward -y, LEFT +x, up +z) - moved with its part, where the part
+    // has moved (in render axes: the axes' swap is its own inverse) -, then the world's and the renderer's.
+    math::V3 at = lamp.at, axisCar{-sy * cp, -cy * cp, sp}, upCar{sy * sp, cy * sp, cp}, rightCar{-cy, sy, 0.0f};
+    if (delta) {
+        auto xf = [&](math::V3 v, float w) {
+            const math::V3 r = math::ToRender(v);
+            return math::ToRender(math::V3{r.x * delta[0] + r.y * delta[4] + r.z * delta[8] + w * delta[12],
+                                           r.x * delta[1] + r.y * delta[5] + r.z * delta[9] + w * delta[13],
+                                           r.x * delta[2] + r.y * delta[6] + r.z * delta[10] + w * delta[14]});
+        };
+        at = xf(at, 1.0f), axisCar = xf(axisCar, 0.0f), upCar = xf(upCar, 0.0f), rightCar = xf(rightCar, 0.0f);
+    }
+    const math::V3 world = math::V3{pose.position[0], pose.position[1], pose.position[2]} + math::Rotate(pose.rotation, at);
     const math::V3 p = math::ToRender(world);
     const math::V3 d = math::ToRender(math::Rotate(pose.rotation, axisCar));
     const math::V3 u = math::ToRender(math::Rotate(pose.rotation, upCar));
-    const math::V3 right = math::ToRender(math::Rotate(pose.rotation, math::V3{-cy, sy, 0.0f}));
+    const math::V3 right = math::ToRender(math::Rotate(pose.rotation, rightCar));
 
     iface::LightDesc l{};
     l.type = iface::kLightBeam;
@@ -254,43 +267,68 @@ CarLamps LoadCarLamps(const std::string& sgcPath, const float cog[3])
     const math::V3 mid{0.0f, 0.5f * (lf.y + rf.y) + 0.15f, 0.5f * (lf.z + rf.z) + 0.25f};
     if (pods.empty())
         for (float x : {0.38f, 0.12f, -0.12f, -0.38f}) pods.push_back({x, mid.y, mid.z});
-    out.layouts.push_back({"ramp", AimRamp(pods)});
+    out.layouts.push_back({"ramp", AimRamp(pods), 10.0f});
     out.layouts.push_back({"2 + 2", {{LampKind::LedDriving, {0.25f, mid.y, mid.z}, -10.0f, -0.8f},
-                                     {LampKind::LedDriving, {-0.25f, mid.y, mid.z}, 10.0f, -0.8f}}});
+                                     {LampKind::LedDriving, {-0.25f, mid.y, mid.z}, 10.0f, -0.8f}}, 10.0f});
     out.layouts.push_back({"LED bars", {{LampKind::LedBar, {0.3f, mid.y, mid.z + 0.02f}, 0.0f, -0.8f},
-                                        {LampKind::LedBar, {-0.3f, mid.y, mid.z + 0.02f}, 0.0f, -0.8f}}});
-    out.layouts.push_back({"no ramp", {}});
+                                        {LampKind::LedBar, {-0.3f, mid.y, mid.z + 0.02f}, 0.0f, -0.8f}}, 0.0f});
+    out.layouts.push_back({"no ramp", {}, 0.0f});
     return out;
 }
 
 void CarLights(const CarLamps& lamps, size_t layout, float spreadDeg, float pitchDeg, const LampSwitches& s,
-               const physics::Pose& pose, std::vector<iface::LightDesc>& out)
+               const physics::Pose& pose, std::vector<iface::LightDesc>& out, const LampMounts* mounts)
 {
+    // A lamp's mount: its group's on its side, else the group's middle one; null where no mesh says (in place).
+    auto side = [](const Lamp& l) { return l.at.x > 0.05f ? 0 : l.at.x < -0.05f ? 1 : 2; };
+    auto place = [&](int group, const Lamp& l, bool* off) -> const float* {
+        *off = false;
+        if (!mounts) return nullptr;
+        const int sd = side(l);
+        for (int k : {sd, 2})
+            if (mounts->off[group][k] || mounts->moved[group][k]) {
+                *off = mounts->off[group][k];
+                return mounts->moved[group][k] ? mounts->delta[group][k] : nullptr;
+            }
+        return nullptr;
+    };
+    const float headSpread = layout < lamps.layouts.size() ? lamps.layouts[layout].headSpread : 0.0f;
     // The indicators blink at 1.5 Hz, half the time on.
     const bool blinkOn = std::fmod(s.seconds * 1.5, 1.0) < 0.5;
     for (const CarLamp& c : lamps.fixed) {
         Lamp l = c.lamp;
         bool on = false, shadows = false;
+        int group = kLampHead;
         switch (c.role) {
         case LampRole::Head:
             on = s.beam > 0, shadows = true;
             if (s.beam == 1) l.kind = LampKind::HalogenLow;   // dipped: straight on, its own cut-off
-            else l.yawDeg = l.at.x > 0.0f ? -10.0f : 10.0f, l.pitchDeg = -0.5f;   // main: 10 degrees out (the wall)
+            else l.yawDeg = l.at.x > 0.0f ? -headSpread : headSpread, l.pitchDeg = -0.5f;   // main: the layout's spread
             break;
-        case LampRole::Tail: on = s.smallLamps && s.beam > 0; break;
-        case LampRole::Brake: on = s.smallLamps && s.brake; break;
-        case LampRole::Reverse: on = s.smallLamps && s.reverse; break;
-        case LampRole::IndicatorLeft: on = s.smallLamps && blinkOn && (s.hazard || s.indicator < 0); break;
-        case LampRole::IndicatorRight: on = s.smallLamps && blinkOn && (s.hazard || s.indicator > 0); break;
+        case LampRole::Tail: on = s.smallLamps && s.beam > 0, group = kLampTail; break;
+        case LampRole::Brake: on = s.smallLamps && s.brake, group = kLampBrake; break;
+        case LampRole::Reverse: on = s.smallLamps && s.reverse, group = kLampReverse; break;
+        case LampRole::IndicatorLeft:   // (beside the headlamps or the tail lamps: on their parts)
+            on = s.smallLamps && blinkOn && (s.hazard || s.indicator < 0), group = l.at.y < 0.0f ? kLampHead : kLampTail;
+            break;
+        case LampRole::IndicatorRight:
+            on = s.smallLamps && blinkOn && (s.hazard || s.indicator > 0), group = l.at.y < 0.0f ? kLampHead : kLampTail;
+            break;
         default: break;
         }
-        if (on) out.push_back(LampLight(l, pose, shadows));
+        bool gone = false;
+        const float* delta = place(group, l, &gone);
+        if (on && !gone) out.push_back(LampLight(l, pose, shadows, delta));
     }
+    // The ramp: on its pods' part, else its housing's (a bonnet's) - a ramp that came off with it is dark.
     if (s.beam == 2 && s.ramp && layout < lamps.layouts.size())
         for (Lamp l : lamps.layouts[layout].lamps) {
             l.yawDeg += (l.at.x > 0.0f ? -spreadDeg : spreadDeg);
             l.pitchDeg += pitchDeg;
-            out.push_back(LampLight(l, pose, true));
+            bool gone = false;
+            const float* delta = place(kLampRamp, l, &gone);
+            if (!gone && !delta) delta = place(kLampRampHousing, l, &gone);
+            if (!gone) out.push_back(LampLight(l, pose, true, delta));
         }
 }
 
