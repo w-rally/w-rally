@@ -40,7 +40,8 @@ namespace wrally::iface {
 // 6: FrameDesc::lights (point and spot lights, every one ray-traced).
 // 7: RenderStats::frameMs (the whole frame's GPU time).
 // 8: LightDesc - beams (kLightBeam: lobes in the lamp's frame, its up), the radial profile gone.
-constexpr uint32_t kRendererInterfaceVer = 8;
+// 9: RenderStats::sunElevationDeg (the frame's sun: its own time and place, or the weather's).
+constexpr uint32_t kRendererInterfaceVer = 9;
 
 struct Renderer;                     // the module's instance, opaque
 typedef uint32_t SceneHandle;        // a loaded .ngg stage
@@ -313,6 +314,7 @@ struct RenderStats {
     float    lightsMs;                     // the local lights' ray trace (GPU ms), part of rtMs (design 5.4 N2)
     uint32_t lightCount;                   // the local lights this frame
     float    frameMs;                      // the whole frame's GPU time, first command to last (GPU ms)
+    float    sunElevationDeg;              // the last frame's sun over the horizon, degrees (a game's lamps by it)
 };
 
 #pragma pack(pop)

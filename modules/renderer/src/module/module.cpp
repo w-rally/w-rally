@@ -12,6 +12,8 @@
 
 #include <cstdio>
 #include <cstdlib>
+#include <algorithm>
+#include <cmath>
 #include <cstring>
 #include <memory>
 #include <string>
@@ -155,6 +157,7 @@ struct Renderer {
     int32_t appliedPreset = -2;            // the weather preset in weatherSky (-1 a WeatherDesc, -2 none yet)
     WeatherDesc appliedDesc{};
     SkyTimeDesc loggedSkyTime{};           // the last FrameDesc::skyTime the log reported
+    float sunElevationDeg = 90.0f;         // the last frame's sun over the horizon (RenderStats)
     std::unordered_map<int32_t, std::vector<uint32_t>> byKey;   // NGGK key -> the scene's objects
     std::unordered_map<int32_t, bool> keyVisible;
     std::vector<Model> models;             // by handle - 1
@@ -642,6 +645,8 @@ Status WRALLY_CALL RenderFrame(Renderer* r, const FrameDesc* f)
     // The frame's sky: the weather's, and over its sun the time and place when the frame gives them (NGG design 5.4)
     // - from the weather's sky every frame, so the night's scaling of the light never compounds.
     ngg::core::SkyParams sky = r->weatherSky;
+    // The sun's elevation for the stats: the weather's sun (sunDir its light's direction), unless a time sets it below.
+    r->sunElevationDeg = static_cast<float>(std::asin(std::clamp(-sky.sunDir[1], -1.0f, 1.0f)) * 57.29578);
     if (world && f->skyTime.set) {
         const SkyTimeDesc& t = f->skyTime;
         ngg::core::SkyTime st;
@@ -649,6 +654,7 @@ Status WRALLY_CALL RenderFrame(Renderer* r, const FrameDesc* f)
         st.localHour = t.localHour, st.utcOffset = t.utcOffset;
         st.latitude = t.latitude, st.longitude = t.longitude, st.northDeg = t.northDeg;
         const ngg::core::SkyBodies b = ngg::core::ApplySkyTime(st, sky);
+        r->sunElevationDeg = b.sunElevationDeg;
         if (std::memcmp(&t, &r->loggedSkyTime, sizeof t)) {   // said once per time, not per frame
             const int minutes = static_cast<int>(t.localHour * 60.0f + 0.5f);
             ngg::core::Log("sky: %04d-%02d-%02d %02d:%02d (UTC%+.1f) at %.2f, %.2f: sun %.1f deg up, moon %.1f deg up "
@@ -702,6 +708,7 @@ Status WRALLY_CALL Stats(Renderer* r, RenderStats* out)
     rt.ReadStats();
     out->passMs = (float)r->scene.LastPassMs();
     out->frameMs = (float)r->core.LastFrameMs();
+    out->sunElevationDeg = r->sunElevationDeg;
     out->envMs = (float)r->scene.LastEnvMs();
     out->aerialMs = (float)r->scene.LastAerialMs();
     out->rtActive = r->core.RayTracedShadowsActive() ? 1u : 0u;

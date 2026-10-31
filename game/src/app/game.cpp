@@ -346,6 +346,29 @@ StageEnd RunStage(Shell& sh, const Options& o, bool fromMenu, std::string& error
     }
     if (testLights_)
         std::printf("test lights: %s\n", testLampOnly ? "the lamp behind" : (std::to_string(testLamps.size()) + " lamps").c_str());
+    // THE CAR'S LAMPS (NGG design 5.4 N3b): its own (assets::LoadCarLamps, at the first frame - the centre of gravity
+    // is the physics'), switched by the driver (headlights, ramp, indicators, hazard) and by the car (the brake pedal,
+    // reverse). After dusk they start lit - main beam and the ramp; by day off, and the small lamps' light not given (it
+    // would show only on their glass, and costs the GPU what the beams do).
+    assets::CarLamps carLamps;
+    bool carLampsLoaded = false;
+    size_t lampLayout = 0;
+    assets::LampSwitches lampSwitch;
+    bool lampSwitchSet = false;
+    int lampFrames = 0;   // the frames drawn: the second one's stats know the sun
+    Press headlightsKey, rampKey, indicatorLeftKey, indicatorRightKey, hazardKey;
+    static const char* const kBeams[] = {"off", "dipped", "main"};
+    // PHYS_DRIVE_LAMPS=<0|1|2>[,noramp][,brake][,reverse][,left][,right][,hazard]: the switches from the start, the
+    // brake and reverse lamps held lit - for captures, which have neither a pedal nor a gear.
+    const char* const lampsEnv = std::getenv("PHYS_DRIVE_LAMPS");
+    const bool lampsForced = lampsEnv && *lampsEnv;
+    if (lampsForced) {
+        lampSwitch.beam = std::clamp(std::atoi(lampsEnv), 0, 2);
+        lampSwitch.ramp = !std::strstr(lampsEnv, "noramp");
+        lampSwitch.hazard = std::strstr(lampsEnv, "hazard") != nullptr;
+        lampSwitch.indicator = std::strstr(lampsEnv, "left") ? -1 : std::strstr(lampsEnv, "right") ? 1 : 0;
+        lampSwitchSet = true;
+    }
     float chaseDistance = o.session.chaseDistance;
     bool chaseChanged = false;     // reported once the key is let go
     const uint32_t jitterTo = std::getenv("PHYS_DRIVE_JITTER") ? std::strtoul(std::getenv("PHYS_DRIVE_JITTER"), nullptr, 0) : 0;
@@ -442,6 +465,18 @@ StageEnd RunStage(Shell& sh, const Options& o, bool fromMenu, std::string& error
             redraw = true;
             std::printf("view %d: %s\n", debugView, renderer.DebugViewName(debugView));
         }
+        // The lamps' switches (assets::LampSwitches).
+        if (headlightsKey(focused && keys.Down(Action::Headlights))) {
+            lampSwitch.beam = (lampSwitch.beam + 1) % 3;
+            std::printf("headlights: %s\n", kBeams[lampSwitch.beam]);
+        }
+        if (rampKey(focused && keys.Down(Action::Ramp))) {
+            lampSwitch.ramp = !lampSwitch.ramp;
+            std::printf("ramp %s\n", lampSwitch.ramp ? "on (with the main beam)" : "off");
+        }
+        if (indicatorLeftKey(focused && keys.Down(Action::IndicatorLeft))) lampSwitch.indicator = lampSwitch.indicator < 0 ? 0 : -1;
+        if (indicatorRightKey(focused && keys.Down(Action::IndicatorRight))) lampSwitch.indicator = lampSwitch.indicator > 0 ? 0 : 1;
+        if (hazardKey(focused && keys.Down(Action::Hazard))) lampSwitch.hazard = !lampSwitch.hazard;
         // , / .: the beside camera round the car at 90 degrees / s; while paused each frame it turns is drawn.
         const int turn = (focused && keys.Down(Action::OrbitRight) ? 1 : 0) - (focused && keys.Down(Action::OrbitLeft) ? 1 : 0);
         if (turn && cameraMode == camera::kBeside) {
@@ -569,6 +604,13 @@ StageEnd RunStage(Shell& sh, const Options& o, bool fromMenu, std::string& error
             else
                 line("exposure x%.2f (manual)", st.exposure);
             line("V view %u: %s", st.debugView, renderer.DebugViewName(static_cast<int32_t>(st.debugView)));
+            if (carLampsLoaded)
+                line("lamps: %s, the ramp %s (%s)%s%s%s   %s %s / %s ramp / %s %s indicators / %s hazard", kBeams[lampSwitch.beam],
+                     lampSwitch.ramp ? "on" : "off", carLamps.layouts[lampLayout].name.c_str(), lampSwitch.brake ? ", brake" : "",
+                     lampSwitch.reverse ? ", reverse" : "", lampSwitch.hazard ? ", hazard" : lampSwitch.indicator < 0 ? ", left"
+                     : lampSwitch.indicator > 0 ? ", right" : "", input::KeyName(keys[Action::Headlights]).c_str(), "lights",
+                     input::KeyName(keys[Action::Ramp]).c_str(), input::KeyName(keys[Action::IndicatorLeft]).c_str(),
+                     input::KeyName(keys[Action::IndicatorRight]).c_str(), input::KeyName(keys[Action::Hazard]).c_str());
             if (legacyProfile >= 0) line("legacy cards: %s", legacyProfile == 1 ? "A (bake)" : legacyProfile == 2 ? "B (bake as occlusion)" : "off");
             if (codriver.Phrases()) line("co-driver: %s   (%.0f m along the stage)", codriver.LastCall().empty() ? "-" : codriver.LastCall().c_str(), snap.distance);
             auto key = [&](Action a) { return input::KeyName(keys[a]); };
@@ -722,6 +764,28 @@ StageEnd RunStage(Shell& sh, const Options& o, bool fromMenu, std::string& error
             // PHYS_DRIVE_TEST_LIGHTS: the test lamps on the car at its pose (above), or the lamp above and behind it.
             std::vector<iface::LightDesc> testLights;
             for (const assets::Lamp& lamp : testLamps) testLights.push_back(assets::LampLight(lamp, p, !testNoShadow));
+            if (!testLights_) {
+                if (!carLampsLoaded) {
+                    carLamps = assets::LoadCarLamps(o.session.physics.sgc, snap.centerOfGravity);
+                    carLampsLoaded = true;
+                    for (size_t k = 0; k < carLamps.layouts.size(); ++k)
+                        if (carLamps.layouts[k].name == o.lampLayout) lampLayout = k;
+                    std::printf("the car's lamps: %s places; the ramp \"%s\", %zu lamps\n", carLamps.fromCar ? "its own" : "default",
+                                carLamps.layouts[lampLayout].name.c_str(), carLamps.layouts[lampLayout].lamps.size());
+                }
+                // The sun the renderer drew last frame: lit after dusk (and the small lamps' light given) - the switch
+                // set once, at the first frame that knows, the driver's after that.
+                const float sun = renderer.Stats().sunElevationDeg;
+                if (!lampSwitchSet && ++lampFrames > 2) {
+                    lampSwitchSet = true;
+                    if (sun < 3.0f) lampSwitch.beam = 2;
+                }
+                lampSwitch.smallLamps = sun < 6.0f;
+                lampSwitch.brake = in.brake || (lampsForced && std::strstr(lampsEnv, "brake"));
+                lampSwitch.reverse = snap.dash.gear < 0 || (lampsForced && std::strstr(lampsEnv, "reverse"));
+                lampSwitch.seconds += in.seconds;
+                assets::CarLights(carLamps, lampLayout, o.lampSpread, o.lampPitch, lampSwitch, p, testLights);
+            }
             if (testLampOnly) {
                 // In the car's frame: x left, -y forward, z up, from its centre of gravity (the pose's origin).
                 iface::LightDesc l{};
