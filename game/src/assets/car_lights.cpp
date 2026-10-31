@@ -213,8 +213,8 @@ std::vector<Lamp> AimRamp(std::vector<math::V3> places)
             l.kind = LampKind::LedPencil, l.yawDeg = 5.0f * side, l.pitchDeg = 4.0f;
         } else if (fromOutside == 0) {
             l.kind = LampKind::LedDriving, l.yawDeg = 20.0f * side, l.pitchDeg = -0.8f;
-        } else {
-            l.kind = LampKind::LedDriving, l.yawDeg = 10.0f * side, l.pitchDeg = -0.8f;
+        } else {   // between: 10 degrees out, 2 up (their own spot above the outer ones', as tuned on the wall)
+            l.kind = LampKind::LedDriving, l.yawDeg = 10.0f * side, l.pitchDeg = 2.0f;
         }
         lamps.push_back(l);
     }
