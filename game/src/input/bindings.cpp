@@ -20,6 +20,11 @@ const ActionInfo kInfo[kActions] = {
     {"orbit_right", "Beside camera right", "Camera", 0x34}, // .
     {"chase_in", "Chase camera in", "Camera", 0x1a},        // [
     {"chase_out", "Chase camera out", "Camera", 0x1b},      // ]
+    {"headlights", "Headlights: off / dipped / main", "Lights", 0x23},   // H
+    {"ramp", "Ramp on / off", "Lights", 0x24},              // J
+    {"indicator_left", "Indicator left", "Lights", 0x10},   // Q
+    {"indicator_right", "Indicator right", "Lights", 0x12}, // E
+    {"hazard", "Hazard lights", "Lights", 0x22},            // G
     {"pause", "Pause", "Other", 0x19},                      // P
     {"screenshot", "Screenshot", "Other", 0x3c},            // F2
     {"mute", "Mute", "Other", 0x32},                        // M

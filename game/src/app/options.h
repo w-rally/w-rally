@@ -38,7 +38,8 @@
 // picture up to that tick (then quit), PHYS_DRIVE_NGGLOG the renderer's log on stdout, PHYS_DRIVE_MATERIALS the car's
 // materials listed, PHYS_DRIVE_LOOK_UP=<degrees> every view tilted up by that much (the sky), PHYS_DRIVE_TEST_LIGHTS
 // test lamps on the car (=ramp two main beams and a 4-pod ramp, =bars two main beams and two LED bars, =low the dipped
-// beams; =lamp a lamp behind it alone, =noshadow the ramp never occluded).
+// beams; =lamp a lamp behind it alone, =noshadow the ramp never occluded), PHYS_DRIVE_LAMPS=<0|1|2>[,noramp][,brake]
+// [,reverse][,left][,right][,hazard] the car's lamps switched so from the start (brake and reverse held: captures).
 
 #include <cstdint>
 #include <filesystem>
@@ -64,6 +65,11 @@ struct Options {
     std::string audioId = "waudio", engine = "Focus03-08", bangs, idleBangs, mix;
     int camera = -1;                     // -1: the replay's TV cameras in a replay, else the chase camera
     float cameraAngle = 0.0f;            // the beside camera's place round the car, radians
+    // The car's lamps (NGG design 5.4 N3b): the ramp (assets::CarLamps' layouts: "ramp", "2 + 2", "LED bars",
+    // "no ramp"; empty its first), and the setup's aim of it - each pod turned further out by `lampSpread` degrees,
+    // up by `lampPitch`.
+    std::string lampLayout;
+    float lampSpread = 0.0f, lampPitch = 0.0f;
     double fixedStep = 0.0;              // --step: every frame this long (0: the frame's real time)
     uint32_t pauseAt = 0, exitAt = 0;
     bool hold = false;                   // --hold: a replay's end keeps its last frame up (else the game quits)

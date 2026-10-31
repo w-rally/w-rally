@@ -1,7 +1,11 @@
 #include "assets/car_lights.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <fstream>
+#include <map>
+#include <sstream>
 
 namespace wrally::assets {
 
@@ -33,6 +37,12 @@ const LampBeam kBeams[] = {
      {{60000.0f, 30.0f, 4.5f, 0.0f, 0.0f, 4.0f}, {15000.0f, 60.0f, 9.0f, 0.0f, -2.0f, 2.0f}}},
     {"ditch", 5800.0f, 0.08f, 1,
      {{40000.0f, 20.0f, 6.0f, 0.0f, -2.0f, 2.0f}}},
+    // The small lamps, as their regulations have them in round figures: a tail lamp some 5-10 cd, a brake lamp ~100,
+    // a reversing lamp a few hundred, an indicator ~150 - wide, they are seen from everywhere behind or beside.
+    {"tail", 0.0f, 0.05f, 1, {{8.0f, 45.0f, 20.0f, 0.0f, -5.0f, 2.0f}}, {1.0f, 0.03f, 0.02f}},
+    {"brake", 0.0f, 0.05f, 1, {{100.0f, 45.0f, 20.0f, 0.0f, -5.0f, 2.0f}}, {1.0f, 0.03f, 0.02f}},
+    {"reverse", 4000.0f, 0.05f, 1, {{300.0f, 45.0f, 20.0f, 0.0f, -10.0f, 2.0f}}},
+    {"indicator", 0.0f, 0.05f, 1, {{150.0f, 50.0f, 20.0f, 0.0f, -5.0f, 2.0f}}, {1.0f, 0.42f, 0.0f}},
 };
 static_assert(sizeof(kBeams) / sizeof(kBeams[0]) == static_cast<size_t>(LampKind::Count), "a beam per LampKind");
 
@@ -94,7 +104,12 @@ iface::LightDesc LampLight(const Lamp& lamp, const physics::Pose& pose, bool sha
     l.position[0] = p.x, l.position[1] = p.y, l.position[2] = p.z;
     l.direction[0] = d.x, l.direction[1] = d.y, l.direction[2] = d.z;
     l.up[0] = u.x, l.up[1] = u.y, l.up[2] = u.z;
-    KelvinToRgb(beam.kelvin, l.colour);
+    if (beam.kelvin > 0.0f) {
+        KelvinToRgb(beam.kelvin, l.colour);
+    } else {   // a coloured lamp: its tint, of luminance 1
+        const float lum = 0.2126f * beam.rgb[0] + 0.7152f * beam.rgb[1] + 0.0722f * beam.rgb[2];
+        for (int k = 0; k < 3; ++k) l.colour[k] = beam.rgb[k] / std::max(lum, 1e-6f);
+    }
     l.intensity = lamp.scale;
     l.radius = beam.radius;
     l.outerDeg = 90.0f;
@@ -135,6 +150,148 @@ std::vector<Lamp> TestLayout(const char* name)
         return {};
     }
     return lamps;
+}
+
+namespace {
+
+// RBR's car .ini's Point_light_<name> places (Pos = x y z), in its model's frame (y up, forward -z).
+std::map<std::string, math::V3> ReadLampPoints(const std::string& iniPath)
+{
+    std::map<std::string, math::V3> points;
+    std::ifstream f(iniPath);
+    std::string line, section;
+    while (std::getline(f, line)) {
+        const size_t a = line.find_first_not_of(" \t\r");
+        if (a == std::string::npos) continue;
+        line = line.substr(a, line.find_last_not_of(" \t\r") - a + 1);
+        if (line.front() == '[') {
+            section = line.substr(1, line.find(']') - 1);
+            continue;
+        }
+        const size_t eq = line.find('=');
+        if (section.rfind("Point_light_", 0) != 0 || eq == std::string::npos) continue;
+        std::string key = line.substr(0, eq);
+        key.erase(key.find_last_not_of(" \t") + 1);
+        if (key != "Pos") continue;
+        std::istringstream v(line.substr(eq + 1));
+        math::V3 p{};
+        if (v >> p.x >> p.y >> p.z) points[section.substr(12)] = p;
+    }
+    return points;
+}
+
+// The pods of a ramp, sorted left to right (+x first), aimed as tuned on the wall: the outer pair 20 degrees out and a
+// little down (driving beams to the corners), the inner pair 5 out and 4 up (pencils down the road), a middle pair 10
+// out, a lone centre one straight on.
+std::vector<Lamp> AimRamp(std::vector<math::V3> places)
+{
+    std::sort(places.begin(), places.end(), [](const math::V3& a, const math::V3& b) { return a.x > b.x; });
+    const size_t n = places.size();
+    std::vector<Lamp> lamps;
+    for (size_t i = 0; i < n; ++i) {
+        const size_t fromOutside = std::min(i, n - 1 - i);         // 0 the outermost pair
+        const size_t pairs = n / 2;
+        const float side = places[i].x > 0.0f ? -1.0f : 1.0f;      // a left lamp turns out with a negative yaw
+        Lamp l;
+        l.at = places[i];
+        if (n % 2 && i == n / 2) {
+            l.kind = LampKind::LedPencil, l.yawDeg = 0.0f, l.pitchDeg = 0.0f;
+        } else if (fromOutside + 1 == pairs && pairs > 1) {     // the innermost pair
+            l.kind = LampKind::LedPencil, l.yawDeg = 5.0f * side, l.pitchDeg = 4.0f;
+        } else if (fromOutside == 0) {
+            l.kind = LampKind::LedDriving, l.yawDeg = 20.0f * side, l.pitchDeg = -0.8f;
+        } else {
+            l.kind = LampKind::LedDriving, l.yawDeg = 10.0f * side, l.pitchDeg = -0.8f;
+        }
+        lamps.push_back(l);
+    }
+    return lamps;
+}
+
+}  // namespace
+
+CarLamps LoadCarLamps(const std::string& sgcPath, const float cog[3])
+{
+    CarLamps out;
+    std::string ini = sgcPath;
+    if (const size_t dot = ini.find_last_of('.'); dot != std::string::npos) ini.resize(dot);
+    const std::map<std::string, math::V3> points = ReadLampPoints(ini + ".ini");
+    // The model's frame to the car's: y and z swapped, less the centre of gravity.
+    auto car = [&](const math::V3& p) { return math::V3{p.x - cog[0], p.z - cog[1], p.y - cog[2]}; };
+    auto get = [&](const char* name, math::V3 fallback, bool* found = nullptr) {
+        const auto it = points.find(name);
+        if (found) *found = it != points.end();
+        return it != points.end() ? car(it->second) : fallback;
+    };
+    bool haveHead = false;
+    const math::V3 lf = get("lf", {0.65f, -2.0f, 0.05f}, &haveHead), rf = get("rf", {-0.65f, -2.0f, 0.05f});
+    const math::V3 lb = get("lb", {0.65f, 1.9f, 0.2f}), rb = get("rb", {-0.65f, 1.9f, 0.2f});
+    out.fromCar = haveHead;
+    // The headlamps (the switch makes them dipped or main), the tail lamps, the brake and reversing lamps, behind.
+    out.fixed.push_back({{LampKind::HalogenHigh, lf}, LampRole::Head});
+    out.fixed.push_back({{LampKind::HalogenHigh, rf}, LampRole::Head});
+    out.fixed.push_back({{LampKind::Tail, lb, 180.0f}, LampRole::Tail});
+    out.fixed.push_back({{LampKind::Tail, rb, 180.0f}, LampRole::Tail});
+    out.fixed.push_back({{LampKind::Brake, get("brake_lb", lb), 180.0f}, LampRole::Brake});
+    out.fixed.push_back({{LampKind::Brake, get("brake_rb", rb), 180.0f}, LampRole::Brake});
+    bool haveCentre = false;
+    const math::V3 mb = get("brake_mb", {}, &haveCentre);   // the high centre one, where the car has it
+    if (haveCentre) out.fixed.push_back({{LampKind::Brake, mb, 180.0f}, LampRole::Brake});
+    out.fixed.push_back({{LampKind::Reverse, get("reverse_lb", lb), 180.0f}, LampRole::Reverse});
+    out.fixed.push_back({{LampKind::Reverse, get("reverse_rb", rb), 180.0f}, LampRole::Reverse});
+    // The indicators - no RBR car has them: at the corners beside the head and tail lamps, turned out 30 degrees.
+    auto outward = [](math::V3 p, float by) { return math::V3{p.x + (p.x > 0.0f ? by : -by), p.y, p.z}; };
+    out.fixed.push_back({{LampKind::Indicator, outward(lf, 0.08f), -30.0f}, LampRole::IndicatorLeft});
+    out.fixed.push_back({{LampKind::Indicator, outward(lb, 0.05f), 210.0f}, LampRole::IndicatorLeft});
+    out.fixed.push_back({{LampKind::Indicator, outward(rf, 0.08f), 30.0f}, LampRole::IndicatorRight});
+    out.fixed.push_back({{LampKind::Indicator, outward(rb, 0.05f), 150.0f}, LampRole::IndicatorRight});
+
+    // The ramps. The car's own pods (Point_light_bon<n>), else four across the bonnet's front edge, a hand behind and
+    // above the headlamps.
+    std::vector<math::V3> pods;
+    for (int k = 1; k <= 8; ++k)
+        if (const auto it = points.find("bon" + std::to_string(k)); it != points.end()) pods.push_back(car(it->second));
+    const math::V3 mid{0.0f, 0.5f * (lf.y + rf.y) + 0.15f, 0.5f * (lf.z + rf.z) + 0.25f};
+    if (pods.empty())
+        for (float x : {0.38f, 0.12f, -0.12f, -0.38f}) pods.push_back({x, mid.y, mid.z});
+    out.layouts.push_back({"ramp", AimRamp(pods)});
+    out.layouts.push_back({"2 + 2", {{LampKind::LedDriving, {0.25f, mid.y, mid.z}, -10.0f, -0.8f},
+                                     {LampKind::LedDriving, {-0.25f, mid.y, mid.z}, 10.0f, -0.8f}}});
+    out.layouts.push_back({"LED bars", {{LampKind::LedBar, {0.3f, mid.y, mid.z + 0.02f}, 0.0f, -0.8f},
+                                        {LampKind::LedBar, {-0.3f, mid.y, mid.z + 0.02f}, 0.0f, -0.8f}}});
+    out.layouts.push_back({"no ramp", {}});
+    return out;
+}
+
+void CarLights(const CarLamps& lamps, size_t layout, float spreadDeg, float pitchDeg, const LampSwitches& s,
+               const physics::Pose& pose, std::vector<iface::LightDesc>& out)
+{
+    // The indicators blink at 1.5 Hz, half the time on.
+    const bool blinkOn = std::fmod(s.seconds * 1.5, 1.0) < 0.5;
+    for (const CarLamp& c : lamps.fixed) {
+        Lamp l = c.lamp;
+        bool on = false, shadows = false;
+        switch (c.role) {
+        case LampRole::Head:
+            on = s.beam > 0, shadows = true;
+            if (s.beam == 1) l.kind = LampKind::HalogenLow;   // dipped: straight on, its own cut-off
+            else l.yawDeg = l.at.x > 0.0f ? -10.0f : 10.0f, l.pitchDeg = -0.5f;   // main: 10 degrees out (the wall)
+            break;
+        case LampRole::Tail: on = s.smallLamps && s.beam > 0; break;
+        case LampRole::Brake: on = s.smallLamps && s.brake; break;
+        case LampRole::Reverse: on = s.smallLamps && s.reverse; break;
+        case LampRole::IndicatorLeft: on = s.smallLamps && blinkOn && (s.hazard || s.indicator < 0); break;
+        case LampRole::IndicatorRight: on = s.smallLamps && blinkOn && (s.hazard || s.indicator > 0); break;
+        default: break;
+        }
+        if (on) out.push_back(LampLight(l, pose, shadows));
+    }
+    if (s.beam == 2 && s.ramp && layout < lamps.layouts.size())
+        for (Lamp l : lamps.layouts[layout].lamps) {
+            l.yawDeg += (l.at.x > 0.0f ? -spreadDeg : spreadDeg);
+            l.pitchDeg += pitchDeg;
+            out.push_back(LampLight(l, pose, true));
+        }
 }
 
 }  // namespace wrally::assets

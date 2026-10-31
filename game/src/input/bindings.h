@@ -15,6 +15,7 @@ namespace wrally::input {
 enum class Action {
     Throttle, Brake, Handbrake, SteerLeft, SteerRight, GearUp, GearDown, BackOnRoad, AntiLagIdle,
     Camera, OrbitLeft, OrbitRight, ChaseIn, ChaseOut,
+    Headlights, Ramp, IndicatorLeft, IndicatorRight, Hazard,
     Pause, Screenshot, Mute, Readout, Taa, Ao, Shadows, RayTracing, DebugView,
     Count
 };

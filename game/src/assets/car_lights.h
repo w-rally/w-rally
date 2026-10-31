@@ -12,6 +12,7 @@
 // a 2-lamp ramp, a 4-pod ramp, LED bars) and the setup's aim come from the car's data (N3b).
 
 #include <cstdint>
+#include <string>
 #include <vector>
 
 #include "core/math.h"
@@ -27,15 +28,20 @@ enum class LampKind : uint32_t {
     LedDriving,    // a pod's wider driving beam
     LedBar,        // an LED bar's flat flood - the verges and the trees beside them
     Ditch,         // a cornering lamp, aimed off to the side
+    Tail,          // the small lamps: a tail lamp (red),
+    Brake,         // a brake lamp (red),
+    Reverse,       // a reversing lamp (white),
+    Indicator,     // an indicator (amber)
     Count
 };
 
 struct LampBeam {
     const char*     name;            // as car.json names it
-    float           kelvin;          // colour temperature
+    float           kelvin;          // colour temperature; 0: `rgb` (a coloured lamp)
     float           radius;          // the emitter's size, metres (its shadows' and its highlight's softness)
     uint32_t        lobeCount;
     iface::LightLobe lobes[iface::kMaxLightLobes];
+    float           rgb[3] = {};     // a coloured lamp's linear tint (its luminance made 1)
 };
 
 const LampBeam& Beam(LampKind kind);
@@ -61,5 +67,50 @@ iface::LightDesc LampLight(const Lamp& lamp, const physics::Pose& pose, bool sha
 // (pencils inside, driving beams outside), "bars" two main beams and two LED bars, "low" the dipped beams alone.
 // Empty for a name it does not know.
 std::vector<Lamp> TestLayout(const char* name);
+
+// ---- a car's lamps (N3b) --------------------------------------------------------------------------------------------
+// What switches a lamp: the headlamps (dipped or main beam by the switch), the ramp (with the main beam, and its own
+// switch), and the small lamps - tail (with the headlamps), brake (the pedal), reverse (the gear), the indicators.
+enum class LampRole : uint32_t { Head, Ramp, Tail, Brake, Reverse, IndicatorLeft, IndicatorRight };
+
+struct CarLamp {
+    Lamp     lamp;
+    LampRole role;
+};
+
+// A ramp the setup can choose: its name and its lamps.
+struct LampLayout {
+    std::string       name;
+    std::vector<Lamp> lamps;
+};
+
+struct CarLamps {
+    std::vector<CarLamp>    fixed;     // every layout's: the headlamps, the tail, brake and reverse lamps, the indicators
+    std::vector<LampLayout> layouts;   // the ramps: "ramp" (the car's own pods, else four), "2 + 2", "LED bars", "no ramp"
+    bool fromCar = false;              // the places are the car's own (its .ini's Point_light_*), not defaults
+};
+
+// A car's lamps from RBR's car .ini beside its .sgc (Point_light_lf/rf/lb/rb/brake_*/reverse_*/bon<n>: their places,
+// in the model's frame, made the car's: y and z swapped, less the centre of gravity `cog`); what it lacks from the
+// headlamps' places, or a hatchback's. The aims are WRally's, as tuned on the wall (tools/lamp-wall/wall.py): RBR's
+// lamp normals are no aims (the 207's pods point sideways).
+CarLamps LoadCarLamps(const std::string& sgcPath, const float cog[3]);
+
+// The switches, the driver's and the car's.
+struct LampSwitches {
+    int   beam = 0;              // 0 off, 1 dipped, 2 main
+    bool  ramp = true;           // the ramp's own switch (it shines with the main beam)
+    bool  brake = false;
+    bool  reverse = false;
+    int   indicator = 0;         // -1 left, 1 right
+    bool  hazard = false;
+    double seconds = 0.0;        // a clock for the indicators' blink
+    bool  smallLamps = true;     // the small lamps' light given (false by day: it shows only on their glass)
+};
+
+// The lights of a car's lamps at its pose, by the switches: `layout` the ramp (an index into lamps.layouts), the setup's
+// aim added to its lamps - `spreadDeg` turning each further out to its side, `pitchDeg` up.
+void CarLights(const CarLamps& lamps, size_t layout, float spreadDeg, float pitchDeg, const LampSwitches& s,
+               const physics::Pose& pose, std::vector<iface::LightDesc>& out);
 
 }  // namespace wrally::assets

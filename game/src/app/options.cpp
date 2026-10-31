@@ -171,6 +171,11 @@ int Parse(const std::vector<std::string>& args, Options& o)
     c.setup = Arg(args, "--setup", "");
     o.weather = Arg(args, "--weather", "");
     if (const int code = ParseSkyTime(args, o)) return code;
+    // --lamps <the ramp> --lamp-aim <spread>,<pitch>: the car's lamps (NGG design 5.4 N3b).
+    o.lampLayout = Arg(args, "--lamps", "");
+    if (const std::string a = Arg(args, "--lamp-aim", ""); !a.empty() &&
+        std::sscanf(a.c_str(), "%f,%f", &o.lampSpread, &o.lampPitch) != 2)
+        return std::fprintf(stderr, "--lamp-aim %s: <spread degrees>,<pitch degrees>\n", a.c_str()), 2;
     // The surface and the tyre type: the stage's unless given.
     {
         std::string from = "--surface";
