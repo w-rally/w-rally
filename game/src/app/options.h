@@ -65,8 +65,8 @@ struct Options {
     std::string audioId = "waudio", engine = "Focus03-08", bangs, idleBangs, mix;
     int camera = -1;                     // -1: the replay's TV cameras in a replay, else the chase camera
     float cameraAngle = 0.0f;            // the beside camera's place round the car, radians
-    // The car's lamps (NGG design 5.4 N3b): the ramp (assets::CarLamps' layouts: "ramp", "2 + 2", "LED bars",
-    // "no ramp"; empty its first), and the setup's aim of it - each pod turned further out by `lampSpread` degrees,
+    // The car's lamps (NGG design 5.4 N3b): the ramp (assets::CarLamps' layouts: "ramp" - the car's own -,
+    // "2 pods", "4 pods", "6 pods", "LED bars", "no ramp"; empty the car's default), and the setup's aim of it - each pod turned further out by `lampSpread` degrees,
     // up by `lampPitch`.
     std::string lampLayout;
     float lampSpread = 0.0f, lampPitch = 0.0f;

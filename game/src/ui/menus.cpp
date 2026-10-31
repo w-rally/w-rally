@@ -364,6 +364,7 @@ QuickChoice QuickRally(const ImGuiLayer& ui, const assets::Catalog& catalog, app
             // Per car folder, read once: the layouts' names, and as the menu shows them.
             struct Layouts {
                 std::vector<std::string> keys, shown;
+                size_t first = 0;   // the car's default
             };
             static std::map<std::string, Layouts> layoutsOf;
             Layouts& ls = layoutsOf[cr->folder];
@@ -372,15 +373,14 @@ QuickChoice QuickRally(const ImGuiLayer& ui, const assets::Catalog& catalog, app
                 const assets::CarLamps lamps = assets::LoadCarLamps(cr->sgc, noCog);
                 for (const assets::LampLayout& l : lamps.layouts) {
                     ls.keys.push_back(l.name);
-                    ls.shown.push_back(l.name != "ramp" ? l.name
-                                                        : std::string(lamps.fromCar ? "its own ramp (" : "a ramp (") +
-                                                              std::to_string(l.lamps.size()) + " pods)");
+                    ls.shown.push_back(l.name != "ramp" ? l.name : "its own ramp (" + std::to_string(l.lamps.size()) + " pods)");
                 }
+                ls.first = lamps.defaultLayout;
             }
             const std::vector<std::string>& keys = ls.keys;
             const std::vector<std::string>& names = ls.shown;
             app::Settings::Lamps& lamp = s.lamps[cr->folder];
-            int layout = 0;
+            int layout = static_cast<int>(ls.first);
             for (size_t i = 0; i < keys.size(); ++i)
                 if (keys[i] == lamp.layout) layout = static_cast<int>(i);
             Choose("Lamps", layout, names);

@@ -3219,8 +3219,10 @@ Four decisions, the user's:
     - **Its lamps** (`assets::LoadCarLamps`): RBR's car .ini places (`Point_light_lf/rf/lb/rb/brake_*/reverse_*/
       bon<n>`, the model's frame made the car's - y and z swapped, less the centre of gravity), defaults where it has
       none; the AIMS are WRally's, as tuned on the wall (RBR's lamp normals are no aims). The ramps a car offers:
-      "ramp" (its own pods - the i20's six, aimed outer 20 out, middle 10 out and 2 up, inner 5 out and 4 up - else four), "2 + 2",
-      "LED bars", "no ramp". The small lamps: tail, brake (with the high centre one), reverse (white), four
+      "ramp" (its own pods, with its ramp's meshes - the i20's six), "2 pods", "4 pods", "6 pods" (a count its own
+      leaves out), "LED bars", "no ramp"; its own ramp the default, else four pods. The pods are halogen (3300 K -
+      `halogen-pencil`, `halogen-driving`, the wall-tuned shapes of N3a's LED presets); the white LED look is the bars'.
+      Aims: two pods 10 out; the outer pair 20 out, the inner 5 out and 4 up, a middle pair (six) 10 out and 2 up. The small lamps: tail, brake (with the high centre one), reverse (white), four
       indicators (amber, 1.5 Hz; no RBR car has them) - coloured presets, no shadows.
     - **The switches:** H headlights off / dipped / main, J the ramp (it shines with the main beam), Q / E the
       indicators, G hazard; the brake pedal and reverse switch theirs. After dusk the lamps start lit (the renderer's
