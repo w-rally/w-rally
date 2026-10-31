@@ -24,7 +24,7 @@ add_executable(W-Rally
     src/render/renderer.cpp src/render/stage_objects.cpp
     src/sound/sound.cpp src/sound/codriver.cpp src/sound/mix_edit.cpp
     src/physics/physics.cpp
-    src/ui/imgui_layer.cpp src/ui/hud.cpp src/ui/menus.cpp src/ui/menu_video.cpp)
+    src/ui/imgui_layer.cpp src/ui/hud.cpp src/ui/menus.cpp src/ui/menu_look.cpp src/ui/quick_rally.cpp src/ui/menu_video.cpp)
 target_include_directories(W-Rally PRIVATE src)
 wrally_build_info(W-Rally)   # the version and commit in the screens' corner
 # Media Foundation: the main menu's video loop.

@@ -43,6 +43,11 @@ struct Settings {
     std::string weather;                // a weather preset's name ("" the stage's default)
     uint32_t road = 0;                  // 0 from the weather, 1 dry, 2 damp, 3 wet
     std::string time;                   // the time of day, "HH:MM" on kQuickDate ("" the weather's own sun)
+    // Custom weather (Quick rally -> Weather -> Custom): over `weather`'s preset, its clouds, fog and rain these, and the
+    // time of day on the season's date (QuickDate).
+    bool weatherCustom = false;
+    uint32_t season = 2;                // 0 spring, 1 summer, 2 autumn, 3 winter
+    float clouds = 0.3f, fog = 0.0f, rain = 0.0f;   // 0..1 each: the sky's cover, how thick the fog, how hard it rains
 
     // The lamps each car runs (NGG design 5.4 N3b; in the setup editor once there is one): per car folder its ramp (a
     // CarLamps layout's name, "" its first) and the ramp's aim - each pod further out, degrees; up, degrees. W-Rally.ini:
@@ -62,6 +67,16 @@ Settings LoadSettings();
 // The date Quick rally's times of day are on: an autumn day, the clocks still on summer time (dusk about 18:30 at 50 N).
 inline const char* kQuickDate = "2026-10-15";
 inline const char* kQuickUtcOffset = "2";
+// A season's date for the custom weather (0 spring .. 3 winter; autumn kQuickDate) and its clocks' offset from UTC.
+struct QuickDay {
+    const char* date;
+    const char* utcOffset;
+};
+inline QuickDay QuickDate(uint32_t season)
+{
+    static const QuickDay kDays[4] = {{"2026-04-15", "2"}, {"2026-07-15", "2"}, {"2026-10-15", "2"}, {"2026-01-15", "1"}};
+    return kDays[season < 4 ? season : 2];
+}
 // Returns "" or what went wrong.
 std::string SaveSettings(const Settings& s);
 

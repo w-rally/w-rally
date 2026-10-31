@@ -170,6 +170,14 @@ int Parse(const std::vector<std::string>& args, Options& o)
     // default the car's own for the surface.
     c.setup = Arg(args, "--setup", "");
     o.weather = Arg(args, "--weather", "");
+    // --sky <clouds>,<fog>,<rain>: over the weather preset, 0..1 each (Quick rally's custom weather).
+    if (const std::string sky = Arg(args, "--sky", ""); !sky.empty()) {
+        float v[3];
+        if (std::sscanf(sky.c_str(), "%f,%f,%f", &v[0], &v[1], &v[2]) != 3)
+            return std::fprintf(stderr, "--sky %s: <clouds>,<fog>,<rain>, 0..1 each\n", sky.c_str()), 2;
+        o.skySet = true, o.skyClouds = std::clamp(v[0], 0.0f, 1.0f), o.skyFog = std::clamp(v[1], 0.0f, 1.0f),
+        o.skyRain = std::clamp(v[2], 0.0f, 1.0f);
+    }
     if (const int code = ParseSkyTime(args, o)) return code;
     // --lamps <the ramp> --lamp-aim <spread>,<pitch>: the car's lamps (NGG design 5.4 N3b).
     o.lampLayout = Arg(args, "--lamps", "");

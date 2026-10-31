@@ -10,6 +10,7 @@
 #include "assets/car_lights.h"
 #include "imgui.h"
 #include "ui/imgui_layer.h"
+#include "ui/menu_look.h"
 
 namespace wrally::ui {
 
@@ -121,144 +122,8 @@ void DrawBackdrop(int width, int height)
 
 namespace {
 
-// The main menu's design (the W-Rally design system, "Factory black"): its colours, and its sizes in px at 1080p.
-constexpr ImU32 kSurfaceBase = IM_COL32(10, 10, 11, 255), kSurfaceRaised = IM_COL32(20, 20, 22, 255),
-                kSurfaceOverlay = IM_COL32(30, 30, 33, 255), kLineStrong = IM_COL32(98, 98, 104, 255),
-                kInk = IM_COL32(255, 255, 255, 255), kInkSecondary = IM_COL32(196, 196, 200, 255),
-                kInkMuted = IM_COL32(140, 140, 144, 255), kSignal = IM_COL32(255, 75, 31, 255),
-                kLine = IM_COL32(44, 44, 48, 255);
-const float kTanStripe = std::tan(22.0f * 3.14159265f / 180.0f);   // slant-stripe, the livery's
-const float kTanPlate = std::tan(14.0f * 3.14159265f / 180.0f);    // slant-plate, the marker's
-constexpr float kRowW = 600, kRowH = 68, kRowGap = 4, kCut = 12;   // a row, its cut right edge
-constexpr float kEase = 0.04f;   // the selection's ease (s): settled in ~120 ms, as the design's transitions
+constexpr float kRowW = 600, kRowH = 68, kRowGap = 4, kCut = 12;   // the main menu's row, its cut right edge
 
-ImU32 Lerp(ImU32 a, ImU32 b, float t)
-{
-    auto ch = [&](int s) {
-        const float x = float((a >> s) & 0xff), y = float((b >> s) & 0xff);
-        return ImU32(x + (y - x) * t + 0.5f) << s;
-    };
-    return ch(IM_COL32_R_SHIFT) | ch(IM_COL32_G_SHIFT) | ch(IM_COL32_B_SHIFT) | ch(IM_COL32_A_SHIFT);
-}
-
-ImU32 Alpha(ImU32 c, float a) { return (c & ~IM_COL32_A_MASK) | (ImU32(((c >> IM_COL32_A_SHIFT) & 0xff) * a + 0.5f) << IM_COL32_A_SHIFT); }
-
-// `text` at `at` with `spacing` (em) between its letters - the design's tracked labels. Returns its width.
-float Tracked(ImDrawList* d, ImFont* f, float size, ImVec2 at, ImU32 col, const char* text, float spacing)
-{
-    const float x0 = at.x;
-    for (const char* p = text; *p;) {
-        const char* q = p + 1;   // (a whole UTF-8 character)
-        while ((*q & 0xc0) == 0x80) ++q;
-        if (d) d->AddText(f, size, at, col, p, q);
-        at.x += f->CalcTextSizeA(size, FLT_MAX, 0, p, q).x + spacing * size;
-        p = q;
-    }
-    return at.x - x0 - (*text ? spacing * size : 0);
-}
-
-// A key chip and what it does: "[ENTER] SELECT".
-float KeyHint(ImDrawList* d, ImFont* f, float k, ImVec2 at, const char* key, const char* does)
-{
-    const float size = 17 * k, h = 34 * k, pad = 10 * k;
-    const float w = std::max(h, Tracked(nullptr, f, size, at, 0, key, 0.08f) + 2 * pad);
-    d->AddRectFilled(at, ImVec2(at.x + w, at.y + h), kSurfaceOverlay, 2 * k);
-    d->AddRect(at, ImVec2(at.x + w, at.y + h), kLineStrong, 2 * k, 0, std::max(1.0f, k));
-    const float ty = at.y + (h - size) * 0.5f;
-    Tracked(d, f, size, ImVec2(at.x + (w - Tracked(nullptr, f, size, at, 0, key, 0.08f)) * 0.5f, ty), kInk, key, 0.08f);
-    return w + 8 * k + Tracked(d, f, size, ImVec2(at.x + w + 8 * k, ty), kInkSecondary, does, 0.16f);
-}
-
-// A livery stripe's corners (top left, top right, bottom right, bottom left): `left` and `w` px at 1080p, placed from the
-// window's right edge, slanted from its top left, 40 px past the top and the bottom.
-void Stripe(float W, float H, float k, float left, float w, float shift, ImVec2 q[4])
-{
-    const float x = W - (1920 - left - shift) * k, top = -40 * k, bottom = H + 40 * k, run = (bottom - top) * kTanStripe;
-    q[0] = ImVec2(x, top), q[1] = ImVec2(x + w * k, top), q[2] = ImVec2(x + w * k - run, bottom), q[3] = ImVec2(x - run, bottom);
-}
-
-// A stripe `q` (Stripe's corners) filled `top` at its top to `bottom` at its bottom.
-void FadeQuad(ImDrawList* d, const ImVec2 q[4], ImU32 top, ImU32 bottom)
-{
-    const ImVec2 white = ImGui::GetFontTexUvWhitePixel();
-    const ImDrawIdx i = ImDrawIdx(d->_VtxCurrentIdx);
-    d->PrimReserve(6, 4);
-    d->PrimWriteIdx(i), d->PrimWriteIdx(ImDrawIdx(i + 1)), d->PrimWriteIdx(ImDrawIdx(i + 2));
-    d->PrimWriteIdx(i), d->PrimWriteIdx(ImDrawIdx(i + 2)), d->PrimWriteIdx(ImDrawIdx(i + 3));
-    d->PrimWriteVtx(q[0], white, top), d->PrimWriteVtx(q[1], white, top);
-    d->PrimWriteVtx(q[2], white, bottom), d->PrimWriteVtx(q[3], white, bottom);
-}
-
-// A screen's ground and its livery: the signal stripe and the white one beside it, each fading into the ground toward
-// the bottom as the video's window does. `shift` (px at 1080p) moves them right, for a screen with a wider column.
-void Livery(ImDrawList* d, float W, float H, float k, float shift, ImU32 ground)
-{
-    d->AddRectFilled(ImVec2(0, 0), ImVec2(W, H), ground);
-    ImVec2 q[4];
-    Stripe(W, H, k, 1430, 220, shift, q);
-    FadeQuad(d, q, kSignal, ground);
-    Stripe(W, H, k, 1690, 28, shift, q);
-    FadeQuad(d, q, kInk, ground);
-}
-
-// The livery's third stripe, left of the signal one: a window onto the video loop, the video covering the stripe's
-// bounds (cropped, centred) and fading in over the ground when its first frame comes. `on` 0..1: how far it shows.
-// Under it the dark of the design's placeholder (overlay to the ground, top to bottom), as see-through as the ground.
-void VideoWindow(ImDrawList* d, float W, float H, float k, float shift, ImU32 ground, const VideoFrame& video, float on)
-{
-    ImVec2 q[4];
-    Stripe(W, H, k, 990, 400, shift, q);
-    const float see = float((ground >> IM_COL32_A_SHIFT) & 0xff) / 255;
-    FadeQuad(d, q, Alpha(kSurfaceOverlay, see), Alpha(kSurfaceBase, see));
-    if (!video.texture || video.width <= 0 || video.height <= 0 || on <= 0.01f) return;
-
-    const float x0 = q[3].x, x1 = q[1].x, y0 = q[0].y, y1 = q[2].y, bw = x1 - x0, bh = y1 - y0;
-    const float s = std::max(bw / video.width, bh / video.height);
-    const float uw = bw / (video.width * s), vh = bh / (video.height * s);
-    auto uv = [&](ImVec2 p) { return ImVec2((1 - uw) * 0.5f + (p.x - x0) / bw * uw, (1 - vh) * 0.5f + (p.y - y0) / bh * vh); };
-    d->AddImageQuad(static_cast<ImTextureID>(video.texture), q[0], q[1], q[2], q[3], uv(q[0]), uv(q[1]), uv(q[2]), uv(q[3]),
-                    Alpha(kInk, on));
-}
-
-// Where the livery is on every full screen (px at 1080p right of the design system's place), so its stripes hold still
-// from screen to screen.
-constexpr float kLiveryShift = 150;
-float g_videoOn = 0;   // the video window's fade in, 0..1 (once there is a frame, over ~300 ms)
-
-// A full screen's ground, its livery and the video's window. `veil` 0..1: how far the video gives way to the ground,
-// for a screen whose content runs over the window.
-void Backdrop(ImDrawList* d, float W, float H, float k, ImU32 ground, const VideoFrame& video, float veil)
-{
-    Livery(d, W, H, k, kLiveryShift, ground);
-    if (video.texture) g_videoOn = std::min(1.0f, g_videoOn + ImGui::GetIO().DeltaTime / 0.3f);
-    VideoWindow(d, W, H, k, kLiveryShift, ground, video, g_videoOn * (1 - veil));
-}
-
-// A row's plate from `a`, `w` x `h`, its right edge cut in by `cut`.
-void Plate(ImDrawList* d, ImVec2 a, float w, float h, float cut, ImU32 col)
-{
-    d->AddQuadFilled(a, ImVec2(a.x + w, a.y), ImVec2(a.x + w - cut, a.y + h), ImVec2(a.x, a.y + h), col);
-}
-
-// The selection's marker, `w` x `h` and slanted, at `x` centred on `mid`: `on` 0..1 slides it in from 12 px left.
-void Marker(ImDrawList* d, float x, float mid, float w, float h, float on, float k)
-{
-    if (on <= 0.01f) return;
-    const float mx = x - 12 * k * (1 - on), half = h * 0.5f, lean = half * kTanPlate;
-    d->AddQuadFilled(ImVec2(mx + lean, mid - half), ImVec2(mx + w + lean, mid - half), ImVec2(mx + w - lean, mid + half),
-                     ImVec2(mx - lean, mid + half), Alpha(kSignal, on));
-}
-
-// A chevron `size` px square centred on `c`, pointing right (or left).
-void Chevron(ImDrawList* d, ImVec2 c, float size, bool right, ImU32 col)
-{
-    const float u = size / 24, s = right ? 1.0f : -1.0f;
-    const ImVec2 p[3] = {ImVec2(c.x - 3 * u * s, c.y - 7 * u), ImVec2(c.x + 4 * u * s, c.y), ImVec2(c.x - 3 * u * s, c.y + 7 * u)};
-    d->AddPolyline(p, 3, col, 0, 2.5f * u);
-}
-
-// How far toward its target an eased value moves this frame (kEase).
-float Ease() { return 1.0f - std::exp(-ImGui::GetIO().DeltaTime / kEase); }
 
 struct MainItem {
     const char* label;
@@ -266,8 +131,9 @@ struct MainItem {
     MainChoice choice;
 };
 const MainItem kMainItems[] = {
-    {"SEASON", nullptr, MainChoice::None},
+    {"ONLINE EVENTS", nullptr, MainChoice::None},
     {"QUICK RALLY", "Pick a stage and a car, and go straight to the start line.", MainChoice::QuickRally},
+    {"GARAGE", nullptr, MainChoice::None},
     {"MARKETPLACE", nullptr, MainChoice::None},
     {"SETTINGS", "Content folders, graphics, sound and the controls.", MainChoice::Settings},
     {"EXIT", "Quit to desktop.", MainChoice::Exit},
@@ -294,7 +160,7 @@ MainChoice MainMenu(const ImGuiLayer& ui, int width, int height, const std::stri
     ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0);
     if (ImGui::Begin("Main menu", nullptr, kFull)) {
         ImDrawList* d = ImGui::GetWindowDrawList();
-        Backdrop(d, W, H, k, kSurfaceBase, video, 0);
+        Backdrop(d, W, H, k, kSurfaceBase, video, true);
 
         // The column: 48 px safe margin, 32 px padding.
         const float x0 = 80 * k, y0 = 80 * k;
@@ -305,9 +171,8 @@ MainChoice MainMenu(const ImGuiLayer& ui, int width, int height, const std::stri
         d->AddText(mark, 72 * k, ImVec2(x0, y0), kInk, "W-R");
         d->AddText(mark, 72 * k, ImVec2(x0 + wr, y0), kInkMuted, "ally");
 
-        const float navY = y0 + 72 * k + 260 * k;
-        Tracked(d, text, 17 * k, ImVec2(x0, navY), kInkMuted, "MAIN MENU", 0.16f);
-        const float rowsY = navY + 20 * k + 20 * k, pitch = (kRowH + kRowGap) * k;
+        // The rows under the wordmark, no overline over them: the main menu needs no name.
+        const float rowsY = y0 + 72 * k + 260 * k, pitch = (kRowH + kRowGap) * k;
 
         // The selection: W / S (and the arrows) move it, skipping what is not there yet; Enter or Space picks it; the
         // mouse selects what it moves over and picks what it clicks.
@@ -369,119 +234,6 @@ MainChoice MainMenu(const ImGuiLayer& ui, int width, int height, const std::stri
     }
     ImGui::End();
     ImGui::PopStyleVar(2);
-    return c;
-}
-
-QuickChoice QuickRally(const ImGuiLayer& ui, const assets::Catalog& catalog, app::Settings& s, int width, int height)
-{
-    QuickChoice c = QuickChoice::None;
-    Screen(ui, "Quick rally", width, height, 720.0f, [&] {
-        ImGui::PushItemWidth(-ImGui::GetFontSize() * 7.0f);
-        // The stage
-        std::vector<std::string> items;
-        int stage = 0;
-        for (size_t i = 0; i < catalog.stages.size(); ++i) {
-            items.push_back(catalog.stages[i].title);
-            if (catalog.stages[i].key == s.stage) stage = static_cast<int>(i);
-        }
-        if (Choose("Stage", stage, items) || s.stage.empty()) s.weather.clear();
-        const assets::Stage* st = catalog.stages.empty() ? nullptr : &catalog.stages[stage];
-        if (st) s.stage = st->key;
-
-        // The car, with where its physics comes from
-        items.clear();
-        int car = 0;
-        for (size_t i = 0; i < catalog.cars.size(); ++i) {
-            items.push_back(catalog.cars[i].name + "   [" + catalog.cars[i].physicsFrom + "]");
-            if (!_stricmp(catalog.cars[i].folder.c_str(), s.car.c_str())) car = static_cast<int>(i);
-        }
-        if (Choose("Car", car, items)) s.setup.clear();
-        const assets::Car* cr = catalog.cars.empty() ? nullptr : &catalog.cars[car];
-        if (cr) s.car = cr->folder;
-
-        // Its setup: the default for the surface, or a saved one
-        items = {"Default"};
-        int setup = 0;
-        const std::vector<assets::Setup> setups = cr ? catalog.SetupsFor(*cr) : std::vector<assets::Setup>{};
-        for (size_t i = 0; i < setups.size(); ++i) {
-            items.push_back(setups[i].name);
-            if (setups[i].path == s.setup) setup = static_cast<int>(i) + 1;
-        }
-        Choose("Setup", setup, items);
-        s.setup = setup ? setups[setup - 1].path : "";
-
-        // Its lamps (NGG design 5.4 N3b): the ramps it can run - its own pods where its .ini places them - and the ramp's
-        // aim, remembered per car.
-        if (cr) {
-            // Per car folder, read once: the layouts' names, and as the menu shows them.
-            struct Layouts {
-                std::vector<std::string> keys, shown;
-                size_t first = 0;   // the car's default
-            };
-            static std::map<std::string, Layouts> layoutsOf;
-            Layouts& ls = layoutsOf[cr->folder];
-            if (ls.keys.empty()) {
-                const float noCog[3] = {};
-                const assets::CarLamps lamps = assets::LoadCarLamps(cr->sgc, noCog);
-                for (const assets::LampLayout& l : lamps.layouts) {
-                    ls.keys.push_back(l.name);
-                    ls.shown.push_back(l.name != "ramp" ? l.name : "its own ramp (" + std::to_string(l.lamps.size()) + " pods)");
-                }
-                ls.first = lamps.defaultLayout;
-            }
-            const std::vector<std::string>& keys = ls.keys;
-            const std::vector<std::string>& names = ls.shown;
-            app::Settings::Lamps& lamp = s.lamps[cr->folder];
-            int layout = static_cast<int>(ls.first);
-            for (size_t i = 0; i < keys.size(); ++i)
-                if (keys[i] == lamp.layout) layout = static_cast<int>(i);
-            Choose("Lamps", layout, names);
-            lamp.layout = keys.empty() ? "" : keys[layout];
-            ImGui::SliderFloat("Ramp spread", &lamp.spread, -5.0f, 10.0f, "%+.1f deg out");
-            ImGui::SliderFloat("Ramp aim", &lamp.pitch, -3.0f, 3.0f, "%+.1f deg up");
-        }
-
-        items = {"Off", "Safe", "Reduced", "Realistic"};
-        int damage = static_cast<int>(std::min(s.damage, 3u));
-        Choose("Damage", damage, items);
-        s.damage = static_cast<uint32_t>(damage);
-
-        // The weather: the stage's presets (custom ones later)
-        items = {"Stage default"};
-        int weather = 0;
-        if (st)
-            for (size_t i = 0; i < st->weathers.size(); ++i) {
-                items.push_back(st->weathers[i]);
-                if (!_stricmp(st->weathers[i].c_str(), s.weather.c_str())) weather = static_cast<int>(i) + 1;
-            }
-        Choose("Weather", weather, items);
-        s.weather = weather && st ? st->weathers[weather - 1] : "";
-        if (st && !st->weathersDrawn && weather)
-            ImGui::TextDisabled("   this .ngg has no weather presets: its own sky is drawn, the weather sets the road");
-
-        items = {"From the weather", "Dry", "Damp", "Wet"};
-        int road = static_cast<int>(std::min(s.road, 3u));
-        Choose("Road", road, items);
-        s.road = static_cast<uint32_t>(road);
-
-        // The time of day, on an autumn day (kQuickDate): the sun, the moon and the stars from it (NGG design 5.4).
-        static const char* const kTimes[] = {"", "08:00", "12:00", "17:30", "18:30", "22:00"};
-        items = {"The weather's own", "Morning 08:00", "Noon 12:00", "Evening 17:30", "Dusk 18:30", "Night 22:00"};
-        int time = 0;
-        for (int i = 1; i < 6; ++i)
-            if (s.time == kTimes[i]) time = i;
-        Choose("Time of day", time, items);
-        s.time = kTimes[time];
-        ImGui::PopItemWidth();
-
-        ImGui::Separator();
-        ImGui::BeginDisabled(!st || !cr);
-        if (Button("Start", true)) c = QuickChoice::Start;
-        ImGui::EndDisabled();
-        if (Button("Back")) c = QuickChoice::Back;
-        if (!st) ImGui::TextColored(ImVec4(1.0f, 0.6f, 0.4f, 1.0f), "No stages found: see Settings.");
-        else if (!cr) ImGui::TextColored(ImVec4(1.0f, 0.6f, 0.4f, 1.0f), "No cars found: see Settings.");
-    });
     return c;
 }
 
@@ -735,8 +487,10 @@ SettingsChoice SettingsUi(const ImGuiLayer& ui, app::Settings& s, bool inStage, 
         const bool click = !busy && ImGui::IsMouseClicked(ImGuiMouseButton_Left);
         auto over = [&](ImVec2 a, ImVec2 b) { return !busy && ImGui::IsMouseHoveringRect(a, b, false); };
 
-        // The ground (over a stage: its scrim) and the livery where the main menu has it, the video veiled under the rows.
-        Backdrop(d, W, H, k, inStage ? IM_COL32(10, 10, 11, 235) : kSurfaceBase, video, 0.75f);
+        // The ground (over a stage: its scrim) and the livery where the main menu has it - without the video's stripe,
+        // which the rows run over: it fades out (over a stage it was never there).
+        if (inStage) HideVideoStripe();
+        Backdrop(d, W, H, k, inStage ? IM_COL32(10, 10, 11, 235) : kSurfaceBase, video, false);
 
         // The header: where the screen is, its title.
         Tracked(d, text, 17 * k, P(x0, 80), kInkMuted, inStage ? "W-RALLY \xC2\xB7 PAUSED" : "W-RALLY \xC2\xB7 MAIN MENU", 0.16f);
