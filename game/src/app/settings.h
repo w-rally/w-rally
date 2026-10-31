@@ -1,5 +1,5 @@
 #pragma once
-// WRally's settings (wrally::app): wrally.ini beside the exe, `name = value` lines - where the content is, the graphics
+// WRally's settings (wrally::app): wrally.ini in the user folder (app/paths.h), `name = value` lines - where the content is, the graphics
 // and the sound, and what Quick rally chose last time. Read at the start, written when the Settings screen or Quick
 // rally changes them. A missing file or key is its default.
 
@@ -57,7 +57,7 @@ struct Settings {
     std::string NggFolders() const;
 };
 
-std::filesystem::path SettingsPath();   // wrally.ini beside the exe
+std::filesystem::path SettingsPath();   // wrally.ini in the user folder (app/paths.h: beside the exe unless installed)
 Settings LoadSettings();
 // The date Quick rally's times of day are on: an autumn day, the clocks still on summer time (dusk about 18:30 at 50 N).
 inline const char* kQuickDate = "2026-10-15";

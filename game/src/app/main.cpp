@@ -12,6 +12,7 @@
 
 #include "app/game.h"
 #include "app/options.h"
+#include "app/paths.h"
 
 namespace {
 
@@ -32,7 +33,7 @@ std::string SetUpOutput()
         std::printf("\n");   // off the prompt the console printed when it went on without us
         return "";
     }
-    const std::string log = (wrally::app::ExeDir() / "WRally.log").string();
+    const std::string log = (wrally::app::UserDir() / "WRally.log").string();
     std::FILE* f;
     if (freopen_s(&f, log.c_str(), "w", stdout)) return "";
     _dup2(_fileno(stdout), _fileno(stderr));   // one file, both streams, in order

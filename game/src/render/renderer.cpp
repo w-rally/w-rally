@@ -1,5 +1,7 @@
 #include "render/renderer.h"
 
+#include "app/paths.h"
+
 #include "wrally/modules/file_host.h"
 #include "wrally/modules/module_host.h"
 
@@ -31,7 +33,7 @@ std::string Renderer::Open(const std::filesystem::path& modulesDir, const std::s
     Impl* impl = m.get();
     // The renderer reads nothing through the VFS yet (the game hands it bytes); its root is the game's folder.
     m->files = std::make_unique<modules::FileHost>(modulesDir.parent_path().parent_path(),
-                                                   modulesDir.parent_path().parent_path() / "cache",
+                                                   app::UserDir() / "cache",
                                                    [impl](iface::LogLevel, const char* text) {
                                                        std::lock_guard<std::mutex> lock(impl->logLock);
                                                        impl->log += text;

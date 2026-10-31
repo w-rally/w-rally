@@ -1,5 +1,7 @@
 #include "sound/sound.h"
 
+#include "app/paths.h"
+
 #include <algorithm>
 #include <cstring>
 #include <mutex>
@@ -85,7 +87,7 @@ std::string Sound::Open(const std::filesystem::path& modulesDir, const std::stri
     m->host.Scan(modulesDir);
     Impl* impl = m.get();
     m->root = root;
-    m->files = std::make_unique<modules::FileHost>(root, modulesDir.parent_path().parent_path() / "cache",
+    m->files = std::make_unique<modules::FileHost>(root, app::UserDir() / "cache",
                                                    [impl](iface::LogLevel level, const char* text) {
                                                        if (level < iface::LogLevel::Info) return;
                                                        std::lock_guard<std::mutex> lock(impl->logLock);

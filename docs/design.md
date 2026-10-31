@@ -686,8 +686,14 @@ Each phase ends with a game you can drive. phys-drive works on day one, and ever
    - **Esc in a stage:** the stage holds and a menu comes up: Resume, Restart stage, Settings, Debug (what the keys
      switch: renderer switches, debug view, camera, chase distance, mute, anti-lag) and Exit to main menu. A CLI run
      still quits at its end (the window closed, a replay's end, `--exit-at`). Its Esc menu leads to the main menu.
-   - **Settings:** saved in `wrally.ini` beside the exe (`app/settings.*`). They cover the RBR folder, the `.ngg`
-     folders (default `<RBR>\Ngg`), the base physics, graphics (applied at once) and sound.
+   - **Settings:** saved in `wrally.ini` in the user folder (`app/settings.*`, `app/paths.h`). They cover the RBR
+     folder, the `.ngg` folders (default `<RBR>\Ngg`), the base physics, graphics (applied at once) and sound.
+   - **Installed:** the MSI (`installer/`, built on every push by `.github/workflows/installer.yml`) installs to
+     Program Files\W-Rally and asks for the RBR folder. It pre-fills the one it finds, and goes on only when the
+     folder has `RichardBurnsRally_SSE.exe`, `Physics.rbz`, `Maps\Tracks.ini` and `Cars\Cars.ini`. It writes that
+     folder to `install.ini` beside the exe, which the game reads before `wrally.ini`. With `install.ini` present,
+     the user folder is `%LOCALAPPDATA%\W-Rally` (`wrally.ini`, `WRally.log`, `drive.phr`, `cache\`). Without it
+     (a build run from its tree), the user folder is the exe's own.
    - **Controls:** the Settings tab that binds every action's key (`game/src/input/bindings.*`). A key is held by its
      place (scan code), named as the layout prints it. Click an action and press a key: Esc keeps the old one, Delete
      unbinds, and an action whose key was taken becomes unbound. The keys are saved as `key_<action>` in
