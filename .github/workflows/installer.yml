@@ -1,4 +1,4 @@
-# On every push: build W-Rally (Release, x64), run the tests that need no RBR folder, and build the MSI
+# On every push: build W-Rally (Release, x64, the runner's newest Visual Studio), run the tests that need no RBR folder, and build the MSI
 # (installer/build-msi.ps1) - the run's artifact "W-Rally-<version>", version 0.1.<run number>.
 name: Installer
 
@@ -12,7 +12,7 @@ jobs:
     env:
       VERSION: 0.1.${{ github.run_number }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           submodules: recursive
 
@@ -22,7 +22,7 @@ jobs:
           wix extension add -g WixToolset.UI.wixext/5.0.2
 
       - name: Configure
-        run: cmake -G "Visual Studio 17 2022" -A x64 -S . -B build
+        run: cmake -A x64 -S . -B build   # the newest Visual Studio on the runner
 
       - name: Build
         run: cmake --build build --config Release --parallel
