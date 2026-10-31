@@ -3202,6 +3202,19 @@ Four decisions, the user's:
       `beams` adds the car's own beams beside the presets; `lamps` the ones every layout has (headlamps, tail,
       brake, reverse, indicators: `role` says how the game switches them); `layouts` the choices for the setup (the
       ramp's lamps, the mesh that is shown with them). The setup's aim (yaw, pitch) is added to a layout's lamps.
+  - **Tuning on a wall, and the lamp lab (2026-10-31).** `tools/lamp-wall/wall.py` draws the lamps on a wall 10 m
+    ahead without the engine (the renderer's beam formula; a copy of the presets and the test layouts). The user's
+    tuning there: each lamp its own spot - the main beams 10 degrees out (80 kcd), the outer pods 20 degrees out, the
+    inner ones 5 out and 4 up; the pods' beams narrow with a harder edge, and a wide, dim spill around each (~7% of
+    its peak, +-25-30 x 10-12 degrees). `WRally --lab` (`assets::BuildLampLab`): the test lamps on a car standing in
+    a synthetic scene - a floor, a wall 10 m ahead of the ramp, thin white poles at 5 and 8 m, a person-sized block -
+    with no stage or physics; `--camera`, `--time`, `--exit-at`, `PHYS_DRIVE_SHOTS` as on a stage.
+  - **"The shadows look like one lamp's."** Checked against an exact reference (`NGG_LIGHTS_REF=1`: a ray to every
+    lamp; `=2`: the one-pick estimate averaged over 16 picks): in the lab the game's shadows ARE the reference's.
+    With the pods aimed apart and their beams narrow, every patch was lit almost by one lamp, so each thing cast that
+    lamp's one dark shadow; the spill gives every patch several lamps and each thing a fan of lighter shadows, as in
+    the reference shots. New debug view 15: the lamps' shadowed fraction. Open: on stage 41 the timing clock's legs
+    still differ from the reference (one hard shadow), which the lab does not show - the clock is a physics object.
 - **N4 - stage lights.** A light chunk in the `.ngg` (with `provenance=auto|authored`, 5.3), emissive texture
   detection for the automatic part, Wallaby's light-placement mode for the authored part (its own task).
 

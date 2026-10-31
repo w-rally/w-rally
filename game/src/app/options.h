@@ -10,6 +10,8 @@
 //          [--chase-distance <metres>] [--chase-pull <metres per 100 km/h>] [--entry <seconds>] [--quick-start]
 //          [--no-sound] [--no-codriver] [--codriver-replay] [--codriver-lead 3] [--codriver-volume 1]
 //          [--pacenote-next 8]
+//   WRally --lab [--camera 1] [--time HH:MM ...] [--exit-at <frame>]   the lamp lab: the test lamps in a synthetic scene
+//          (no stage, no physics; app/game.cpp RunLab, assets/lamp_lab.h)
 //          [--eng Focus03-08] [--mix sound-mix.ini] [--overrides cars/s_i2003.ini | none]
 //          [--launch-rpm 7400] [--als-crack 0.25] [--als-bangs <folder of .wav>] [--als-idle-bangs <folder>]
 //
@@ -77,6 +79,9 @@ struct Options {
 int Parse(int argc, char** argv, Options& o);
 // The same from a list (args[0] the program) - what the menus build: a run from the menu is a command line too.
 int Parse(const std::vector<std::string>& args, Options& o);
+// --time HH:MM [--date] [--utc-offset] [--latitude] [--longitude] [--north] into `o` (the sky's time and place);
+// `defaultTime` when there is no --time (null: none, the weather's sun). 0, or an exit code after the message.
+int ParseSkyTime(const std::vector<std::string>& args, Options& o, const char* defaultTime = nullptr);
 
 // The folder the exe is in.
 std::filesystem::path ExeDir();

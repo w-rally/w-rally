@@ -348,6 +348,93 @@ void CSMain(uint3 tid : SV_DispatchThreadID)
 
     const float viewZ = dot(p - gCamPos, gCamFwd);
     const uint2 c = gClusters[LightCluster(float2(tid.xy) + 0.5, viewZ, gClusterParams)];
+#if LIGHTS_REF == 2
+    // NGG_LIGHTS_REF=2: the estimator itself, 16 picks per pixel averaged - what the one pick converges to.
+    {
+        float vSum = 0.0;
+        bool anyMoved = false;
+        for (uint s = 0; s < 16u; ++s)
+        {
+            float total = 0.0;
+            uint chosen = 0xFFFFFFFFu;
+            for (uint k = 0; k < c.y; ++k)
+            {
+                const uint li = gLightIndex[c.x + k];
+                if ((gLights[li].flags & kLightShadows) == 0u) continue;
+                float3 l;
+                float dist;
+                const float3 E = LightIrradiance(li, p, l, dist);
+                const float w = dot(E, float3(0.2126, 0.7152, 0.0722)) * (plant != 0u ? 1.0 : saturate(dot(N, l)));
+                if (w <= 0.0) continue;
+                total += w;
+                if (Rand2(tid.xy, gFrame * 17u + s, 101u + k).x * total < w) chosen = li;
+            }
+            if (chosen == 0xFFFFFFFFu) { vSum += 1.0; continue; }
+            const float3 lpos = gLights[chosen].pos;
+            const float3 toL = lpos - p;
+            const float3 d0 = toL / max(length(toL), 1e-4);
+            float3 T, B; Basis(d0, T, B);
+            const float2 r = Rand2(tid.xy, gFrame * 17u + s, 7u);
+            const float rad = sqrt(r.x) * gLights[chosen].radius, ang = r.y * 6.28318530;
+            const float3 target = lpos + T * (rad * cos(ang)) + B * (rad * sin(ang));
+            float3 Nn = N;
+            if (dot(Nn, d0) < 0.0) Nn = -Nn;
+            RayDesc ray;
+            ray.Origin = p + Nn * (gBias * (1.0 + length(p - gCamPos) * 0.002));
+            const float3 dv = target - ray.Origin;
+            const float len = length(dv);
+            ray.Direction = dv / max(len, 1e-4);
+            ray.TMin = 0.0;
+            ray.TMax = max(len - 0.02, 0.0);
+            bool onMoved;
+            const bool hit = Occluded(ray, false, plant, onMoved);
+            anyMoved = anyMoved || onMoved;
+            vSum += hit ? 0.0 : 1.0;
+        }
+        gOut[tid.xy] = EncodeRaw(vSum / 16.0, anyMoved);
+        return;
+    }
+#elif defined(LIGHTS_REF)
+    // NGG_LIGHTS_REF=1: THE REFERENCE - a ray to EVERY light, the exact weighted visibility. The one-ray estimate below
+    // is checked against it (design 5.4 N3: the lamp lab, the test lamps' shadows).
+    {
+        float sumW = 0.0, sumV = 0.0;
+        bool anyMoved = false;
+        for (uint k = 0; k < c.y; ++k)
+        {
+            const uint li = gLightIndex[c.x + k];
+            if ((gLights[li].flags & kLightShadows) == 0u) continue;
+            float3 l;
+            float dist;
+            const float3 E = LightIrradiance(li, p, l, dist);
+            const float w = dot(E, float3(0.2126, 0.7152, 0.0722)) * (plant != 0u ? 1.0 : saturate(dot(N, l)));
+            if (w <= 0.0) continue;
+            const float3 lpos = gLights[li].pos;
+            const float3 toL = lpos - p;
+            const float3 d0 = toL / max(length(toL), 1e-4);
+            float3 T, B; Basis(d0, T, B);
+            const float2 r = Rand2(tid.xy, gFrame, 7u + k);
+            const float rad = sqrt(r.x) * gLights[li].radius, ang = r.y * 6.28318530;
+            const float3 target = lpos + T * (rad * cos(ang)) + B * (rad * sin(ang));
+            float3 Nn = N;
+            if (dot(Nn, d0) < 0.0) Nn = -Nn;
+            RayDesc ray;
+            ray.Origin = p + Nn * (gBias * (1.0 + length(p - gCamPos) * 0.002));
+            const float3 dv = target - ray.Origin;
+            const float len = length(dv);
+            ray.Direction = dv / max(len, 1e-4);
+            ray.TMin = 0.0;
+            ray.TMax = max(len - 0.02, 0.0);
+            bool onMoved;
+            const bool hit = Occluded(ray, false, plant, onMoved);
+            anyMoved = anyMoved || onMoved;
+            sumW += w;
+            sumV += hit ? 0.0 : w;
+        }
+        gOut[tid.xy] = EncodeRaw(sumW > 0.0 ? sumV / sumW : 1.0, anyMoved);
+        return;
+    }
+#endif
     float total = 0.0;
     uint chosen = 0xFFFFFFFFu;
     for (uint k = 0; k < c.y; ++k)
@@ -958,7 +1045,10 @@ bool Rt::Create(Device& dev)
             Log("rt: AO pipeline creation failed - shadows still work, AO does not");
     }
 
-    ComPtr<ID3DBlob> lcs = m_dxc.Compile(std::string(kRtCommonSrc) + kLightsRegsSrc + kLightsHlsl + kLightMainSrc,
+    // NGG_LIGHTS_REF=1|2: the local lights' shadows by a reference (kLightMainSrc) - for checking, never for play.
+    const char* refEnv = std::getenv("NGG_LIGHTS_REF");
+    const char* lightsRef = !refEnv ? "" : refEnv[0] == '2' ? "#define LIGHTS_REF 2\n" : "#define LIGHTS_REF 1\n";
+    ComPtr<ID3DBlob> lcs = m_dxc.Compile(std::string(lightsRef) + kRtCommonSrc + kLightsRegsSrc + kLightsHlsl + kLightMainSrc,
                                          L"CSMain", L"cs_6_5", "ngg_rt_lights");
     if (lcs)
     {
