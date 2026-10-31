@@ -1,6 +1,7 @@
 #include "ui/menus.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <map>
@@ -127,27 +128,175 @@ void DrawBackdrop(int width, int height)
                                IM_COL32(18, 24, 34, 255), IM_COL32(52, 34, 22, 255), IM_COL32(52, 34, 22, 255));
 }
 
+namespace {
+
+// The main menu's design (the WRally design system, "Factory black"): its colours, and its sizes in px at 1080p.
+constexpr ImU32 kSurfaceBase = IM_COL32(10, 10, 11, 255), kSurfaceRaised = IM_COL32(20, 20, 22, 255),
+                kSurfaceOverlay = IM_COL32(30, 30, 33, 255), kLineStrong = IM_COL32(98, 98, 104, 255),
+                kInk = IM_COL32(255, 255, 255, 255), kInkSecondary = IM_COL32(196, 196, 200, 255),
+                kInkMuted = IM_COL32(140, 140, 144, 255), kSignal = IM_COL32(255, 75, 31, 255);
+const float kTanStripe = std::tan(22.0f * 3.14159265f / 180.0f);   // slant-stripe, the livery's
+const float kTanPlate = std::tan(14.0f * 3.14159265f / 180.0f);    // slant-plate, the marker's
+constexpr float kRowW = 600, kRowH = 68, kRowGap = 4, kCut = 12;   // a row, its cut right edge
+constexpr float kEase = 0.04f;   // the selection's ease (s): settled in ~120 ms, as the design's transitions
+
+ImU32 Lerp(ImU32 a, ImU32 b, float t)
+{
+    auto ch = [&](int s) {
+        const float x = float((a >> s) & 0xff), y = float((b >> s) & 0xff);
+        return ImU32(x + (y - x) * t + 0.5f) << s;
+    };
+    return ch(IM_COL32_R_SHIFT) | ch(IM_COL32_G_SHIFT) | ch(IM_COL32_B_SHIFT) | ch(IM_COL32_A_SHIFT);
+}
+
+ImU32 Alpha(ImU32 c, float a) { return (c & ~IM_COL32_A_MASK) | (ImU32(((c >> IM_COL32_A_SHIFT) & 0xff) * a + 0.5f) << IM_COL32_A_SHIFT); }
+
+// `text` at `at` with `spacing` (em) between its letters - the design's tracked labels. Returns its width.
+float Tracked(ImDrawList* d, ImFont* f, float size, ImVec2 at, ImU32 col, const char* text, float spacing)
+{
+    const float x0 = at.x;
+    for (const char* p = text; *p; ++p) {
+        if (d) d->AddText(f, size, at, col, p, p + 1);
+        at.x += f->CalcTextSizeA(size, FLT_MAX, 0, p, p + 1).x + spacing * size;
+    }
+    return at.x - x0 - (*text ? spacing * size : 0);
+}
+
+// A key chip and what it does: "[ENTER] SELECT".
+float KeyHint(ImDrawList* d, ImFont* f, float k, ImVec2 at, const char* key, const char* does)
+{
+    const float size = 17 * k, h = 34 * k, pad = 10 * k;
+    const float w = std::max(h, Tracked(nullptr, f, size, at, 0, key, 0.08f) + 2 * pad);
+    d->AddRectFilled(at, ImVec2(at.x + w, at.y + h), kSurfaceOverlay, 2 * k);
+    d->AddRect(at, ImVec2(at.x + w, at.y + h), kLineStrong, 2 * k, 0, std::max(1.0f, k));
+    const float ty = at.y + (h - size) * 0.5f;
+    Tracked(d, f, size, ImVec2(at.x + (w - Tracked(nullptr, f, size, at, 0, key, 0.08f)) * 0.5f, ty), kInk, key, 0.08f);
+    return w + 8 * k + Tracked(d, f, size, ImVec2(at.x + w + 8 * k, ty), kInkSecondary, does, 0.16f);
+}
+
+struct MainItem {
+    const char* label;
+    const char* desc;   // null: not there yet (shown, not selectable)
+    MainChoice choice;
+};
+const MainItem kMainItems[] = {
+    {"SEASON", nullptr, MainChoice::None},
+    {"QUICK RALLY", "Pick a stage and a car, and go straight to the start line.", MainChoice::QuickRally},
+    {"SETTINGS", "Content folders, graphics, sound and the controls.", MainChoice::Settings},
+    {"EXIT", "Quit to desktop.", MainChoice::Exit},
+};
+constexpr int kMainCount = int(sizeof kMainItems / sizeof kMainItems[0]);
+
+int g_mainAt = 1;              // the selected item (Quick rally first)
+float g_mainPlate = -1;        // where the selection's plate is, in rows (eased to g_mainAt; -1: not drawn yet)
+float g_mainOn[kMainCount];    // how selected each item looks, 0..1 (its marker, its ink)
+
+} // namespace
+
 MainChoice MainMenu(const ImGuiLayer& ui, int width, int height, const std::string& note)
 {
-    // The title above the menu, in the HUD's large face.
-    if (ImFont* f = ui.HudSmall()) {
-        const char* title = "WRally";
-        const float size = std::max(48.0f, height * 0.12f);
-        const ImVec2 t = f->CalcTextSizeA(size, FLT_MAX, 0, title);
-        ImGui::GetBackgroundDrawList()->AddText(f, size, ImVec2((width - t.x) * 0.5f, height * 0.12f), IM_COL32(235, 235, 235, 255), title);
-    }
+    // The whole window is the screen: the design at 1080p scaled to its height, the left column from the left edge and
+    // the livery's stripes from the right.
+    const float k = std::min(height / 1080.0f, width / 1280.0f), W = float(width), H = float(height);
+    ImGui::SetNextWindowPos(ImVec2(0, 0));
+    ImGui::SetNextWindowSize(ImVec2(W, H));
+    constexpr ImGuiWindowFlags kFull = ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings |
+                                       ImGuiWindowFlags_NoNav | ImGuiWindowFlags_NoBackground | ImGuiWindowFlags_NoScrollWithMouse;
     MainChoice c = MainChoice::None;
-    Screen(ui, "Main menu", width, height, 320.0f, [&] {
-        if (Button("Quick rally", true)) c = MainChoice::QuickRally;
-        if (Button("Settings")) c = MainChoice::Settings;
-        if (Button("Exit")) c = MainChoice::Exit;
-        if (!note.empty()) {
-            ImGui::Separator();
-            ImGui::PushTextWrapPos(ImGui::GetFontSize() * 24.0f);
-            ImGui::TextColored(ImVec4(1.0f, 0.6f, 0.4f, 1.0f), "%s", note.c_str());
-            ImGui::PopTextWrapPos();
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0);
+    if (ImGui::Begin("Main menu", nullptr, kFull)) {
+        ImDrawList* d = ImGui::GetWindowDrawList();
+        d->AddRectFilled(ImVec2(0, 0), ImVec2(W, H), kSurfaceBase);
+        // The livery: the signal stripe and the white one beside it, slanted from their top left.
+        auto stripe = [&](float left, float w, ImU32 col) {
+            const float x = W - (1920 - left) * k, top = -40 * k, bottom = H + 40 * k, run = (bottom - top) * kTanStripe;
+            d->AddQuadFilled(ImVec2(x, top), ImVec2(x + w * k, top), ImVec2(x + w * k - run, bottom), ImVec2(x - run, bottom), col);
+        };
+        stripe(1430, 220, kSignal);
+        stripe(1690, 28, kInk);
+
+        // The column: 48 px safe margin, 32 px padding.
+        const float x0 = 80 * k, y0 = 80 * k;
+        ImFont* mark = ui.Wordmark();
+        ImFont* item = ui.MenuItem();
+        ImFont* text = ui.MenuText();
+        const float wr = mark->CalcTextSizeA(72 * k, FLT_MAX, 0, "WR").x;
+        d->AddText(mark, 72 * k, ImVec2(x0, y0), kInk, "WR");
+        d->AddText(mark, 72 * k, ImVec2(x0 + wr, y0), kInkMuted, "ally");
+
+        const float navY = y0 + 72 * k + 260 * k;
+        Tracked(d, text, 17 * k, ImVec2(x0, navY), kInkMuted, "MAIN MENU", 0.16f);
+        const float rowsY = navY + 20 * k + 20 * k, pitch = (kRowH + kRowGap) * k;
+
+        // The selection: W / S (and the arrows) move it, skipping what is not there yet; Enter or Space picks it; the
+        // mouse selects what it moves over and picks what it clicks.
+        auto step = [&](int dir) {
+            for (int i = g_mainAt + dir; i >= 0 && i < kMainCount; i += dir)
+                if (kMainItems[i].desc) return void(g_mainAt = i);
+        };
+        if (ImGui::IsKeyPressed(ImGuiKey_W) || ImGui::IsKeyPressed(ImGuiKey_UpArrow)) step(-1);
+        if (ImGui::IsKeyPressed(ImGuiKey_S) || ImGui::IsKeyPressed(ImGuiKey_DownArrow)) step(+1);
+        const ImVec2 mouseMoved = ImGui::GetIO().MouseDelta;
+        for (int i = 0; i < kMainCount; ++i) {
+            ImGui::SetCursorScreenPos(ImVec2(x0, rowsY + i * pitch));
+            ImGui::PushID(i);
+            const bool clicked = ImGui::InvisibleButton("row", ImVec2(kRowW * k, kRowH * k));
+            ImGui::PopID();
+            if (!kMainItems[i].desc) continue;
+            if (ImGui::IsItemHovered() && (mouseMoved.x || mouseMoved.y)) g_mainAt = i;
+            if (clicked) g_mainAt = i, c = kMainItems[i].choice;
         }
-    });
+        if (ImGui::IsKeyPressed(ImGuiKey_Enter, false) || ImGui::IsKeyPressed(ImGuiKey_KeypadEnter, false) ||
+            ImGui::IsKeyPressed(ImGuiKey_Space, false))
+            c = kMainItems[g_mainAt].choice;
+
+        // The animation: the plate slides to the selected row, its marker slides in and its ink brightens, the one it
+        // left fading back - each eased toward where it goes.
+        const float ease = 1.0f - std::exp(-ImGui::GetIO().DeltaTime / kEase);
+        if (g_mainPlate < 0) {
+            g_mainPlate = float(g_mainAt);
+            for (int i = 0; i < kMainCount; ++i) g_mainOn[i] = i == g_mainAt ? 1.0f : 0.0f;
+        }
+        g_mainPlate += (g_mainAt - g_mainPlate) * ease;
+        if (std::fabs(g_mainAt - g_mainPlate) < 0.002f) g_mainPlate = float(g_mainAt);
+        auto plate = [&](float y, ImU32 col) {
+            const float x1 = x0 + kRowW * k, y1 = y + kRowH * k;
+            d->AddQuadFilled(ImVec2(x0, y), ImVec2(x1, y), ImVec2(x1 - kCut * k, y1), ImVec2(x0, y1), col);
+        };
+        plate(rowsY + g_mainPlate * pitch, kSurfaceRaised);
+
+        for (int i = 0; i < kMainCount; ++i) {
+            const MainItem& m = kMainItems[i];
+            float& on = g_mainOn[i];
+            on += ((i == g_mainAt ? 1.0f : 0.0f) - on) * ease;
+            const float y = rowsY + i * pitch, mid = y + kRowH * k * 0.5f;
+            if (on > 0.01f) {   // the marker: 12 x 34, slanted, from 12 px left of its place
+                const float mx = x0 + 12 * k - 12 * k * (1 - on), half = 17 * k, lean = half * kTanPlate;
+                d->AddQuadFilled(ImVec2(mx + lean, mid - half), ImVec2(mx + 12 * k + lean, mid - half),
+                                 ImVec2(mx + 12 * k - lean, mid + half), ImVec2(mx - lean, mid + half), Alpha(kSignal, on));
+            }
+            const ImU32 ink = m.desc ? Lerp(kInkSecondary, kInk, on) : Alpha(kInkMuted, 0.55f);
+            Tracked(d, item, 28 * k, ImVec2(x0 + 46 * k, mid - 28 * k * 0.5f), ink, m.label, 0.02f);
+        }
+
+        // What the selected one does, then what is missing (the note), in the signal.
+        float y = rowsY + kMainCount * pitch - kRowGap * k + 24 * k;
+        const float wrap = 560 * k;
+        if (const char* desc = kMainItems[g_mainAt].desc) {
+            d->AddText(text, 23 * k, ImVec2(x0 + 46 * k, y), kInkSecondary, desc, nullptr, wrap);
+            y += std::max(64 * k, text->CalcTextSizeA(23 * k, FLT_MAX, wrap, desc).y);
+        }
+        if (!note.empty()) d->AddText(text, 23 * k, ImVec2(x0 + 46 * k, y + 8 * k), kSignal, note.c_str(), nullptr, wrap);
+
+        // The keys, at the column's foot.
+        const float footY = H - 80 * k - 34 * k;
+        float x = x0;
+        x += KeyHint(d, text, k, ImVec2(x, footY), "W S", "MOVE") + 24 * k;
+        KeyHint(d, text, k, ImVec2(x, footY), "ENTER", "SELECT");
+    }
+    ImGui::End();
+    ImGui::PopStyleVar(2);
     return c;
 }
 
