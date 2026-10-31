@@ -30,6 +30,7 @@ foreach(cfg "" _DEBUG _RELEASE _RELWITHDEBINFO _MINSIZEREL)
 endforeach()
 
 include(cmake/BuildHash.cmake)
+include(cmake/BuildInfo.cmake)
 
 enable_testing()
 

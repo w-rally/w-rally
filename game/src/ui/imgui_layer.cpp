@@ -4,6 +4,7 @@
 #include <cstring>
 #include <string>
 
+#include "build_info.h"
 #include "imgui.h"
 #include "imgui_impl_win32.h"
 #include "render/renderer.h"
@@ -91,6 +92,17 @@ void ImGuiLayer::NewFrame()
 
 const iface::UiDrawList& ImGuiLayer::Render()
 {
+    // The build in the window's bottom right corner, over everything on every screen (the stage too): the version and
+    // the commit, in the main menu's text face at its 1080p size, ink-muted.
+    {
+        const ImVec2 size = ImGui::GetIO().DisplaySize;
+        const float k = std::min(size.y / 1080.0f, size.x / 1280.0f), px = 15 * k;
+        const std::string tag = std::string("W-Rally ") + WRALLY_VERSION + (*WRALLY_COMMIT ? " \xC2\xB7 " WRALLY_COMMIT : "");
+        ImFont* f = m_menuText ? m_menuText : ImGui::GetFont();
+        const ImVec2 t = f->CalcTextSizeA(px, FLT_MAX, 0, tag.c_str());
+        ImGui::GetForegroundDrawList()->AddText(f, px, ImVec2(size.x - t.x - 14 * k, size.y - t.y - 10 * k),
+                                                IM_COL32(140, 140, 144, 200), tag.c_str());
+    }
     ImGui::Render();
     const ImDrawData* d = ImGui::GetDrawData();
     m_vertices.clear();

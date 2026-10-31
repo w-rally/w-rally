@@ -32,7 +32,8 @@ public:
     static bool WndProc(HWND h, UINT m, WPARAM w, LPARAM l);
 
     void NewFrame();
-    // The frame's draw data as the renderer takes it (valid until the next Render).
+    // The frame's draw data as the renderer takes it (valid until the next Render), the build's version and commit in
+    // its bottom right corner.
     const iface::UiDrawList& Render();
 
     ImFont* HudSmall() const { return m_small; }

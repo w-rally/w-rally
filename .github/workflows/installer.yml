@@ -22,7 +22,7 @@ jobs:
           wix extension add -g WixToolset.UI.wixext/5.0.2
 
       - name: Configure
-        run: cmake -A x64 -S . -B build   # the newest Visual Studio on the runner
+        run: cmake -A x64 -S . -B build -DWRALLY_VERSION=$env:VERSION   # the newest Visual Studio on the runner
 
       - name: Build
         run: cmake --build build --config Release --parallel
