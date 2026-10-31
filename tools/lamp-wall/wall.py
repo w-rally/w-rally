@@ -20,7 +20,9 @@ BEAMS = {
                             (25000, 25.0, 10.0, 0.0, -1.0, 2.0)]),
     'led-driving':  (5800, [(150000, 5.0, 3.0, 0.0, 0.0, 3.0), (15000, 12.0, 5.0, 0.0, -1.0, 2.0),
                             (12000, 30.0, 12.0, 0.0, -1.0, 2.0)]),
-    'led-bar':      (5700, [(60000, 30.0, 4.5, 0.0, 0.0, 4.0), (15000, 60.0, 9.0, 0.0, -2.0, 2.0)]),
+    # A combo bar's smooth beam: a spot in the middle, a wide flood round it, no cut-off (not a halogen's).
+    'led-bar':      (5700, [(150000, 6.0, 3.5, 0.0, 0.0, 2.0), (30000, 18.0, 6.0, 0.0, -0.5, 2.0),
+                            (10000, 40.0, 10.0, 0.0, -1.0, 2.0)]),
     'ditch':        (5800, [(40000, 20.0, 6.0, 0.0, -2.0, 2.0)]),
 }
 
@@ -33,6 +35,7 @@ LAYOUTS = {
     # and up (yaw is to the right, so the left side's are negative).
     'ramp': HEAD_RAMP + [('led-driving', 0.38, -1.9, 0.3, -20.0, -0.8), ('led-pencil', 0.12, -1.9, 0.3, -5.0, 4.0),
                          ('led-pencil', -0.12, -1.9, 0.3, 5.0, 4.0), ('led-driving', -0.38, -1.9, 0.3, 20.0, -0.8)],
+    # The LED bars: the main beams straight on (the bars' flood covers the corners).
     'bars': HEAD + [('led-bar', 0.3, -1.8, 0.32, 0.0, -0.8), ('led-bar', -0.3, -1.8, 0.32, 0.0, -0.8)],
     'low': [('halogen-low', 0.65, -2.0, 0.05, 0.0, 0.0), ('halogen-low', -0.65, -2.0, 0.05, 0.0, 0.0)],
 }

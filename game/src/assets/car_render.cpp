@@ -196,8 +196,19 @@ void CarRender::Create(render::Renderer& renderer, const std::string& sgc, const
         std::vector<iface::Vertex> v;
         std::vector<uint32_t> idx;
         uint32_t material;
+        uint32_t node;
     };
-    std::vector<LampMesh> lampMeshes[kLampGroups][2];
+    std::vector<LampMesh> lampMeshes[kLampGroups][3][2];
+    for (auto& g : m_lampPart)
+        for (int& p : g) p = -2;
+    // A lamp mesh's side, by its name (e_light_lf, e_light_brake_rb, ...): 0 left, 1 right, 2 neither.
+    auto sideOf = [](const std::string& n) {
+        for (const char* l : {"_lf", "_lb"})
+            if (n.find(l) != std::string::npos) return 0;
+        for (const char* r : {"_rf", "_rb"})
+            if (n.find(r) != std::string::npos) return 1;
+        return 2;
+    };
     auto add = [&](std::vector<iface::Vertex> v, std::vector<uint32_t> idx, uint32_t material, uint32_t node) {
         vertices.push_back(std::move(v));
         indices.push_back(std::move(idx));
@@ -247,8 +258,11 @@ void CarRender::Create(render::Renderer& renderer, const std::string& sgc, const
                 std::printf("mesh %s -> node %s%s%s\n", part.name.c_str(), part.lampGroup >= 0 ? "lamp " : "",
                             part.lampGroup >= 0 ? std::to_string(part.lampGroup).c_str() : nodes[node].name, above.c_str());
             }
-            if (part.lampGroup >= 0) {   // a lamp's: its own instance, on the body (assets::CarRender::PlaceLamps)
-                lampMeshes[part.lampGroup][part.lit ? 1 : 0].push_back({std::move(v), part.indices, static_cast<uint32_t>(mi + 1)});
+            if (part.lampGroup >= 0) {   // a lamp's: its own instance, on its part's node (assets::CarRender::PlaceLamps)
+                const int sd = sideOf(part.name);
+                lampMeshes[part.lampGroup][sd][part.lit ? 1 : 0].push_back({std::move(v), part.indices,
+                                                                            static_cast<uint32_t>(mi + 1), node});
+                if (m_lampPart[part.lampGroup][sd] == -2) m_lampPart[part.lampGroup][sd] = node >= kParts ? static_cast<int>(node - kParts) : -1;
                 continue;
             }
             add(std::move(v), part.indices, static_cast<uint32_t>(mi + 1), node);
@@ -304,13 +318,10 @@ void CarRender::Create(render::Renderer& renderer, const std::string& sgc, const
     const iface::TextureHandle kColour[kLampGroups] = {warm, red, red, white, white, 0};
     size_t lampCount = 0;
     for (int g = 0; g < kLampGroups; ++g)
+        for (int sd = 0; sd < 3; ++sd)
         for (int lit = 0; lit < 2; ++lit) {
-            std::vector<LampMesh>& lm = lampMeshes[g][lit];
+            std::vector<LampMesh>& lm = lampMeshes[g][sd][lit];
             if (lm.empty()) continue;
-            iface::ModelNode node{};
-            node.parent = -1;
-            node.local[0] = node.local[5] = node.local[10] = node.local[15] = 1;
-            std::snprintf(node.name, sizeof node.name, "lamp_%d_%d", g, lit);
             std::vector<iface::MaterialDesc> mats = materials;
             if (lit)
                 for (iface::MaterialDesc& m : mats) {
@@ -323,32 +334,63 @@ void CarRender::Create(render::Renderer& renderer, const std::string& sgc, const
                 mm.vertices = x.v.data(), mm.vertexCount = static_cast<uint32_t>(x.v.size());
                 mm.indices = x.idx.data(), mm.indexCount = static_cast<uint32_t>(x.idx.size());
                 mm.material = x.material;
-                mm.node = 0;
+                mm.node = x.node;
                 ms.push_back(mm);
             }
             iface::ModelDesc ld{};
-            ld.nodes = &node, ld.nodeCount = 1;
+            ld.nodes = nodes.data(), ld.nodeCount = static_cast<uint32_t>(nodes.size());   // the car's node tree
             ld.meshes = ms.data(), ld.meshCount = static_cast<uint32_t>(ms.size());
             ld.materials = mats.data(), ld.materialCount = static_cast<uint32_t>(mats.size());
             const iface::ModelHandle lmodel = renderer.CreateModel(ld);
-            m_lamps[g][lit] = lmodel ? renderer.CreateInstance(lmodel) : 0;
+            m_lamps[g][sd][lit] = lmodel ? renderer.CreateInstance(lmodel) : 0;
             lampCount += lm.size();
         }
     if (lampCount) std::printf("the car's lamps: %zu meshes\n", lampCount);
 }
 
-void CarRender::PlaceLamps(const bool lit[kLampGroups], bool housing, std::vector<iface::InstanceUpdate>& out) const
+// A part off the car, or loose and no longer in its frame: what sits on it has lost its cable.
+static bool PartGone(const physics::Part& p) { return p.state == 2 || (p.state == 1 && !p.inCar); }
+
+void CarRender::PlaceLamps(const bool lit[kLampGroups], bool housing, const std::vector<physics::Part>& parts,
+                           std::vector<iface::InstanceUpdate>& out) const
 {
     for (int g = 0; g < kLampGroups; ++g)
-        for (int l = 0; l < 2; ++l) {
-            if (!m_lamps[g][l]) continue;
-            iface::InstanceUpdate u{};
-            u.instance = m_lamps[g][l];
-            u.visible = g == kLampRampHousing ? housing : (lit[g] == (l == 1)) && (g != kLampRamp || housing);
-            std::memcpy(u.world, m_update.world, sizeof u.world);
-            u.nodes = m_nodes.data() + 16 * kBody;   // the body's node
-            u.nodeCount = 1;
-            out.push_back(u);
+        for (int sd = 0; sd < 3; ++sd) {
+            const int part = m_lampPart[g][sd];
+            const bool gone = part >= 0 && static_cast<size_t>(part) < parts.size() && PartGone(parts[part]);
+            for (int l = 0; l < 2; ++l) {
+                if (!m_lamps[g][sd][l]) continue;
+                iface::InstanceUpdate u{};
+                u.instance = m_lamps[g][sd][l];
+                u.visible = g == kLampRampHousing ? housing : (lit[g] && !gone) == (l == 1) && (g != kLampRamp || housing);
+                std::memcpy(u.world, m_update.world, sizeof u.world);
+                u.nodes = m_nodes.data();   // the car's nodes, as the body instance has them
+                u.nodeCount = m_update.nodeCount;
+                out.push_back(u);
+            }
+        }
+}
+
+void CarRender::Mounts(const std::vector<physics::Part>& parts, LampMounts& out) const
+{
+    out = {};
+    for (int g = 0; g < kLampGroups; ++g)
+        for (int sd = 0; sd < 3; ++sd) {
+            const int part = m_lampPart[g][sd];
+            if (part < 0 || static_cast<size_t>(part) >= parts.size()) continue;
+            const physics::Part& p = parts[part];
+            if (PartGone(p)) {
+                out.off[g][sd] = true;
+                continue;
+            }
+            if (!std::memcmp(p.position, p.restPosition, 12) && !std::memcmp(p.rotation, p.restRotation, 16)) continue;
+            // Its move in the car's frame: out of its rest place, into where it is now (PartNode's, less the body).
+            float rest[16], restInv[16], now[16];
+            PoseRows(p.restRotation, p.restPosition, rest);
+            RigidInverse(rest, restInv);
+            PoseRows(p.rotation, p.position, now);
+            math::Mul44(restInv, now, out.delta[g][sd]);
+            out.moved[g][sd] = true;
         }
 }
 

@@ -3234,8 +3234,17 @@ Four decisions, the user's:
     - **Quick rally** (the setup editor's, once there is one): "Lamps" (the car's ramps), the ramp's spread and aim,
       remembered per car (`lamps_<folder>` in wrally.ini), and the time of day (`quick_time`, on 15 October, summer
       time: dusk ~18:30). Command line: `--lamps <ramp> --lamp-aim <spread>,<pitch>`.
-    - Open: a lamp on a part that comes loose (a bumper) stays on the body; bloom on the lit glass; replays switch
-      the brake and reverse lamps by the live input only.
+    - **Lamps on loose parts:** each lamp mesh sits on its part's node (the i20's ramp on the bonnet, by the .sgc's
+      node tree) - one instance per group and side (`_lf` / `_rf` / `_lb` / `_rb` in the name), on the car's own
+      node tree. A part that comes off (or hangs loose out of the car's frame) takes its lamps' light with it: its
+      cable is torn, glass and beams dark (`CarRender::Mounts`, `assets::LampMounts`); one that hangs on (a bonnet
+      on its hinge) moves its lamps' beams with it - the part's move, rest to now in the car's frame, applied to the
+      lamp's place and axes. The ramp follows its pods' part, else its housing's.
+    - **LED bars, their own beam:** a combo bar's - a 6 x 3.5 degree spot (150 kcd), an 18 x 6 mid (30 kcd) and a
+      40 x 10 flood (10 kcd), all soft (sharpness 2): no cut-off, unlike the halogens and the pods it was tuned
+      against. With the bars the main beams shine straight on (`LampLayout::headSpread` 0; 10 degrees out with the
+      pods, whose outer lamps cover the corners).
+    - Open: bloom on the lit glass; replays switch the brake and reverse lamps by the live input only.
 - **N4 - stage lights.** A light chunk in the `.ngg` (with `provenance=auto|authored`, 5.3), emissive texture
   detection for the automatic part, Wallaby's light-placement mode for the authored part (its own task).
 

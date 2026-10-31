@@ -15,6 +15,7 @@
 #include <string>
 #include <vector>
 
+#include "assets/car_model.h"
 #include "core/math.h"
 #include "physics/physics.h"
 #include "wrally/iface/renderer.h"
@@ -60,8 +61,9 @@ struct Lamp {
 // 1667-25000 K), so that candela stay candela whatever the colour.
 void KelvinToRgb(float kelvin, float rgb[3]);
 
-// The renderer's light for a lamp on the car at its pose.
-iface::LightDesc LampLight(const Lamp& lamp, const physics::Pose& pose, bool shadows = true);
+// The renderer's light for a lamp on the car at its pose; `delta`, where the lamp sits on a part that has moved (a
+// bonnet hanging on its hinge), the part's move in the car's frame (render axes, row vectors: rest to now).
+iface::LightDesc LampLight(const Lamp& lamp, const physics::Pose& pose, bool shadows = true, const float* delta = nullptr);
 
 // A test layout (PHYS_DRIVE_TEST_LIGHTS) until the cars carry their own: "ramp" two main beams and a 4-pod ramp
 // (pencils inside, driving beams outside), "bars" two main beams and two LED bars, "low" the dipped beams alone.
@@ -78,10 +80,12 @@ struct CarLamp {
     LampRole role;
 };
 
-// A ramp the setup can choose: its name and its lamps.
+// A ramp the setup can choose: its name and its lamps; how far out the headlamps' main beams turn with it (each to its
+// side: with pods, to the corners the pods do not cover, as tuned on the wall; with LED bars, straight on).
 struct LampLayout {
     std::string       name;
     std::vector<Lamp> lamps;
+    float             headSpread = 0.0f;
 };
 
 struct CarLamps {
@@ -108,9 +112,19 @@ struct LampSwitches {
     bool  smallLamps = true;     // the small lamps' light given (false by day: it shows only on their glass)
 };
 
+// Where the lamps sit (CarRender::Mounts): per LampMeshGroup and side (0 left, 1 right, 2 the middle / one for both),
+// whether that lamp's part is gone - off the car: its cable torn, so it is dark - and, where the part has moved but
+// hangs on, its move (LampLight's delta).
+struct LampMounts {
+    bool  off[kLampGroups][3] = {};
+    bool  moved[kLampGroups][3] = {};
+    float delta[kLampGroups][3][16] = {};
+};
+
 // The lights of a car's lamps at its pose, by the switches: `layout` the ramp (an index into lamps.layouts), the setup's
-// aim added to its lamps - `spreadDeg` turning each further out to its side, `pitchDeg` up.
+// aim added to its lamps - `spreadDeg` turning each further out to its side, `pitchDeg` up; `mounts` where they sit
+// (null: all in place).
 void CarLights(const CarLamps& lamps, size_t layout, float spreadDeg, float pitchDeg, const LampSwitches& s,
-               const physics::Pose& pose, std::vector<iface::LightDesc>& out);
+               const physics::Pose& pose, std::vector<iface::LightDesc>& out, const LampMounts* mounts = nullptr);
 
 }  // namespace wrally::assets
