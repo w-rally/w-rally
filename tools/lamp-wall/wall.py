@@ -36,10 +36,11 @@ LAYOUTS = {
     'ramp': HEAD_RAMP + [('halogen-driving', 0.38, -1.9, 0.3, -20.0, -0.8), ('halogen-pencil', 0.12, -1.9, 0.3, -5.0, 4.0),
                          ('halogen-pencil', -0.12, -1.9, 0.3, 5.0, 4.0), ('halogen-driving', -0.38, -1.9, 0.3, 20.0, -0.8)],
     # The i20 R5's own six pods (its .ini's Point_light_bon1..6, the centre of gravity as HEAD's), aimed as the game's
-    # AimRamp aims six: the outer pair 20 degrees out, the middle pair 10 and 2 up, the inner pair 5 out and 4 up.
-    'ramp6': HEAD_RAMP + [('halogen-driving', 0.456, -2.27, 0.15, -20.0, -0.8), ('halogen-driving', 0.316, -2.27, 0.18, -10.0, 2.0),
+    # AimRamp aims six: the outer pair 20 degrees out, the middle pair 10 and 2 up, the inner pair 5 out and 4 up;
+    # all six pencils.
+    'ramp6': HEAD_RAMP + [('halogen-pencil', 0.456, -2.27, 0.15, -20.0, -0.8), ('halogen-pencil', 0.316, -2.27, 0.18, -10.0, 2.0),
                           ('halogen-pencil', 0.126, -2.27, 0.18, -5.0, 4.0), ('halogen-pencil', -0.126, -2.27, 0.18, 5.0, 4.0),
-                          ('halogen-driving', -0.316, -2.27, 0.18, 10.0, 2.0), ('halogen-driving', -0.486, -2.27, 0.15, 20.0, -0.8)],
+                          ('halogen-pencil', -0.316, -2.27, 0.18, 10.0, 2.0), ('halogen-pencil', -0.486, -2.27, 0.15, 20.0, -0.8)],
     # Two pods: driving beams 10 degrees out.
     'pods2': HEAD_RAMP + [('halogen-driving', 0.25, -1.9, 0.3, -10.0, -0.8), ('halogen-driving', -0.25, -1.9, 0.3, 10.0, -0.8)],
     # The LED bars: the main beams straight on (the bars' flood covers the corners).
