@@ -202,7 +202,8 @@ environment → prepass → sun visibility (RT or cascades) → AO → sky → s
 ### 3.1a What WRenderer does today (phase 4)
 
 - One scene at a time. Scene textures and models belong to the loaded scene, and loading another releases them.
-  UI textures (`createTextureRgba`) are the renderer's and stay.
+  UI textures (`createTextureRgba`) are the renderer's and stay; `updateTextureRgba` (interface 10) replaces one's
+  pixels, the same size - the main menu's video loop, a frame at a time.
 - Windowed only (`ErrNotSupported` for borderless and fullscreen). `renderScale` is ignored.
 - `kMaterialBlend` (glass) is drawn blended since 2026-10-30: after the opaque, far to near, premultiplied, no
   shadow and not ray traced (NGG design 5.0u). The car's glass uses it.

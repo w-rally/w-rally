@@ -37,6 +37,8 @@ public:
     iface::SceneHandle LoadScene(const void* ngg, uint64_t bytes);   // 0 on failure (Error())
     iface::TextureHandle CreateTexture(const void* dds, uint64_t bytes);
     iface::TextureHandle CreateTextureRgba(const void* rgba, uint32_t width, uint32_t height);
+    bool UpdateTextureRgba(iface::TextureHandle t, const void* rgba);   // its own size; outside RenderFrame
+    void ReleaseTexture(iface::TextureHandle t);
     iface::ModelHandle CreateModel(const iface::ModelDesc& d);
     iface::InstanceHandle CreateInstance(iface::ModelHandle model);
     bool ApplySettings(const iface::RenderSettings& s);

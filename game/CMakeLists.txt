@@ -24,9 +24,10 @@ add_executable(WRally
     src/render/renderer.cpp src/render/stage_objects.cpp
     src/sound/sound.cpp src/sound/codriver.cpp src/sound/mix_edit.cpp
     src/physics/physics.cpp
-    src/ui/imgui_layer.cpp src/ui/hud.cpp src/ui/menus.cpp)
+    src/ui/imgui_layer.cpp src/ui/hud.cpp src/ui/menus.cpp src/ui/menu_video.cpp)
 target_include_directories(WRally PRIVATE src)
-target_link_libraries(WRally PRIVATE phys-data ngg-format wrally-modules wrally-signals imgui)
+# Media Foundation: the main menu's video loop.
+target_link_libraries(WRally PRIVATE phys-data ngg-format wrally-modules wrally-signals imgui mfplat mfreadwrite mfuuid)
 # Not linked: loaded at run time from bin/modules - but built with the game.
 add_dependencies(WRally WPhysicsRBR WAudio WRenderer)
 # Where WRallyFile finds content/ and game/config/ when they are not beside the exe (a build run from its tree).

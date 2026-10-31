@@ -4,7 +4,7 @@
 // ImGui's and Controls' wait for a key; what they edit is the caller's (Settings, the debug switches).
 //
 //   MainMenu     Quick rally, Settings, Exit (Season, Marketplace: not there yet): the whole window, drawn to the WRally design -
-//                W / S or the arrows slide the selection, Enter or Space picks it
+//                W / S or the arrows slide the selection, Enter or Space picks it; the video loop in the livery
 //   QuickRally   stage, car, setup, damage, weather, road - Start / Back (the choice kept in Settings)
 //   SettingsUi   tabs: the content (folders, base physics, Extract the slot cars' physics), graphics, sound, controls -
 //                the whole window, drawn to the WRally design: Q / E the tabs, W / S the rows, A / D the values
@@ -18,6 +18,7 @@
 #include "app/settings.h"
 #include "assets/catalog.h"
 #include "sound/mix_edit.h"
+#include "ui/menu_video.h"
 
 namespace wrally::ui {
 
@@ -27,8 +28,9 @@ class ImGuiLayer;
 void DrawBackdrop(int width, int height);
 
 enum class MainChoice { None, QuickRally, Settings, Exit };
-// `note`: shown under the buttons ("" none) - what is missing for Quick rally.
-MainChoice MainMenu(const ImGuiLayer& ui, int width, int height, const std::string& note);
+// `note`: shown under the buttons ("" none) - what is missing for Quick rally. `video`: the loop in the livery's window
+// (MenuVideo; no texture: the window dark).
+MainChoice MainMenu(const ImGuiLayer& ui, int width, int height, const std::string& note, const VideoFrame& video);
 
 enum class QuickChoice { None, Start, Back };
 // `s`'s quick fields (stage, car, setup, damage, weather, road) are the choice, kept between runs.

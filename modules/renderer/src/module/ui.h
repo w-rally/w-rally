@@ -30,6 +30,8 @@ public:
     // 0 on failure.
     uint32_t AddTexture(ngg::core::Device& dev, const void* rgba, uint32_t width, uint32_t height, std::string& error);
     void ReleaseTexture(uint32_t slot);
+    // A texture's pixels replaced (its own size), uploaded now as AddTexture's.
+    bool UpdateTexture(ngg::core::Device& dev, uint32_t slot, const void* rgba, std::string& error);
 
     // Records the draw list into dev.list (open, `rtv` in RENDER_TARGET).
     void Record(ngg::core::Device& dev, D3D12_CPU_DESCRIPTOR_HANDLE rtv, uint32_t width, uint32_t height,
@@ -46,6 +48,8 @@ private:
     Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> m_heap;
     UINT m_srvStride = 0;
     std::vector<Microsoft::WRL::ComPtr<ID3D12Resource>> m_textures;   // by slot; [0] white
+    Microsoft::WRL::ComPtr<ID3D12Resource> m_update;                  // UpdateTexture's upload buffer (kept: every frame)
+    uint64_t m_updateBytes = 0;
     Microsoft::WRL::ComPtr<ID3D12Resource> m_buffer;                  // upload heap: vertices, then indices
     uint64_t m_bufferBytes = 0;
 };

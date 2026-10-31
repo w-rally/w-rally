@@ -169,17 +169,48 @@ float KeyHint(ImDrawList* d, ImFont* f, float k, ImVec2 at, const char* key, con
     return w + 8 * k + Tracked(d, f, size, ImVec2(at.x + w + 8 * k, ty), kInkSecondary, does, 0.16f);
 }
 
-// A screen's ground and its livery: the signal stripe and the white one beside it, slanted from their top left. `shift`
-// (px at 1080p) moves them right, for a screen with a wider column.
+// A livery stripe's corners (top left, top right, bottom right, bottom left): `left` and `w` px at 1080p, placed from the
+// window's right edge, slanted from its top left, 40 px past the top and the bottom.
+void Stripe(float W, float H, float k, float left, float w, float shift, ImVec2 q[4])
+{
+    const float x = W - (1920 - left - shift) * k, top = -40 * k, bottom = H + 40 * k, run = (bottom - top) * kTanStripe;
+    q[0] = ImVec2(x, top), q[1] = ImVec2(x + w * k, top), q[2] = ImVec2(x + w * k - run, bottom), q[3] = ImVec2(x - run, bottom);
+}
+
+// A screen's ground and its livery: the signal stripe and the white one beside it. `shift` (px at 1080p) moves them
+// right, for a screen with a wider column.
 void Livery(ImDrawList* d, float W, float H, float k, float shift, ImU32 ground)
 {
     d->AddRectFilled(ImVec2(0, 0), ImVec2(W, H), ground);
-    auto stripe = [&](float left, float w, ImU32 col) {
-        const float x = W - (1920 - left - shift) * k, top = -40 * k, bottom = H + 40 * k, run = (bottom - top) * kTanStripe;
-        d->AddQuadFilled(ImVec2(x, top), ImVec2(x + w * k, top), ImVec2(x + w * k - run, bottom), ImVec2(x - run, bottom), col);
-    };
-    stripe(1430, 220, kSignal);
-    stripe(1690, 28, kInk);
+    ImVec2 q[4];
+    Stripe(W, H, k, 1430, 220, shift, q);
+    d->AddQuadFilled(q[0], q[1], q[2], q[3], kSignal);
+    Stripe(W, H, k, 1690, 28, shift, q);
+    d->AddQuadFilled(q[0], q[1], q[2], q[3], kInk);
+}
+
+// The main menu's third stripe, left of the signal one: a window onto the video loop, the video covering the stripe's
+// bounds (cropped, centred) and fading in over the ground when its first frame comes. `on` 0..1: how far it has.
+// Without a video, the dark of the design's placeholder (overlay to the ground, top to bottom).
+void VideoWindow(ImDrawList* d, float W, float H, float k, float shift, const VideoFrame& video, float on)
+{
+    ImVec2 q[4];
+    Stripe(W, H, k, 990, 400, shift, q);
+    const ImU32 top = kSurfaceOverlay, bottom = kSurfaceBase;
+    const ImVec2 white = ImGui::GetFontTexUvWhitePixel();
+    d->PrimReserve(6, 4);
+    d->PrimWriteIdx(ImDrawIdx(d->_VtxCurrentIdx)), d->PrimWriteIdx(ImDrawIdx(d->_VtxCurrentIdx + 1)), d->PrimWriteIdx(ImDrawIdx(d->_VtxCurrentIdx + 2));
+    d->PrimWriteIdx(ImDrawIdx(d->_VtxCurrentIdx)), d->PrimWriteIdx(ImDrawIdx(d->_VtxCurrentIdx + 2)), d->PrimWriteIdx(ImDrawIdx(d->_VtxCurrentIdx + 3));
+    d->PrimWriteVtx(q[0], white, top), d->PrimWriteVtx(q[1], white, top);
+    d->PrimWriteVtx(q[2], white, bottom), d->PrimWriteVtx(q[3], white, bottom);
+    if (!video.texture || video.width <= 0 || video.height <= 0 || on <= 0.01f) return;
+
+    const float x0 = q[3].x, x1 = q[1].x, y0 = q[0].y, y1 = q[2].y, bw = x1 - x0, bh = y1 - y0;
+    const float s = std::max(bw / video.width, bh / video.height);
+    const float uw = bw / (video.width * s), vh = bh / (video.height * s);
+    auto uv = [&](ImVec2 p) { return ImVec2((1 - uw) * 0.5f + (p.x - x0) / bw * uw, (1 - vh) * 0.5f + (p.y - y0) / bh * vh); };
+    d->AddImageQuad(static_cast<ImTextureID>(video.texture), q[0], q[1], q[2], q[3], uv(q[0]), uv(q[1]), uv(q[2]), uv(q[3]),
+                    Alpha(kInk, on));
 }
 
 // A row's plate from `a`, `w` x `h`, its right edge cut in by `cut`.
@@ -225,10 +256,11 @@ constexpr int kMainCount = int(sizeof kMainItems / sizeof kMainItems[0]);
 int g_mainAt = 1;              // the selected item (Quick rally first)
 float g_mainPlate = -1;        // where the selection's plate is, in rows (eased to g_mainAt; -1: not drawn yet)
 float g_mainOn[kMainCount];    // how selected each item looks, 0..1 (its marker, its ink)
+float g_videoOn = 0;           // the video window's fade in, 0..1
 
 } // namespace
 
-MainChoice MainMenu(const ImGuiLayer& ui, int width, int height, const std::string& note)
+MainChoice MainMenu(const ImGuiLayer& ui, int width, int height, const std::string& note, const VideoFrame& video)
 {
     // The whole window is the screen: the design at 1080p scaled to its height, the left column from the left edge and
     // the livery's stripes from the right.
@@ -242,7 +274,12 @@ MainChoice MainMenu(const ImGuiLayer& ui, int width, int height, const std::stri
     ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0);
     if (ImGui::Begin("Main menu", nullptr, kFull)) {
         ImDrawList* d = ImGui::GetWindowDrawList();
-        Livery(d, W, H, k, 0, kSurfaceBase);
+        // The stripes 150 px right of the Settings screen's place: more room between the column and the video.
+        constexpr float kShift = 150;
+        Livery(d, W, H, k, kShift, kSurfaceBase);
+        // The video fades in over ~300 ms once there is a frame.
+        if (video.texture) g_videoOn = std::min(1.0f, g_videoOn + ImGui::GetIO().DeltaTime / 0.3f);
+        VideoWindow(d, W, H, k, kShift, video, g_videoOn);
 
         // The column: 48 px safe margin, 32 px padding.
         const float x0 = 80 * k, y0 = 80 * k;
