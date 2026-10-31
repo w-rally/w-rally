@@ -6,6 +6,7 @@
 #include <sstream>
 
 #include "app/options.h"
+#include "app/paths.h"
 
 namespace wrally::app {
 
@@ -68,32 +69,35 @@ std::string Settings::NggFolders() const
     return rbrPath.empty() ? "" : rbrPath + "\\Ngg";
 }
 
-std::filesystem::path SettingsPath() { return ExeDir() / "wrally.ini"; }
+std::filesystem::path SettingsPath() { return UserDir() / "wrally.ini"; }
 
 Settings LoadSettings()
 {
     Settings s;
     // Unset, the RBR folder is the exe's own when WRally sits in one.
     if (std::filesystem::exists(ExeDir() / "RichardBurnsRally_SSE.exe")) s.rbrPath = ExeDir().string();
-    std::ifstream f(SettingsPath());
-    std::string line;
-    while (std::getline(f, line)) {
-        if (const size_t hash = line.find('#'); hash != std::string::npos && line.find_first_not_of(" \t") == hash) continue;
-        const size_t eq = line.find('=');
-        if (eq == std::string::npos) continue;
-        const std::string key = Trim(line.substr(0, eq)), value = Trim(line.substr(eq + 1));
-        Fields(s, [&](const char* name, auto& field) {
-            if (key == name) Set(field, value);
-        });
-        for (int a = 0; a < input::kActions; ++a)
-            if (key == std::string("key_") + input::Info(static_cast<input::Action>(a)).id)
-                s.keys.scan[a] = static_cast<UINT>(std::strtoul(value.c_str(), nullptr, 0));
-        if (key.rfind("lamps_", 0) == 0) {   // lamps_<folder> = <ramp>|<spread>|<pitch>
-            Settings::Lamps& l = s.lamps[key.substr(6)];
-            const size_t a = value.find('|'), b = a == std::string::npos ? a : value.find('|', a + 1);
-            l.layout = Trim(value.substr(0, a));
-            if (a != std::string::npos) l.spread = static_cast<float>(std::atof(value.c_str() + a + 1));
-            if (b != std::string::npos) l.pitch = static_cast<float>(std::atof(value.c_str() + b + 1));
+    // The installer's install.ini first (the RBR folder chosen at install), then the user's own wrally.ini over it.
+    for (const std::filesystem::path& path : {InstallIni(), SettingsPath()}) {
+        std::ifstream f(path);
+        std::string line;
+        while (std::getline(f, line)) {
+            if (const size_t hash = line.find('#'); hash != std::string::npos && line.find_first_not_of(" \t") == hash) continue;
+            const size_t eq = line.find('=');
+            if (eq == std::string::npos) continue;
+            const std::string key = Trim(line.substr(0, eq)), value = Trim(line.substr(eq + 1));
+            Fields(s, [&](const char* name, auto& field) {
+                if (key == name) Set(field, value);
+            });
+            for (int a = 0; a < input::kActions; ++a)
+                if (key == std::string("key_") + input::Info(static_cast<input::Action>(a)).id)
+                    s.keys.scan[a] = static_cast<UINT>(std::strtoul(value.c_str(), nullptr, 0));
+            if (key.rfind("lamps_", 0) == 0) {   // lamps_<folder> = <ramp>|<spread>|<pitch>
+                Settings::Lamps& l = s.lamps[key.substr(6)];
+                const size_t a = value.find('|'), b = a == std::string::npos ? a : value.find('|', a + 1);
+                l.layout = Trim(value.substr(0, a));
+                if (a != std::string::npos) l.spread = static_cast<float>(std::atof(value.c_str() + a + 1));
+                if (b != std::string::npos) l.pitch = static_cast<float>(std::atof(value.c_str() + b + 1));
+            }
         }
     }
     return s;

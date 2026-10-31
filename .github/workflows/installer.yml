@@ -1,0 +1,40 @@
+# On every push: build W-Rally (Release, x64), run the tests that need no RBR folder, and build the MSI
+# (installer/build-msi.ps1) - the run's artifact "W-Rally-<version>", version 0.1.<run number>.
+name: Installer
+
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  msi:
+    runs-on: windows-2025
+    env:
+      VERSION: 0.1.${{ github.run_number }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: WiX 5
+        run: |
+          dotnet tool install --global wix --version 5.0.2
+          wix extension add -g WixToolset.UI.wixext/5.0.2
+
+      - name: Configure
+        run: cmake -G "Visual Studio 17 2022" -A x64 -S . -B build
+
+      - name: Build
+        run: cmake --build build --config Release --parallel
+
+      - name: Tests (those needing no RBR folder)
+        run: ctest --test-dir build -C Release --output-on-failure
+
+      - name: MSI
+        run: ./installer/build-msi.ps1 -Build build -Config Release -Version $env:VERSION
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: W-Rally-${{ env.VERSION }}
+          path: build/W-Rally-${{ env.VERSION }}.msi
+          if-no-files-found: error

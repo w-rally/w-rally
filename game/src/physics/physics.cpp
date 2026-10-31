@@ -1,5 +1,7 @@
 #include "physics/physics.h"
 
+#include "app/paths.h"
+
 #include <algorithm>
 #include <cstring>
 #include <fstream>
@@ -69,7 +71,7 @@ std::string Physics::Open(const std::filesystem::path& modulesDir, const std::st
 {
     m = std::make_unique<Impl>();
     m->host.Scan(modulesDir);
-    m->files = std::make_unique<modules::FileHost>(c.root, modulesDir.parent_path().parent_path() / "cache",
+    m->files = std::make_unique<modules::FileHost>(c.root, app::UserDir() / "cache",
                                                    [this](iface::LogLevel level, const char* text) {
                                                        if (level >= iface::LogLevel::Info) m_log += text;
                                                    });

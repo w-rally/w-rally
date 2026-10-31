@@ -15,6 +15,7 @@
 #include <string>
 #include <vector>
 
+#include "app/paths.h"
 #include "app/settings.h"
 #include "app/window.h"
 #include "assets/car_lights.h"
@@ -865,7 +866,7 @@ std::vector<std::string> QuickArgs(const Settings& s, const assets::Catalog& cat
         while (physics.back() == '\\') physics.pop_back();
     }
     std::vector<std::string> a = {"WRally", s.rbrPath, st->ngg, "--stage", st->stage, "--sgc", ec ? car->sgc : sgc, "--car", physics,
-                                  "--damage", std::to_string(std::min(s.damage, 3u)), "--out", (ExeDir() / "drive.phr").string()};
+                                  "--damage", std::to_string(std::min(s.damage, 3u)), "--out", (UserDir() / "drive.phr").string()};
     if (!s.setup.empty()) a.insert(a.end(), {"--setup", s.rbrPath + "\\" + s.setup});
     if (!s.weather.empty()) a.insert(a.end(), {"--weather", s.weather});
     static const char* const kRoad[3] = {"dry", "damp", "wet"};
