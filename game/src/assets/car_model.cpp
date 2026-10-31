@@ -64,12 +64,26 @@ struct Cur {
 
 bool Starts(const std::string& s, const char* prefix) { return s.compare(0, std::strlen(prefix), prefix) == 0; }
 
+// A mesh's lamp group (LampMeshGroup), by its name with any _lit taken off; -1 not a lamp's.
+int LampGroupOf(std::string t)
+{
+    if (t.size() > 4 && t.compare(t.size() - 4, 4, "_lit") == 0) t.resize(t.size() - 4);
+    if (t == "e_light_lf" || t == "e_light_rf") return kLampHead;
+    if (t == "e_light_lb" || t == "e_light_rb") return kLampTail;
+    if (Starts(t, "e_light_brake_") || t == "e_light_lit_c") return kLampBrake;   // lit_c: the high centre brake lamp
+    if (Starts(t, "e_light_reverse_")) return kLampReverse;
+    if (t == "e_extralight" || t == "e_ramp_light") return kLampRamp;            // the pods (the i20's, the 207's)
+    if (t == "e_bonnet_ramp" || t == "e_ramp" || t == "e_extralight_glass" || t == "e_ramp_light_glass") return kLampRampHousing;
+    return -1;
+}
+
 // Which exterior meshes are drawn.
 bool Drawn(const std::string& n, const std::string& surface)
 {
     if (!Starts(n, "e_")) return false;
     const std::string t = n.substr(0, n.find_last_not_of(' ') + 1);   // a name may end in a space ("e_light_brake_rb_lit ")
-    if (t.size() > 4 && t.compare(t.size() - 4, 4, "_lit") == 0) return false;   // the lamps lit
+    // A lit twin: a lamp's (switched with it), else not drawn (a hot brake disc, ...).
+    if (t.size() > 4 && t.compare(t.size() - 4, 4, "_lit") == 0) return LampGroupOf(t) >= 0;
     for (const char* s : {"tarmac", "gravel", "snow"})
         if (n.find(std::string("_") + s) != std::string::npos && surface != s) return false;   // another surface's wheels
     return true;
@@ -265,6 +279,11 @@ CarModel ReadCarModel(const std::string& sgcPath, const std::string& surface)
         for (uint32_t g = 0; g < ng; ++g) {
             CarPart part;
             part.name = name;
+            {
+                const std::string t = name.substr(0, name.find_last_not_of(' ') + 1);
+                part.lampGroup = LampGroupOf(t);
+                part.lit = part.lampGroup >= 0 && t.size() > 4 && t.compare(t.size() - 4, 4, "_lit") == 0;
+            }
             part.parents = parents;
             part.wheel = wheel;
             part.spins = wheel >= 0 && (Starts(name, "e_wheel_") || Starts(name, "e_brakedisc_"));

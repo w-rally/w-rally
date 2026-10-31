@@ -28,8 +28,15 @@ struct CarVertex {
     float pos[3], normal[3], uv[2];
 };
 
+// The lamps' meshes (NGG design 5.4 N3b), by what switches them: RBR's lamp meshes come in pairs - e_light_lf and its
+// lit twin e_light_lf_lit, one shown at a time (the .ini's SwitchBox = light) -, the ramp's housing (e_bonnet_ramp,
+// e_ramp, their glass) shows with the car's own ramp.
+enum LampMeshGroup : int { kLampHead, kLampTail, kLampBrake, kLampReverse, kLampRamp, kLampRampHousing, kLampGroups };
+
 struct CarPart {
     std::string name;
+    int lampGroup = -1;    // a LampMeshGroup, -1 not a lamp's
+    bool lit = false;      // a lamp's lit twin (<name>_lit)
     int wheel = -1;        // 0 lf, 1 rf, 2 lb, 3 rb: in that hub's frame; -1 in the car's
     bool spins = false;    // turns with the wheel (the tyre, the brake disc)
     std::string material;          // the group's material name (the .sgc's)
@@ -51,7 +58,8 @@ struct CarModel {
 };
 
 // The exterior as seen from outside: the "e_" meshes, the wheels and spare wheel of `surface` only (tarmac, gravel,
-// snow), without the lamps' lit variants. Throws std::runtime_error on a bad file.
+// snow), the lamps' lit twins too (CarPart::lit; other _lit meshes - hot brake discs - left out). Throws
+// std::runtime_error on a bad file.
 CarModel ReadCarModel(const std::string& sgcPath, const std::string& surface);
 
 } // namespace wrally::assets

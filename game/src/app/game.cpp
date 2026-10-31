@@ -539,7 +539,18 @@ StageEnd RunStage(Shell& sh, const Options& o, bool fromMenu, std::string& error
         Between(snap.before, snap.after, t, p, wheels, parts);
         const iface::InstanceUpdate& carUpdate = car.Place(p, wheels, snap.centerOfGravity, parts);
         instances.clear();
-        if (car.Ready()) instances.push_back(carUpdate);
+        if (car.Ready()) {
+            instances.push_back(carUpdate);
+            // The lamps' glass, lit or not, by the switches (last frame's: the brake pedal and the gear are read below).
+            const bool on = carLampsLoaded && !testLights_;
+            bool lit[assets::kLampGroups] = {};
+            lit[assets::kLampHead] = lit[assets::kLampTail] = on && lampSwitch.beam > 0;
+            lit[assets::kLampBrake] = on && lampSwitch.brake;
+            lit[assets::kLampReverse] = on && lampSwitch.reverse;
+            lit[assets::kLampRamp] = on && lampSwitch.beam == 2 && lampSwitch.ramp;
+            const bool housing = carLampsLoaded && !testLights_ && carLamps.layouts[lampLayout].name == "ramp";
+            car.PlaceLamps(lit, housing, instances);
+        }
         for (const iface::InstanceUpdate& u : fences.Step(in.seconds, p, snap.centerOfGravity)) instances.push_back(u);
         const V3 chaseEye = snap.before.chase.eye + (snap.after.chase.eye - snap.before.chase.eye) * t;
         const camera::View view = camera::Look(cameraMode, p, chaseEye, orbit, tv.get());
