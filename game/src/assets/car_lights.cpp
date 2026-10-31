@@ -28,11 +28,12 @@ const LampBeam kBeams[] = {
     // And a wide, dim spill around each hot spot (~7% of its peak): every patch of road lit by several lamps, so a
     // thing casts several lighter shadows, not one lamp's dark one.
     // Halogen pods (warm as the headlamps; the white LED look is the LED bars').
+    // Their spots half as big again as first tuned (the wall, 2026-10-31); the spill as it was.
     {"halogen-pencil", 3300.0f, 0.08f, 3,
-     {{350000.0f, 2.5f, 1.8f, 0.0f, 0.0f, 3.0f}, {15000.0f, 6.0f, 3.5f, 0.0f, 0.0f, 2.0f},
+     {{350000.0f, 3.75f, 2.7f, 0.0f, 0.0f, 3.0f}, {15000.0f, 9.0f, 5.25f, 0.0f, 0.0f, 2.0f},
       {25000.0f, 25.0f, 10.0f, 0.0f, -1.0f, 2.0f}}},
     {"halogen-driving", 3300.0f, 0.08f, 3,
-     {{150000.0f, 5.0f, 3.0f, 0.0f, 0.0f, 3.0f}, {15000.0f, 12.0f, 5.0f, 0.0f, -1.0f, 2.0f},
+     {{150000.0f, 7.5f, 4.5f, 0.0f, 0.0f, 3.0f}, {15000.0f, 18.0f, 7.5f, 0.0f, -1.0f, 2.0f},
       {12000.0f, 30.0f, 12.0f, 0.0f, -1.0f, 2.0f}}},
     // A combo LED bar: a spot in the middle, a wide flood round it, smooth - no cut-off (the halogens' and the pods'
     // tuning not its).

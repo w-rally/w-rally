@@ -3221,7 +3221,7 @@ Four decisions, the user's:
       none; the AIMS are WRally's, as tuned on the wall (RBR's lamp normals are no aims). The ramps a car offers:
       "ramp" (its own pods, with its ramp's meshes - the i20's six), "2 pods", "4 pods", "6 pods" (a count its own
       leaves out), "LED bars", "no ramp"; its own ramp the default, else four pods. The pods are halogen (3300 K -
-      `halogen-pencil`, `halogen-driving`, the wall-tuned shapes of N3a's LED presets); the white LED look is the bars'.
+      `halogen-pencil`, `halogen-driving`, the wall-tuned shapes of N3a's LED presets, their spots then made half as big again); the white LED look is the bars'.
       Aims: two pods (driving beams) 5 out and 3 up; the outer pair 20 out, the inner 5 out and 4 up, a middle pair (six)
       13 out and 2 up; with four or more every pod a pencil. The small lamps: tail, brake (with the high centre one), reverse (white), four
       indicators (amber, 1.5 Hz; no RBR car has them) - coloured presets, no shadows.
