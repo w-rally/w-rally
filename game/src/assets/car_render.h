@@ -20,6 +20,7 @@
 #include <string>
 #include <vector>
 
+#include "assets/car_model.h"
 #include "data/rec.h"
 #include "physics/physics.h"
 #include "wrally/iface/renderer.h"
@@ -50,12 +51,19 @@ public:
     const iface::InstanceUpdate& Place(const physics::Pose& pose, const physics::Wheel wheels[4], const float cog[3],
                                        const std::vector<physics::Part>& parts);
 
+    // THE LAMPS' MESHES (NGG design 5.4 N3b), placed as the body is at the last Place: per LampMeshGroup the unlit
+    // meshes or their lit twins (glowing: their own texture as the emission), as `lit` says; the ramp's housing when
+    // `housing` (the car's own ramp chosen). Appended to `out`.
+    void PlaceLamps(const bool lit[kLampGroups], bool housing, std::vector<iface::InstanceUpdate>& out) const;
+
 private:
     static constexpr uint32_t kBody = 0, kHub = 1, kSpin = 5, kParts = 9;
     iface::InstanceHandle m_instance = 0;
     uint32_t m_partNodes = 0;    // the parts' nodes (9 ..)
     std::vector<float> m_nodes;  // 16 a node
     iface::InstanceUpdate m_update{};
+    // The lamps' instances, [group][0 unlit, 1 lit] (0: the car has none), each a model of one node - the body's.
+    iface::InstanceHandle m_lamps[kLampGroups][2] = {};
 };
 
 } // namespace wrally::assets

@@ -191,6 +191,13 @@ void CarRender::Create(render::Renderer& renderer, const std::string& sgc, const
     std::vector<std::vector<uint32_t>> indices;
     std::vector<iface::ModelMesh> meshes;
     std::vector<uint32_t> perPart(m_partNodes, 0);
+    // The lamps' meshes, apart: [group][lit] their vertices, indices and material (built into models of their own).
+    struct LampMesh {
+        std::vector<iface::Vertex> v;
+        std::vector<uint32_t> idx;
+        uint32_t material;
+    };
+    std::vector<LampMesh> lampMeshes[kLampGroups][2];
     auto add = [&](std::vector<iface::Vertex> v, std::vector<uint32_t> idx, uint32_t material, uint32_t node) {
         vertices.push_back(std::move(v));
         indices.push_back(std::move(idx));
@@ -237,7 +244,12 @@ void CarRender::Create(render::Renderer& renderer, const std::string& sgc, const
             if (listParts) {
                 std::string above;
                 for (const std::string& p : part.parents) above += " < " + p;
-                std::printf("mesh %s -> node %s%s\n", part.name.c_str(), nodes[node].name, above.c_str());
+                std::printf("mesh %s -> node %s%s%s\n", part.name.c_str(), part.lampGroup >= 0 ? "lamp " : "",
+                            part.lampGroup >= 0 ? std::to_string(part.lampGroup).c_str() : nodes[node].name, above.c_str());
+            }
+            if (part.lampGroup >= 0) {   // a lamp's: its own instance, on the body (assets::CarRender::PlaceLamps)
+                lampMeshes[part.lampGroup][part.lit ? 1 : 0].push_back({std::move(v), part.indices, static_cast<uint32_t>(mi + 1)});
+                continue;
             }
             add(std::move(v), part.indices, static_cast<uint32_t>(mi + 1), node);
         }
@@ -269,6 +281,75 @@ void CarRender::Create(render::Renderer& renderer, const std::string& sgc, const
     const iface::ModelHandle model = meshes.empty() ? 0 : renderer.CreateModel(d);
     m_instance = model ? renderer.CreateInstance(model) : 0;
     if (!m_instance) std::fprintf(stderr, "the car: %s\n", renderer.Error().c_str());
+
+    // The lamps' models: one node (the body's, placed by PlaceLamps), the car's materials - a lit twin's glowing in its
+    // lamp's colour, strong as the lamp's lens is bright in the renderer's units (~1600 nits a unit): a
+    // headlamp's or a pod's ~100,000 nits, a brake lamp's ~10,000, a reversing lamp's a few thousand, a tail lamp's ~200.
+    static const float kGlow[kLampGroups] = {60.0f, 0.15f, 6.0f, 2.0f, 60.0f, 0.0f};
+    // Their colour: a lamp's own, flat over its lit twin. Not the twin's texture: RBR draws those with its CarLight
+    // shader on the tyre's texture sheet (`external dynamic::tire`), which glows in a colour of its own - as an
+    // emission that sheet was pink. A 4x4 DXT1 of one colour each (565): halogen warm white, LED white, red.
+    auto solid = [&](uint16_t c565) {
+        std::vector<uint8_t> d(128, 0);
+        std::memcpy(d.data(), "DDS ", 4);
+        auto w32 = [&](size_t off, uint32_t v) { std::memcpy(d.data() + off, &v, 4); };
+        w32(4, 124), w32(8, 0x1 | 0x2 | 0x4 | 0x1000 | 0x80000), w32(12, 4), w32(16, 4), w32(20, 8), w32(28, 1);
+        w32(76, 32), w32(80, 0x4), w32(84, 0x31545844u), w32(108, 0x1000);   // pixel format FOURCC 'DXT1'
+        const uint8_t block[8] = {static_cast<uint8_t>(c565), static_cast<uint8_t>(c565 >> 8),
+                                  static_cast<uint8_t>(c565), static_cast<uint8_t>(c565 >> 8), 0, 0, 0, 0};
+        d.insert(d.end(), block, block + 8);
+        return renderer.CreateTexture(d.data(), d.size());
+    };
+    const iface::TextureHandle warm = solid(0xFF16), white = solid(0xFFFF), red = solid(0xF800);
+    const iface::TextureHandle kColour[kLampGroups] = {warm, red, red, white, white, 0};
+    size_t lampCount = 0;
+    for (int g = 0; g < kLampGroups; ++g)
+        for (int lit = 0; lit < 2; ++lit) {
+            std::vector<LampMesh>& lm = lampMeshes[g][lit];
+            if (lm.empty()) continue;
+            iface::ModelNode node{};
+            node.parent = -1;
+            node.local[0] = node.local[5] = node.local[10] = node.local[15] = 1;
+            std::snprintf(node.name, sizeof node.name, "lamp_%d_%d", g, lit);
+            std::vector<iface::MaterialDesc> mats = materials;
+            if (lit)
+                for (iface::MaterialDesc& m : mats) {
+                    m.emissive = kColour[g];
+                    m.emissiveStrength = kGlow[g];
+                }
+            std::vector<iface::ModelMesh> ms;
+            for (LampMesh& x : lm) {
+                iface::ModelMesh mm{};
+                mm.vertices = x.v.data(), mm.vertexCount = static_cast<uint32_t>(x.v.size());
+                mm.indices = x.idx.data(), mm.indexCount = static_cast<uint32_t>(x.idx.size());
+                mm.material = x.material;
+                mm.node = 0;
+                ms.push_back(mm);
+            }
+            iface::ModelDesc ld{};
+            ld.nodes = &node, ld.nodeCount = 1;
+            ld.meshes = ms.data(), ld.meshCount = static_cast<uint32_t>(ms.size());
+            ld.materials = mats.data(), ld.materialCount = static_cast<uint32_t>(mats.size());
+            const iface::ModelHandle lmodel = renderer.CreateModel(ld);
+            m_lamps[g][lit] = lmodel ? renderer.CreateInstance(lmodel) : 0;
+            lampCount += lm.size();
+        }
+    if (lampCount) std::printf("the car's lamps: %zu meshes\n", lampCount);
+}
+
+void CarRender::PlaceLamps(const bool lit[kLampGroups], bool housing, std::vector<iface::InstanceUpdate>& out) const
+{
+    for (int g = 0; g < kLampGroups; ++g)
+        for (int l = 0; l < 2; ++l) {
+            if (!m_lamps[g][l]) continue;
+            iface::InstanceUpdate u{};
+            u.instance = m_lamps[g][l];
+            u.visible = g == kLampRampHousing ? housing : (lit[g] == (l == 1)) && (g != kLampRamp || housing);
+            std::memcpy(u.world, m_update.world, sizeof u.world);
+            u.nodes = m_nodes.data() + 16 * kBody;   // the body's node
+            u.nodeCount = 1;
+            out.push_back(u);
+        }
 }
 
 const iface::InstanceUpdate& CarRender::Place(const physics::Pose& pose, const physics::Wheel wheels[4], const float cog[3],
