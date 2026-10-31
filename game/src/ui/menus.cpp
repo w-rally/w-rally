@@ -177,16 +177,28 @@ void Stripe(float W, float H, float k, float left, float w, float shift, ImVec2 
     q[0] = ImVec2(x, top), q[1] = ImVec2(x + w * k, top), q[2] = ImVec2(x + w * k - run, bottom), q[3] = ImVec2(x - run, bottom);
 }
 
-// A screen's ground and its livery: the signal stripe and the white one beside it. `shift` (px at 1080p) moves them
-// right, for a screen with a wider column.
+// A stripe `q` (Stripe's corners) filled `top` at its top to `bottom` at its bottom.
+void FadeQuad(ImDrawList* d, const ImVec2 q[4], ImU32 top, ImU32 bottom)
+{
+    const ImVec2 white = ImGui::GetFontTexUvWhitePixel();
+    const ImDrawIdx i = ImDrawIdx(d->_VtxCurrentIdx);
+    d->PrimReserve(6, 4);
+    d->PrimWriteIdx(i), d->PrimWriteIdx(ImDrawIdx(i + 1)), d->PrimWriteIdx(ImDrawIdx(i + 2));
+    d->PrimWriteIdx(i), d->PrimWriteIdx(ImDrawIdx(i + 2)), d->PrimWriteIdx(ImDrawIdx(i + 3));
+    d->PrimWriteVtx(q[0], white, top), d->PrimWriteVtx(q[1], white, top);
+    d->PrimWriteVtx(q[2], white, bottom), d->PrimWriteVtx(q[3], white, bottom);
+}
+
+// A screen's ground and its livery: the signal stripe and the white one beside it, each fading into the ground toward
+// the bottom as the video's window does. `shift` (px at 1080p) moves them right, for a screen with a wider column.
 void Livery(ImDrawList* d, float W, float H, float k, float shift, ImU32 ground)
 {
     d->AddRectFilled(ImVec2(0, 0), ImVec2(W, H), ground);
     ImVec2 q[4];
     Stripe(W, H, k, 1430, 220, shift, q);
-    d->AddQuadFilled(q[0], q[1], q[2], q[3], kSignal);
+    FadeQuad(d, q, kSignal, ground);
     Stripe(W, H, k, 1690, 28, shift, q);
-    d->AddQuadFilled(q[0], q[1], q[2], q[3], kInk);
+    FadeQuad(d, q, kInk, ground);
 }
 
 // The main menu's third stripe, left of the signal one: a window onto the video loop, the video covering the stripe's
@@ -196,13 +208,7 @@ void VideoWindow(ImDrawList* d, float W, float H, float k, float shift, const Vi
 {
     ImVec2 q[4];
     Stripe(W, H, k, 990, 400, shift, q);
-    const ImU32 top = kSurfaceOverlay, bottom = kSurfaceBase;
-    const ImVec2 white = ImGui::GetFontTexUvWhitePixel();
-    d->PrimReserve(6, 4);
-    d->PrimWriteIdx(ImDrawIdx(d->_VtxCurrentIdx)), d->PrimWriteIdx(ImDrawIdx(d->_VtxCurrentIdx + 1)), d->PrimWriteIdx(ImDrawIdx(d->_VtxCurrentIdx + 2));
-    d->PrimWriteIdx(ImDrawIdx(d->_VtxCurrentIdx)), d->PrimWriteIdx(ImDrawIdx(d->_VtxCurrentIdx + 2)), d->PrimWriteIdx(ImDrawIdx(d->_VtxCurrentIdx + 3));
-    d->PrimWriteVtx(q[0], white, top), d->PrimWriteVtx(q[1], white, top);
-    d->PrimWriteVtx(q[2], white, bottom), d->PrimWriteVtx(q[3], white, bottom);
+    FadeQuad(d, q, kSurfaceOverlay, kSurfaceBase);
     if (!video.texture || video.width <= 0 || video.height <= 0 || on <= 0.01f) return;
 
     const float x0 = q[3].x, x1 = q[1].x, y0 = q[0].y, y1 = q[2].y, bw = x1 - x0, bh = y1 - y0;
