@@ -86,14 +86,24 @@ void MenuVideo::Run(std::filesystem::path path)
         hr = reader->SetCurrentMediaType(DWORD(MF_SOURCE_READER_FIRST_VIDEO_STREAM), nullptr, want.Get());
         if (FAILED(hr)) return fail("no video stream it can turn into RGB", hr);
 
+        // The picture's size, as the file says; the decoder's frames may be padded past it (1080 coded as 1088), which
+        // it says once they come - their row pitch then.
         UINT32 w = 0, h = 0;
-        auto size = [&] {
+        LONG stride = 0;
+        {
             ComPtr<IMFMediaType> type;
             if (SUCCEEDED(reader->GetCurrentMediaType(DWORD(MF_SOURCE_READER_FIRST_VIDEO_STREAM), &type)))
                 MFGetAttributeSize(type.Get(), MF_MT_FRAME_SIZE, &w, &h);
-        };
-        size();
+        }
         if (!w || !h) return fail("no frame size", E_FAIL);
+        stride = LONG(w * 4);
+        auto padded = [&] {
+            ComPtr<IMFMediaType> type;
+            UINT32 s = 0;
+            if (SUCCEEDED(reader->GetCurrentMediaType(DWORD(MF_SOURCE_READER_FIRST_VIDEO_STREAM), &type)) &&
+                SUCCEEDED(type->GetUINT32(MF_MT_DEFAULT_STRIDE, &s)) && LONG(s) >= LONG(w * 4))
+                stride = LONG(s);
+        };
         std::vector<uint8_t> rgba(size_t(w) * h * 4);
 
         LONGLONG first = -1;          // the first frame's time since the clock started (100 ns); -1: start it again
@@ -112,7 +122,7 @@ void MenuVideo::Run(std::filesystem::path path)
             ComPtr<IMFSample> sample;
             hr = reader->ReadSample(DWORD(MF_SOURCE_READER_FIRST_VIDEO_STREAM), 0, nullptr, &flags, &at, &sample);
             if (FAILED(hr)) return fail("would not decode", hr);
-            if (flags & MF_SOURCE_READERF_CURRENTMEDIATYPECHANGED) size(), rgba.resize(size_t(w) * h * 4);
+            if (flags & MF_SOURCE_READERF_CURRENTMEDIATYPECHANGED) padded();
             if (flags & MF_SOURCE_READERF_ENDOFSTREAM) {   // the loop
                 PROPVARIANT zero;
                 PropVariantInit(&zero);
@@ -141,8 +151,8 @@ void MenuVideo::Run(std::filesystem::path path)
             const bool is2d = SUCCEEDED(buffer.As(&buffer2d)) && SUCCEEDED(buffer2d->Lock2D(&scan0, &pitch));
             if (!is2d) {
                 if (FAILED(buffer->Lock(&scan0, nullptr, &length))) continue;
-                pitch = LONG(w * 4);
-                if (length < DWORD(pitch) * h) {
+                pitch = stride;
+                if (length < DWORD(pitch) * (h - 1) + w * 4) {
                     buffer->Unlock();
                     continue;
                 }
