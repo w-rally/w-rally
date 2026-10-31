@@ -219,6 +219,8 @@ std::vector<Lamp> AimRamp(std::vector<math::V3> places)
         } else {   // between: 10 degrees out, 2 up (their own spot above the outer ones', as tuned on the wall)
             l.kind = LampKind::HalogenDriving, l.yawDeg = 10.0f * side, l.pitchDeg = 2.0f;
         }
+        // Six or more: every pod a pencil - each its own narrow spot (the wall); four keep the outer driving beams.
+        if (pairs >= 3) l.kind = LampKind::HalogenPencil;
         lamps.push_back(l);
     }
     return lamps;
