@@ -1,5 +1,5 @@
 // ---------------------------------------------------------------------------
-// wrally/iface/common.h - what every WRally module DLL and the game share.
+// wrally/iface/common.h - what every W-Rally module DLL and the game share.
 //
 // THE CONTRACT ACROSS A DLL BOUNDARY IS PLAIN DATA. The game and its modules
 // may be built by different compilers, CRTs and build configurations, so

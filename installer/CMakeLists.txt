@@ -1,7 +1,7 @@
 # The installer (installer/W-Rally.wxs, built by installer/build-msi.ps1): what it ships - `cmake --install` lays the
 # game out as installed (the exe, the modules, the game's config, the content) - and its custom actions' DLL.
 
-install(TARGETS WRally RUNTIME DESTINATION .)
+install(TARGETS W-Rally RUNTIME DESTINATION .)
 install(TARGETS WPhysicsRBR RUNTIME DESTINATION modules/physics)
 install(TARGETS WAudio RUNTIME DESTINATION modules/audio)
 install(TARGETS WRenderer RUNTIME DESTINATION modules/renderer)

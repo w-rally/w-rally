@@ -97,7 +97,7 @@ struct CarLamps {
 
 // A car's lamps from RBR's car .ini beside its .sgc (Point_light_lf/rf/lb/rb/brake_*/reverse_*/bon<n>: their places,
 // in the model's frame, made the car's: y and z swapped, less the centre of gravity `cog`); what it lacks from the
-// headlamps' places, or a hatchback's. The aims are WRally's, as tuned on the wall (tools/lamp-wall/wall.py): RBR's
+// headlamps' places, or a hatchback's. The aims are W-Rally's, as tuned on the wall (tools/lamp-wall/wall.py): RBR's
 // lamp normals are no aims (the 207's pods point sideways).
 CarLamps LoadCarLamps(const std::string& sgcPath, const float cog[3]);
 

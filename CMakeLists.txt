@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.20)
 
 # --------------------------------------------------------------------------
-# WRally (docs/design.md). x64 only, self-contained: everything it builds is in
+# W-Rally (docs/design.md). x64 only, self-contained: everything it builds is in
 # this repository (code imported from plugin-rbr is listed in docs/imported.md).
 #
 #   cmake -G "Visual Studio 17 2022" -A x64 -S . -B build
@@ -16,7 +16,7 @@ cmake_minimum_required(VERSION 3.20)
 project(wrally VERSION 0.1.0 LANGUAGES CXX)
 
 if(NOT CMAKE_SIZEOF_VOID_P EQUAL 8)
-    message(FATAL_ERROR "WRally is x64 only: configure with -A x64")
+    message(FATAL_ERROR "W-Rally is x64 only: configure with -A x64")
 endif()
 
 set(CMAKE_CXX_STANDARD 20)

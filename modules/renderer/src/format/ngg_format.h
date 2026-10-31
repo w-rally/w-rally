@@ -8,7 +8,7 @@
 // without invalidating anything already written - an unknown chunk is skipped,
 // not an error.
 //
-// WRally's writer of this layout is ngg_scene.h beside this file (the legacy
+// W-Rally's writer of this layout is ngg_scene.h beside this file (the legacy
 // importer writes through it); Wallaby's NggWriter.cs is another producer.
 // tools/ngg-check keeps them in step: the writer against a reader and the
 // renderer's own loader, and Wallaby's files read and rewritten the same.
@@ -66,7 +66,7 @@ struct ChunkHeader
 // the game's per-stage world space, so offsetting it would be exactly wrong -
 // this is the switch that keeps the debug behaviour out of the real path.
 const uint32_t kSceneFlagAnchorToCamera = 1u << 0;
-// Set by WRally's automatic .lbs importer (game/src/assets/legacy_stage.h): converted with no human input and no
+// Set by W-Rally's automatic .lbs importer (game/src/assets/legacy_stage.h): converted with no human input and no
 // tags, the vertex colour RBR's bake. The renderer then lights alpha-tested geometry by its legacy profile
 // (Scene::SetLegacyProfile). Wallaby's files never carry it.
 const uint32_t kSceneFlagLegacyImport = 1u << 1;
@@ -396,7 +396,7 @@ static_assert(sizeof(WeatherChunkHeader) == 16, "WeatherChunkHeader layout");
 static_assert(sizeof(WeatherRecord) == 160,     "WeatherRecord v1 layout - keep NggWriter.cs in step");
 
 // A clear morning with no name: what a producer starts a record from. The same values as core::SkyParams' defaults
-// (core/sky.h) - a producer outside the renderer (WRally's importer) cannot include that, so the format says them;
+// (core/sky.h) - a producer outside the renderer (W-Rally's importer) cannot include that, so the format says them;
 // core/weather.cpp checks at compile time that they agree.
 constexpr WeatherRecord DefaultWeatherRecord()
 {

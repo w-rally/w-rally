@@ -372,7 +372,7 @@ struct RendererApi {
     Status (WRALLY_CALL* captureFrame)(Renderer*, const char* path);    // the next rendered frame, .bmp
     Status (WRALLY_CALL* setDebugView)(Renderer*, int32_t mode);         // 0 off
     const char* (WRALLY_CALL* debugViewName)(int32_t mode);              // null past the last
-    // How a scene WRally's .lbs importer made (its kSceneFlagLegacyImport) lights its alpha-tested cards: 0 as
+    // How a scene W-Rally's .lbs importer made (its kSceneFlagLegacyImport) lights its alpha-tested cards: 0 as
     // any scene, 1 A (RBR's bake times the dynamic light), 2 B (dynamic light, the bake as occlusion). Other
     // scenes ignore it. Takes effect at the next frame.
     Status (WRALLY_CALL* setLegacyProfile)(Renderer*, int32_t mode);

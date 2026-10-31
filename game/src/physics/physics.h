@@ -31,7 +31,7 @@ struct Config {
     std::string surface = "tarmac";                        // tarmac, gravel or snow
     std::string tyres = "michelin";                        // the tyre brand
     std::string setup;                                     // a setup member in physics.rbz ("" the surface's default)
-    std::string overrides;                                 // WRally's car data: a FILE, read here ("" none)
+    std::string overrides;                                 // W-Rally's car data: a FILE, read here ("" none)
     uint32_t tyreIndex = 0;                                // TyreTypeNN
     uint32_t settings = 0x217;                             // the game's options word (data/rec.h)
     uint32_t aids[4] = {};                                 // AutoGears, GearGuard, NeutralLock, ClutchHelp

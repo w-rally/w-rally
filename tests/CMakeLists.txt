@@ -32,7 +32,7 @@ set(WRALLY_TEST_RBR_DIR "<RBR>" CACHE PATH "RBR folder for the golden replay tes
 set(WRALLY_TEST_NGG "<phys-data>/m5/track-41.ngg" CACHE FILEPATH "stage 41's .ngg (drawn only)")
 set(WRALLY_TEST_GOLDEN "<phys-data>/m2/run-41-20261011-150633.phr" CACHE FILEPATH "RBR's recording of stage 41")
 if(EXISTS ${WRALLY_TEST_RBR_DIR}/Maps/track-41_M.trk AND EXISTS ${WRALLY_TEST_NGG} AND EXISTS ${WRALLY_TEST_GOLDEN})
-    add_test(NAME golden-replay-41 COMMAND WRally ${WRALLY_TEST_RBR_DIR} ${WRALLY_TEST_NGG} --stage track-41_M --step 0.1
+    add_test(NAME golden-replay-41 COMMAND W-Rally ${WRALLY_TEST_RBR_DIR} ${WRALLY_TEST_NGG} --stage track-41_M --step 0.1
              --no-sound --overrides none --replay ${WRALLY_TEST_GOLDEN} --out ${CMAKE_BINARY_DIR}/tests-bin/golden-41.phr)
     set_tests_properties(golden-replay-41 PROPERTIES PASS_REGULAR_EXPRESSION "replay check: [0-9]+ poses, all bit-exact"
                          TIMEOUT 600)
@@ -100,7 +100,7 @@ endif()
 
 # The .ngg writer and its readers in step (tools/ngg-check, docs/design.md decision 2): a made-up scene written, read
 # back the same and loaded by the renderer; Wallaby's stage 41 .ngg (another producer) read, rewritten the same and
-# both loaded; WRally's legacy importer on RBR's stage 41 .lbs, loaded by the renderer. They open a hidden window.
+# both loaded; W-Rally's legacy importer on RBR's stage 41 .lbs, loaded by the renderer. They open a hidden window.
 add_test(NAME ngg-roundtrip COMMAND ngg-check)
 set_tests_properties(ngg-roundtrip PROPERTIES PASS_REGULAR_EXPRESSION "ngg-check: all good")
 if(EXISTS ${WRALLY_TEST_NGG})

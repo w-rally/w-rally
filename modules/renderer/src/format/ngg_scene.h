@@ -1,7 +1,7 @@
 #pragma once
 // An .ngg in memory - ngg_format.h's chunks as vectors - with its writer and a strict reader. This is the format's
 // library beside the renderer's own loader (core/scene.cpp), so a format change touches the reader and the writer in
-// one place (docs/design.md decision 2). The writer is what WRally's legacy importer (.lbs -> .ngg) produces through;
+// one place (docs/design.md decision 2). The writer is what W-Rally's legacy importer (.lbs -> .ngg) produces through;
 // the reader is for tools and tests (the renderer keeps its own loader, which the round-trip test runs too).
 //
 // Write always writes kFormatCurrent (v3 materials). Read accepts v3 and the v2 transition, upgrading v2 materials as

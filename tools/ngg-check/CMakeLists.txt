@@ -1,4 +1,4 @@
-# ngg-check: the .ngg writer (ngg-format) against its reader and the renderer's own loader, and WRally's legacy
+# ngg-check: the .ngg writer (ngg-format) against its reader and the renderer's own loader, and W-Rally's legacy
 # importer end to end (main.cpp says how). Builds the game's importer and renderer wrapper in.
 set(GAME_SRC ${PROJECT_SOURCE_DIR}/game/src)
 add_executable(ngg-check main.cpp ${GAME_SRC}/assets/legacy_stage.cpp ${GAME_SRC}/assets/legacy_weather.cpp

@@ -1,4 +1,4 @@
-# WRally — architecture design
+# W-Rally — architecture design
 
 Status: draft 3, 2026-10-25. Interfaces: [`include/wrally/iface/`](../include/wrally/iface/).
 Decisions taken so far are in §9.
@@ -7,8 +7,8 @@ Decisions taken so far are in §9.
 
 A standalone rally game that:
 
-- **runs on its own content**, with no RBR install needed: WRally stages, cars and sounds in WRally's own formats;
-- **also runs everything RBR has**, when WRally is placed in an RBR folder (or pointed at one). It then reads RBR's
+- **runs on its own content**, with no RBR install needed: W-Rally stages, cars and sounds in W-Rally's own formats;
+- **also runs everything RBR has**, when W-Rally is placed in an RBR folder (or pointed at one). It then reads RBR's
   stages, cars, physics data, sounds and replays directly, alongside its own content;
 - is **modular**: the game executable plus swappable DLLs for the renderer, the physics and the audio. Several
   physics modules can sit side by side (original RBR, WPhysics, others later), and the player or an event picks one.
@@ -21,12 +21,12 @@ C++20, x64 only, Windows first. The top namespace is `wrally`.
 game loop: it loads a stage and a car from RBR's files, drives the car from the keyboard with the native physics,
 draws through the NGG renderer DLL (`ngg-api.dll`), plays the engine sound (`audio/`) from the physics' records,
 runs RBR's stage clock (countdown, false start, splits, finish), switches cameras (including the stage's TV
-cameras), records `.phr` runs and replays them. WRally keeps that working at every step while it is split into the
+cameras), records `.phr` runs and replays them. W-Rally keeps that working at every step while it is split into the
 exe and modules (§8).
 
 | existing (plugin-rbr) | becomes |
 |---|---|
-| **`phys/drive/drive.cpp`** — the phys-drive main loop | **WRally.exe**: `wrally::app` / `session`, split by §5.5 |
+| **`phys/drive/drive.cpp`** — the phys-drive main loop | **W-Rally.exe**: `wrally::app` / `session`, split by §5.5 |
 | `phys/drive/car_model` — `.sgc` → render parts | `wrally::assets` car model → `iface::ModelDesc` |
 | `phys/drive/replay_camera` | `wrally::camera` |
 | `phys/drive/launch_control.h`, `anti_lag.h` | game's driver layer (`wrally::session`), emits `DriverTick` |
@@ -40,11 +40,11 @@ exe and modules (§8).
 | `phys/data` — readers for `.lsp .rbz .trk .col .dls .lbs .sgc .rpl .phr` | shared `wrally::formats::rbr` |
 | `signals/` — record bus | `wrally::signals` + the pinned record layout in `iface/records.h` |
 
-**WRally is self-contained.** The plugin-rbr code it uses is copied into this repository, not referenced from
+**W-Rally is self-contained.** The plugin-rbr code it uses is copied into this repository, not referenced from
 it. [imported.md](imported.md) lists what came from where.
 
 `ngg/bridge`, `ngg/ipc` and the d3d9 hooking are **not** carried over. They exist only to render inside
-RichardBurnsRally_SSE.exe, and WRally owns its own window. The classic `phys::sim::Sim` (the exe image in a 4 GB
+RichardBurnsRally_SSE.exe, and W-Rally owns its own window. The classic `phys::sim::Sim` (the exe image in a 4 GB
 arena) is not carried over either. It stays in plugin-rbr as the oracle that the native port is checked against.
 
 ---
@@ -52,7 +52,7 @@ arena) is not carried over either. It stays in plugin-rbr as the oracle that the
 ## 1. Process and modules
 
 ```
- WRally.exe  (wrally::app)  ─────────────────────────────────────────────────────────────
+ W-Rally.exe  (wrally::app)  ────────────────────────────────────────────────────────────
  │  window, input, GUI (ImGui), game flow, rules, timing, replays, VFS, assets, config
  │
  │  ModuleHost: scans modules/, GetWInterfaceVer → InitWInterface → function tables
@@ -127,7 +127,7 @@ WRALLY_EXPORT iface::Status  WRALLY_CALL InitWInterface(uint32_t gameVersion,
   module's matching release call.
 - No exceptions cross the boundary. Every entry point catches everything, sets `lastError`, and returns a `Status`.
   `ErrFault` means the instance is broken and must be destroyed.
-- **Files only through `HostServices::files`.** That way RBR's loose files, `physics.rbz` members, WRally's content
+- **Files only through `HostServices::files`.** That way RBR's loose files, `physics.rbz` members, W-Rally's content
   and later mod packages all resolve one way (§5.1).
 
 ### 2.4 Loading (game side)
@@ -284,16 +284,16 @@ configures without an interface bump.
 - Built from `phys/native` + `phys/num` + `phys/data` (`NativeSim` without the classic arena).
 - Must stay **bit-exact** with RBR. That is what makes RBR replays and fair online times possible. The checks
   against RBR's own code (`phys-native-check`, `phys-sim-check`) need the classic physics, so they stay in
-  plugin-rbr. WRally gates this module with golden recordings: `.phr` runs that must replay to the same poses,
+  plugin-rbr. W-Rally gates this module with golden recordings: `.phr` runs that must replay to the same poses,
   bit for bit.
 - Caps: `RbrCars | RbrStages | CarOverrides`. Not `MultiCar` (one car per world today) or `Spectators` (not ported:
   `NativeSim::Open` refuses animation objects).
 - Its config is RBR's own data (`physics.rbz`, the cars' `.lsp`). It needs no file of its own, so `config` is "".
   It runs RBR cars only (decision 8), so it is offered only when the RBR layer is present. It can drive those cars on
-  WRally stages too, since those use RBR's gameplay formats (§6.3).
+  W-Rally stages too, since those use RBR's gameplay formats (§6.3).
 - File access: every read the physics makes goes through `phys::data::ReadWholeFile` (`data/files.h`). The module
   points it at `HostServices::files`, so `WorldDesc` paths are VFS paths. Car overrides arrive as text
-  (`CarDesc::overrides`), because WRally's car data is not in the RBR folder.
+  (`CarDesc::overrides`), because W-Rally's car data is not in the RBR folder.
 - Not yet read out of the native car: `CarState::steeringTorque` and `damaged` (0), and `resetCar`
   (`ErrNotSupported`).
 
@@ -375,7 +375,7 @@ Adding them is an interface version bump when the first caller needs them, not b
 
 - The config has a default physics. An event or online championship may *require* one (id + minimum module
   version, or an exact `buildHash` for competitive events).
-- A car declares which physics it can run on. An RBR car runs on any module with `RbrCars`. A WRally car has only a
+- A car declares which physics it can run on. An RBR car runs on any module with `RbrCars`. A W-Rally car has only a
   `wphysics.json` and needs WPhysics (decision 8). The car menu hides combinations that cannot run.
 - One physics module per session. Several can be *loaded* (for menu listing), but only one has a `World`.
 
@@ -389,7 +389,7 @@ Interface: [`audio.h`](../include/wrally/iface/audio.h). Implementation: `plugin
   `DriverTick` to `submitRecord`, unchanged. This is what `audio::Audio::Connect(bus)` does inside phys-drive today,
   moved across the boundary. The grains engine needs per-firing records (`EngineTick` crank angle, `fired`), which is
   why the interface passes records rather than a few summarised parameters.
-- `createCarVoice(CarSoundDesc)` per car: the engine sound (RBR `.eng`, or a WRally sound set), the surrounding bank,
+- `createCarVoice(CarSoundDesc)` per car: the engine sound (RBR `.eng`, or a W-Rally sound set), the surrounding bank,
   and the mix (today's `sound-mix.ini`, the module's format).
 - Game sounds: `loadSound`/`play` on buses (World, CoDriver, Ui), positional or not. The co-driver's pacenotes are the
   game's logic (which call, when, from `.dls`). The audio module only plays them.
@@ -449,14 +449,14 @@ Interface: [`audio.h`](../include/wrally/iface/audio.h). Implementation: `plugin
 
 ### 6.1 Content roots and the VFS — `wrally::vfs`
 
-WRally runs **standalone** on its own content. When it sits in an RBR folder, it **adds** RBR's content.
+W-Rally runs **standalone** on its own content. When it sits in an RBR folder, it **adds** RBR's content.
 
 Layers, with later layers winning:
 
-1. **RBR install**, read-only, *optional*. It is used when the WRally exe's folder (or `rbrPath` in `wrally.ini`)
+1. **RBR install**, read-only, *optional*. It is used when the W-Rally exe's folder (or `rbrPath` in `W-Rally.ini`)
    contains `RichardBurnsRally_SSE.exe` and `Physics/physics.rbz`. It provides `Maps/`, `Cars/`, `Physics/`,
    `Audio/` and `Replays/`.
-2. **WRally content** (`<WRally>/content`): WRally's own stages, cars, sound sets, UI, default configs.
+2. **W-Rally content** (`<W-Rally>/content`): W-Rally's own stages, cars, sound sets, UI, default configs.
 3. **Mod packages** (zip, later), one layer each.
 
 Archive members use `archive.rbz:member/path` (`physics.rbz` is a zip of deflated members, `phys/data/inflate`).
@@ -466,7 +466,7 @@ module.
 **Content catalog** (`wrally::assets::Catalog`). This is what the menus list: one list of stages and one of cars,
 with a source tag on each.
 
-- **WRally content** is listed by manifests: `content/stages/<id>/stage.json` and `content/cars/<id>/car.json`.
+- **W-Rally content** is listed by manifests: `content/stages/<id>/stage.json` and `content/cars/<id>/car.json`.
 - **RBR content**, when the RBR layer is present, is listed from `Maps/Tracks.ini` and `Cars/Cars.ini`, and wrapped
   in the same catalog entries in memory. RBR's files are never rewritten.
 - Without RBR, the RBR entries do not exist and nothing in the game refers to them. The game never assumes
@@ -479,19 +479,19 @@ legacy importer uses (decision 2), which sits next to the renderer's reader. Oth
 
 | format | what | source today | used by |
 |---|---|---|---|
-| `stage.json`, `car.json` | **WRally manifests**: what a stage/car consists of, per-physics/per-audio data files | new | game catalog |
+| `stage.json`, `car.json` | **W-Rally manifests**: what a stage/car consists of, per-physics/per-audio data files | new | game catalog |
 | `.lsp`, `.rbz` | physics defs, car/setup/tyre files | `phys/data/lsp`, `inflate` | rbr physics |
 | `.trk` | collision objects, drive line | `phys/data/trk`, `trkworld` | physics, game (drive line) |
 | `.col` `.mat` `.fnc` | static collision, surfaces, fences | `phys/data/col`, `phys/native` | physics |
 | `.fnc` + `Textures/fence.dat` | the fences drawn: post points, tape/post textures | `formats/fnc` | game (`assets/fences`: drawn, knocked about by the car) |
-| `.lbs` | **render geometry** (+ script objects) | script objects: `phys/data/lbs`; geometry: WRally's own reader (decision 2) | legacy importer, physics |
+| `.lbs` | **render geometry** (+ script objects) | script objects: `phys/data/lbs`; geometry: W-Rally's own reader (decision 2) | legacy importer, physics |
 | `.dls` | cameras, pacenotes, splits/finish | `phys/data/dls` | game |
 | `.sgc` + `<car>.ini` + `_shaders.ini` | car render model + collision meshes | `phys/drive/car_model`, `phys/data/sgc` | game → renderer model, physics |
 | `.dds` | textures | (pass-through) | renderer |
 | `Tracks.ini`, `TrackSettings.ini`, `Cars.ini` | stage list, surfaces, weather/lighting, car list | `sim::StageSurface`, NGG weather | game catalog |
 | `.eng`, audio banks | engine sounds | `audio/` | audio module |
 | `.rpl` | RBR replays | `phys/data/rpl` | game (playback by state) |
-| `.phr` | WRally recordings (controls + checks) | `phys/data/rec` | game |
+| `.phr` | W-Rally recordings (controls + checks) | `phys/data/rec` | game |
 | **`.ngg`** | stage graphics (PBR, weather presets, object keys); later car graphics | `ngg/format` | renderer |
 | module JSON | physics/audio module config and per-car data | new, owned by each module | that module only |
 
@@ -511,16 +511,16 @@ gameplay: .trk .col .mat .fnc .lbs (physics) + .dls (cameras, pacenotes, splits)
 
 - **RBR stages** use RBR's own gameplay files. Their graphics come from a Wallaby-converted `.ngg` if there is one,
   otherwise from the on-the-fly import.
-- **WRally stages** (`stage.json`) ship an `.ngg` and gameplay files *in RBR's formats*, written by our tools.
+- **W-Rally stages** (`stage.json`) ship an `.ngg` and gameplay files *in RBR's formats*, written by our tools.
   That is what NGG design §7 already specifies for native tracks (".ngg + LBS/COL/DLS gameplay stub"). Reusing the
-  formats does not need any RBR content, and it lets both physics modules run WRally stages from day one. Later the
-  gameplay data moves into `.ngg` chunks (decision 10), so a WRally stage becomes one file; the manifest is what
+  formats does not need any RBR content, and it lets both physics modules run W-Rally stages from day one. Later the
+  gameplay data moves into `.ngg` chunks (decision 10), so a W-Rally stage becomes one file; the manifest is what
   makes that change local.
 
 So there is **one renderer path**. A legacy stage is "an NGG converted on the fly with default PBR materials", which
 is what `Material`'s defaults are designed for (`DefaultMaterial()`, every factor standing alone).
 
-**WRally imports `.lbs` itself** (decision 2): a C++ reader of the `.lbs` geometry and a simple automatic
+**W-Rally imports `.lbs` itself** (decision 2): a C++ reader of the `.lbs` geometry and a simple automatic
 importer, written fresh (no Wallaby code). It reads the geometry, the textures and the object keys. It drops RBR's
 baked shading (the sun, ray tracing and AO light the stage), rebuilds the normals by an angle weld, cuts out
 alpha-textured foliage, and takes weather presets from `TrackSettings.ini`. Its result is cached. Wallaby remains
@@ -534,7 +534,7 @@ moves every scene object whose NGGK key is *k*. The importer writes those keys f
 
 - **RBR cars** (RBR layer present): `Cars/Cars.ini` lists them. Render model from `.sgc` (`ReadCarModel`) →
   `iface::ModelDesc`. Physics from `physics.rbz` `Physics/<car>/`. Sound from `.eng`.
-- **WRally cars** (`car.json`): the render model (`.sgc` written by our tools at first, a car `.ngg` later),
+- **W-Rally cars** (`car.json`): the render model (`.sgc` written by our tools at first, a car `.ngg` later),
   `wphysics.json` for the physics (WPhysics-only, decision 8: no `.lsp`), and a sound set for the audio.
 - The game animates the model from `CarState`: body pose → instance `world`, `wheels[k]` position/rotation/spin →
   hub and spinning nodes, `damaged` bits → hide detached parts. This is phys-drive's car-part code, moved to node
@@ -544,7 +544,7 @@ moves every scene object whose NGGK key is *k*. The importer writes those keys f
 
 | namespace | contents | from phys-drive |
 |---|---|---|
-| `wrally::app` | `main`, window, threads, config (`wrally.ini`), crash handling | `drive.cpp` window/loop, args |
+| `wrally::app` | `main`, window, threads, config (`W-Rally.ini`), crash handling | `drive.cpp` window/loop, args |
 | `wrally::modules` | `ModuleHost`, the C++ wrappers over the iface tables | (new) |
 | `wrally::vfs`, `wrally::formats` | §6.1, §6.2 | file loading in `drive.cpp` |
 | `wrally::assets` | catalog, stage resolution, `LegacyStageImporter`, car model building, caches | `car_model`, stage/`.ngg` pick |
@@ -601,7 +601,7 @@ wrally/
                                          apart from the physics; ngg/format; car_model; LBS reader port)
       vfs/            wrally::vfs
       json/           nlohmann/json + schema validation, for manifests and module configs
-  game/               WRally.exe        (phase 1: src/drive/ = phys-drive, imported)
+  game/               W-Rally.exe        (phase 1: src/drive/ = phys-drive, imported)
       src/app  src/modules  src/assets  src/session  src/rules  src/input
       src/camera  src/ui  src/sound  src/replay
       config/         sound-mix.ini ...
@@ -611,7 +611,7 @@ wrally/
       physics-w/      WPhysics.dll
       audio/          WAudio.dll        (src/audio: plugin-rbr/audio)
   third_party/        dxc (dxcompiler.dll, dxil.dll); later imgui, nlohmann/json
-  content/            WRally's own stages, cars, sound sets, default configs (standalone)
+  content/            W-Rally's own stages, cars, sound sets, default configs (standalone)
   tests/              iface layout tests, module conformance (any DLL of a kind through its Api),
                       rbr bit-exact suite (phys-native-check), renderer smoke, audio offline golden
   tools/              module-info (lists a DLL's kinds/versions/caps), phr-check
@@ -620,11 +620,11 @@ wrally/
 Output layout, mirroring the runtime:
 
 ```
-WRally.exe
+W-Rally.exe
 modules/renderer/WRenderer.dll, dxcompiler.dll, dxil.dll
 modules/physics/WPhysicsRBR.dll, WPhysics.dll
 modules/audio/WAudio.dll
-content/   config/   cache/   wrally.ini
+content/   config/   cache/   W-Rally.ini
 ```
 
 ---
@@ -635,7 +635,7 @@ Each phase ends with a game you can drive. phys-drive works on day one, and ever
 
 1. **Skeleton + phys-drive moved in** — DONE 2026-10-25. CMake, `iface` headers, `ModuleHost` + `FileHost`,
    `tools/module-info`, a stub module and handshake tests. phys-drive and the libraries it uses were imported
-   (docs/imported.md): WRally.exe is phys-drive, still drawing through `ngg-api.dll`, with `NativeSim` and
+   (docs/imported.md): W-Rally.exe is phys-drive, still drawing through `ngg-api.dll`, with `NativeSim` and
    `audio::Audio` linked in. Its recordings are byte-identical to plugin-rbr's phys-drive.
 2. **WPhysicsRBR** — DONE 2026-10-25. `NativeSim` behind `PhysicsApi` (`modules/physics-rbr/src/module`), every
    file read through `HostServices::files` (`data/files.h`). The game loads the DLL through
@@ -672,7 +672,7 @@ Each phase ends with a game you can drive. phys-drive works on day one, and ever
      clean build had silently lost ray tracing, because the old copies next to the exe were what made it work.
    - **Already there:** moved stage objects (phase 4) and RT instancing (ngg-core).
    - **Not done:** the body's dents (the `.sgc` morph channels, from the damage zones).
-6a. **Menus** — 2026-10-26 (phase 7 moved later). With no command line WRally opens a main menu: Quick rally,
+6a. **Menus** — 2026-10-26 (phase 7 moved later). With no command line W-Rally opens a main menu: Quick rally,
    Settings, Exit (`game/src/ui/menus.*`, Dear ImGui, mouse or keyboard). The window, the renderer and ImGui live for
    the whole run, and a stage loads and unloads its scene on them (`app/game.cpp`).
    - **Quick rally:** stage, car, setup (the default or a saved RBR `.lsp`), damage (off, safe, reduced, realistic),
@@ -686,21 +686,21 @@ Each phase ends with a game you can drive. phys-drive works on day one, and ever
    - **Esc in a stage:** the stage holds and a menu comes up: Resume, Restart stage, Settings, Debug (what the keys
      switch: renderer switches, debug view, camera, chase distance, mute, anti-lag) and Exit to main menu. A CLI run
      still quits at its end (the window closed, a replay's end, `--exit-at`). Its Esc menu leads to the main menu.
-   - **Settings:** saved in `wrally.ini` in the user folder (`app/settings.*`, `app/paths.h`). They cover the RBR
+   - **Settings:** saved in `W-Rally.ini` in the user folder (`app/settings.*`, `app/paths.h`). They cover the RBR
      folder, the `.ngg` folders (default `<RBR>\Ngg`), the base physics, graphics (applied at once) and sound.
    - **Installed:** the MSI (`installer/`, built on every push by `.github/workflows/installer.yml`) installs to
      Program Files\W-Rally and asks for the RBR folder. It pre-fills the one it finds, and goes on only when the
      folder has `RichardBurnsRally_SSE.exe`, `Physics.rbz`, `Maps\Tracks.ini` and `Cars\Cars.ini`. It writes that
-     folder to `install.ini` beside the exe, which the game reads before `wrally.ini`. With `install.ini` present,
-     the user folder is `%LOCALAPPDATA%\W-Rally` (`wrally.ini`, `WRally.log`, `drive.phr`, `cache\`). Without it
+     folder to `install.ini` beside the exe, which the game reads before `W-Rally.ini`. With `install.ini` present,
+     the user folder is `%LOCALAPPDATA%\W-Rally` (`W-Rally.ini`, `W-Rally.log`, `drive.phr`, `cache\`). Without it
      (a build run from its tree), the user folder is the exe's own.
    - **Controls:** the Settings tab that binds every action's key (`game/src/input/bindings.*`). A key is held by its
      place (scan code), named as the layout prints it. Click an action and press a key: Esc keeps the old one, Delete
      unbinds, and an action whose key was taken becomes unbound. The keys are saved as `key_<action>` in
-     `wrally.ini`.
+     `W-Rally.ini`.
 7. **Content.** VFS layers, catalog, `stage.json`/`car.json` with their schemas, and standalone mode without RBR
    (tested with the RBR layer switched off; RBR content remains the development data, decision 7).
-8. **Legacy stages.** WRally's own automatic importer (decision 2), so every RBR stage draws without Wallaby:
+8. **Legacy stages.** W-Rally's own automatic importer (decision 2), so every RBR stage draws without Wallaby:
    1. a C++ NGG writer next to the renderer's reader, with a round-trip test; the `.lbs` geometry reader; a minimal
       importer (geometry, textures, object keys, baked shading dropped) — DONE 2026-10-26.
       - **Writer:** `modules/renderer/src/format/ngg_scene.*` (library `ngg-format`) writes v3 and reads v3 and v2.
@@ -771,38 +771,38 @@ Each phase ends with a game you can drive. phys-drive works on day one, and ever
 9. **Game.** Menus, car/stage selection, settings, wheels + FFB, replays, results.
 10. **WPhysics.** Fork, JSON config, higher tick rate, then extend. Multi-car and save-state come with their
     interface bump.
-11. **Native gameplay in `.ngg`** (decision 10), then **first WRally stage and car** for standalone (§11).
+11. **Native gameplay in `.ngg`** (decision 10), then **first W-Rally stage and car** for standalone (§11).
 
 ---
 
 ## 10. Decisions (2026-10-25)
 
 1. **GUI: Dear ImGui** for all game UI in v1, rendered through `FrameDesc::ui`.
-2. **Two converters (revised 2026-10-26).** WRally has its own simple, automatic LBS → NGG importer in C++, and
+2. **Two converters (revised 2026-10-26).** W-Rally has its own simple, automatic LBS → NGG importer in C++, and
    Wallaby stays the authoring converter. Wallaby does the sophisticated work: replacing low-poly objects, manual
    overrides, tagging, plants and weather import. The game's importer needs no human input and makes any RBR stage
-   drawable and dynamically lit. No Wallaby code ships with WRally or is copied into it; the importer is written
+   drawable and dynamically lit. No Wallaby code ships with W-Rally or is copied into it; the importer is written
    against RBR's formats. A Wallaby-made `.ngg` always wins over the automatic import. To keep the two NGG writers
-   from drifting apart, WRally's writer sits next to the renderer's reader (one format header), a round-trip test
+   from drifting apart, W-Rally's writer sits next to the renderer's reader (one format header), a round-trip test
    writes, loads and compares, and a test loads Wallaby-made `.ngg` files as another producer of the format.
 3. **Audio is a module** (`ModuleKind::Audio`, WAudio.dll), fed by the physics' record stream (§5).
 4. **WPhysics** may run at a higher tick rate and has its own configuration, in JSON (`config/physics/wphysics.json`,
    `cars/<car>/wphysics.json`). The interface leaves config format and `dt` to each module.
-5. **Standalone + RBR.** WRally works without RBR on its own content. Placed in an RBR folder (or pointed at one), it
+5. **Standalone + RBR.** W-Rally works without RBR on its own content. Placed in an RBR folder (or pointed at one), it
    also uses RBR's content, read in place and never shipped.
 6. **Starting point: `phys/drive`** (phys-drive), which already combines the physics, the NGG renderer DLL, the
    audio, the stage clock and replays.
 7. **Development content: RBR's own stages and cars.** Until the game runs end to end, all development and testing
-   uses an RBR install. Standalone mode is built and tested with the layer switched off, but WRally's own first
+   uses an RBR install. Standalone mode is built and tested with the layer switched off, but W-Rally's own first
    stage and car are not needed before phase 9 (§11).
-8. **WRally cars are WPhysics-only.** They carry `wphysics.json`, never `.lsp`. The rbr physics module runs RBR cars
+8. **W-Rally cars are WPhysics-only.** They carry `wphysics.json`, never `.lsp`. The rbr physics module runs RBR cars
    only, so standalone play (no RBR install) runs on WPhysics.
 9. **JSON: nlohmann/json, with published schemas.** Every manifest and module config has a JSON Schema in
    `docs/schemas/` (`stage.schema.json`, `car.schema.json`, `wphysics.schema.json`, `wphysics-car.schema.json`). The
    game validates manifests against them at load and in `tools/`, and modders get the same files.
-10. **Native gameplay format: later, inside the `.ngg`.** WRally stages use RBR's `.trk/.col/.mat/.fnc/.dls`
+10. **Native gameplay format: later, inside the `.ngg`.** W-Rally stages use RBR's `.trk/.col/.mat/.fnc/.dls`
     formats until the game runs end to end. Then collision, surfaces, fences, the drive line, splits and pacenotes
-    become `.ngg` chunks, so a WRally stage is one file. Physics modules read them through the same VFS. Readers
+    become `.ngg` chunks, so a W-Rally stage is one file. Physics modules read them through the same VFS. Readers
     still accept the RBR formats, because RBR stages keep using them.
 
 ## 11. Open questions

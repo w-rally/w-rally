@@ -56,7 +56,7 @@ constexpr uint64_t kPhysicsCapSaveState     = 1ull << 1;   // saveState / loadSt
 constexpr uint64_t kPhysicsCapRbrCars       = 1ull << 2;   // reads physics.rbz car definitions
 constexpr uint64_t kPhysicsCapRbrStages     = 1ull << 3;   // reads .trk / .col / .mat / .fnc / .lbs
 constexpr uint64_t kPhysicsCapSpectators    = 1ull << 4;   // animation objects (.lbs scripts)
-constexpr uint64_t kPhysicsCapCarOverrides  = 1ull << 5;   // CarDesc::overrides (WRally's car data)
+constexpr uint64_t kPhysicsCapCarOverrides  = 1ull << 5;   // CarDesc::overrides (W-Rally's car data)
 constexpr uint64_t kPhysicsCapExtendedCars  = 1ull << 6;   // its own car files (CarDesc::carData)
 
 #pragma pack(push, 4)
@@ -80,7 +80,7 @@ struct StageDesc {
 constexpr uint32_t kStageSpectators = 1u << 0;   // load the animation objects (needs kPhysicsCapSpectators)
 
 // One car. Strings are VFS paths or names, "" for the default or "not this kind".
-// An RBR car fills physicsCar (kPhysicsCapRbrCars); a WRally car fills carData
+// An RBR car fills physicsCar (kPhysicsCapRbrCars); a W-Rally car fills carData
 // (the module's own file, e.g. cars/<car>/wphysics.json). A module refuses a car
 // it has no data for with ErrNotSupported.
 struct CarDesc {
@@ -92,7 +92,7 @@ struct CarDesc {
     const char* setup;        // a setup: a physics.rbz member (Physics/...) or a VFS file (SavedGames/...); default the
                               // car's setups/d_<surface>.lsp
     const char* tyres;        // brand: "michelin" (Physics/<brand>/tyres.lsp)
-    const char* overrides;    // WRally's car data: `Name = value` lines (text, not a path), "" none
+    const char* overrides;    // W-Rally's car data: `Name = value` lines (text, not a path), "" none
     Surface     surface;
     uint32_t    tyreType;     // TyreType00..06
     uint32_t    aids[4];      // AutoGears, GearGuard, NeutralLock, ClutchHelp

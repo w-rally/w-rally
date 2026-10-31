@@ -1,5 +1,5 @@
 #pragma once
-// WRally's own legacy stage importer (wrally::assets, docs/design.md 6.3 and decision 2): an RBR stage's .lbs and its
+// W-Rally's own legacy stage importer (wrally::assets, docs/design.md 6.3 and decision 2): an RBR stage's .lbs and its
 // textures (Maps/<stage>_textures.rbz beside it) into an .ngg in memory, for the renderer to load - so an RBR stage
 // draws with no converted .ngg. Simple and automatic, needing nobody: Wallaby stays the tool for a hand-finished .ngg,
 // which wins whenever there is one.

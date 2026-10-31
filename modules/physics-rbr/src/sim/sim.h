@@ -2,7 +2,7 @@
 // The physics as a library (M5): a stage and a car loaded from the game's files - physics.rbz, the stage's .trk / .col /
 // .mat / .fnc / .lbs, the car's .sgc - and stepped with control records, natively in 64 bits.
 //
-// WRally has the native implementation only (NativeSim, sim/native_sim.h). plugin-rbr's classic Sim - the game's code
+// W-Rally has the native implementation only (NativeSim, sim/native_sim.h). plugin-rbr's classic Sim - the game's code
 // in a 4 GB arena, from the exe's image - stays there as the oracle the native port is checked against
 // (docs/design.md 0); Config's exe and heap fields are its and unused here. The stage clock and the stage helpers
 // are the game's (game/src/rules/stage.h).
@@ -28,10 +28,10 @@ struct Config {
     std::string surface = "tarmac";         // tarmac, gravel or snow: the car's <surface>.lsp, its setup and options
     std::string tyres = "michelin";         // the tyre brand (Physics/<brand>/tyres.lsp; the game: pirelli for cars 5, 7)
     std::string setup;                      // a setup: a physics.rbz member (Physics/...) or a file; default the car's setups/d_<surface>.lsp
-    // Our own values on top of RBR's car (WRally's car data, cars/<car>.ini; "" none): `Name = value` lines, written
+    // Our own values on top of RBR's car (W-Rally's car data, cars/<car>.ini; "" none): `Name = value` lines, written
     // into the car's defs once they are built - for what RBR's files cannot set or set otherwise than the real car.
     // Names (CarOverride): Engine.IdleThrottle (the eased throttle's minimum: the idle's revs).
-    // The TEXT (the file read by the caller: WRally's car data is not in the game's VFS), `overridesName` what messages
+    // The TEXT (the file read by the caller: W-Rally's car data is not in the game's VFS), `overridesName` what messages
     // call it.
     std::string overrides, overridesName = "overrides";
     uint32_t tyreIndex = 0;                 // the tyre type (TyreTypeNN of the options)

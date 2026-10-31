@@ -186,7 +186,7 @@ public:
     void SetLightMode(int mode) { m_lightMode = WrapMode(mode, kLightModeCount); }
     int  LightMode() const { return m_lightMode; }
 
-    // The LEGACY PROFILE: how a scene WRally's .lbs importer made (kSceneFlagLegacyImport) lights its alpha-tested
+    // The LEGACY PROFILE: how a scene W-Rally's .lbs importer made (kSceneFlagLegacyImport) lights its alpha-tested
     // geometry - RBR's cards, untagged, which modern lighting shows up as cardboard. Other scenes are never touched.
     //   0 off: as any scene
     //   1 A, baked: the card lit by RBR's bake (its vertex colour) times the dynamic light of an upward surface

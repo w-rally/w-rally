@@ -114,7 +114,7 @@ int ParseSkyTime(const std::vector<std::string>& args, Options& o, const char* d
 int Parse(const std::vector<std::string>& args, Options& o)
 {
     if (args.size() < 3) {
-        std::fprintf(stderr, "usage: WRally <game dir> <stage .ngg> [--stage track-34_E] [--sgc <car .sgc>] [--car s_i2003] "
+        std::fprintf(stderr, "usage: W-Rally <game dir> <stage .ngg> [--stage track-34_E] [--sgc <car .sgc>] [--car s_i2003] "
                              "[--surface gravel] [--tyre-type 3] [--tyres michelin] [--out drive.phr]\n");
         return 2;
     }
@@ -148,7 +148,7 @@ int Parse(const std::vector<std::string>& args, Options& o)
     c.lbs = maps + ".lbs";
     c.sgc = game + "/" + Arg(args, "--sgc", "Cars/i20_R5/i20_R5.sgc");
     c.car = Arg(args, "--car", "s_i2003");
-    // WRally's values on top of RBR's car: --overrides, else content/cars/<car>.ini (WRallyFile) if there is one
+    // W-Rally's values on top of RBR's car: --overrides, else content/cars/<car>.ini (WRallyFile) if there is one
     // ("none": RBR's car as it is).
     c.overrides = Arg(args, "--overrides", "");
     if (c.overrides.empty()) c.overrides = WRallyFile("content/cars/" + c.car + ".ini");

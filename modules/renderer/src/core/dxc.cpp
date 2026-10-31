@@ -12,7 +12,7 @@ namespace core {
 
 namespace {
 
-// A DLL beside the module this code is linked into (WRenderer.dll in WRally), then by the normal search. A bare
+// A DLL beside the module this code is linked into (WRenderer.dll in W-Rally), then by the normal search. A bare
 // LoadLibraryW(name) searches the EXE's folder, not ours - and a module DLL's dependencies sit beside the module.
 HMODULE LoadBeside(const wchar_t* name)
 {

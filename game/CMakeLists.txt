@@ -1,4 +1,4 @@
-# WRally.exe (docs/design.md 6.5): the game on three modules - WPhysicsRBR.dll, WAudio.dll and WRenderer.dll, loaded
+# W-Rally.exe (docs/design.md 6.5): the game on three modules - WPhysicsRBR.dll, WAudio.dll and WRenderer.dll, loaded
 # from bin/modules. Its parts:
 #   app/      main, options, settings, the window, menus and frame loop  wrally::app
 #   session/  one stage run: physics, clock, driver layer, recording       wrally::session
@@ -14,7 +14,7 @@
 #   ui/       Dear ImGui, the menus and the HUD                            wrally::ui
 #   core/     the small 3D math                                            wrally::math
 # Still linked in: RBR's file readers (phys-data).
-add_executable(WRally
+add_executable(W-Rally
     src/app/main.cpp src/app/options.cpp src/app/settings.cpp src/app/window.cpp src/app/game.cpp
     src/session/session.cpp src/session/sim_thread.cpp src/input/bindings.cpp
     src/camera/camera.cpp src/camera/replay_camera.cpp
@@ -25,16 +25,16 @@ add_executable(WRally
     src/sound/sound.cpp src/sound/codriver.cpp src/sound/mix_edit.cpp
     src/physics/physics.cpp
     src/ui/imgui_layer.cpp src/ui/hud.cpp src/ui/menus.cpp src/ui/menu_video.cpp)
-target_include_directories(WRally PRIVATE src)
+target_include_directories(W-Rally PRIVATE src)
 # Media Foundation: the main menu's video loop.
-target_link_libraries(WRally PRIVATE phys-data ngg-format wrally-modules wrally-signals imgui mfplat mfreadwrite mfuuid)
+target_link_libraries(W-Rally PRIVATE phys-data ngg-format wrally-modules wrally-signals imgui mfplat mfreadwrite mfuuid)
 # Not linked: loaded at run time from bin/modules - but built with the game.
-add_dependencies(WRally WPhysicsRBR WAudio WRenderer)
+add_dependencies(W-Rally WPhysicsRBR WAudio WRenderer)
 # Where WRallyFile finds content/ and game/config/ when they are not beside the exe (a build run from its tree).
-target_compile_definitions(WRally PRIVATE _CRT_SECURE_NO_WARNINGS NOMINMAX WRALLY_SOURCE_DIR="${PROJECT_SOURCE_DIR}")
-target_compile_options(WRally PRIVATE /W4)
-set_target_properties(WRally PROPERTIES CXX_STANDARD 17)
+target_compile_definitions(W-Rally PRIVATE _CRT_SECURE_NO_WARNINGS NOMINMAX WRALLY_SOURCE_DIR="${PROJECT_SOURCE_DIR}")
+target_compile_options(W-Rally PRIVATE /W4)
+set_target_properties(W-Rally PROPERTIES CXX_STANDARD 17)
 # A window application (no console window of its own), still entered at main(): output goes where app/main.cpp's
 # SetUpOutput sends it.
-set_target_properties(WRally PROPERTIES WIN32_EXECUTABLE TRUE)
-target_link_options(WRally PRIVATE /ENTRY:mainCRTStartup)
+set_target_properties(W-Rally PROPERTIES WIN32_EXECUTABLE TRUE)
+target_link_options(W-Rally PRIVATE /ENTRY:mainCRTStartup)

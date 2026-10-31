@@ -4,7 +4,7 @@
   - Asks for the Richard Burns Rally folder, pre-filled with the one found (ca/rbr_folder.cpp: DetectRbr), and goes on
     only with a real one (ValidateRbr): W-Rally has no content of its own yet. A silent install takes RBRDIR=<folder>
     or the one found, and fails without one.
-  - The folder goes to install.ini beside the exe (rbr_path, read by the game before the user's wrally.ini) and to
+  - The folder goes to install.ini beside the exe (rbr_path, read by the game before the user's W-Rally.ini) and to
     HKLM\Software\W-Rally (RbrPath), where an upgrade finds it again.
 -->
 <Wix xmlns="http://wixtoolset.org/schemas/v4/wxs" xmlns:ui="http://wixtoolset.org/schemas/v4/wxs/ui">
@@ -57,7 +57,7 @@
 
     <Component Id="StartMenu" Directory="ProgramMenuFolder" Guid="5E2F8C1D-9B3A-4C7E-8D6F-1A2B3C4D5E61">
       <Shortcut Id="WRallyShortcut" Name="W-Rally" Description="A rally simulator created by the community"
-                Target="[INSTALLFOLDER]WRally.exe" WorkingDirectory="INSTALLFOLDER" />
+                Target="[INSTALLFOLDER]W-Rally.exe" WorkingDirectory="INSTALLFOLDER" />
       <RegistryValue Root="HKLM" Key="Software\W-Rally" Name="StartMenu" Type="integer" Value="1" KeyPath="yes" />
     </Component>
 
