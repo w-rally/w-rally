@@ -3,7 +3,9 @@
 #include <algorithm>
 #include <cstdio>
 #include <cstring>
+#include <map>
 
+#include "assets/car_lights.h"
 #include "imgui.h"
 #include "ui/imgui_layer.h"
 
@@ -187,6 +189,37 @@ QuickChoice QuickRally(const ImGuiLayer& ui, const assets::Catalog& catalog, app
         Choose("Setup", setup, items);
         s.setup = setup ? setups[setup - 1].path : "";
 
+        // Its lamps (NGG design 5.4 N3b): the ramps it can run - its own pods where its .ini places them - and the ramp's
+        // aim, remembered per car.
+        if (cr) {
+            // Per car folder, read once: the layouts' names, and as the menu shows them.
+            struct Layouts {
+                std::vector<std::string> keys, shown;
+            };
+            static std::map<std::string, Layouts> layoutsOf;
+            Layouts& ls = layoutsOf[cr->folder];
+            if (ls.keys.empty()) {
+                const float noCog[3] = {};
+                const assets::CarLamps lamps = assets::LoadCarLamps(cr->sgc, noCog);
+                for (const assets::LampLayout& l : lamps.layouts) {
+                    ls.keys.push_back(l.name);
+                    ls.shown.push_back(l.name != "ramp" ? l.name
+                                                        : std::string(lamps.fromCar ? "its own ramp (" : "a ramp (") +
+                                                              std::to_string(l.lamps.size()) + " pods)");
+                }
+            }
+            const std::vector<std::string>& keys = ls.keys;
+            const std::vector<std::string>& names = ls.shown;
+            app::Settings::Lamps& lamp = s.lamps[cr->folder];
+            int layout = 0;
+            for (size_t i = 0; i < keys.size(); ++i)
+                if (keys[i] == lamp.layout) layout = static_cast<int>(i);
+            Choose("Lamps", layout, names);
+            lamp.layout = keys.empty() ? "" : keys[layout];
+            ImGui::SliderFloat("Ramp spread", &lamp.spread, -5.0f, 10.0f, "%+.1f deg out");
+            ImGui::SliderFloat("Ramp aim", &lamp.pitch, -3.0f, 3.0f, "%+.1f deg up");
+        }
+
         items = {"Off", "Safe", "Reduced", "Realistic"};
         int damage = static_cast<int>(std::min(s.damage, 3u));
         Choose("Damage", damage, items);
@@ -209,6 +242,15 @@ QuickChoice QuickRally(const ImGuiLayer& ui, const assets::Catalog& catalog, app
         int road = static_cast<int>(std::min(s.road, 3u));
         Choose("Road", road, items);
         s.road = static_cast<uint32_t>(road);
+
+        // The time of day, on an autumn day (kQuickDate): the sun, the moon and the stars from it (NGG design 5.4).
+        static const char* const kTimes[] = {"", "08:00", "12:00", "17:30", "18:30", "22:00"};
+        items = {"The weather's own", "Morning 08:00", "Noon 12:00", "Evening 17:30", "Dusk 18:30", "Night 22:00"};
+        int time = 0;
+        for (int i = 1; i < 6; ++i)
+            if (s.time == kTimes[i]) time = i;
+        Choose("Time of day", time, items);
+        s.time = kTimes[time];
         ImGui::PopItemWidth();
 
         ImGui::Separator();

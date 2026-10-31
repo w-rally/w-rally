@@ -43,6 +43,7 @@ template <class F> void Fields(Settings& s, F&& f)
     f("quick_damage", s.damage);
     f("quick_weather", s.weather);
     f("quick_road", s.road);
+    f("quick_time", s.time);
 }
 
 void Set(std::string& v, const std::string& text) { v = text; }
@@ -87,6 +88,13 @@ Settings LoadSettings()
         for (int a = 0; a < input::kActions; ++a)
             if (key == std::string("key_") + input::Info(static_cast<input::Action>(a)).id)
                 s.keys.scan[a] = static_cast<UINT>(std::strtoul(value.c_str(), nullptr, 0));
+        if (key.rfind("lamps_", 0) == 0) {   // lamps_<folder> = <ramp>|<spread>|<pitch>
+            Settings::Lamps& l = s.lamps[key.substr(6)];
+            const size_t a = value.find('|'), b = a == std::string::npos ? a : value.find('|', a + 1);
+            l.layout = Trim(value.substr(0, a));
+            if (a != std::string::npos) l.spread = static_cast<float>(std::atof(value.c_str() + a + 1));
+            if (b != std::string::npos) l.pitch = static_cast<float>(std::atof(value.c_str() + b + 1));
+        }
     }
     return s;
 }
@@ -103,6 +111,7 @@ std::string SaveSettings(const Settings& in)
         out << "key_" << input::Info(static_cast<input::Action>(a)).id << " = " << (s.keys.scan[a] ? hex : "0") << "   # "
             << input::KeyName(s.keys.scan[a]) << "\n";
     }
+    for (const auto& [car, l] : s.lamps) out << "lamps_" << car << " = " << l.layout << "|" << Text(l.spread) << "|" << Text(l.pitch) << "\n";
     std::ofstream f(SettingsPath(), std::ios::binary);
     if (!f) return "cannot write " + SettingsPath().string();
     f << out.str();

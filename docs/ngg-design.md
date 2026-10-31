@@ -3215,6 +3215,27 @@ Four decisions, the user's:
     lamp's one dark shadow; the spill gives every patch several lamps and each thing a fan of lighter shadows, as in
     the reference shots. New debug view 15: the lamps' shadowed fraction. Open: on stage 41 the timing clock's legs
     still differ from the reference (one hard shadow), which the lab does not show - the clock is a physics object.
+  - **N3b - DONE 2026-10-31: the car's lamps, switched.**
+    - **Its lamps** (`assets::LoadCarLamps`): RBR's car .ini places (`Point_light_lf/rf/lb/rb/brake_*/reverse_*/
+      bon<n>`, the model's frame made the car's - y and z swapped, less the centre of gravity), defaults where it has
+      none; the AIMS are WRally's, as tuned on the wall (RBR's lamp normals are no aims). The ramps a car offers:
+      "ramp" (its own pods - the i20's six, aimed outer 20 out, middle 10, inner 5 out and 4 up - else four), "2 + 2",
+      "LED bars", "no ramp". The small lamps: tail, brake (with the high centre one), reverse (white), four
+      indicators (amber, 1.5 Hz; no RBR car has them) - coloured presets, no shadows.
+    - **The switches:** H headlights off / dipped / main, J the ramp (it shines with the main beam), Q / E the
+      indicators, G hazard; the brake pedal and reverse switch theirs. After dusk the lamps start lit (the renderer's
+      sun: `RenderStats::sunElevationDeg`, renderer interface 9); by day the small lamps' light is not given (only
+      their glass shows it). The readout shows the switches; `PHYS_DRIVE_LAMPS` sets them for captures.
+    - **The glass:** RBR's lamp meshes come in pairs (`e_light_lf`, its lit twin `e_light_lf_lit`); the car draws
+      each lamp group as instances of its own - the unlit glass or the lit twin by the switches, the ramp's housing
+      with the car's own ramp. A lit twin glows in its lamp's colour (a solid DXT1), as bright as such a lens is in
+      the renderer's units (~1600 nits a unit: a headlamp ~100,000 nits, a brake lamp ~10,000, a tail lamp ~200) -
+      not by its texture: RBR draws the twins with its CarLight shader on the tyre's texture sheet.
+    - **Quick rally** (the setup editor's, once there is one): "Lamps" (the car's ramps), the ramp's spread and aim,
+      remembered per car (`lamps_<folder>` in wrally.ini), and the time of day (`quick_time`, on 15 October, summer
+      time: dusk ~18:30). Command line: `--lamps <ramp> --lamp-aim <spread>,<pitch>`.
+    - Open: a lamp on a part that comes loose (a bumper) stays on the body; bloom on the lit glass; replays switch
+      the brake and reverse lamps by the live input only.
 - **N4 - stage lights.** A light chunk in the `.ngg` (with `provenance=auto|authored`, 5.3), emissive texture
   detection for the automatic part, Wallaby's light-placement mode for the authored part (its own task).
 

@@ -5,6 +5,7 @@
 
 #include <cstdint>
 #include <filesystem>
+#include <map>
 #include <string>
 
 #include "input/bindings.h"
@@ -41,6 +42,16 @@ struct Settings {
     uint32_t damage = 2;                // 0 off, 1 safe, 2 reduced, 3 realistic
     std::string weather;                // a weather preset's name ("" the stage's default)
     uint32_t road = 0;                  // 0 from the weather, 1 dry, 2 damp, 3 wet
+    std::string time;                   // the time of day, "HH:MM" on kQuickDate ("" the weather's own sun)
+
+    // The lamps each car runs (NGG design 5.4 N3b; in the setup editor once there is one): per car folder its ramp (a
+    // CarLamps layout's name, "" its first) and the ramp's aim - each pod further out, degrees; up, degrees. wrally.ini:
+    // lamps_<folder> = <ramp>|<spread>|<pitch>.
+    struct Lamps {
+        std::string layout;
+        float spread = 0.0f, pitch = 0.0f;
+    };
+    std::map<std::string, Lamps> lamps;
 
     // The ';'-separated .ngg folders, or <rbr>/Ngg.
     std::string NggFolders() const;
@@ -48,6 +59,9 @@ struct Settings {
 
 std::filesystem::path SettingsPath();   // wrally.ini beside the exe
 Settings LoadSettings();
+// The date Quick rally's times of day are on: an autumn day, the clocks still on summer time (dusk about 18:30 at 50 N).
+inline const char* kQuickDate = "2026-10-15";
+inline const char* kQuickUtcOffset = "2";
 // Returns "" or what went wrong.
 std::string SaveSettings(const Settings& s);
 
