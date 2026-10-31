@@ -135,7 +135,7 @@ public:
 
     // Debug views - isolate one shader input so an artefact can be ATTRIBUTED
     // rather than guessed at. See kDebugModeNames for the list.
-    enum { kDebugCount = 15 };
+    enum { kDebugCount = 16 };
     static const char* DebugModeName(int mode);
     void SetDebugMode(int mode) { m_debugMode = WrapMode(mode, kDebugCount); }
     int  DebugMode() const { return m_debugMode; }

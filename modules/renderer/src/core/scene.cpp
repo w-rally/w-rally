@@ -1318,6 +1318,10 @@ float4 Shade(VSOut i, bool frontFace, out GBufOut g)
 #endif
         }
 
+        // The local lights' shadowed fraction (the ray tracer's, denoised; lights.h): white = every lamp reaches it.
+        if (gDebugMode > 14.5 && gDebugMode < 15.5)
+            return float4((gLightsVisOn > 0.5 ? gRtLights.Load(int3(i.pos.xy, 0)) : 1.0).xxx, 1.0);
+
         // FLAT GREY - no texture, no vertex colour, no blend. Every shading
         // input is gone, so anything still visible here is geometry, depth or
         // rasterisation. This is the view that separates "we are shading it
@@ -2904,6 +2908,7 @@ static const char* const kDebugModeNames[] = {
     "RT vs SHADOW MAP - RED = RT shadow/map lit, BLUE = reverse, grey = agree",
     "RT ambient occlusion - white = sees the whole sky",
     "PLANTS - green = a card of a plant (volume normal), red = other alpha-tested",
+    "RT local lights - the lamps' shadowed fraction, white = every lamp reaches it",
 };
 
 static_assert(sizeof(kLightModeNames) / sizeof(kLightModeNames[0])

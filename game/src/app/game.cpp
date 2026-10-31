@@ -18,6 +18,7 @@
 #include "app/settings.h"
 #include "app/window.h"
 #include "assets/car_lights.h"
+#include "assets/lamp_lab.h"
 #include "assets/car_render.h"
 #include "assets/fences.h"
 #include "assets/catalog.h"
@@ -238,7 +239,9 @@ StageEnd RunStage(Shell& sh, const Options& o, bool fromMenu, std::string& error
     const bool rendererLog = sh.rendererLog;
     iface::RenderSettings settings = ToRender(sh.settings);
     renderer.ApplySettings(settings);
-    renderer.SetDebugView(0);
+    // NGG_DEBUG_VIEW=<n>: the stage starts in that debug view (V cycles them); otherwise the normal one.
+    const int startView = std::getenv("NGG_DEBUG_VIEW") ? std::atoi(std::getenv("NGG_DEBUG_VIEW")) : 0;
+    renderer.SetDebugView(startView);
     if (imported) renderer.SetLegacyProfile(legacyProfile);   // (the renderer keeps it from stage to stage)
     const iface::SceneHandle scene = renderer.LoadScene(bytes.data(), bytes.size());
     if (rendererLog) std::printf("%s", renderer.TakeLog().c_str());
@@ -291,7 +294,7 @@ StageEnd RunStage(Shell& sh, const Options& o, bool fromMenu, std::string& error
     // (shot-NNN.bmp beside the recording).
     Press taaKey, pauseKey, aoKey, shadowKey, shotKey, viewKey, rtKey, debugHudKey, muteKey, antiLagIdleKey;
     Press gearUpKey, gearDownKey, cameraKey, resetKey;
-    int debugView = 0;
+    int debugView = startView;
     uint32_t pauseAt = o.pauseAt;
     bool taa = settings.taa != 0, paused = false, ao = settings.quality != 0, shadows = settings.shadows != 0, rt = settings.rayTracing != 0;
     bool antiLagIdle = false;   // N: the anti-lag armed at standstill (the driver's switch before a start)
@@ -894,10 +897,97 @@ int Menus(Shell& sh, std::string note)
 
 } // namespace
 
+// THE LAMP LAB (--lab, NGG design 5.4 N3): the test lamps (PHYS_DRIVE_TEST_LIGHTS, the ramp by default) on a car standing
+// in a synthetic scene (assets::BuildLampLab) - no stage, no physics, no car model yet. The sky's --time / --date as a
+// stage's (23:00 by default); --camera 0 chase, 1 bonnet (the default), 2 above, 3 beside; --exit-at <frame>.
+// PHYS_DRIVE_SHOTS=<n> a capture at frame n and every n frames after; PHYS_DRIVE_OFF and NGG_DEBUG_VIEW as on a stage.
+int RunLab(Shell& sh, const std::vector<std::string>& args)
+{
+    auto arg = [&](const char* name, const char* fallback) {
+        for (size_t i = 1; i + 1 < args.size(); ++i)
+            if (args[i] == name) return args[i + 1];
+        return std::string(fallback);
+    };
+    Options o;
+    o.skyMonth = 11, o.skyDay = 9;   // a long night, unless --date says otherwise
+    if (const int code = ParseSkyTime(args, o, "23:00")) return code;
+    const int cameraMode = std::atoi(arg("--camera", "1").c_str());
+    const uint32_t exitAt = std::strtoul(arg("--exit-at", "0").c_str(), nullptr, 10);
+    const uint32_t shotEvery = std::getenv("PHYS_DRIVE_SHOTS") ? std::strtoul(std::getenv("PHYS_DRIVE_SHOTS"), nullptr, 0) : 0;
+
+    render::Renderer& renderer = sh.renderer;
+    iface::RenderSettings settings = ToRender(sh.settings);
+    if (const char* off = std::getenv("PHYS_DRIVE_OFF")) {
+        if (std::strstr(off, "vsync")) settings.vsync = 0;
+        if (std::strstr(off, "taa")) settings.taa = 0;
+        if (std::strstr(off, "ao")) settings.quality = 0;
+        if (std::strstr(off, "shadows")) settings.shadows = 0;
+        if (std::strstr(off, "rt")) settings.rayTracing = 0;
+    }
+    renderer.ApplySettings(settings);
+    renderer.SetDebugView(std::getenv("NGG_DEBUG_VIEW") ? std::atoi(std::getenv("NGG_DEBUG_VIEW")) : 0);
+    const std::vector<uint8_t> bytes = assets::BuildLampLab();
+    const iface::SceneHandle scene = renderer.LoadScene(bytes.data(), bytes.size());
+    if (!scene) return std::fprintf(stderr, "the lab: %s\n", renderer.Error().c_str()), 3;
+
+    // The car at the origin, unturned (facing the physics frame's -y), its lamps the test layout's.
+    physics::Pose p{};
+    p.position[2] = assets::kLabCogHeight;
+    p.rotation[3] = 1.0f;
+    const char* layoutEnv = std::getenv("PHYS_DRIVE_TEST_LIGHTS");
+    const std::string layout = layoutEnv && *layoutEnv ? layoutEnv : "ramp";
+    const bool noShadow = layout == "noshadow";
+    std::vector<assets::Lamp> lamps = assets::TestLayout(noShadow ? "ramp" : layout.c_str());
+    if (lamps.empty()) lamps = assets::TestLayout("ramp");
+    std::vector<iface::LightDesc> lights;
+    for (const assets::Lamp& lamp : lamps) lights.push_back(assets::LampLight(lamp, p, !noShadow));
+    std::printf("the lab: %zu lamps (%s), camera %d\n", lamps.size(), layout.c_str(), cameraMode);
+
+    const V3 chaseEye = V3{p.position[0], p.position[1], p.position[2]} + V3{0.0f, 5.2f, 1.6f};
+    uint32_t frame = 0;
+    int shots = 0;
+    while (sh.window.Pump() && !sh.window.TakeEscape()) {
+        sh.FollowSize();
+        const camera::View view = camera::Look(cameraMode, p, chaseEye, 0.0f, nullptr);
+        float viewM[16], proj[16];
+        math::LookAt(math::ToRender(view.eye), math::ToRender(view.at), viewM);
+        math::Perspective(view.fovY, sh.height ? float(sh.width) / float(sh.height) : 16.0f / 9.0f, 0.25f, 8000.0f, proj);
+        if (shotEvery && frame >= shotEvery && frame % shotEvery == 0) {
+            char name[32];
+            std::snprintf(name, sizeof name, "shot-%03d.bmp", shots++);
+            renderer.CaptureFrame(name);
+            std::printf("screenshot %s (frame %u)\n", name, frame);
+        }
+        sh.ui.NewFrame();
+        iface::FrameDesc fd{};
+        fd.scene = scene;
+        std::memcpy(fd.camera.view, viewM, sizeof viewM);
+        std::memcpy(fd.camera.proj, proj, sizeof proj);
+        fd.camera.nearZ = 0.25f;
+        fd.camera.farZ = 8000.0f;
+        fd.camera.fovY = view.fovY;
+        fd.skyTime = {1, o.skyYear, o.skyMonth, o.skyDay, static_cast<float>(o.skyHour), static_cast<float>(o.skyUtcOffset),
+                      static_cast<float>(o.skyLatitude), static_cast<float>(o.skyLongitude), static_cast<float>(o.skyNorth)};
+        fd.lights = lights.data();
+        fd.lightCount = static_cast<uint32_t>(lights.size());
+        fd.ui = sh.ui.Render();
+        if (!renderer.RenderFrame(fd)) std::fprintf(stderr, "renderer: %s\n", renderer.Error().c_str());
+        renderer.Present();
+        if (const std::string log = renderer.TakeLog(); sh.rendererLog && !log.empty()) std::printf("%s", log.c_str());
+        if (exitAt && ++frame >= exitAt) break;
+        if (!exitAt) ++frame;
+    }
+    return 0;
+}
+
 int RunGame(const std::vector<std::string>& args)
 {
     Shell sh;
     sh.settings = LoadSettings();
+    if (std::find(args.begin(), args.end(), std::string("--lab")) != args.end()) {
+        if (const std::string e = OpenShell(sh, "wrenderer"); !e.empty()) return std::fprintf(stderr, "%s\n", e.c_str()), 3;
+        return RunLab(sh, args);
+    }
     // A command line: that stage at once (its Esc menu's "Exit to main menu" goes to the menus).
     if (args.size() > 1) {
         Options o;

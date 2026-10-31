@@ -21,10 +21,14 @@ const LampBeam kBeams[] = {
      {{80000.0f, 7.0f, 3.5f, 0.0f, 0.0f, 2.0f}, {18000.0f, 22.0f, 7.0f, 0.0f, -1.0f, 2.0f}}},
     // The pods' beams narrow, with a harder edge: each lamp lights its own spot (the user's tuning on the wall,
     // tools/lamp-wall/wall.py, 2026-10-31).
-    {"led-pencil", 5800.0f, 0.08f, 2,
-     {{350000.0f, 2.5f, 1.8f, 0.0f, 0.0f, 3.0f}, {15000.0f, 6.0f, 3.5f, 0.0f, 0.0f, 2.0f}}},
-    {"led-driving", 5800.0f, 0.08f, 2,
-     {{150000.0f, 5.0f, 3.0f, 0.0f, 0.0f, 3.0f}, {15000.0f, 12.0f, 5.0f, 0.0f, -1.0f, 2.0f}}},
+    // And a wide, dim spill around each hot spot (~7% of its peak): every patch of road lit by several lamps, so a
+    // thing casts several lighter shadows, not one lamp's dark one.
+    {"led-pencil", 5800.0f, 0.08f, 3,
+     {{350000.0f, 2.5f, 1.8f, 0.0f, 0.0f, 3.0f}, {15000.0f, 6.0f, 3.5f, 0.0f, 0.0f, 2.0f},
+      {25000.0f, 25.0f, 10.0f, 0.0f, -1.0f, 2.0f}}},
+    {"led-driving", 5800.0f, 0.08f, 3,
+     {{150000.0f, 5.0f, 3.0f, 0.0f, 0.0f, 3.0f}, {15000.0f, 12.0f, 5.0f, 0.0f, -1.0f, 2.0f},
+      {12000.0f, 30.0f, 12.0f, 0.0f, -1.0f, 2.0f}}},
     {"led-bar", 5700.0f, 0.25f, 2,
      {{60000.0f, 30.0f, 4.5f, 0.0f, 0.0f, 4.0f}, {15000.0f, 60.0f, 9.0f, 0.0f, -2.0f, 2.0f}}},
     {"ditch", 5800.0f, 0.08f, 1,
