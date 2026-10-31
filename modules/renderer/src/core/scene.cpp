@@ -176,7 +176,7 @@ float WetNoise(float2 p)
 
 // Declared ahead of its use; defined after the BRDF helpers below.
 float3 LocalLights(float3 p, float3 N, float3 V, float3 diffuseCol, float3 f0, float a, float specScale, float2 px,
-                   float wrap, bool withSpec);
+                   float wrap, float trans, bool withSpec);
 
 // Standard GGX: Trowbridge-Reitz distribution, height-correlated Smith
 // visibility, Schlick Fresnel. Nothing bespoke here on purpose - the value of a
@@ -222,13 +222,16 @@ float VisSmith(float ndv, float ndl, float a)
 // Scalar loads (above), the cone culling of the clusters (lights.cpp) and the early exit below each took little
 // off it - fewer fragments did: the opaque world's lights are shaded once per PIXEL by the deferred pass
 // (PSDeferredLights), only glass here (design 5.4 N2c).
+// `trans`: a foliage card's transmission, as for the sun - a leaf with the lamp behind it is backlit, not black
+// (design 5.4 N3: grass tufts lit by the lamps had black lower halves, their volume normals turned away).
 void ShadeLocalLight(uint li, LightRec L, float3 p, float3 N, float3 V, float ndv, float3 diffuseCol, float3 f0,
-                     float a, float specScale, float wrap, bool withSpec, inout float3 shadowed, inout float3 open)
+                     float a, float specScale, float wrap, float trans, bool withSpec, inout float3 shadowed,
+                     inout float3 open)
 {
     float3 l;
     float dist;
     const float3 E = LightIrradiance(li, L, p, l, dist);
-    const float ndl = saturate((dot(N, l) + wrap) / (1.0 + wrap));
+    const float ndl = saturate((dot(N, l) + wrap) / (1.0 + wrap)) + saturate(-dot(N, l)) * trans;
     // Nothing from it here - outside a spot's cone or past its range, or facing away: the rest is skipped (a cone's
     // edge on screen is a coherent boundary, so whole waves skip together).
     if (ndl <= 0.0 || max(E.r, max(E.g, E.b)) <= 0.0) return;
@@ -254,18 +257,19 @@ void ShadeLocalLight(uint li, LightRec L, float3 p, float3 N, float3 V, float nd
 }
 
 void ShadeLightCluster(uint ci, float3 p, float3 N, float3 V, float ndv, float3 diffuseCol, float3 f0, float a,
-                       float specScale, float wrap, bool withSpec, inout float3 shadowed, inout float3 open)
+                       float specScale, float wrap, float trans, bool withSpec, inout float3 shadowed, inout float3 open)
 {
     const uint2 c = gClusters[ci];
     for (uint k = 0; k < c.y; ++k)
     {
         const uint li = gLightIndex[c.x + k];
-        ShadeLocalLight(li, LightLoad(li), p, N, V, ndv, diffuseCol, f0, a, specScale, wrap, withSpec, shadowed, open);
+        ShadeLocalLight(li, LightLoad(li), p, N, V, ndv, diffuseCol, f0, a, specScale, wrap, trans, withSpec, shadowed,
+                        open);
     }
 }
 
 float3 LocalLights(float3 p, float3 N, float3 V, float3 diffuseCol, float3 f0, float a, float specScale, float2 px,
-                   float wrap, bool withSpec)
+                   float wrap, float trans, bool withSpec)
 {
     if (gLightsOn < 0.5) return float3(0.0, 0.0, 0.0);
     const uint ci = LightCluster(px, dot(p - gCamPos, gCamFwd), gClusterParams);
@@ -278,13 +282,13 @@ float3 LocalLights(float3 p, float3 N, float3 V, float3 diffuseCol, float3 f0, f
         const uint cu = WaveReadLaneFirst(ci);   // wave-uniform
         [branch] if (cu == ci)
         {
-            ShadeLightCluster(cu, p, N, V, ndv, diffuseCol, f0, a, specScale, wrap, withSpec, shadowed, open);
+            ShadeLightCluster(cu, p, N, V, ndv, diffuseCol, f0, a, specScale, wrap, trans, withSpec, shadowed, open);
             done = true;
         }
     }
 #endif
     [branch] if (!done)
-        ShadeLightCluster(ci, p, N, V, ndv, diffuseCol, f0, a, specScale, wrap, withSpec, shadowed, open);
+        ShadeLightCluster(ci, p, N, V, ndv, diffuseCol, f0, a, specScale, wrap, trans, withSpec, shadowed, open);
 #ifdef BLEND
     const float vis = 1.0;
 #else
@@ -952,11 +956,11 @@ float4 Shade(VSOut i, bool frontFace, out GBufOut g)
             const float3 lV    = normalize(gCamPos - i.wpos);
             const float  lspec = physical ? 1.0 : 3.14159265;
 #if defined(ALPHA_TEST)
-            localLight = LocalLights(i.wpos, N, lV, ldiff, lf0, la, lspec, i.pos.xy, kFoliageWrap, false);
+            localLight = LocalLights(i.wpos, N, lV, ldiff, lf0, la, lspec, i.pos.xy, kFoliageWrap, kFoliageTransmission, false);
 #elif defined(BLEND)
-            localLight = LocalLights(i.wpos, N, lV, ldiff * coverage, lf0, la, lspec, i.pos.xy, 0.0, true);
+            localLight = LocalLights(i.wpos, N, lV, ldiff * coverage, lf0, la, lspec, i.pos.xy, 0.0, 0.0, true);
 #else
-            localLight = LocalLights(i.wpos, N, lV, ldiff, lf0, la, lspec, i.pos.xy, 0.0, true);
+            localLight = LocalLights(i.wpos, N, lV, ldiff, lf0, la, lspec, i.pos.xy, 0.0, 0.0, true);
 #endif
         }
 #endif
@@ -1408,7 +1412,8 @@ float4 PSDeferredLights(float4 pos : SV_Position) : SV_Target
     const float la = max(0.002, roughness * roughness);
     const float lspec = physical ? 1.0 : 3.14159265;
     const bool foliage = kind > 1.5;
-    const float3 L = LocalLights(p, N, V, ldiff, lf0, la, lspec, pos.xy, foliage ? kFoliageWrap : 0.0, !foliage);
+    const float3 L = LocalLights(p, N, V, ldiff, lf0, la, lspec, pos.xy, foliage ? kFoliageWrap : 0.0,
+                                 foliage ? kFoliageTransmission : 0.0, !foliage);
     float3 tr = float3(1.0, 1.0, 1.0), inscatter;
     if (gAerial > 0.5)
     {
