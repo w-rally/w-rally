@@ -5,7 +5,8 @@
 //
 // The fonts: ImGui's own for small text, and Consolas Bold (the HUD's face since phys-drive) at a small and a large
 // size for the HUD - the large one so the countdown's digits are drawn from big glyphs rather than blown-up small ones;
-// Segoe UI for the menus, which the keyboard (arrows, Enter, Esc) works as well as the mouse.
+// Segoe UI for the menus, which the keyboard (arrows, Enter, Esc) works as well as the mouse; its italics and semibold
+// for the main menu.
 
 #include <windows.h>
 
@@ -38,6 +39,11 @@ public:
     ImFont* HudLarge() const { return m_large; }
     // The menus' face (Segoe UI; null: ImGui's own).
     ImFont* MenuFont() const { return m_menu; }
+    // The main menu's: the wordmark (Segoe UI Black Italic), its items (Bold Italic), its labels and text (Semibold).
+    // Never null (the menus' face, else ImGui's own).
+    ImFont* Wordmark() const { return m_wordmark; }
+    ImFont* MenuItem() const { return m_menuItem; }
+    ImFont* MenuText() const { return m_menuText; }
     // The monitor's scale (its DPI / 96, at least 1): the menus' sizes are multiplied by it.
     float Scale() const { return m_scale; }
 
@@ -46,6 +52,9 @@ private:
     ImFont* m_small = nullptr;
     ImFont* m_large = nullptr;
     ImFont* m_menu = nullptr;
+    ImFont* m_wordmark = nullptr;
+    ImFont* m_menuItem = nullptr;
+    ImFont* m_menuText = nullptr;
     float m_scale = 1.0f;
     std::vector<iface::UiVertex> m_vertices;
     std::vector<uint32_t> m_indices;

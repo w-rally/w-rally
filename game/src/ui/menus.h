@@ -3,7 +3,8 @@
 // between ImGuiLayer::NewFrame and Render, returning what was chosen. The screens hold no state of their own beyond
 // ImGui's and Controls' wait for a key; what they edit is the caller's (Settings, the debug switches).
 //
-//   MainMenu     Quick rally, Settings, Exit
+//   MainMenu     Quick rally, Settings, Exit (Season, not there yet): the whole window, drawn to the WRally design -
+//                W / S or the arrows slide the selection, Enter or Space picks it
 //   QuickRally   stage, car, setup, damage, weather, road - Start / Back (the choice kept in Settings)
 //   SettingsUi   tabs: the content (folders, base physics, Extract the slot cars' physics), graphics, sound, controls
 //   PauseMenu    the in-stage menu (Esc): Resume, Restart stage, Settings, Debug, Exit to main menu

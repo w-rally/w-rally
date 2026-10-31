@@ -47,6 +47,16 @@ std::string ImGuiLayer::Init(HWND window, render::Renderer& renderer)
     m_scale = std::max(1.0f, static_cast<float>(GetDpiForWindow(window)) / 96.0f);
     if (GetFileAttributesA(segoe.c_str()) != INVALID_FILE_ATTRIBUTES)
         m_menu = io.Fonts->AddFontFromFileTTF(segoe.c_str(), 24.0f * m_scale);
+    // The main menu's faces (its design's Saira: Segoe UI's black and bold italics, its semibold), drawn at the window's
+    // height - loaded large, so 1440p is drawn from big enough glyphs.
+    auto face = [&](const char* file, float px) -> ImFont* {
+        const std::string path = std::string(fonts) + "\\Fonts\\" + file;
+        if (GetFileAttributesA(path.c_str()) == INVALID_FILE_ATTRIBUTES) return m_menu ? m_menu : io.Fonts->Fonts[0];
+        return io.Fonts->AddFontFromFileTTF(path.c_str(), px);
+    };
+    m_wordmark = face("seguibli.ttf", 100.0f);
+    m_menuItem = face("segoeuiz.ttf", 40.0f);
+    m_menuText = face("seguisb.ttf", 32.0f);
     ImGui::StyleColorsDark();
     ImGuiStyle& style = ImGui::GetStyle();
     style.WindowRounding = style.FrameRounding = 4.0f;
