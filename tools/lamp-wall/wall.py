@@ -33,16 +33,16 @@ HEAD_RAMP = [('halogen-high', 0.65, -2.0, 0.05, -10.0, -0.5), ('halogen-high', -
 LAYOUTS = {
     # The pods each to their own spot: the outer ones 20 degrees out to their corners, the inner ones 5 degrees out
     # and up (yaw is to the right, so the left side's are negative).
-    'ramp': HEAD_RAMP + [('halogen-driving', 0.38, -1.9, 0.3, -20.0, -0.8), ('halogen-pencil', 0.12, -1.9, 0.3, -5.0, 4.0),
-                         ('halogen-pencil', -0.12, -1.9, 0.3, 5.0, 4.0), ('halogen-driving', -0.38, -1.9, 0.3, 20.0, -0.8)],
+    'ramp': HEAD_RAMP + [('halogen-pencil', 0.38, -1.9, 0.3, -20.0, -0.8), ('halogen-pencil', 0.12, -1.9, 0.3, -5.0, 4.0),
+                         ('halogen-pencil', -0.12, -1.9, 0.3, 5.0, 4.0), ('halogen-pencil', -0.38, -1.9, 0.3, 20.0, -0.8)],
     # The i20 R5's own six pods (its .ini's Point_light_bon1..6, the centre of gravity as HEAD's), aimed as the game's
-    # AimRamp aims six: the outer pair 20 degrees out, the middle pair 10 and 2 up, the inner pair 5 out and 4 up;
+    # AimRamp aims six: the outer pair 20 degrees out, the middle pair 13 and 2 up, the inner pair 5 out and 4 up;
     # all six pencils.
-    'ramp6': HEAD_RAMP + [('halogen-pencil', 0.456, -2.27, 0.15, -20.0, -0.8), ('halogen-pencil', 0.316, -2.27, 0.18, -10.0, 2.0),
+    'ramp6': HEAD_RAMP + [('halogen-pencil', 0.456, -2.27, 0.15, -20.0, -0.8), ('halogen-pencil', 0.316, -2.27, 0.18, -13.0, 2.0),
                           ('halogen-pencil', 0.126, -2.27, 0.18, -5.0, 4.0), ('halogen-pencil', -0.126, -2.27, 0.18, 5.0, 4.0),
-                          ('halogen-pencil', -0.316, -2.27, 0.18, 10.0, 2.0), ('halogen-pencil', -0.486, -2.27, 0.15, 20.0, -0.8)],
-    # Two pods: driving beams 10 degrees out.
-    'pods2': HEAD_RAMP + [('halogen-driving', 0.25, -1.9, 0.3, -10.0, -0.8), ('halogen-driving', -0.25, -1.9, 0.3, 10.0, -0.8)],
+                          ('halogen-pencil', -0.316, -2.27, 0.18, 13.0, 2.0), ('halogen-pencil', -0.486, -2.27, 0.15, 20.0, -0.8)],
+    # Two pods: driving beams 5 degrees out and 3 up.
+    'pods2': HEAD_RAMP + [('halogen-driving', 0.25, -1.9, 0.3, -5.0, 3.0), ('halogen-driving', -0.25, -1.9, 0.3, 5.0, 3.0)],
     # The LED bars: the main beams straight on (the bars' flood covers the corners).
     'bars': HEAD + [('led-bar', 0.3, -1.8, 0.32, 0.0, -0.8), ('led-bar', -0.3, -1.8, 0.32, 0.0, -0.8)],
     'low': [('halogen-low', 0.65, -2.0, 0.05, 0.0, 0.0), ('halogen-low', -0.65, -2.0, 0.05, 0.0, 0.0)],

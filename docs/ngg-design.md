@@ -3222,7 +3222,8 @@ Four decisions, the user's:
       "ramp" (its own pods, with its ramp's meshes - the i20's six), "2 pods", "4 pods", "6 pods" (a count its own
       leaves out), "LED bars", "no ramp"; its own ramp the default, else four pods. The pods are halogen (3300 K -
       `halogen-pencil`, `halogen-driving`, the wall-tuned shapes of N3a's LED presets); the white LED look is the bars'.
-      Aims: two pods 10 out; the outer pair 20 out, the inner 5 out and 4 up, a middle pair (six) 10 out and 2 up; with six or more every pod a pencil. The small lamps: tail, brake (with the high centre one), reverse (white), four
+      Aims: two pods (driving beams) 5 out and 3 up; the outer pair 20 out, the inner 5 out and 4 up, a middle pair (six)
+      13 out and 2 up; with four or more every pod a pencil. The small lamps: tail, brake (with the high centre one), reverse (white), four
       indicators (amber, 1.5 Hz; no RBR car has them) - coloured presets, no shadows.
     - **The switches:** H headlights off / dipped / main, J the ramp (it shines with the main beam), Q / E the
       indicators, G hazard; the brake pedal and reverse switch theirs. After dusk the lamps start lit (the renderer's

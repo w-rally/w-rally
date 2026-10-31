@@ -153,10 +153,10 @@ std::vector<Lamp> TestLayout(const char* name)
         // degrees out to the corners, the inner ones 5 degrees out and 4 up.
         lamps[0].yawDeg = -10.0f;
         lamps[1].yawDeg = 10.0f;
-        lamps.push_back({LampKind::HalogenDriving, {0.38f, -1.9f, 0.3f}, -20.0f, rampPitch});
+        lamps.push_back({LampKind::HalogenPencil, {0.38f, -1.9f, 0.3f}, -20.0f, rampPitch});
         lamps.push_back({LampKind::HalogenPencil, {0.12f, -1.9f, 0.3f}, -5.0f, 4.0f});
         lamps.push_back({LampKind::HalogenPencil, {-0.12f, -1.9f, 0.3f}, 5.0f, 4.0f});
-        lamps.push_back({LampKind::HalogenDriving, {-0.38f, -1.9f, 0.3f}, 20.0f, rampPitch});
+        lamps.push_back({LampKind::HalogenPencil, {-0.38f, -1.9f, 0.3f}, 20.0f, rampPitch});
     } else if (!std::strcmp(name, "bars")) {
         lamps.push_back({LampKind::LedBar, {-0.3f, -1.8f, 0.32f}, 0.0f, rampPitch});
         lamps.push_back({LampKind::LedBar, {0.3f, -1.8f, 0.32f}, 0.0f, rampPitch});
@@ -210,17 +210,17 @@ std::vector<Lamp> AimRamp(std::vector<math::V3> places)
         l.at = places[i];
         if (n % 2 && i == n / 2) {
             l.kind = LampKind::HalogenPencil, l.yawDeg = 0.0f, l.pitchDeg = 0.0f;
-        } else if (pairs == 1) {   // a single pair: driving beams 10 degrees out, below the main beams' corners
-            l.kind = LampKind::HalogenDriving, l.yawDeg = 10.0f * side, l.pitchDeg = -0.8f;
+        } else if (pairs == 1) {   // a single pair: driving beams 5 degrees out and 3 up
+            l.kind = LampKind::HalogenDriving, l.yawDeg = 5.0f * side, l.pitchDeg = 3.0f;
         } else if (fromOutside + 1 == pairs) {   // the innermost pair
             l.kind = LampKind::HalogenPencil, l.yawDeg = 5.0f * side, l.pitchDeg = 4.0f;
         } else if (fromOutside == 0) {
             l.kind = LampKind::HalogenDriving, l.yawDeg = 20.0f * side, l.pitchDeg = -0.8f;
-        } else {   // between: 10 degrees out, 2 up (their own spot above the outer ones', as tuned on the wall)
-            l.kind = LampKind::HalogenDriving, l.yawDeg = 10.0f * side, l.pitchDeg = 2.0f;
+        } else {   // between: 13 degrees out, 2 up (their own spot above the outer ones', as tuned on the wall)
+            l.kind = LampKind::HalogenDriving, l.yawDeg = 13.0f * side, l.pitchDeg = 2.0f;
         }
-        // Six or more: every pod a pencil - each its own narrow spot (the wall); four keep the outer driving beams.
-        if (pairs >= 3) l.kind = LampKind::HalogenPencil;
+        // Four or more: every pod a pencil - each its own narrow spot (the wall).
+        if (pairs >= 2) l.kind = LampKind::HalogenPencil;
         lamps.push_back(l);
     }
     return lamps;
