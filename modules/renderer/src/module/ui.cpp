@@ -219,6 +219,44 @@ void UiPass::ReleaseTexture(uint32_t slot)
     if (slot > 0 && slot < m_textures.size()) m_textures[slot].Reset();   // (the GPU is idle between frames)
 }
 
+bool UiPass::UpdateTexture(ngg::core::Device& dev, uint32_t slot, const void* rgba, std::string& error)
+{
+    if (slot == 0 || slot >= m_textures.size() || !m_textures[slot]) return error = "ui texture: no such texture", false;
+    ID3D12Device* device = dev.device.Get();
+    ID3D12Resource* tex = m_textures[slot].Get();
+    const D3D12_RESOURCE_DESC td = tex->GetDesc();
+    const uint32_t width = static_cast<uint32_t>(td.Width), height = td.Height;
+    D3D12_PLACED_SUBRESOURCE_FOOTPRINT foot = {};
+    UINT64 bytes = 0;
+    device->GetCopyableFootprints(&td, 0, 1, 0, &foot, nullptr, nullptr, &bytes);
+    if (bytes > m_updateBytes) {
+        m_update = UploadBuffer(device, bytes);
+        m_updateBytes = m_update ? bytes : 0;
+        if (!m_update) return error = "ui texture: upload buffer", false;
+    }
+    uint8_t* p = nullptr;
+    if (FAILED(m_update->Map(0, nullptr, reinterpret_cast<void**>(&p)))) return error = "ui texture: map", false;
+    for (uint32_t y = 0; y < height; ++y)
+        std::memcpy(p + foot.Offset + size_t(y) * foot.Footprint.RowPitch, static_cast<const uint8_t*>(rgba) + size_t(y) * width * 4,
+                    size_t(width) * 4);
+    m_update->Unmap(0, nullptr);
+
+    if (!dev.Begin()) return error = "ui texture: command list would not open", false;
+    D3D12_RESOURCE_BARRIER b = Transition(tex, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COPY_DEST);
+    dev.list->ResourceBarrier(1, &b);
+    D3D12_TEXTURE_COPY_LOCATION dst = {}, src = {};
+    dst.pResource = tex;
+    dst.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+    src.pResource = m_update.Get();
+    src.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+    src.PlacedFootprint = foot;
+    dev.list->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
+    b = Transition(tex, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+    dev.list->ResourceBarrier(1, &b);
+    dev.EndAndWait();
+    return true;
+}
+
 bool UiPass::Upload(ngg::core::Device& dev, const iface::UiDrawList& ui)
 {
     const uint64_t vb = uint64_t(ui.vertexCount) * sizeof(iface::UiVertex), ib = uint64_t(ui.indexCount) * 4;

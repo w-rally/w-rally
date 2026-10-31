@@ -905,14 +905,18 @@ int Menus(Shell& sh, std::string note)
     Screen screen = Screen::Main;
     std::string settingsLog;
     Settings atOpen;   // the settings as the Settings screen opened (the content changed: scanned again)
+    // The main menu's video loop (content/video/menu.mp4; none: the window dark).
+    ui::MenuVideo video;
+    if (const std::string e = video.Open(WRallyFile("content/video/menu.mp4")); !e.empty()) std::printf("%s\n", e.c_str());
     for (;;) {
+        if (screen == Screen::Main) video.Update(sh.renderer);   // (outside the frame: the upload is its own)
         bool start = false, exit = false;
         const UINT keyDown = sh.window.TakeKeyDown();   // (for Settings -> Controls)
         const bool capturing = ui::CapturingKey();      // (Esc then the binding's, not the menu's)
         const bool open = MenuFrame(sh, [&] {
             switch (screen) {
             case Screen::Main:
-                switch (ui::MainMenu(sh.ui, sh.width, sh.height, note)) {
+                switch (ui::MainMenu(sh.ui, sh.width, sh.height, note, video.Frame())) {
                 case ui::MainChoice::QuickRally: screen = Screen::Quick; break;
                 case ui::MainChoice::Settings: screen = Screen::Settings, atOpen = sh.settings, settingsLog.clear(); break;
                 case ui::MainChoice::Exit: exit = true; break;

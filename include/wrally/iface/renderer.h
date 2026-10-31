@@ -41,7 +41,8 @@ namespace wrally::iface {
 // 7: RenderStats::frameMs (the whole frame's GPU time).
 // 8: LightDesc - beams (kLightBeam: lobes in the lamp's frame, its up), the radial profile gone.
 // 9: RenderStats::sunElevationDeg (the frame's sun: its own time and place, or the weather's).
-constexpr uint32_t kRendererInterfaceVer = 9;
+// 10: updateTextureRgba (a UI texture's pixels again: the main menu's video).
+constexpr uint32_t kRendererInterfaceVer = 10;
 
 struct Renderer;                     // the module's instance, opaque
 typedef uint32_t SceneHandle;        // a loaded .ngg stage
@@ -375,6 +376,10 @@ struct RendererApi {
     // any scene, 1 A (RBR's bake times the dynamic light), 2 B (dynamic light, the bake as occlusion). Other
     // scenes ignore it. Takes effect at the next frame.
     Status (WRALLY_CALL* setLegacyProfile)(Renderer*, int32_t mode);
+
+    // A createTextureRgba texture's pixels replaced, the same size (RGBA8, width * 4 bytes a row): a video's frames.
+    // Uploaded now - call outside renderFrame.
+    Status (WRALLY_CALL* updateTextureRgba)(Renderer*, TextureHandle, const void* rgba);
 };
 
 struct RendererInput {

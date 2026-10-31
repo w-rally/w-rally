@@ -449,6 +449,14 @@ void WRALLY_CALL ReleaseTexture(Renderer* r, TextureHandle t)
     if (r && (t & kUiTextureBit)) r->ui.ReleaseTexture(t & ~kUiTextureBit);   // (scene textures go with the scene)
 }
 
+Status WRALLY_CALL UpdateTextureRgba(Renderer* r, TextureHandle t, const void* rgba)
+{
+    if (!r || !rgba || !(t & kUiTextureBit)) return Status::ErrInvalidArg;
+    std::string e;
+    if (!r->ui.UpdateTexture(r->dev, t & ~kUiTextureBit, rgba, e)) return r->Fail(Status::ErrInvalidArg, e);
+    return Status::Ok;
+}
+
 Status WRALLY_CALL CreateModel(Renderer* r, const ModelDesc* d, ModelHandle* out)
 {
     if (out) *out = 0;
@@ -764,7 +772,7 @@ const RendererApi kApi = {&Destroy,       &LastError,         &ApplySettings,  &
                           &WeatherPresetAt, &FindWeatherPreset, &CreateTexture, &CreateTextureRgba,
                           &ReleaseTexture, &CreateModel,      &ReleaseModel,   &CreateInstance, &DestroyInstance,
                           &RenderFrame,   &Present,           &Stats,          &CaptureFrame,   &SetDebugView,
-                          &DebugViewName, &SetLegacyProfile};
+                          &DebugViewName, &SetLegacyProfile, &UpdateTextureRgba};
 
 } // namespace
 

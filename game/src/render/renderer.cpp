@@ -122,6 +122,16 @@ iface::TextureHandle Renderer::CreateTextureRgba(const void* rgba, uint32_t widt
     return Made(s, h, m_api, m_instance, m->error);
 }
 
+void Renderer::ReleaseTexture(iface::TextureHandle t)
+{
+    if (m_instance && t) m_api->releaseTexture(m_instance, t);
+}
+
+bool Renderer::UpdateTextureRgba(iface::TextureHandle t, const void* rgba)
+{
+    return m_instance && Made(m_api->updateTextureRgba(m_instance, t, rgba), 1, m_api, m_instance, m->error);
+}
+
 iface::ModelHandle Renderer::CreateModel(const iface::ModelDesc& d)
 {
     if (!m_instance) return 0;
