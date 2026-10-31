@@ -40,9 +40,10 @@ enum class SettingsChoice { None, Back, Graphics, Rescan, Extract };
 // Graphics: a graphics field changed (to apply now). `inStage`: the content's part is shown but not editable.
 // `log`: the last Rescan / Extract's report.
 // The screen has tabs: Content, Graphics, Sound, Controls (the keys). `keyDown`: the key pressed this frame
-// (Window::TakeKeyDown), which Controls binds while it waits for one.
+// (Window::TakeKeyDown), which Controls binds while it waits for one. `video`: the main menu's loop, veiled in the
+// livery's window, which holds the main menu's place (none: the window dark).
 SettingsChoice SettingsUi(const ImGuiLayer& ui, app::Settings& s, bool inStage, const std::string& log, UINT keyDown,
-                          int width, int height);
+                          int width, int height, const VideoFrame& video = {});
 // Esc on the screen is Back. Whether Controls is waiting for a key or a text field has the keyboard: Esc is then
 // theirs (no change), not the menu's.
 bool CapturingKey();

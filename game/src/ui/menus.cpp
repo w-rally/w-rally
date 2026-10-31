@@ -201,14 +201,15 @@ void Livery(ImDrawList* d, float W, float H, float k, float shift, ImU32 ground)
     FadeQuad(d, q, kInk, ground);
 }
 
-// The main menu's third stripe, left of the signal one: a window onto the video loop, the video covering the stripe's
-// bounds (cropped, centred) and fading in over the ground when its first frame comes. `on` 0..1: how far it has.
-// Without a video, the dark of the design's placeholder (overlay to the ground, top to bottom).
-void VideoWindow(ImDrawList* d, float W, float H, float k, float shift, const VideoFrame& video, float on)
+// The livery's third stripe, left of the signal one: a window onto the video loop, the video covering the stripe's
+// bounds (cropped, centred) and fading in over the ground when its first frame comes. `on` 0..1: how far it shows.
+// Under it the dark of the design's placeholder (overlay to the ground, top to bottom), as see-through as the ground.
+void VideoWindow(ImDrawList* d, float W, float H, float k, float shift, ImU32 ground, const VideoFrame& video, float on)
 {
     ImVec2 q[4];
     Stripe(W, H, k, 990, 400, shift, q);
-    FadeQuad(d, q, kSurfaceOverlay, kSurfaceBase);
+    const float see = float((ground >> IM_COL32_A_SHIFT) & 0xff) / 255;
+    FadeQuad(d, q, Alpha(kSurfaceOverlay, see), Alpha(kSurfaceBase, see));
     if (!video.texture || video.width <= 0 || video.height <= 0 || on <= 0.01f) return;
 
     const float x0 = q[3].x, x1 = q[1].x, y0 = q[0].y, y1 = q[2].y, bw = x1 - x0, bh = y1 - y0;
@@ -217,6 +218,20 @@ void VideoWindow(ImDrawList* d, float W, float H, float k, float shift, const Vi
     auto uv = [&](ImVec2 p) { return ImVec2((1 - uw) * 0.5f + (p.x - x0) / bw * uw, (1 - vh) * 0.5f + (p.y - y0) / bh * vh); };
     d->AddImageQuad(static_cast<ImTextureID>(video.texture), q[0], q[1], q[2], q[3], uv(q[0]), uv(q[1]), uv(q[2]), uv(q[3]),
                     Alpha(kInk, on));
+}
+
+// Where the livery is on every full screen (px at 1080p right of the design system's place), so its stripes hold still
+// from screen to screen.
+constexpr float kLiveryShift = 150;
+float g_videoOn = 0;   // the video window's fade in, 0..1 (once there is a frame, over ~300 ms)
+
+// A full screen's ground, its livery and the video's window. `veil` 0..1: how far the video gives way to the ground,
+// for a screen whose content runs over the window.
+void Backdrop(ImDrawList* d, float W, float H, float k, ImU32 ground, const VideoFrame& video, float veil)
+{
+    Livery(d, W, H, k, kLiveryShift, ground);
+    if (video.texture) g_videoOn = std::min(1.0f, g_videoOn + ImGui::GetIO().DeltaTime / 0.3f);
+    VideoWindow(d, W, H, k, kLiveryShift, ground, video, g_videoOn * (1 - veil));
 }
 
 // A row's plate from `a`, `w` x `h`, its right edge cut in by `cut`.
@@ -262,7 +277,6 @@ constexpr int kMainCount = int(sizeof kMainItems / sizeof kMainItems[0]);
 int g_mainAt = 1;              // the selected item (Quick rally first)
 float g_mainPlate = -1;        // where the selection's plate is, in rows (eased to g_mainAt; -1: not drawn yet)
 float g_mainOn[kMainCount];    // how selected each item looks, 0..1 (its marker, its ink)
-float g_videoOn = 0;           // the video window's fade in, 0..1
 
 } // namespace
 
@@ -280,20 +294,15 @@ MainChoice MainMenu(const ImGuiLayer& ui, int width, int height, const std::stri
     ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0);
     if (ImGui::Begin("Main menu", nullptr, kFull)) {
         ImDrawList* d = ImGui::GetWindowDrawList();
-        // The stripes 150 px right of the Settings screen's place: more room between the column and the video.
-        constexpr float kShift = 150;
-        Livery(d, W, H, k, kShift, kSurfaceBase);
-        // The video fades in over ~300 ms once there is a frame.
-        if (video.texture) g_videoOn = std::min(1.0f, g_videoOn + ImGui::GetIO().DeltaTime / 0.3f);
-        VideoWindow(d, W, H, k, kShift, video, g_videoOn);
+        Backdrop(d, W, H, k, kSurfaceBase, video, 0);
 
         // The column: 48 px safe margin, 32 px padding.
         const float x0 = 80 * k, y0 = 80 * k;
         ImFont* mark = ui.Wordmark();
         ImFont* item = ui.MenuItem();
         ImFont* text = ui.MenuText();
-        const float wr = mark->CalcTextSizeA(72 * k, FLT_MAX, 0, "WR").x;
-        d->AddText(mark, 72 * k, ImVec2(x0, y0), kInk, "WR");
+        const float wr = mark->CalcTextSizeA(72 * k, FLT_MAX, 0, "W-R").x;
+        d->AddText(mark, 72 * k, ImVec2(x0, y0), kInk, "W-R");
         d->AddText(mark, 72 * k, ImVec2(x0 + wr, y0), kInkMuted, "ally");
 
         const float navY = y0 + 72 * k + 260 * k;
@@ -516,7 +525,7 @@ struct SetRow {
 } // namespace
 
 SettingsChoice SettingsUi(const ImGuiLayer& ui, app::Settings& s, bool inStage, const std::string& log, UINT keyDown,
-                          int width, int height)
+                          int width, int height, const VideoFrame& video)
 {
     using input::Action;
     const float k = std::min(height / 1080.0f, width / 1280.0f), W = float(width), H = float(height);
@@ -726,11 +735,11 @@ SettingsChoice SettingsUi(const ImGuiLayer& ui, app::Settings& s, bool inStage, 
         const bool click = !busy && ImGui::IsMouseClicked(ImGuiMouseButton_Left);
         auto over = [&](ImVec2 a, ImVec2 b) { return !busy && ImGui::IsMouseHoveringRect(a, b, false); };
 
-        // The ground (over a stage: its scrim), the livery moved right for the wider column.
-        Livery(d, W, H, k, 160, inStage ? IM_COL32(10, 10, 11, 235) : kSurfaceBase);
+        // The ground (over a stage: its scrim) and the livery where the main menu has it, the video veiled under the rows.
+        Backdrop(d, W, H, k, inStage ? IM_COL32(10, 10, 11, 235) : kSurfaceBase, video, 0.75f);
 
         // The header: where the screen is, its title.
-        Tracked(d, text, 17 * k, P(x0, 80), kInkMuted, inStage ? "WRALLY \xC2\xB7 PAUSED" : "WRALLY \xC2\xB7 MAIN MENU", 0.16f);
+        Tracked(d, text, 17 * k, P(x0, 80), kInkMuted, inStage ? "W-RALLY \xC2\xB7 PAUSED" : "W-RALLY \xC2\xB7 MAIN MENU", 0.16f);
         d->AddText(mark, 48 * k, P(x0, 108), kInk, "SETTINGS");
 
         // The tabs between their keys: the selected one's ink and its underline eased in.

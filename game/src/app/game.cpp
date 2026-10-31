@@ -910,7 +910,7 @@ int Menus(Shell& sh, std::string note)
     ui::MenuVideo video;
     if (const std::string e = video.Open(WRallyFile("content/video/menu.mp4")); !e.empty()) std::printf("%s\n", e.c_str());
     for (;;) {
-        if (screen == Screen::Main) video.Update(sh.renderer);   // (outside the frame: the upload is its own)
+        if (screen != Screen::Quick) video.Update(sh.renderer);   // (outside the frame: the upload is its own)
         bool start = false, exit = false;
         const UINT keyDown = sh.window.TakeKeyDown();   // (for Settings -> Controls)
         const bool capturing = ui::CapturingKey();      // (Esc then the binding's, not the menu's)
@@ -932,7 +932,7 @@ int Menus(Shell& sh, std::string note)
                 }
                 break;
             case Screen::Settings:
-                switch (ui::SettingsUi(sh.ui, sh.settings, false, settingsLog, keyDown, sh.width, sh.height)) {
+                switch (ui::SettingsUi(sh.ui, sh.settings, false, settingsLog, keyDown, sh.width, sh.height, video.Frame())) {
                 case ui::SettingsChoice::Graphics: sh.renderer.ApplySettings(ToRender(sh.settings)); break;
                 case ui::SettingsChoice::Rescan: {
                     const std::string e = scan();
