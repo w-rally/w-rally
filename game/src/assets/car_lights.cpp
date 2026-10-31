@@ -12,16 +12,19 @@ constexpr float kDeg = 3.14159265f / 180.0f;
 // The presets (LampKind order). Lobes: candela, half-width, half-height, yaw, pitch (degrees), sharpness.
 // Halogen headlamps: main beams of a few tens of thousands of candela, a dipped beam's hot spot under the horizon;
 // rally LED pods: rated at about 1 lux several hundred metres out, i.e. a few hundred thousand candela in the pencil;
-// an LED bar: a wide, flat flood of lower peak. Round figures - N3c tunes them on the reference shots.
+// an LED bar: a wide, flat flood of lower peak. Round figures, tuned on a wall (tools/lamp-wall/wall.py, which keeps
+// a copy of this table and the test layouts - change both).
 const LampBeam kBeams[] = {
     {"halogen-low", 3200.0f, 0.07f, 2,
      {{16000.0f, 22.0f, 3.5f, 0.0f, -2.0f, 4.0f}, {5000.0f, 45.0f, 8.0f, 0.0f, -5.0f, 2.0f}}},
     {"halogen-high", 3300.0f, 0.07f, 2,
-     {{50000.0f, 7.0f, 3.5f, 0.0f, 0.0f, 2.0f}, {12000.0f, 22.0f, 7.0f, 0.0f, -1.0f, 2.0f}}},
+     {{80000.0f, 7.0f, 3.5f, 0.0f, 0.0f, 2.0f}, {18000.0f, 22.0f, 7.0f, 0.0f, -1.0f, 2.0f}}},
+    // The pods' beams narrow, with a harder edge: each lamp lights its own spot (the user's tuning on the wall,
+    // tools/lamp-wall/wall.py, 2026-10-31).
     {"led-pencil", 5800.0f, 0.08f, 2,
-     {{350000.0f, 3.5f, 2.5f, 0.0f, 0.0f, 2.0f}, {40000.0f, 10.0f, 5.0f, 0.0f, 0.0f, 2.0f}}},
+     {{350000.0f, 2.5f, 1.8f, 0.0f, 0.0f, 3.0f}, {15000.0f, 6.0f, 3.5f, 0.0f, 0.0f, 2.0f}}},
     {"led-driving", 5800.0f, 0.08f, 2,
-     {{150000.0f, 8.0f, 4.0f, 0.0f, 0.0f, 2.0f}, {30000.0f, 22.0f, 8.0f, 0.0f, -1.0f, 2.0f}}},
+     {{150000.0f, 5.0f, 3.0f, 0.0f, 0.0f, 3.0f}, {15000.0f, 12.0f, 5.0f, 0.0f, -1.0f, 2.0f}}},
     {"led-bar", 5700.0f, 0.25f, 2,
      {{60000.0f, 30.0f, 4.5f, 0.0f, 0.0f, 4.0f}, {15000.0f, 60.0f, 9.0f, 0.0f, -2.0f, 2.0f}}},
     {"ditch", 5800.0f, 0.08f, 1,
@@ -106,17 +109,21 @@ iface::LightDesc LampLight(const Lamp& lamp, const physics::Pose& pose, bool sha
 std::vector<Lamp> TestLayout(const char* name)
 {
     // Round places on a rally hatchback: the headlamps at the nose's corners, a ramp across the bonnet's front edge.
-    const math::V3 hl{-0.65f, -2.0f, 0.05f}, hr{0.65f, -2.0f, 0.05f};
+    // +x is the car's left, and a yaw is to the right: the left side's lamps turn out with a negative one.
+    const math::V3 hl{0.65f, -2.0f, 0.05f}, hr{-0.65f, -2.0f, 0.05f};
     const float headPitch = -0.5f, rampPitch = -0.8f;
     if (!std::strcmp(name, "low"))
         return {{LampKind::HalogenLow, hl, 0.0f, 0.0f}, {LampKind::HalogenLow, hr, 0.0f, 0.0f}};
     std::vector<Lamp> lamps = {{LampKind::HalogenHigh, hl, 0.0f, headPitch}, {LampKind::HalogenHigh, hr, 0.0f, headPitch}};
     if (!std::strcmp(name, "ramp")) {
-        // The driving beams outside, toed 2 degrees out (+x is the car's left).
-        lamps.push_back({LampKind::LedDriving, {0.38f, -1.9f, 0.3f}, -2.0f, rampPitch});
-        lamps.push_back({LampKind::LedPencil, {0.12f, -1.9f, 0.3f}, 0.0f, rampPitch});
-        lamps.push_back({LampKind::LedPencil, {-0.12f, -1.9f, 0.3f}, 0.0f, rampPitch});
-        lamps.push_back({LampKind::LedDriving, {-0.38f, -1.9f, 0.3f}, 2.0f, rampPitch});
+        // Each lamp to its own spot (the user's tuning on the wall): the main beams 10 degrees out, the outer pods 20
+        // degrees out to the corners, the inner ones 5 degrees out and 4 up.
+        lamps[0].yawDeg = -10.0f;
+        lamps[1].yawDeg = 10.0f;
+        lamps.push_back({LampKind::LedDriving, {0.38f, -1.9f, 0.3f}, -20.0f, rampPitch});
+        lamps.push_back({LampKind::LedPencil, {0.12f, -1.9f, 0.3f}, -5.0f, 4.0f});
+        lamps.push_back({LampKind::LedPencil, {-0.12f, -1.9f, 0.3f}, 5.0f, 4.0f});
+        lamps.push_back({LampKind::LedDriving, {-0.38f, -1.9f, 0.3f}, 20.0f, rampPitch});
     } else if (!std::strcmp(name, "bars")) {
         lamps.push_back({LampKind::LedBar, {-0.3f, -1.8f, 0.32f}, 0.0f, rampPitch});
         lamps.push_back({LampKind::LedBar, {0.3f, -1.8f, 0.32f}, 0.0f, rampPitch});
