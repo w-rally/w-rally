@@ -28,32 +28,48 @@
 namespace ngg {
 namespace core {
 
+// A BEAM's lobe (design 5.4 N3a): an intensity peak in the lamp's own frame - its axis, its up - that falls to half at
+// the half-width across and the half-height up and down, centred `yawDeg` right and `pitchDeg` up of the axis.
+// `sharpness` 2 is a gaussian; higher, a flatter top with a harder edge (a headlamp's cut-off). A lamp's beam is the
+// sum of a few: a pod's pencil plus its driving spread, an LED bar's one wide flood.
+struct LightLobe
+{
+    float candela = 0.0f;
+    float halfWidthDeg = 10.0f, halfHeightDeg = 10.0f;
+    float yawDeg = 0.0f, pitchDeg = 0.0f;
+    float sharpness = 2.0f;
+};
+
 struct LightDesc
 {
-    enum Type : uint32_t { kPoint = 0, kSpot = 1 };
+    static constexpr uint32_t kMaxLobes = 4;
+    enum Type : uint32_t { kPoint = 0, kSpot = 1, kBeam = 2 };
     uint32_t type = kPoint;
     float    position[3] = {};     // world (render axes: y up)
-    float    direction[3] = { 0.0f, 0.0f, 1.0f };   // a spot's axis, unit
+    float    direction[3] = { 0.0f, 0.0f, 1.0f };   // a spot's or a beam's axis, unit
+    float    up[3] = { 0.0f, 1.0f, 0.0f };          // a beam's up (made square to the axis)
     float    colour[3] = { 1.0f, 1.0f, 1.0f };      // linear tint
-    float    intensity = 0.0f;     // candela, on the axis
+    float    intensity = 0.0f;     // candela on the axis; a beam: its lobes' scale (1: as given)
     float    range = 0.0f;         // metres; 0: from the intensity
     float    radius = 0.05f;       // the emitter's size, metres: how soft its shadows are
     float    innerDeg = 0.0f, outerDeg = 45.0f;     // a spot's full-intensity and cut-off half-angles
     bool     shadows = true;       // false: never occluded (a dashboard lamp)
-    bool     hasProfile = false;
-    float    profile[16] = {};     // the beam: intensity over angle, 0 .. outerDeg, relative to the axis
+    uint32_t lobeCount = 0;        // a beam's
+    LightLobe lobes[kMaxLobes];
 };
 
-// One light as the GPU reads it (kLightsHlsl's Light), 128 bytes.
+// One light as the GPU reads it (kLightsHlsl's Light), 208 bytes.
 struct GpuLight
 {
     float    pos[3];    float invRange2;   // 1 / range^2
     float    colour[3]; float radius;      // colour: tint x intensity, in irradiance units at 1 m
-    float    dir[3];    float cosOuter;
-    float    spotScale; float invOuterRad; uint32_t type; uint32_t flags;   // 1 / (cos inner - cos outer), 1 / outer
-    float    profile[16];
+    float    dir[3];    float cosOuter;    // a spot's cut-off; a beam's extent (the clusters' culling only)
+    float    up[3];     float spotScale;   // 1 / (cos inner - cos outer)
+    uint32_t type; uint32_t flags; uint32_t lobeCount; float pad;
+    float    lobeA[LightDesc::kMaxLobes][4];   // candela, 1/tan(half-width), 1/tan(half-height), sharpness / 2
+    float    lobeB[LightDesc::kMaxLobes][4];   // tan(yaw), tan(pitch)
 };
-static_assert(sizeof(GpuLight) == 128, "GpuLight - keep kLightsHlsl in step");
+static_assert(sizeof(GpuLight) == 208, "GpuLight - keep kLightsHlsl in step");
 
 class Lights
 {
@@ -63,6 +79,7 @@ public:
     static constexpr uint32_t kMaxLights = 512;
     static constexpr uint32_t kMaxIndices = 65536;
     static constexpr float    kNear = 0.25f, kFar = 1000.0f;   // the slices' depth range, metres
+    static constexpr float    kMaxRange = 1000.0f;              // a light's reach at most: a pencil beam's
     static constexpr float    kCandelaToUnits = 2e-4f;          // lux -> the sun's irradiance unit
 
     bool Create(ID3D12Device* dev);
