@@ -779,6 +779,7 @@ StageEnd RunStage(Shell& sh, const Options& o, bool fromMenu, std::string& error
                 if (!carLampsLoaded) {
                     carLamps = assets::LoadCarLamps(o.session.physics.sgc, snap.centerOfGravity);
                     carLampsLoaded = true;
+                    lampLayout = carLamps.defaultLayout;
                     for (size_t k = 0; k < carLamps.layouts.size(); ++k)
                         if (carLamps.layouts[k].name == o.lampLayout) lampLayout = k;
                     std::printf("the car's lamps: %s places; the ramp \"%s\", %zu lamps\n", carLamps.fromCar ? "its own" : "default",

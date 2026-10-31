@@ -25,8 +25,8 @@ namespace wrally::assets {
 enum class LampKind : uint32_t {
     HalogenLow,    // a headlamp's dipped beam: wide, with the cut-off just under the horizon
     HalogenHigh,   // its main beam
-    LedPencil,     // a pod's long, narrow spot - the reach down the road
-    LedDriving,    // a pod's wider driving beam
+    HalogenPencil,   // a pod's long, narrow spot - the reach down the road
+    HalogenDriving,  // a pod's wider driving beam
     LedBar,        // an LED bar's flat flood - the verges and the trees beside them
     Ditch,         // a cornering lamp, aimed off to the side
     Tail,          // the small lamps: a tail lamp (red),
@@ -46,7 +46,7 @@ struct LampBeam {
 };
 
 const LampBeam& Beam(LampKind kind);
-// The kind car.json names ("halogen-low", "led-pencil", ...); false if none is.
+// The kind car.json names ("halogen-low", "halogen-pencil", ...); false if none is.
 bool LampKindByName(const char* name, LampKind* kind);
 
 struct Lamp {
@@ -90,7 +90,8 @@ struct LampLayout {
 
 struct CarLamps {
     std::vector<CarLamp>    fixed;     // every layout's: the headlamps, the tail, brake and reverse lamps, the indicators
-    std::vector<LampLayout> layouts;   // the ramps: "ramp" (the car's own pods, else four), "2 + 2", "LED bars", "no ramp"
+    std::vector<LampLayout> layouts;   // the ramps: "ramp" (the car's own pods), "2/4/6 pods", "LED bars", "no ramp"
+    size_t defaultLayout = 0;          // the one it starts with: its own ramp, else four pods
     bool fromCar = false;              // the places are the car's own (its .ini's Point_light_*), not defaults
 };
 

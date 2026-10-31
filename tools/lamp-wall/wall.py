@@ -16,9 +16,9 @@ from PIL import Image, ImageDraw
 BEAMS = {
     'halogen-low':  (3200, [(16000, 22.0, 3.5, 0.0, -2.0, 4.0), (5000, 45.0, 8.0, 0.0, -5.0, 2.0)]),
     'halogen-high': (3300, [(80000, 7.0, 3.5, 0.0, 0.0, 2.0), (18000, 22.0, 7.0, 0.0, -1.0, 2.0)]),
-    'led-pencil':   (5800, [(350000, 2.5, 1.8, 0.0, 0.0, 3.0), (15000, 6.0, 3.5, 0.0, 0.0, 2.0),
+    'halogen-pencil':  (3300, [(350000, 2.5, 1.8, 0.0, 0.0, 3.0), (15000, 6.0, 3.5, 0.0, 0.0, 2.0),
                             (25000, 25.0, 10.0, 0.0, -1.0, 2.0)]),
-    'led-driving':  (5800, [(150000, 5.0, 3.0, 0.0, 0.0, 3.0), (15000, 12.0, 5.0, 0.0, -1.0, 2.0),
+    'halogen-driving': (3300, [(150000, 5.0, 3.0, 0.0, 0.0, 3.0), (15000, 12.0, 5.0, 0.0, -1.0, 2.0),
                             (12000, 30.0, 12.0, 0.0, -1.0, 2.0)]),
     # A combo bar's smooth beam: a spot in the middle, a wide flood round it, no cut-off (not a halogen's).
     'led-bar':      (5700, [(150000, 6.0, 3.5, 0.0, 0.0, 2.0), (30000, 18.0, 6.0, 0.0, -0.5, 2.0),
@@ -33,13 +33,15 @@ HEAD_RAMP = [('halogen-high', 0.65, -2.0, 0.05, -10.0, -0.5), ('halogen-high', -
 LAYOUTS = {
     # The pods each to their own spot: the outer ones 20 degrees out to their corners, the inner ones 5 degrees out
     # and up (yaw is to the right, so the left side's are negative).
-    'ramp': HEAD_RAMP + [('led-driving', 0.38, -1.9, 0.3, -20.0, -0.8), ('led-pencil', 0.12, -1.9, 0.3, -5.0, 4.0),
-                         ('led-pencil', -0.12, -1.9, 0.3, 5.0, 4.0), ('led-driving', -0.38, -1.9, 0.3, 20.0, -0.8)],
+    'ramp': HEAD_RAMP + [('halogen-driving', 0.38, -1.9, 0.3, -20.0, -0.8), ('halogen-pencil', 0.12, -1.9, 0.3, -5.0, 4.0),
+                         ('halogen-pencil', -0.12, -1.9, 0.3, 5.0, 4.0), ('halogen-driving', -0.38, -1.9, 0.3, 20.0, -0.8)],
     # The i20 R5's own six pods (its .ini's Point_light_bon1..6, the centre of gravity as HEAD's), aimed as the game's
     # AimRamp aims six: the outer pair 20 degrees out, the middle pair 10 and 2 up, the inner pair 5 out and 4 up.
-    'ramp6': HEAD_RAMP + [('led-driving', 0.456, -2.27, 0.15, -20.0, -0.8), ('led-driving', 0.316, -2.27, 0.18, -10.0, 2.0),
-                          ('led-pencil', 0.126, -2.27, 0.18, -5.0, 4.0), ('led-pencil', -0.126, -2.27, 0.18, 5.0, 4.0),
-                          ('led-driving', -0.316, -2.27, 0.18, 10.0, 2.0), ('led-driving', -0.486, -2.27, 0.15, 20.0, -0.8)],
+    'ramp6': HEAD_RAMP + [('halogen-driving', 0.456, -2.27, 0.15, -20.0, -0.8), ('halogen-driving', 0.316, -2.27, 0.18, -10.0, 2.0),
+                          ('halogen-pencil', 0.126, -2.27, 0.18, -5.0, 4.0), ('halogen-pencil', -0.126, -2.27, 0.18, 5.0, 4.0),
+                          ('halogen-driving', -0.316, -2.27, 0.18, 10.0, 2.0), ('halogen-driving', -0.486, -2.27, 0.15, 20.0, -0.8)],
+    # Two pods: driving beams 10 degrees out.
+    'pods2': HEAD_RAMP + [('halogen-driving', 0.25, -1.9, 0.3, -10.0, -0.8), ('halogen-driving', -0.25, -1.9, 0.3, 10.0, -0.8)],
     # The LED bars: the main beams straight on (the bars' flood covers the corners).
     'bars': HEAD + [('led-bar', 0.3, -1.8, 0.32, 0.0, -0.8), ('led-bar', -0.3, -1.8, 0.32, 0.0, -0.8)],
     'low': [('halogen-low', 0.65, -2.0, 0.05, 0.0, 0.0), ('halogen-low', -0.65, -2.0, 0.05, 0.0, 0.0)],

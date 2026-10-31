@@ -27,10 +27,11 @@ const LampBeam kBeams[] = {
     // tools/lamp-wall/wall.py, 2026-10-31).
     // And a wide, dim spill around each hot spot (~7% of its peak): every patch of road lit by several lamps, so a
     // thing casts several lighter shadows, not one lamp's dark one.
-    {"led-pencil", 5800.0f, 0.08f, 3,
+    // Halogen pods (warm as the headlamps; the white LED look is the LED bars').
+    {"halogen-pencil", 3300.0f, 0.08f, 3,
      {{350000.0f, 2.5f, 1.8f, 0.0f, 0.0f, 3.0f}, {15000.0f, 6.0f, 3.5f, 0.0f, 0.0f, 2.0f},
       {25000.0f, 25.0f, 10.0f, 0.0f, -1.0f, 2.0f}}},
-    {"led-driving", 5800.0f, 0.08f, 3,
+    {"halogen-driving", 3300.0f, 0.08f, 3,
      {{150000.0f, 5.0f, 3.0f, 0.0f, 0.0f, 3.0f}, {15000.0f, 12.0f, 5.0f, 0.0f, -1.0f, 2.0f},
       {12000.0f, 30.0f, 12.0f, 0.0f, -1.0f, 2.0f}}},
     // A combo LED bar: a spot in the middle, a wide flood round it, smooth - no cut-off (the halogens' and the pods'
@@ -152,10 +153,10 @@ std::vector<Lamp> TestLayout(const char* name)
         // degrees out to the corners, the inner ones 5 degrees out and 4 up.
         lamps[0].yawDeg = -10.0f;
         lamps[1].yawDeg = 10.0f;
-        lamps.push_back({LampKind::LedDriving, {0.38f, -1.9f, 0.3f}, -20.0f, rampPitch});
-        lamps.push_back({LampKind::LedPencil, {0.12f, -1.9f, 0.3f}, -5.0f, 4.0f});
-        lamps.push_back({LampKind::LedPencil, {-0.12f, -1.9f, 0.3f}, 5.0f, 4.0f});
-        lamps.push_back({LampKind::LedDriving, {-0.38f, -1.9f, 0.3f}, 20.0f, rampPitch});
+        lamps.push_back({LampKind::HalogenDriving, {0.38f, -1.9f, 0.3f}, -20.0f, rampPitch});
+        lamps.push_back({LampKind::HalogenPencil, {0.12f, -1.9f, 0.3f}, -5.0f, 4.0f});
+        lamps.push_back({LampKind::HalogenPencil, {-0.12f, -1.9f, 0.3f}, 5.0f, 4.0f});
+        lamps.push_back({LampKind::HalogenDriving, {-0.38f, -1.9f, 0.3f}, 20.0f, rampPitch});
     } else if (!std::strcmp(name, "bars")) {
         lamps.push_back({LampKind::LedBar, {-0.3f, -1.8f, 0.32f}, 0.0f, rampPitch});
         lamps.push_back({LampKind::LedBar, {0.3f, -1.8f, 0.32f}, 0.0f, rampPitch});
@@ -208,13 +209,15 @@ std::vector<Lamp> AimRamp(std::vector<math::V3> places)
         Lamp l;
         l.at = places[i];
         if (n % 2 && i == n / 2) {
-            l.kind = LampKind::LedPencil, l.yawDeg = 0.0f, l.pitchDeg = 0.0f;
-        } else if (fromOutside + 1 == pairs && pairs > 1) {     // the innermost pair
-            l.kind = LampKind::LedPencil, l.yawDeg = 5.0f * side, l.pitchDeg = 4.0f;
+            l.kind = LampKind::HalogenPencil, l.yawDeg = 0.0f, l.pitchDeg = 0.0f;
+        } else if (pairs == 1) {   // a single pair: driving beams 10 degrees out, below the main beams' corners
+            l.kind = LampKind::HalogenDriving, l.yawDeg = 10.0f * side, l.pitchDeg = -0.8f;
+        } else if (fromOutside + 1 == pairs) {   // the innermost pair
+            l.kind = LampKind::HalogenPencil, l.yawDeg = 5.0f * side, l.pitchDeg = 4.0f;
         } else if (fromOutside == 0) {
-            l.kind = LampKind::LedDriving, l.yawDeg = 20.0f * side, l.pitchDeg = -0.8f;
+            l.kind = LampKind::HalogenDriving, l.yawDeg = 20.0f * side, l.pitchDeg = -0.8f;
         } else {   // between: 10 degrees out, 2 up (their own spot above the outer ones', as tuned on the wall)
-            l.kind = LampKind::LedDriving, l.yawDeg = 10.0f * side, l.pitchDeg = 2.0f;
+            l.kind = LampKind::HalogenDriving, l.yawDeg = 10.0f * side, l.pitchDeg = 2.0f;
         }
         lamps.push_back(l);
     }
@@ -259,17 +262,24 @@ CarLamps LoadCarLamps(const std::string& sgcPath, const float cog[3])
     out.fixed.push_back({{LampKind::Indicator, outward(rf, 0.08f), 30.0f}, LampRole::IndicatorRight});
     out.fixed.push_back({{LampKind::Indicator, outward(rb, 0.05f), 150.0f}, LampRole::IndicatorRight});
 
-    // The ramps. The car's own pods (Point_light_bon<n>), else four across the bonnet's front edge, a hand behind and
-    // above the headlamps.
+    // The ramps: the car's own pods (Point_light_bon<n>, its ramp's meshes shown with them), then two, four or six
+    // halogen pods across the bonnet's front edge, a hand behind and above the headlamps (a count the car's own has
+    // left out), two LED bars, none. The main beams turn 10 degrees out with pods; the car's own ramp is the default,
+    // else four pods.
     std::vector<math::V3> pods;
     for (int k = 1; k <= 8; ++k)
         if (const auto it = points.find("bon" + std::to_string(k)); it != points.end()) pods.push_back(car(it->second));
     const math::V3 mid{0.0f, 0.5f * (lf.y + rf.y) + 0.15f, 0.5f * (lf.z + rf.z) + 0.25f};
-    if (pods.empty())
-        for (float x : {0.38f, 0.12f, -0.12f, -0.38f}) pods.push_back({x, mid.y, mid.z});
-    out.layouts.push_back({"ramp", AimRamp(pods), 10.0f});
-    out.layouts.push_back({"2 + 2", {{LampKind::LedDriving, {0.25f, mid.y, mid.z}, -10.0f, -0.8f},
-                                     {LampKind::LedDriving, {-0.25f, mid.y, mid.z}, 10.0f, -0.8f}}, 10.0f});
+    if (!pods.empty()) out.layouts.push_back({"ramp", AimRamp(pods), 10.0f});
+    static const std::vector<float> kAcross[3] = {{0.25f, -0.25f}, {0.38f, 0.12f, -0.12f, -0.38f},
+                                                  {0.47f, 0.3f, 0.12f, -0.12f, -0.3f, -0.47f}};
+    for (const std::vector<float>& xs : kAcross) {
+        if (xs.size() == pods.size()) continue;
+        std::vector<math::V3> places;
+        for (float x : xs) places.push_back({x, mid.y, mid.z});
+        if (xs.size() == 4 && pods.empty()) out.defaultLayout = out.layouts.size();
+        out.layouts.push_back({std::to_string(xs.size()) + " pods", AimRamp(places), 10.0f});
+    }
     out.layouts.push_back({"LED bars", {{LampKind::LedBar, {0.3f, mid.y, mid.z + 0.02f}, 0.0f, -0.8f},
                                         {LampKind::LedBar, {-0.3f, mid.y, mid.z + 0.02f}, 0.0f, -0.8f}}, 0.0f});
     out.layouts.push_back({"no ramp", {}, 0.0f});
