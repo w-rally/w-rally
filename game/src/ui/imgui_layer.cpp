@@ -49,10 +49,12 @@ std::string ImGuiLayer::Init(HWND window, render::Renderer& renderer)
         m_menu = io.Fonts->AddFontFromFileTTF(segoe.c_str(), 24.0f * m_scale);
     // The main menu's faces (its design's Saira: Segoe UI's black and bold italics, its semibold), drawn at the window's
     // height - loaded large, so 1440p is drawn from big enough glyphs.
+    // Latin-1 and Latin Extended-A: the key names of a Czech (or other central European) layout.
+    static const ImWchar kLatin[] = {0x0020, 0x017f, 0};
     auto face = [&](const char* file, float px) -> ImFont* {
         const std::string path = std::string(fonts) + "\\Fonts\\" + file;
         if (GetFileAttributesA(path.c_str()) == INVALID_FILE_ATTRIBUTES) return m_menu ? m_menu : io.Fonts->Fonts[0];
-        return io.Fonts->AddFontFromFileTTF(path.c_str(), px);
+        return io.Fonts->AddFontFromFileTTF(path.c_str(), px, nullptr, kLatin);
     };
     m_wordmark = face("seguibli.ttf", 100.0f);
     m_menuItem = face("segoeuiz.ttf", 40.0f);

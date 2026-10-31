@@ -3,10 +3,11 @@
 // between ImGuiLayer::NewFrame and Render, returning what was chosen. The screens hold no state of their own beyond
 // ImGui's and Controls' wait for a key; what they edit is the caller's (Settings, the debug switches).
 //
-//   MainMenu     Quick rally, Settings, Exit (Season, not there yet): the whole window, drawn to the WRally design -
+//   MainMenu     Quick rally, Settings, Exit (Season, Marketplace: not there yet): the whole window, drawn to the WRally design -
 //                W / S or the arrows slide the selection, Enter or Space picks it
 //   QuickRally   stage, car, setup, damage, weather, road - Start / Back (the choice kept in Settings)
-//   SettingsUi   tabs: the content (folders, base physics, Extract the slot cars' physics), graphics, sound, controls
+//   SettingsUi   tabs: the content (folders, base physics, Extract the slot cars' physics), graphics, sound, controls -
+//                the whole window, drawn to the WRally design: Q / E the tabs, W / S the rows, A / D the values
 //   PauseMenu    the in-stage menu (Esc): Resume, Restart stage, Settings, Debug, Exit to main menu
 //   DebugMenu    what the keys switch (the renderer's, the cameras, the sound), the sound mix
 //   MixPanel     the sound mix beside the stage while driving (the Debug menu turns it on)
@@ -40,7 +41,8 @@ enum class SettingsChoice { None, Back, Graphics, Rescan, Extract };
 // (Window::TakeKeyDown), which Controls binds while it waits for one.
 SettingsChoice SettingsUi(const ImGuiLayer& ui, app::Settings& s, bool inStage, const std::string& log, UINT keyDown,
                           int width, int height);
-// Whether Controls is waiting for a key: Esc is then its (no change), not the menu's.
+// Esc on the screen is Back. Whether Controls is waiting for a key or a text field has the keyboard: Esc is then
+// theirs (no change), not the menu's.
 bool CapturingKey();
 
 enum class PauseChoice { None, Resume, Restart, Settings, Debug, ExitToMenu };

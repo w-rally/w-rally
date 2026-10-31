@@ -67,8 +67,11 @@ std::string KeyName(UINT s)
 {
     if (!s) return "-";
     const LONG l = static_cast<LONG>((s & 0xff) << 16 | ((s & 0xe000) ? 1u << 24 : 0u));
-    char name[64] = {};
-    if (GetKeyNameTextA(l, name, sizeof name) > 0) return name;
+    // In UTF-8 (the UI's text), so a layout's own keys (a Czech one's ú, ů) show as they are.
+    wchar_t wide[64] = {};
+    char name[256] = {};
+    if (GetKeyNameTextW(l, wide, 64) > 0 && WideCharToMultiByte(CP_UTF8, 0, wide, -1, name, sizeof name, nullptr, nullptr) > 0)
+        return name;
     char hex[16];
     wsprintfA(hex, "key %#x", s);
     return hex;
