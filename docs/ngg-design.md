@@ -3129,7 +3129,40 @@ Four decisions, the user's:
     may become a branch that skips the work - check the ISA (`NGG_DUMP_PS` writes what Radeon GPU Analyzer needs:
     the blobs, the root signature, the source).
 - **N3 - car lights.** The spec and its fallbacks (above), lit meshes as emissive, the game's switching (brake,
-  reverse, indicators, hazard, beams, pod).
+  reverse, indicators, hazard, beams, pod). Analysed 2026-10-31 against the user's reference shots (onboard night
+  stages: a 4-pod bonnet ramp; two LED bars):
+  - **What the look is made of.** The BEAM SHAPE first: a pod throws an intense, fairly narrow hot spot down the
+    road, an LED bar a wide, flat flood that lights both verges and the trees beside them - wide horizontally,
+    narrow vertically, a sharpish upper edge. N2's round cone cannot make a flat flood. Then the REACH (halogen
+    headlamps ~15-60 k cd; rally LED pods rated ~1 lux at several hundred metres, i.e. a few hundred k cd - to be
+    calibrated on the references), the AIM (lamps 0.6-1 m up, ~0.5-1.5 degrees down: the hot spot lands 50-150 m
+    ahead), the COLOUR (LED ~5700-6500 K, the references' blue-white; HID ~4300 K; halogen ~3200 K). Around the beam:
+    the lamps' own glowing lenses and LED strips, the dark pod housings in the onboard view, retroreflectors (marker
+    poles, signs, vests) flashing back because the lamp sits almost at the eye, haze in dust and rain, glare, and an
+    exposure that keeps the blown-out near verges and the dark distance both readable.
+  - **The lamp model:** a beam is a sum of a few LOBES, each with its own horizontal and vertical spread (a pod:
+    pencil + driving; a bar: one very wide lobe), in the lamp's own frame (an axis AND an up vector); a colour
+    temperature; candela. Real IES/LDT photometry can come later as one more kind of lobe. The 300 m range cap goes
+    to ~1 km (a pencil beam's reach).
+  - **What RBR gives** (`<RBR>\Cars`, 41 car .inis with lamps): the headlamps' positions with usable forward
+    normals (`Point_light_lf/rf`), the tail, brake and reverse positions. Bonnet lamps in 5 of them only
+    (`Point_light_bon1-4`), their normals mostly sideways - positions, no aim; a ramp mesh (`e_ramp`,
+    `e_ramp_light_lit`) in 4, switched off (`Predicate=NotUsed`): RBR modelled ramps and never used them. So the
+    beams' character, the layouts and most ramps are WRally's (car.json presets), RBR's positions where they exist.
+  - **Decided (the user, 2026-10-31):**
+    1. **Layouts per car, chosen in the setup:** car.json lists the configurations a car can run (e.g. 2 headlamps +
+       a 2-lamp ramp, a 4-pod ramp, 2 LED bars, no ramp); the driver picks one; a car without its own spec gets a
+       sensible default ramp.
+    2. **The aim is set in the setup**, per ramp, yaw and pitch a few degrees (as crews do at service); while
+       driving only the switches: low/high beam, the ramp on/off; brake, reverse and the indicators by the car's
+       state and keys.
+    3. **Beams visible in dust, mist and rain: a later phase**, with the weather and dust work they depend on.
+  - **Phases:** N3a the lamp model (lobes, orientation, colour temperature, reach; the renderer interface; the
+    car.json lamp schema; presets: halogen low/high, LED pod pencil/driving, LED bar flood, ditch lamp). N3b the
+    car's layouts and controls (derived from RBR where it has data, the setup's choices, the switches, the glowing
+    lenses). N3c tuning on the references (intensities, spreads, aim, exposure). Later: haze, retroreflective
+    materials, glare. Cost: shadows stay one ray per pixel however many lamps; shading ~0.15 ms per lamp over the
+    whole screen on the 780M.
 - **N4 - stage lights.** A light chunk in the `.ngg` (with `provenance=auto|authored`, 5.3), emissive texture
   detection for the automatic part, Wallaby's light-placement mode for the authored part (its own task).
 
