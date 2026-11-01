@@ -22,7 +22,8 @@ constexpr float kHudSize = 1.5f, kMiddleSize = 0.7f;
 // A HUD's sizes: px at 1080p times `k`, as the menus'.
 float Scale(int width, int height) { return std::min(height / 1080.0f, width / 1280.0f); }
 
-ImDrawList* Draw() { return ImGui::GetForegroundDrawList(); }
+// Under every window: the menus over a stage (Esc, Settings) veil the HUD with the stage.
+ImDrawList* Draw() { return ImGui::GetBackgroundDrawList(); }
 
 // `text`'s width at `size` (tracked by `spacing` em).
 float Width(ImFont* f, float size, const char* text, float spacing = 0) { return Tracked(nullptr, f, size, ImVec2(), 0, text, spacing); }
