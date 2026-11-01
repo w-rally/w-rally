@@ -131,7 +131,7 @@ public:
         float    motionOn;     // the motion SRV holds this frame's prepass
         float    blendMoved;   // history weight where a ray hit a moved object
         float    period4;      // 1 = the AO's window, one 4-pixel period each way
-        float    pad;
+        float    blendStill;   // history weight where the pixel stays put on the screen
     };
     ID3D12Resource* Result() const { return m_result.Get(); }
 
@@ -168,10 +168,15 @@ private:
     D3D12_RESOURCE_STATES m_aoHistState[2] = {};
     ID3D12Resource*       m_filteredAo = nullptr;
     // The AO's wide pass (kAoWideSrc in rt.cpp) and its output.
-    void WidenAo(ID3D12GraphicsCommandList* list, const DenoiseCB& dc);
+    void Widen(ID3D12GraphicsCommandList* list, const DenoiseCB& dc,
+               Microsoft::WRL::ComPtr<ID3D12Resource>* hists, D3D12_RESOURCE_STATES* histState,
+               UINT pair0, UINT pair1, ID3D12Resource* wide, D3D12_RESOURCE_STATES& wideState, UINT uav,
+               ID3D12Resource*& filtered);
     Microsoft::WRL::ComPtr<ID3D12PipelineState>  m_psoAoWide;
     Microsoft::WRL::ComPtr<ID3D12Resource>       m_aoWide;
     D3D12_RESOURCE_STATES m_aoWideState = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+    Microsoft::WRL::ComPtr<ID3D12Resource>       m_lightWide;   // the local lights' wide pass output
+    D3D12_RESOURCE_STATES m_lightWideState = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
     bool                  m_aoHistValid = false;
     // The local lights' (lights.h): its trace, output, counters, histories.
     Microsoft::WRL::ComPtr<ID3D12PipelineState>  m_psoLights;
