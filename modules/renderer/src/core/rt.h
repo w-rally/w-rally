@@ -93,6 +93,12 @@ public:
                bool ao, float aoRadius, uint32_t aoRays, UINT width, UINT height,
                const Lights* lights = nullptr);
 
+    // The denoisers' histories dropped on the next Trace - a camera's cut, as
+    // PostFx::ResetHistory: reprojected, the old view lands on the new one's
+    // surfaces wherever the depths happen to agree, and a still camera keeps
+    // that for its long still history (kDenoiseSrc's STILL).
+    void ResetHistory() { m_histValid = m_aoHistValid = m_lightHistValid = false; }
+
     // Filled by ReadStats after the caller has waited for the GPU - the same
     // contract as Scene::LogProbe and ReadOverlayStats, and for the same reason.
     void ReadStats();

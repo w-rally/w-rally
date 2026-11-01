@@ -555,6 +555,11 @@ StageEnd RunStage(Shell& sh, const Options& o, bool fromMenu, std::string& error
     const int cameras = tv ? 5 : 4;
     int cameraMode = (o.camera >= 0 ? o.camera : tv ? camera::kTv : camera::kChase) % cameras;
     float orbit = o.cameraAngle;   // the beside camera's place round the car, radians from its left side toward its front
+    // The last drawn frame's camera, its TV camera and eye: another mode, another TV camera or an eye 10 m away (R back on
+    // the road) is a cut, every history of the old view dropped (iface::FrameDesc camera.cut).
+    int drawnMode = -1;
+    int32_t drawnTv = -1;
+    V3 drawnEye{};
     // PHYS_DRIVE_LOOK_UP=<degrees>: every view tilted up by that much - the sky's moon and stars to look at.
     const float lookUp = std::getenv("PHYS_DRIVE_LOOK_UP") ? static_cast<float>(std::atof(std::getenv("PHYS_DRIVE_LOOK_UP"))) : 0.0f;
     // PHYS_DRIVE_TEST_LIGHTS: test lamps on the car until it carries its own (assets::TestLayout, design 5.4 N3).
@@ -639,6 +644,15 @@ StageEnd RunStage(Shell& sh, const Options& o, bool fromMenu, std::string& error
         if (gearUpKey(focused && keys.Down(Action::GearUp))) in.presses |= session::kGearUp;
         if (gearDownKey(focused && keys.Down(Action::GearDown))) in.presses |= session::kGearDown;
         if (cameraKey(focused && keys.Down(Action::Camera))) cameraMode = (cameraMode + 1) % cameras;
+        // PHYS_DRIVE_CAMERA_AT=<tick>:<camera>: that camera from that tick, as if C were pressed - a cut for captures.
+        static const char* const cameraAt = std::getenv("PHYS_DRIVE_CAMERA_AT");
+        static bool cameraAtDone = false;
+        if (cameraAt && *cameraAt && !cameraAtDone && snap.tick >= std::strtoul(cameraAt, nullptr, 0)) {
+            const char* const colon = std::strchr(cameraAt, ':');
+            cameraMode = (colon ? std::atoi(colon + 1) : cameraMode + 1) % cameras;
+            cameraAtDone = true;
+            std::printf("camera %d at tick %u (PHYS_DRIVE_CAMERA_AT)\n", cameraMode, snap.tick);
+        }
         bool redraw = false;   // a renderer switch changed: draw one frame even while paused
         auto toggle = [&](bool& on, uint32_t& field, uint32_t onValue, const char* name, const char* offText) {
             on = !on;
@@ -997,6 +1011,12 @@ StageEnd RunStage(Shell& sh, const Options& o, bool fromMenu, std::string& error
             fd.camera.nearZ = 0.25f;
             fd.camera.farZ = 8000.0f;
             fd.camera.fovY = view.fovY;
+            {
+                const V3 d = view.eye - drawnEye;
+                const bool cut = cameraMode != drawnMode || view.tvCamera != drawnTv || d.x * d.x + d.y * d.y + d.z * d.z > 100.0f;
+                fd.camera.cut = cut ? 1u : 0u;
+                drawnMode = cameraMode, drawnTv = view.tvCamera, drawnEye = view.eye;
+            }
             fd.weatherPreset = customSkySet ? -1 : weatherPreset;   // the .ngg's preset (0 its own weather), or --sky's
             if (customSkySet) fd.weather = customSky;
             fd.wetness = 0.5f * static_cast<float>(std::clamp(wet, 0, 2));   // the road's: dry 0, damp 0.5, wet 1

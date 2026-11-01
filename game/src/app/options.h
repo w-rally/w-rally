@@ -39,7 +39,8 @@
 // materials listed, PHYS_DRIVE_LOOK_UP=<degrees> every view tilted up by that much (the sky), PHYS_DRIVE_TEST_LIGHTS
 // test lamps on the car (=ramp two main beams and a 4-pod ramp, =bars two main beams and two LED bars, =low the dipped
 // beams; =lamp a lamp behind it alone, =noshadow the ramp never occluded), PHYS_DRIVE_LAMPS=<0|1|2>[,noramp][,brake]
-// [,reverse][,left][,right][,hazard] the car's lamps switched so from the start (brake and reverse held: captures).
+// [,reverse][,left][,right][,hazard] the car's lamps switched so from the start (brake and reverse held: captures),
+// PHYS_DRIVE_CAMERA_AT=<tick>:<camera> that camera from that tick (a cut, captured).
 
 #include <cstdint>
 #include <filesystem>

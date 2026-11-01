@@ -643,7 +643,7 @@ Status WRALLY_CALL RenderFrame(Renderer* r, const FrameDesc* f)
             r->scene.SetOverlayLines(r->dev.device.Get(), 0, nullptr, 0, 0);
             r->linesSet = false;
         }
-        if (f->camera.cut) r->post.ResetHistory();
+        if (f->camera.cut) r->post.ResetHistory(), r->core.Raytracer().ResetHistory();
     }
 
     if (!r->dev.Begin()) return r->Fail(Status::ErrDevice, "renderFrame: the command list would not open");

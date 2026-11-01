@@ -200,7 +200,8 @@ struct Camera {
     float proj[16];               // conventional depth; the renderer reverses it
     float nearZ, farZ;
     float fovY;                   // radians, for LOD and culling decisions
-    uint32_t cut;                 // 1 when the camera jumped (cut, new camera): TAA history is dropped
+    uint32_t cut;                 // 1 when the camera jumped (cut, new camera): every history dropped (TAA, the RT
+                                  // denoisers'), the exposure snapped to the new view
 };
 
 // One placed model this frame. `nodes`, if given, overrides every node's
