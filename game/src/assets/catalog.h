@@ -10,7 +10,8 @@
 //   cars     EVERY car folder in Cars (one with an .sgc), not only the eight Cars.ini slots. Its physics, in order:
 //              - its own: Cars/<folder>/physics/ (common.lsp, <surface>.lsp, r_<surface>.lsp, setups/)
 //              - a slot car's: its physics.rbz folder (Car00 c_xsara ... Car07 s_i2000, the game's table)
-//              - else the base physics (Settings::basePhysics), so any car with an .sgc drives
+//              - its car.json's (CarRegister), over either
+//            none of them: the car has no physics and is not usable (no stand-in: a car drives only as itself)
 //            its engine sound: an .eng in its folder, else its slot's (audio/Cars/Cars.ini), else the default
 //   setups   per car: its own physics' setups/*.lsp, and a slot car's saved ones (SavedGames/<slot>slot<n>_<name>.lsp)
 //

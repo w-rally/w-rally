@@ -305,12 +305,6 @@ SettingsChoice SettingsUi(const ImGuiLayer& ui, app::Settings& s, bool inStage, 
 
     // The tab's rows, over copies of what the settings hold as other types.
     int quality = static_cast<int>(std::min(s.quality, 2u));
-    std::vector<std::string> slots;
-    int base = 5;
-    for (int i = 0; i < 8; ++i) {
-        slots.emplace_back(assets::SlotPhysics(i));
-        if (slots.back() == s.basePhysics) base = i;
-    }
     const int tab = g_setTab;
     const bool keys = tab == 3;
     std::vector<SetRow> rows;
@@ -322,13 +316,8 @@ SettingsChoice SettingsUi(const ImGuiLayer& ui, app::Settings& s, bool inStage, 
     if (tab == 0) {
         SetRow& rbr = add(SetRow::Text, "RBR FOLDER", "Where Richard Burns Rally is: the stages, the cars and their physics are read from it.");
         rbr.text = &s.rbrPath, rbr.hint = "the RBR folder";
-        SetRow& ngg = add(SetRow::Text, ".NGG FOLDERS", "Folders of stage .ngg files, with ; between them. Empty: the RBR folder's Ngg.");
-        ngg.text = &s.nggFolders, ngg.hint = "Empty: " + (s.rbrPath.empty() ? std::string("<RBR folder>\\Ngg") : s.rbrPath + "\\Ngg");
-        SetRow& phys = add(SetRow::Choice, "BASE PHYSICS", "The physics of a car without physics of its own.");
-        phys.at = &base, phys.options = slots;
-        add(SetRow::Action, "RESCAN CONTENT", "Read the stages and the cars again from the folders above.").action = SettingsChoice::Rescan;
-        add(SetRow::Action, "EXTRACT THE SLOT CARS' PHYSICS", "Copy each slot car's physics out of physics.rbz into its own folder.").action =
-            SettingsChoice::Extract;
+        // (The .ngg folders are W-Rally.ini's alone, for development: ngg_folders.)
+        add(SetRow::Action, "RESCAN CONTENT", "Read the stages and the cars again from the RBR folder.").action = SettingsChoice::Rescan;
         for (SetRow& r : rows) {
             r.off = inStage;
             if (inStage) r.help = "The content can be changed from the main menu.";
@@ -336,6 +325,7 @@ SettingsChoice SettingsUi(const ImGuiLayer& ui, app::Settings& s, bool inStage, 
     } else if (tab == 1) {
         SetRow& q = add(SetRow::Choice, "QUALITY", "The renderer's level of detail. Graphics changes apply at once.");
         q.at = &quality, q.options = {"LOW", "MEDIUM", "HIGH"};
+        add(SetRow::Toggle, "FULL SCREEN", "The whole screen, or a window on the desktop. Applies at once.").on = &s.fullscreen;
         add(SetRow::Toggle, "RAY TRACING", "Ray tracing in the renderer. Applies at once.").on = &s.rayTracing;
         add(SetRow::Toggle, "TAA", "Temporal anti-aliasing. Applies at once.").on = &s.taa;
         add(SetRow::Toggle, "SHADOWS", "Shadows. Applies at once.").on = &s.shadows;
@@ -625,12 +615,12 @@ SettingsChoice SettingsUi(const ImGuiLayer& ui, app::Settings& s, bool inStage, 
                     ImGui::PopID();
                 }
             }
-            // The last Rescan / Extract's report, under the content.
+            // The last Rescan's report, under the content.
             if (tab == 0 && !log.empty()) {
                 const float by = listEnd + 12, wrap = (rowW - 48) * k;
                 const float th = text->CalcTextSizeA(20 * k, FLT_MAX, wrap, log.c_str()).y;
                 d->AddRectFilled(P(x0, by), ImVec2((x0 + rowW) * k, by * k + 16 * k + 20 * k + 8 * k + th + 16 * k), kSurfaceRaised);
-                Tracked(d, text, 17 * k, P(x0 + 24, by + 16), kInkMuted, "LAST RESCAN / EXTRACT", 0.16f);
+                Tracked(d, text, 17 * k, P(x0 + 24, by + 16), kInkMuted, "LAST RESCAN", 0.16f);
                 d->AddText(text, 20 * k, P(x0 + 24, by + 16 + 28), kInkSecondary, log.c_str(), nullptr, wrap);
             }
         } else {
@@ -712,7 +702,6 @@ SettingsChoice SettingsUi(const ImGuiLayer& ui, app::Settings& s, bool inStage, 
 
     // The copies back into the settings; a graphics change to apply now.
     if (static_cast<uint32_t>(quality) != s.quality) s.quality = static_cast<uint32_t>(quality), graphics = true;
-    s.basePhysics = slots[base];
     if (graphics && c == SettingsChoice::None) c = SettingsChoice::Graphics;
     return c;
 }

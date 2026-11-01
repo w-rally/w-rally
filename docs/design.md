@@ -688,13 +688,15 @@ Each phase ends with a game you can drive. phys-drive works on day one, and ever
      same as a CLI run. Custom weather (sun, rain, clouds...) comes later.
    - **All cars:** the catalog (`assets/catalog.*`) lists every `Cars/<folder>` that has an `.sgc`, not only the eight
      `Cars.ini` slots. A car's physics comes from its own `Cars/<folder>/physics/` if it has one, else its slot's
-     `physics.rbz` folder, else the base physics (Settings). Settings → "Extract the slot cars' physics" copies the
-     slot cars' physics out of `physics.rbz` into their folders, so each car's physics is a set of loose files.
+     `physics.rbz` folder, else its `car.json`'s. There is no stand-in: a car without physics of its own is not usable.
+     `--extract-slot-physics` (development) copies the slot cars' physics out of `physics.rbz` into their folders, so
+     each car's physics is a set of loose files.
    - **Esc in a stage:** the stage holds and a menu comes up: Resume, Restart stage, Settings, Debug (what the keys
      switch: renderer switches, debug view, camera, chase distance, mute, anti-lag) and Exit to main menu. A CLI run
      still quits at its end (the window closed, a replay's end, `--exit-at`). Its Esc menu leads to the main menu.
    - **Settings:** saved in `W-Rally.ini` in the user folder (`app/settings.*`, `app/paths.h`). They cover the RBR
-     folder, the `.ngg` folders (default `<RBR>\Ngg`), the base physics, graphics (applied at once) and sound.
+     folder, graphics (applied at once; the full screen, a borderless one, by default) and sound. The `.ngg` folders
+     (`ngg_folders`, default `<RBR>\Ngg`) are the `.ini`'s alone, for development.
    - **Installed:** the MSI (`installer/`, built on every push by `.github/workflows/installer.yml`) installs to
      Program Files\W-Rally and asks for the RBR folder. It pre-fills the one it finds, and goes on only when the
      folder has `RichardBurnsRally_SSE.exe`, `Physics.rbz`, `Maps\Tracks.ini` and `Cars\Cars.ini`. It writes that
