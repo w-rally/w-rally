@@ -43,7 +43,8 @@ namespace wrally::iface {
 // 9: RenderStats::sunElevationDeg (the frame's sun: its own time and place, or the weather's).
 // 10: updateTextureRgba (a UI texture's pixels again: the main menu's video).
 // 11: RenderSettings::upscaler (temporal upscaling at renderScale), RenderStats' render size and upscaler.
-constexpr uint32_t kRendererInterfaceVer = 11;
+// 12: kUpscalerDlss (NVIDIA DLSS Super Resolution; where it cannot run, the renderer's TAA).
+constexpr uint32_t kRendererInterfaceVer = 12;
 
 struct Renderer;                     // the module's instance, opaque
 typedef uint32_t SceneHandle;        // a loaded .ngg stage
@@ -306,6 +307,7 @@ struct RenderSettings {
 // RenderSettings::upscaler
 constexpr uint32_t kUpscalerNone = 0;
 constexpr uint32_t kUpscalerFsr  = 1;    // AMD FSR 3.1 (FSR 4 on RDNA 4), any DX12 GPU
+constexpr uint32_t kUpscalerDlss = 2;    // NVIDIA DLSS Super Resolution, RTX GPUs; elsewhere the TAA (logged)
 
 // What the last finished frame did - ngg_stats, the renderer's own readout.
 struct RenderStats {

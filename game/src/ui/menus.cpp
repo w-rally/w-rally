@@ -231,6 +231,10 @@ MainChoice MainMenu(const ImGuiLayer& ui, int width, int height, const std::stri
         float x = x0;
         x += KeyHint(d, text, k, ImVec2(x, footY), "W S", "MOVE") + 24 * k;
         KeyHint(d, text, k, ImVec2(x, footY), "ENTER", "SELECT");
+
+        // The credits the upscalers' licences ask for, under the keys, ink-muted.
+        d->AddText(text, 15 * k, ImVec2(x0, footY + 48 * k), kInkMuted,
+                   "Upscaling: NVIDIA\xC2\xAE DLSS \xC2\xB7 AMD FidelityFX\xE2\x84\xA2 Super Resolution");
     }
     ImGui::End();
     ImGui::PopStyleVar(2);
@@ -330,7 +334,8 @@ SettingsChoice SettingsUi(const ImGuiLayer& ui, app::Settings& s, bool inStage, 
         add(SetRow::Toggle, "RAY TRACING", "Ray tracing in the renderer. Applies at once.").on = &s.rayTracing;
         add(SetRow::Toggle, "TAA", "Temporal anti-aliasing. Applies at once.").on = &s.taa;
         SetRow& up = add(SetRow::Choice, "UPSCALING",
-                         "Render below the screen's resolution and upscale with AMD FSR in place of TAA: faster, softer. "
+                         "Render below the screen's resolution and upscale with AMD FSR or NVIDIA DLSS (RTX graphics "
+                         "cards only) in place of TAA: faster, softer. DLAA: DLSS at full resolution. "
                          "Off: TAA at full resolution. Applies at once.");
         up.at = &upscaling;
         for (const app::UpscaleMode& m : app::kUpscaleModes) up.options.push_back(m.label);

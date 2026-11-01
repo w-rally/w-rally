@@ -77,9 +77,12 @@ void Renderer::SetUpscaling(Device& dev, UpscalerKind kind, float scale)
 {
     if (!(scale > 0.0f) || scale > 1.0f) scale = 1.0f;
     if (kind == m_upKind && (kind == UpscalerKind::None || scale == m_renderScale)) return;
-    if (kind == UpscalerKind::Fsr && !m_upscaler)
+    if (kind != UpscalerKind::None && (kind != m_upKind || !m_upscaler))
     {
-        m_upscaler.reset(CreateFsrUpscaler(dev.device.Get()));
+        // Another backend: the old one goes first (PostFx lets go of it), then the new one is made.
+        m_post.SetUpscaler(nullptr);
+        m_upscaler.reset(kind == UpscalerKind::Dlss ? CreateDlssUpscaler(dev.device.Get())
+                                                    : CreateFsrUpscaler(dev.device.Get()));
         if (!m_upscaler) kind = UpscalerKind::None;
     }
     if (kind == UpscalerKind::None) scale = 1.0f;
@@ -88,7 +91,8 @@ void Renderer::SetUpscaling(Device& dev, UpscalerKind kind, float scale)
     m_renderScale = scale;
     m_post.SetUpscaler(kind == UpscalerKind::None ? nullptr : m_upscaler.get());
     if (kind == UpscalerKind::None) m_upscaler.reset();
-    Log("renderer: upscaling %s, render scale %.2f", kind == UpscalerKind::None ? "off (TAA)" : "FSR", scale);
+    Log("renderer: upscaling %s, render scale %.2f",
+        kind == UpscalerKind::None ? "off (TAA)" : kind == UpscalerKind::Dlss ? "DLSS" : "FSR", scale);
     if (m_width && m_height) OnResize(dev, m_width, m_height);
 }
 

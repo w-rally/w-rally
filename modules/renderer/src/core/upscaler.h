@@ -4,10 +4,10 @@
 // the upscaler resolves the jittered frames into the output size, in place of
 // PostFx's own TAA (PSTaa). The tonemap, the HUD and the UI stay at the output.
 //
-// FSR 3.1 is the first backend (fsr.cpp: AMD's signed ffx-api DLLs, any DX12
-// GPU); DLSS Super Resolution (Streamline, RTX only) is meant to be the second,
-// which is why this is an interface and not FSR's API. What a backend needs
-// is what PostFx already has, converted once to the common convention below.
+// Two backends: FSR 3.1 (fsr.cpp: AMD's signed ffx-api DLLs, any DX12 GPU)
+// and DLSS Super Resolution (dlss.cpp: NVIDIA's NGX, RTX GPUs only). What a
+// backend needs is what PostFx already has, converted once to the common
+// convention below; each backend writes down its own conversions.
 //
 // THE CONVENTION:
 //   colour    linear HDR, before exposure and tonemap (PostFx's RGBA16F
@@ -71,6 +71,7 @@ public:
 // The backends. Null when this one cannot run here (its DLL missing, an
 // unsupported adapter); logs why.
 Upscaler* CreateFsrUpscaler(ID3D12Device* device);
+Upscaler* CreateDlssUpscaler(ID3D12Device* device);
 
 // The render size for an output size at a per-axis scale (1 native), even and
 // at least 64 px.
