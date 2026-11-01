@@ -428,6 +428,32 @@ float3 ToneDisplay(float3 c)
     return Agx(c);
 }
 
+// THE UPSCALER'S INPUTS (upscaler.h), at render size: every pixel's motion, which our TAA works out per pixel from
+// the depth and the prepass and an upscaler needs as a texture - the same reprojection PSTaa makes, as (previous uv -
+// current uv) of the pixel's unjittered centre - and the reactive mask: MOVING GLASS (the prepass's w = 0.25, see
+// PSTaa) is reprojected as what is behind it while its own light moves, so it keeps little history.
+struct UpscaleIn { float2 motion : SV_Target0; float reactive : SV_Target1; };
+
+UpscaleIn PSUpscaleIn(VSOut i)
+{
+    const float2 uv = i.uv;
+    const float depth = gDepth.SampleLevel(sPoint, uv, 0).r;
+    const float2 ndc  = float2(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0);
+    const float4 motion = (gMotionOn > 0.5) ? gMotion.SampleLevel(sPoint, uv, 0) : float4(0, 0, 0, 0);
+    float2 prevNdc = ndc;
+    if (motion.w > 0.5)
+        prevNdc = ndc + motion.xy;
+    else
+    {
+        const float4 prevClip = mul(float4(ndc, depth, 1.0), gReproj);
+        if (abs(prevClip.w) > 1e-7) prevNdc = prevClip.xy / prevClip.w;
+    }
+    UpscaleIn o;
+    o.motion   = float2(prevNdc.x - ndc.x, ndc.y - prevNdc.y) * 0.5;    // uv: y down
+    o.reactive = (motion.w <= 0.5 && motion.w > 0.125) ? 0.75 : 0.0;
+    return o;
+}
+
 float4 PSTonemap(VSOut i) : SV_Target
 {
     float3 c = gColour.SampleLevel(sPoint, i.uv, 0).rgb;
@@ -597,6 +623,8 @@ void CSAdapt(uint gi : SV_GroupIndex)
     gState[1] = metered;
     gState[2] = 1.0;
     gState[3] = gExposure * exp2(ev);
+    // Again at byte 512, where a buffer-to-texture copy may start: the upscaler's 1x1 exposure (PostFx::Resolve).
+    gState[128] = gState[3];
 }
 )";
 
@@ -704,8 +732,11 @@ D3D12_RESOURCE_BARRIER Transition(ID3D12Resource* r,
 
 // Descriptor groups, eight wide so one root signature serves both passes.
 // t0 is "the colour input", which differs per pass; t1/t2 are only read by TAA.
-enum { kGroupTaa0 = 0, kGroupTaa1 = 1, kGroupTone0 = 2, kGroupTone1 = 3, kGroupToneHdr = 4 };
-enum { kGroupSize = 8, kGroupCount = 5 };   // colour, history, depth, motion, RT shadow, RT AO, its last
+enum { kGroupTaa0 = 0, kGroupTaa1 = 1, kGroupTone0 = 2, kGroupTone1 = 3, kGroupToneHdr = 4, kGroupToneUp = 5 };
+enum { kGroupSize = 8, kGroupCount = 6 };
+const UINT kExposureCopyOffset = 512;   // gState[128]: D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT
+const DXGI_FORMAT kUpMotionFormat   = DXGI_FORMAT_R16G16_FLOAT;
+const DXGI_FORMAT kUpReactiveFormat = DXGI_FORMAT_R8_UNORM;   // colour, history, depth, motion, RT shadow, RT AO, its last
 
 } // namespace
 
@@ -789,7 +820,7 @@ bool PostFx::CreatePasses(ID3D12Device* dev, DXGI_FORMAT outputFormat)
     flags = D3DCOMPILE_DEBUG | D3DCOMPILE_SKIP_OPTIMIZATION;
 #endif
     const std::string src = kPostSrc;
-    ComPtr<ID3DBlob> vs, psTaa, psTone;
+    ComPtr<ID3DBlob> vs, psTaa, psTone, psUpIn;
     if (FAILED(D3DCompile(src.c_str(), src.size(), "ngg_post", nullptr, nullptr,
                           "VSMain", "vs_5_1", flags, 0, &vs, &err)))
     {
@@ -806,6 +837,12 @@ bool PostFx::CreatePasses(ID3D12Device* dev, DXGI_FORMAT outputFormat)
                           "PSTonemap", "ps_5_1", flags, 0, &psTone, &err)))
     {
         Log("post: tonemap compile: %s", err ? (const char*)err->GetBufferPointer() : "?");
+        return false;
+    }
+    if (FAILED(D3DCompile(src.c_str(), src.size(), "ngg_post", nullptr, nullptr,
+                          "PSUpscaleIn", "ps_5_1", flags, 0, &psUpIn, &err)))
+    {
+        Log("post: upscaler inputs compile: %s", err ? (const char*)err->GetBufferPointer() : "?");
         return false;
     }
 
@@ -836,6 +873,17 @@ bool PostFx::CreatePasses(ID3D12Device* dev, DXGI_FORMAT outputFormat)
     if (FAILED(dev->CreateGraphicsPipelineState(&pd, IID_PPV_ARGS(&m_psoTonemap))))
     {
         Log("post: tonemap pipeline creation failed");
+        return false;
+    }
+
+    pd.PS = { psUpIn->GetBufferPointer(), psUpIn->GetBufferSize() };
+    pd.NumRenderTargets = 2;
+    pd.RTVFormats[0] = kUpMotionFormat;
+    pd.RTVFormats[1] = kUpReactiveFormat;
+    pd.BlendState.RenderTarget[1].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+    if (FAILED(dev->CreateGraphicsPipelineState(&pd, IID_PPV_ARGS(&m_psoUpIn))))
+    {
+        Log("post: upscaler inputs pipeline creation failed");
         return false;
     }
 
@@ -928,7 +976,7 @@ bool PostFx::CreateMetering(ID3D12Device* dev)
     };
     if (!buffer(128 * 4, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
                 D3D12_RESOURCE_STATE_COMMON, m_histogram) ||
-        !buffer(4 * 4, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
+        !buffer(kExposureCopyOffset + 256, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
                 D3D12_RESOURCE_STATE_COMMON, m_exposureState) ||
         !buffer(4 * 4, D3D12_HEAP_TYPE_READBACK, D3D12_RESOURCE_FLAG_NONE,
                 D3D12_RESOURCE_STATE_COPY_DEST, m_exposureReadback))
@@ -1024,12 +1072,14 @@ void PostFx::Meter(ID3D12GraphicsCommandList* list, ID3D12Resource* image,
     m_readbackPending = true;
 }
 
-bool PostFx::OnResize(ID3D12Device* dev, UINT width, UINT height)
+bool PostFx::OnResize(ID3D12Device* dev, UINT width, UINT height, UINT outputWidth, UINT outputHeight)
 {
-    if (!width || !height) return false;
+    if (!width || !height || !outputWidth || !outputHeight) return false;
 
     m_width = width;
     m_height = height;
+    m_outWidth = outputWidth;
+    m_outHeight = outputHeight;
     m_historyValid = false;      // a resized history is a different image
     m_hdrIsTarget = false;
 
@@ -1074,7 +1124,7 @@ bool PostFx::OnResize(ID3D12Device* dev, UINT width, UINT height)
     {
         D3D12_DESCRIPTOR_HEAP_DESC hd = {};
         hd.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
-        hd.NumDescriptors = 3;
+        hd.NumDescriptors = 5;   // + the upscaler's motion and reactive mask
         if (FAILED(dev->CreateDescriptorHeap(&hd, IID_PPV_ARGS(&m_rtvHeap)))) return false;
         m_rtvStride = dev->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
     }
@@ -1122,13 +1172,62 @@ bool PostFx::OnResize(ID3D12Device* dev, UINT width, UINT height)
     dev->CreateShaderResourceView(m_hdr.Get(),        &sd, slot(kGroupToneHdr, 0));
     dev->CreateShaderResourceView(m_hdr.Get(),        &sd, slot(kGroupToneHdr, 1));
 
-    Log("post: %u x %u HDR + 2 history buffers", width, height);
+    // The upscaler's targets, and the upscaler sized to them.
+    m_upReady = false;
+    m_upMotion.Reset();
+    m_upReactive.Reset();
+    m_upExposure.Reset();
+    m_upOutput.Reset();
+    if (m_upscaler)
+    {
+        auto texture = [&](UINT w, UINT h, DXGI_FORMAT f, D3D12_RESOURCE_FLAGS flags, D3D12_RESOURCE_STATES state,
+                           ComPtr<ID3D12Resource>& out) {
+            D3D12_RESOURCE_DESC d = desc;
+            d.Width = w;
+            d.Height = h;
+            d.Format = f;
+            d.Flags = flags;
+            return SUCCEEDED(dev->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &d, state, nullptr,
+                                                          IID_PPV_ARGS(&out)));
+        };
+        const D3D12_RESOURCE_STATES read = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE |
+                                           D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+        if (texture(width, height, kUpMotionFormat, D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET, read, m_upMotion) &&
+            texture(width, height, kUpReactiveFormat, D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET, read, m_upReactive) &&
+            texture(1, 1, DXGI_FORMAT_R32_FLOAT, D3D12_RESOURCE_FLAG_NONE, read, m_upExposure) &&
+            texture(outputWidth, outputHeight, kHdrFormat, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
+                    D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, m_upOutput))
+        {
+            rtv.ptr += m_rtvStride;
+            dev->CreateRenderTargetView(m_upMotion.Get(), nullptr, rtv);
+            rtv.ptr += m_rtvStride;
+            dev->CreateRenderTargetView(m_upReactive.Get(), nullptr, rtv);
+            dev->CreateShaderResourceView(m_upOutput.Get(), &sd, slot(kGroupToneUp, 0));
+            dev->CreateShaderResourceView(m_upOutput.Get(), &sd, slot(kGroupToneUp, 1));
+            m_upReady = m_upscaler->Resize(dev, width, height, outputWidth, outputHeight);
+            m_upPhases = m_upReady ? m_upscaler->JitterPhases(width, outputWidth) : 8;
+        }
+        if (!m_upReady) Log("post: the upscaler could not be set up - our own TAA, at the render size");
+    }
+
+    Log("post: %u x %u HDR + 2 history buffers%s", width, height, m_upReady ? ", upscaled" : "");
+    if (m_upReady) Log("post: upscaled to %u x %u by %s, %d jitter phases", outputWidth, outputHeight,
+                       m_upscaler->Name(), m_upPhases);
     return true;
 }
 
 void PostFx::Jitter(UINT width, UINT height, float* outX, float* outY) const
 {
     if (!m_taa || !width || !height) { *outX = *outY = 0.0f; return; }
+
+    if (Upscaling())
+    {
+        float px = 0.0f, py = 0.0f;   // render pixels, +y down
+        m_upscaler->JitterOffset((int)(m_frame % (UINT)m_upPhases), m_upPhases, &px, &py);
+        *outX =  2.0f * px / (float)width;
+        *outY = -2.0f * py / (float)height;
+        return;
+    }
 
     // 8 samples: long enough to look converged on an edge, short enough that a
     // 16-frame history is not required to complete the pattern.
@@ -1149,6 +1248,108 @@ D3D12_CPU_DESCRIPTOR_HANDLE PostFx::Begin(ID3D12GraphicsCommandList* list)
         m_hdrIsTarget = true;
     }
     return m_rtvHeap->GetCPUDescriptorHandleForHeapStart();
+}
+
+// The upscaler in place of PSTaa: its inputs at the render size (PSUpscaleIn), last frame's exposure into its 1x1
+// texture, then the upscaler, into m_upOutput. The viewport is the render size on entry.
+void PostFx::Upscale(ID3D12GraphicsCommandList* list, ID3D12Resource* depth, ID3D12Resource* motion,
+                     const float* consts, D3D12_GPU_DESCRIPTOR_HANDLE taaGroup, bool autoExposure)
+{
+    const D3D12_RESOURCE_STATES read = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE |
+                                       D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+    {
+        D3D12_RESOURCE_BARRIER pre[4];
+        UINT n = 0;
+        pre[n++] = Transition(m_upMotion.Get(), read, D3D12_RESOURCE_STATE_RENDER_TARGET);
+        pre[n++] = Transition(m_upReactive.Get(), read, D3D12_RESOURCE_STATE_RENDER_TARGET);
+        pre[n++] = Transition(depth, D3D12_RESOURCE_STATE_DEPTH_WRITE, read);
+        if (motion)
+            pre[n++] = Transition(motion, D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+        list->ResourceBarrier(n, pre);
+    }
+    D3D12_CPU_DESCRIPTOR_HANDLE rtvs[2];
+    rtvs[0] = m_rtvHeap->GetCPUDescriptorHandleForHeapStart();
+    rtvs[0].ptr += (SIZE_T)3 * m_rtvStride;
+    rtvs[1] = rtvs[0];
+    rtvs[1].ptr += m_rtvStride;
+    list->OMSetRenderTargets(2, rtvs, FALSE, nullptr);
+    list->SetPipelineState(m_psoUpIn.Get());
+    list->SetGraphicsRootDescriptorTable(0, taaGroup);
+    list->SetGraphicsRoot32BitConstants(1, 28, consts, 0);
+    if (m_exposureState)
+    {
+        ExposureStateTo(list, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+        list->SetGraphicsRootShaderResourceView(2, m_exposureState->GetGPUVirtualAddress());
+    }
+    list->DrawInstanced(3, 1, 0, 0);
+    {
+        D3D12_RESOURCE_BARRIER mid[5];
+        UINT n = 0;
+        mid[n++] = Transition(m_upMotion.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, read);
+        mid[n++] = Transition(m_upReactive.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, read);
+        mid[n++] = Transition(m_hdr.Get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, read);
+        mid[n++] = Transition(m_upOutput.Get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
+                              D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        if (motion)
+            mid[n++] = Transition(motion, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET);
+        list->ResourceBarrier(n, mid);
+    }
+
+    // THE EXPOSURE the colour will be tonemapped with, so the upscaler's own tonemapped heuristics see the screen's
+    // brightness: last frame's (the meter runs on the upscaled image, after this), copied from the state buffer's
+    // byte 512. None (exposure 1) until the meter has run, and with a fixed exposure.
+    ID3D12Resource* exposure = nullptr;
+    if (autoExposure && m_curve >= kCurveExp && m_lastExposure > 0.0f)
+    {
+        ExposureStateTo(list, D3D12_RESOURCE_STATE_COPY_SOURCE);
+        D3D12_RESOURCE_BARRIER b = Transition(m_upExposure.Get(), read, D3D12_RESOURCE_STATE_COPY_DEST);
+        list->ResourceBarrier(1, &b);
+        D3D12_TEXTURE_COPY_LOCATION dst = {};
+        dst.pResource = m_upExposure.Get();
+        dst.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+        D3D12_TEXTURE_COPY_LOCATION src = {};
+        src.pResource = m_exposureState.Get();
+        src.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+        src.PlacedFootprint.Offset = kExposureCopyOffset;
+        src.PlacedFootprint.Footprint = { DXGI_FORMAT_R32_FLOAT, 1, 1, 1, 256 };
+        list->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
+        b = Transition(m_upExposure.Get(), D3D12_RESOURCE_STATE_COPY_DEST, read);
+        list->ResourceBarrier(1, &b);
+        exposure = m_upExposure.Get();
+    }
+
+    LARGE_INTEGER now, hz;
+    QueryPerformanceCounter(&now);
+    QueryPerformanceFrequency(&hz);
+    float frameMs = 16.7f;
+    if (m_upTick.QuadPart) frameMs = (float)(double(now.QuadPart - m_upTick.QuadPart) * 1000.0 / double(hz.QuadPart));
+    m_upTick = now;
+    if (frameMs <= 0.0f || frameMs > 100.0f) frameMs = 16.7f;
+
+    UpscaleDispatch d;
+    d.list = list;
+    d.colour = m_hdr.Get();
+    d.depth = depth;
+    d.motion = m_upMotion.Get();
+    d.reactive = m_upReactive.Get();
+    d.exposure = exposure;
+    d.output = m_upOutput.Get();
+    d.renderWidth = m_width, d.renderHeight = m_height;
+    d.outputWidth = m_outWidth, d.outputHeight = m_outHeight;
+    // The jitter this frame was rendered with, back in render pixels (Jitter).
+    d.jitterX =  consts[18] * 0.5f * (float)m_width;
+    d.jitterY = -consts[19] * 0.5f * (float)m_height;
+    d.frameMs = frameMs;
+    d.cameraNear = m_near, d.cameraFar = m_far, d.fovY = m_fovY;
+    d.reset = !m_historyValid;
+    m_upscaler->Dispatch(d);
+
+    D3D12_RESOURCE_BARRIER post[3];
+    post[0] = Transition(depth, read, D3D12_RESOURCE_STATE_DEPTH_WRITE);
+    post[1] = Transition(m_hdr.Get(), read, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+    post[2] = Transition(m_upOutput.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                         D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+    list->ResourceBarrier(3, post);
 }
 
 void PostFx::Resolve(ID3D12GraphicsCommandList* list,
@@ -1286,7 +1487,19 @@ void PostFx::Resolve(ID3D12GraphicsCommandList* list,
     }
 
     int toneGroup = kGroupToneHdr;
-    if (taa)
+    UINT toneWidth = width, toneHeight = height;   // the image the tonemap reads
+    if (taa && Upscaling())
+    {
+        Upscale(list, depth, motion, consts, gpuGroup(kGroupTaa0), autoExposure);
+        // The upscaler bound its own heaps and root signature: ours again.
+        list->SetGraphicsRootSignature(m_rootSig.Get());
+        list->SetDescriptorHeaps(1, heaps);
+        list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+        toneGroup = kGroupToneUp;
+        toneWidth = m_outWidth, toneHeight = m_outHeight;
+        m_historyValid = true;
+    }
+    else if (taa)
     {
         D3D12_RESOURCE_BARRIER pre[3];
         pre[0] = Transition(m_history[writeIndex].Get(),
@@ -1332,11 +1545,23 @@ void PostFx::Resolve(ID3D12GraphicsCommandList* list,
     // Meter exactly what is about to be tonemapped - the resolved history, or
     // the raw HDR without TAA - and only for the curves that apply exposure.
     if (autoExposure && m_curve >= kCurveExp)
-        Meter(list, (toneGroup == kGroupToneHdr) ? m_hdr.Get()
+        Meter(list, (toneGroup == kGroupToneHdr) ? m_hdr.Get() : (toneGroup == kGroupToneUp) ? m_upOutput.Get()
                     : m_history[(toneGroup == kGroupTone0) ? 0 : 1].Get(),
-              gpuGroup(toneGroup), width, height);
+              gpuGroup(toneGroup), toneWidth, toneHeight);
     else
         m_snapExposure = true;     // whatever it held is stale when it resumes
+
+    // The tonemap writes the OUTPUT size, whatever it reads (an upscaler's image, or the render-size one stretched
+    // when the upscaler does not run); its sharpen steps by the texels of what it reads.
+    if (m_outWidth != width || m_outHeight != height)
+    {
+        const D3D12_VIEWPORT ovp = { 0.0f, 0.0f, (float)m_outWidth, (float)m_outHeight, 0.0f, 1.0f };
+        const D3D12_RECT oscissor = { 0, 0, (LONG)m_outWidth, (LONG)m_outHeight };
+        list->RSSetViewports(1, &ovp);
+        list->RSSetScissorRects(1, &oscissor);
+    }
+    consts[16] = 1.0f / (float)toneWidth;
+    consts[17] = 1.0f / (float)toneHeight;
 
     list->OMSetRenderTargets(1, &outRtv, FALSE, nullptr);
     list->SetPipelineState(m_psoTonemap.Get());

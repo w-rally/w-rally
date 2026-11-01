@@ -305,6 +305,7 @@ SettingsChoice SettingsUi(const ImGuiLayer& ui, app::Settings& s, bool inStage, 
 
     // The tab's rows, over copies of what the settings hold as other types.
     int quality = static_cast<int>(std::min(s.quality, 2u));
+    int upscaling = static_cast<int>(std::min(s.upscaling, app::kUpscaleModeCount - 1));
     const int tab = g_setTab;
     const bool keys = tab == 3;
     std::vector<SetRow> rows;
@@ -328,6 +329,11 @@ SettingsChoice SettingsUi(const ImGuiLayer& ui, app::Settings& s, bool inStage, 
         add(SetRow::Toggle, "FULL SCREEN", "The whole screen, or a window on the desktop. Applies at once.").on = &s.fullscreen;
         add(SetRow::Toggle, "RAY TRACING", "Ray tracing in the renderer. Applies at once.").on = &s.rayTracing;
         add(SetRow::Toggle, "TAA", "Temporal anti-aliasing. Applies at once.").on = &s.taa;
+        SetRow& up = add(SetRow::Choice, "UPSCALING",
+                         "Render below the screen's resolution and upscale with AMD FSR in place of TAA: faster, softer. "
+                         "Off: TAA at full resolution. Applies at once.");
+        up.at = &upscaling;
+        for (const app::UpscaleMode& m : app::kUpscaleModes) up.options.push_back(m.label);
         add(SetRow::Toggle, "SHADOWS", "Shadows. Applies at once.").on = &s.shadows;
         add(SetRow::Toggle, "VERTICAL SYNC", "Frames in step with the display. Applies at once.").on = &s.vsync;
     } else if (tab == 2) {
@@ -702,6 +708,7 @@ SettingsChoice SettingsUi(const ImGuiLayer& ui, app::Settings& s, bool inStage, 
 
     // The copies back into the settings; a graphics change to apply now.
     if (static_cast<uint32_t>(quality) != s.quality) s.quality = static_cast<uint32_t>(quality), graphics = true;
+    if (static_cast<uint32_t>(upscaling) != s.upscaling) s.upscaling = static_cast<uint32_t>(upscaling), graphics = true;
     if (graphics && c == SettingsChoice::None) c = SettingsChoice::Graphics;
     return c;
 }

@@ -3631,6 +3631,7 @@ bool Scene::LoadFromMemory(ID3D12Device* dev, ID3D12CommandQueue* queue,
         samp[i].Filter = D3D12_FILTER_ANISOTROPIC;
         samp[i].MaxAnisotropy = 8;
         samp[i].MaxLOD = D3D12_FLOAT32_MAX;
+        samp[i].MipLODBias = m_mipBias;
         samp[i].AddressU = samp[i].AddressV = samp[i].AddressW = D3D12_TEXTURE_ADDRESS_MODE_WRAP;
         samp[i].ShaderRegister = i;
         samp[i].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;

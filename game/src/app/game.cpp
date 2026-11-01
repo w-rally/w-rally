@@ -109,7 +109,16 @@ iface::RenderSettings ToRender(const Settings& s)
     r.taa = s.taa;
     r.shadows = s.shadows;
     r.autoExposure = 1;
-    r.renderScale = 1;
+    // The upscaling: the settings', or PHYS_DRIVE_UPSCALE's (an index or a name of kUpscaleModes) over them.
+    uint32_t mode = s.upscaling;
+    if (const char* e = std::getenv("PHYS_DRIVE_UPSCALE")) {
+        mode = static_cast<uint32_t>(std::strtoul(e, nullptr, 10));
+        for (uint32_t k = 0; k < kUpscaleModeCount; ++k)
+            if (std::strcmp(e, kUpscaleModes[k].name) == 0) mode = k;
+    }
+    const UpscaleMode& m = kUpscaleModes[mode < kUpscaleModeCount ? mode : 0];
+    r.upscaler = m.upscaler;
+    r.renderScale = m.scale;
     return r;
 }
 
@@ -612,6 +621,10 @@ StageEnd RunStage(Shell& sh, const Options& o, bool fromMenu, std::string& error
     const uint32_t jitterTo = std::getenv("PHYS_DRIVE_JITTER") ? std::strtoul(std::getenv("PHYS_DRIVE_JITTER"), nullptr, 0) : 0;
     const uint32_t shotEvery = std::getenv("PHYS_DRIVE_SHOTS") ? std::strtoul(std::getenv("PHYS_DRIVE_SHOTS"), nullptr, 0) : 0;
     uint32_t shotTick = 0;
+    // PHYS_DRIVE_FRAMEMS: every drawn frame's whole GPU time (RenderStats::frameMs), its mean and median printed at the
+    // end - how a renderer setting is judged (design 5.4 N2c), from a replay under --step.
+    const bool frameMsLog = std::getenv("PHYS_DRIVE_FRAMEMS") != nullptr;
+    std::vector<float> frameMsSeen;
     double mixCheck = 0, title = 0;
     // The session on its own thread from here on (session/sim_thread.h): in lockstep with the frames under --step, so
     // those runs stay the same frame for frame.
@@ -858,6 +871,11 @@ StageEnd RunStage(Shell& sh, const Options& o, bool fromMenu, std::string& error
                      st.lightCount);
             else if (st.rtFallback[0])
                 line("   shadows from cascades: %s", st.rtFallback);
+            if (st.upscaler[0])
+                line("upscaled by %s from %ux%u (%.0f%%)", st.upscaler, st.renderWidth, st.renderHeight,
+                     shownWidth ? 100.0 * st.renderWidth / shownWidth : 0.0);
+            else
+                line("native %ux%u, %s", st.renderWidth, st.renderHeight, st.taa ? "TAA" : "no TAA");
             if (st.autoExposure)
                 line("exposure x%.2f   metered %+.2f EV   adapted %+.2f EV", st.exposure, st.meteredEv, st.adaptedEv);
             else
@@ -992,6 +1010,8 @@ StageEnd RunStage(Shell& sh, const Options& o, bool fromMenu, std::string& error
         }
         // PHYS_DRIVE_SHOTS=<n>: a capture every n ticks as well, for a replay looked at afterwards - the renderer's own
         // frame (captureFrame), which a covered or minimised window does not spoil. F2: the window as shown.
+        if (frameMsLog && !paused)
+            if (const float ms = renderer.Stats().frameMs; ms > 0.0f) frameMsSeen.push_back(ms);
         const bool timedShot = shotEvery && !paused && snap.tick >= shotTick + shotEvery;
         if (timedShot) shotTick = snap.tick;
         const bool keyShot = shotKey(focused && keys.Down(Action::Screenshot));
@@ -1103,6 +1123,13 @@ StageEnd RunStage(Shell& sh, const Options& o, bool fromMenu, std::string& error
     }
     simThread.Stop();   // (the steps posted so far done: the recording is whole)
     sim.Finish();
+    if (frameMsLog && frameMsSeen.size() > 30) {
+        std::vector<float> v(frameMsSeen.begin() + 30, frameMsSeen.end());   // (the first second: loading, warming)
+        double sum = 0;
+        for (float ms : v) sum += ms;
+        std::nth_element(v.begin(), v.begin() + v.size() / 2, v.end());
+        std::printf("gpu frame: mean %.2f ms, median %.2f ms over %zu frames\n", sum / v.size(), v[v.size() / 2], v.size());
+    }
     window.SetTitle(L"W-Rally");
     return end;
 }

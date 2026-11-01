@@ -42,7 +42,8 @@ namespace wrally::iface {
 // 8: LightDesc - beams (kLightBeam: lobes in the lamp's frame, its up), the radial profile gone.
 // 9: RenderStats::sunElevationDeg (the frame's sun: its own time and place, or the weather's).
 // 10: updateTextureRgba (a UI texture's pixels again: the main menu's video).
-constexpr uint32_t kRendererInterfaceVer = 10;
+// 11: RenderSettings::upscaler (temporal upscaling at renderScale), RenderStats' render size and upscaler.
+constexpr uint32_t kRendererInterfaceVer = 11;
 
 struct Renderer;                     // the module's instance, opaque
 typedef uint32_t SceneHandle;        // a loaded .ngg stage
@@ -298,8 +299,13 @@ struct RenderSettings {
     uint32_t   taa;
     uint32_t   autoExposure;
     uint32_t   shadows;           // sun shadows at all
-    float      renderScale;       // 1 native; < 1 upscaled
+    float      renderScale;       // 1 native; < 1 upscaled. Per axis; used only with an upscaler
+    uint32_t   upscaler;          // kUpscaler*: what resolves the frame (none: the renderer's own TAA, native)
 };
+
+// RenderSettings::upscaler
+constexpr uint32_t kUpscalerNone = 0;
+constexpr uint32_t kUpscalerFsr  = 1;    // AMD FSR 3.1 (FSR 4 on RDNA 4), any DX12 GPU
 
 // What the last finished frame did - ngg_stats, the renderer's own readout.
 struct RenderStats {
@@ -317,6 +323,8 @@ struct RenderStats {
     uint32_t lightCount;                   // the local lights this frame
     float    frameMs;                      // the whole frame's GPU time, first command to last (GPU ms)
     float    sunElevationDeg;              // the last frame's sun over the horizon, degrees (a game's lamps by it)
+    uint32_t renderWidth, renderHeight;    // the size the scene is rendered at (the output's without an upscaler)
+    char     upscaler[48];                 // what upscales it, "FSR 3.1.x"; "" none (the renderer's TAA)
 };
 
 #pragma pack(pop)
