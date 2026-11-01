@@ -9,7 +9,8 @@
 //                open: Stage, Garage, Car setup, Weather (ui/quick_rally.cpp)
 //   SettingsUi   tabs: the content (the RBR folder, Rescan), graphics, sound, controls -
 //                the whole window, drawn to the W-Rally design: Q / E the tabs, W / S the rows, A / D the values
-//   PauseMenu    the in-stage menu (Esc): Resume, Restart stage, Settings, Debug, Exit to main menu
+//   PauseMenu    the in-stage menu (Esc), drawn to the W-Rally design over the held stage: Resume, Restart stage,
+//                Settings, Debug, Exit to main menu (the last two asked first), the run so far beside them
 //   DebugMenu    what the keys switch (the renderer's, the cameras, the sound), the sound mix
 //   MixPanel     the sound mix beside the stage while driving (the Debug menu turns it on)
 
@@ -63,7 +64,22 @@ SettingsChoice SettingsUi(const ImGuiLayer& ui, app::Settings& s, bool inStage, 
 bool CapturingKey();
 
 enum class PauseChoice { None, Resume, Restart, Settings, Debug, ExitToMenu };
-PauseChoice PauseMenu(const ImGuiLayer& ui, int width, int height);
+// What the pause menu tells of the run (its panel, its title).
+struct PauseInfo {
+    std::string stage, car, surface, weather;   // as the menus name them ("" not known)
+    int damage = -1;                            // 0 off .. 3 realistic (-1 not known)
+    float time = 0;                             // the stage time so far
+    std::vector<float> splits;
+    bool falseStart = false;
+    float distance = 0, finish = -1;            // the car along the drive line and the finish, metres (< 0 not known)
+};
+// The pause menu over the held stage, to the W-Rally design: the stage, its rows (Resume, Restart stage, Settings,
+// Debug, Exit to main menu), the run so far beside them. Restart and Exit ask first (Enter: yes, Esc: no).
+PauseChoice PauseMenu(const ImGuiLayer& ui, const PauseInfo& info, int width, int height);
+// The menu opened (Esc in a stage): on Resume, nothing asked.
+void OpenPause();
+// Esc while the menu is up: true when the menu took it (its question closed), else it is the game's (resume).
+bool PauseEscape();
 
 // The switches the keys work, for the debug menu to work too.
 struct DebugSwitches {

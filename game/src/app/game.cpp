@@ -639,6 +639,19 @@ StageEnd RunStage(Shell& sh, const Options& o, bool fromMenu, std::string& error
     std::vector<std::string> views;
     for (int32_t v = 0; const char* n = renderer.Api()->debugViewName(v); ++v) views.emplace_back(n);
     std::string settingsLog;
+    // What the pause menu tells of the run: Quick rally's names, else the command line's files.
+    auto pauseInfo = [&] {
+        ui::PauseInfo p;
+        p.stage = !o.stageTitle.empty() ? o.stageTitle : o.stage;
+        p.car = !o.carName.empty() ? o.carName : std::filesystem::path(o.session.physics.sgc).stem().string();
+        p.surface = o.session.physics.surface;
+        p.weather = !o.weatherName.empty() ? o.weatherName : !o.weather.empty() ? o.weather : "stage default";
+        const uint32_t options = o.session.physics.settings;
+        p.damage = options & 0x10u ? static_cast<int>(options >> 8 & 0xffu) : -1;
+        p.time = snap.clock.Time(), p.splits = snap.clock.Splits(), p.falseStart = snap.clock.FalseStart();
+        p.distance = snap.distance, p.finish = snap.clock.Finish();
+        return p;
+    };
 
     QueryPerformanceCounter(&last);
     bool quit = false;
@@ -648,8 +661,10 @@ StageEnd RunStage(Shell& sh, const Options& o, bool fromMenu, std::string& error
         if (!window.Pump()) quit = true, end = StageEnd::Quit;
         // Esc: the menu up, down again, or a step back from its Settings / Debug (the settings kept as they are).
         const UINT keyDown = window.TakeKeyDown();   // (for Settings -> Controls)
-        if (window.TakeEscape() && !ui::CapturingKey()) {
+        // (The pause menu's question takes Esc first: no.)
+        if (window.TakeEscape() && !ui::CapturingKey() && !(menu == StageMenu::Pause && ui::PauseEscape())) {
             if (menu == StageMenu::Settings) SaveSettings(sh.settings);
+            if (menu == StageMenu::None) ui::OpenPause();
             menu = menu == StageMenu::None ? StageMenu::Pause : menu == StageMenu::Pause ? StageMenu::None : StageMenu::Pause;
         }
         QueryPerformanceCounter(&now);
@@ -920,7 +935,7 @@ StageEnd RunStage(Shell& sh, const Options& o, bool fromMenu, std::string& error
 
         // Esc's menu over the stage.
         if (menu == StageMenu::Pause) {
-            switch (ui::PauseMenu(ui, shownWidth, shownHeight)) {
+            switch (ui::PauseMenu(ui, pauseInfo(), shownWidth, shownHeight)) {
             case ui::PauseChoice::Resume: menu = StageMenu::None; break;
             case ui::PauseChoice::Restart: quit = true, end = StageEnd::Restart; break;
             case ui::PauseChoice::Settings: menu = StageMenu::Settings; break;
@@ -1272,6 +1287,9 @@ int Menus(Shell& sh, std::string note)
             screen = Screen::Main;
             continue;
         }
+        o.stageTitle = catalog.FindStage(sh.settings.stage)->title;
+        o.carName = catalog.FindCar(sh.settings.car)->name;
+        o.weatherName = sh.settings.weatherCustom ? "custom weather" : sh.settings.weather.empty() ? "stage default" : sh.settings.weather;
         std::string line;
         for (const std::string& a : args) line += (line.empty() ? "" : " ") + a;
         std::printf("quick rally: %s\n", line.c_str());

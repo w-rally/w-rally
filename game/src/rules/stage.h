@@ -56,6 +56,7 @@ public:
     bool FalseStart() const { return m_falseStart; }
     const std::vector<float>& Splits() const { return m_splits; }
     size_t SplitCount() const { return m_checkpoints.size(); }
+    float Finish() const { return m_finish; }         // the finish's distance (< 0: none known)
     // What the HUD's middle shows: "3", "2", "1", "GO", "FALSE START" (3 s after it), a split (5 s after it), the finish
     // with the final time (from then on) or "".
     std::string Shown() const;
