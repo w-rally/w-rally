@@ -55,8 +55,8 @@ public:
     std::string Describe(size_t count) const;
     // The last phrase called, as text (for the readout).
     const std::string& LastCall() const { return m_last; }
-    // The HUD's text (temporary, until the HUD's pacenote graphics: the corners as L1 / R1 (flat) .. L7 / R7
-    // (hairpin), the rest short words, a distance its number): `current` the first phrase ahead (not yet passed by
+    // The HUD's words (ui::DrawPacenotes draws them: the corners as L1 / R1 (flat) .. L7 / R7 (hairpin), the rest
+    // short words, a distance its number): `current` the first phrase ahead (not yet passed by
     // 5 m) once it is spoken - from when its first word starts (no voice: when it is called), so the HUD and the voice
     // agree; `next` the one after it when the car is `nextSeconds` from it or less at its speed (only with a current).
     // "" not shown.

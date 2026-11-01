@@ -3,6 +3,7 @@
 #include <windows.h>
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -39,6 +40,7 @@
 #include "session/session.h"
 #include "session/sim_thread.h"
 #include "signals/bus.h"
+#include "signals/car.h"
 #include "sound/codriver.h"
 #include "sound/sound.h"
 #include "ui/hud.h"
@@ -358,6 +360,8 @@ StageEnd RunStage(Shell& sh, const Options& o, bool fromMenu, std::string& error
     render::Renderer& renderer = sh.renderer;
     ui::ImGuiLayer& ui = sh.ui;
     const input::Bindings& keys = sh.settings.keys;   // (Settings -> Controls: changes apply at once)
+    // The engine's rev limiter for the HUD's shift lights: its EngineInfo, at the car's load (from the physics' thread).
+    std::atomic<float> rpmLimit{0};
     // The modules hear the physics on the bus (before what it connects, which goes first).
     signals::Bus bus;
     // The physics, through the session (a module DLL in modules/physics: --physics, "rbr" by default).
@@ -406,6 +410,7 @@ StageEnd RunStage(Shell& sh, const Options& o, bool fromMenu, std::string& error
     }
     bool soundPaused = false;
     std::string lastLogged;   // (WRALLY_CODRIVER_LOG's)
+    bus.Connect<signals::EngineInfo>([&rpmLimit](const signals::EngineInfo& e) { rpmLimit = e.rpmLimit; });
     sim.Connect(&bus);
     const std::vector<phys::data::RecMesh> collision =
         phys::data::CarCollisionMeshes(phys::data::ReadSgcCollision(o.session.physics.sgc));
@@ -785,7 +790,7 @@ StageEnd RunStage(Shell& sh, const Options& o, bool fromMenu, std::string& error
         math::Perspective(view.fovY, aspect, 0.25f, 8000.0f, proj);
 
         ui.NewFrame();
-        ui::DrawDashboard(ui, snap.dash, shownWidth, shownHeight);
+        ui::DrawDashboard(ui, snap.dash, rpmLimit, shownWidth, shownHeight);
         ui::DrawStageClock(ui, snap.clock, shownWidth, shownHeight);
         if (live) {   // (the live game's): the call being spoken, and the next when close at the speed
             std::string current, next;

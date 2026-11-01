@@ -66,7 +66,7 @@ std::vector<std::string> WordsOf(const phys::data::DlsPacenote& n)
     return w;
 }
 
-// A word as the HUD shows it (a temporary text until the HUD has its pacenote graphics): the corners as Wallaby's
+// A word as the HUD takes it (ui::DrawPacenotes: a corner its block, the rest its plate): the corners as Wallaby's
 // pacenotes editor names them - L1 / R1 flat .. L7 / R7 hairpin -, the rest a short word, a distance its number.
 std::string ShortOf(const std::string& w)
 {

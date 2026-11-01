@@ -38,11 +38,8 @@ std::string ImGuiLayer::Init(HWND window, render::Renderer& renderer)
     char fonts[MAX_PATH] = {};
     GetWindowsDirectoryA(fonts, MAX_PATH);
     const std::string consolas = std::string(fonts) + "\\Fonts\\consolab.ttf";
-    if (GetFileAttributesA(consolas.c_str()) != INVALID_FILE_ATTRIBUTES) {
-        m_small = io.Fonts->AddFontFromFileTTF(consolas.c_str(), 48.0f);
-        m_large = io.Fonts->AddFontFromFileTTF(consolas.c_str(), 200.0f);
-    }
-    if (!m_small) m_small = m_large = io.Fonts->Fonts[0];   // (ImGui's own, scaled up)
+    if (GetFileAttributesA(consolas.c_str()) != INVALID_FILE_ATTRIBUTES) m_small = io.Fonts->AddFontFromFileTTF(consolas.c_str(), 48.0f);
+    if (!m_small) m_small = io.Fonts->Fonts[0];   // (ImGui's own, scaled up)
     const std::string segoe = std::string(fonts) + "\\Fonts\\segoeui.ttf";
     // The menus at the monitor's scale (the window is per-monitor DPI aware: its pixels are the screen's).
     m_scale = std::max(1.0f, static_cast<float>(GetDpiForWindow(window)) / 96.0f);
@@ -58,8 +55,13 @@ std::string ImGuiLayer::Init(HWND window, render::Renderer& renderer)
         return io.Fonts->AddFontFromFileTTF(path.c_str(), px, nullptr, kLatin);
     };
     m_wordmark = face("seguibli.ttf", 100.0f);
-    m_menuItem = face("segoeuiz.ttf", 40.0f);
+    m_menuItem = face("segoeuiz.ttf", 56.0f);   // (the HUD's timer and calls too, ~40 px at 1080p)
     m_menuText = face("seguisb.ttf", 32.0f);
+    // The countdown's (3, 2, 1, GO) and the like: digits, + - . : and capitals.
+    static const ImWchar kDigitsCaps[] = {0x0020, 0x0020, 0x002b, 0x003a, 0x0041, 0x005a, 0};
+    const std::string black = std::string(fonts) + "\\Fonts\\seguibli.ttf";
+    m_display = GetFileAttributesA(black.c_str()) != INVALID_FILE_ATTRIBUTES
+                    ? io.Fonts->AddFontFromFileTTF(black.c_str(), 240.0f, nullptr, kDigitsCaps) : m_wordmark;
     ImGui::StyleColorsDark();
     ImGuiStyle& style = ImGui::GetStyle();
     style.WindowRounding = style.FrameRounding = 4.0f;
