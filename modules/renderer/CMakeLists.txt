@@ -6,9 +6,16 @@
 add_library(ngg-core STATIC src/core/device.cpp src/core/aerial.cpp src/core/renderer.cpp src/core/atmosphere_ms.cpp
             src/core/dxc.cpp src/core/env.cpp src/core/log.cpp src/core/mipgen.cpp src/core/post.cpp src/core/rt.cpp
             src/core/scene.cpp src/core/shadow.cpp src/core/sky.cpp src/core/weather.cpp
-            src/core/astronomy.cpp src/core/lights.cpp src/core/fsr.cpp)
+            src/core/astronomy.cpp src/core/lights.cpp src/core/fsr.cpp src/core/dlss.cpp)
 target_include_directories(ngg-core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src/core)
 target_link_libraries(ngg-core PUBLIC d3d12 dxgi d3dcompiler PRIVATE fidelityfx)
+# DLSS (core/dlss.cpp) when its SDK was fetched (third_party/CMakeLists.txt). NVIDIA's NGX library is built against the
+# static release C runtime (/MT), so a Debug build leaves DLSS out (dlss.cpp's stub: no DLSS, logged).
+if(TARGET nvidia-dlss)
+    target_link_libraries(ngg-core PRIVATE $<$<NOT:$<CONFIG:Debug>>:nvidia-dlss>)
+    target_include_directories(ngg-core PRIVATE $<$<NOT:$<CONFIG:Debug>>:${WRALLY_DLSS_DIR}/include>)
+    target_compile_definitions(ngg-core PRIVATE $<$<NOT:$<CONFIG:Debug>>:WRALLY_DLSS>)
+endif()
 target_compile_definitions(ngg-core PRIVATE _CRT_SECURE_NO_WARNINGS)
 target_compile_options(ngg-core PRIVATE /W3)
 set_target_properties(ngg-core PROPERTIES CXX_STANDARD 17)
@@ -35,5 +42,10 @@ add_custom_command(TARGET WRenderer POST_BUILD COMMAND ${CMAKE_COMMAND} -E copy_
 # FSR (core/fsr.cpp): AMD's signed ffx-api DLLs, fetched by third_party/CMakeLists.txt, beside the module that loads them.
 if(WRALLY_FFX_DLLS)
     add_custom_command(TARGET WRenderer POST_BUILD COMMAND ${CMAKE_COMMAND} -E copy_if_different ${WRALLY_FFX_DLLS}
+                       $<TARGET_FILE_DIR:WRenderer>)
+endif()
+# DLSS (core/dlss.cpp): NVIDIA's runtime, fetched by third_party/CMakeLists.txt, beside the module NGX finds it from.
+if(WRALLY_DLSS_DLLS)
+    add_custom_command(TARGET WRenderer POST_BUILD COMMAND ${CMAKE_COMMAND} -E copy_if_different ${WRALLY_DLSS_DLLS}
                        $<TARGET_FILE_DIR:WRenderer>)
 endif()

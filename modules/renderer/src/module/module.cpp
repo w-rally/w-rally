@@ -188,7 +188,9 @@ void Apply(Renderer& r)
     r.core.SetPreferRayTracedShadows(s.rayTracing != 0);
     r.scene.SetShadowsOn(s.shadows != 0);
     r.post.SetAutoExposure(s.autoExposure != 0);
-    r.core.SetUpscaling(r.dev, s.upscaler == kUpscalerFsr ? ngg::core::UpscalerKind::Fsr : ngg::core::UpscalerKind::None,
+    r.core.SetUpscaling(r.dev, s.upscaler == kUpscalerFsr    ? ngg::core::UpscalerKind::Fsr
+                               : s.upscaler == kUpscalerDlss ? ngg::core::UpscalerKind::Dlss
+                                                             : ngg::core::UpscalerKind::None,
                         s.renderScale);
 }
 

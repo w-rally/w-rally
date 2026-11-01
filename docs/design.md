@@ -210,6 +210,9 @@ environment → prepass → sun visibility (RT or cascades) → AO → sky → s
   place of the TAA; the tonemap, the HUD and the UI stay at the output. `kUpscalerNone` (the default) is the TAA at the
   output, `renderScale` ignored. At half the output's pixels or fewer the AO traces twice the tier's rays. Without
   AMD's DLLs beside the module there is no FSR and the TAA stays.
+- DLSS (interface 12): `kUpscalerDlss` is the same with NVIDIA DLSS Super Resolution (NGX, `core/dlss.cpp`; DLAA at
+  `renderScale` 1) on RTX GPUs. The SDK is fetched at configure, not in git (NVIDIA's headers are proprietary), and
+  Release builds only; elsewhere, or without NVIDIA's runtime beside the module, the TAA stays (logged).
 - `kMaterialBlend` (glass) is drawn blended since 2026-10-30: after the opaque, far to near, premultiplied, no
   shadow and not ray traced (NGG design 5.0u). The car's glass uses it.
 - UI textures carry a high bit in their handle (`UiPass::kTextureBit`). A UI command naming any other texture draws

@@ -53,8 +53,8 @@ enum class Quality { Low = 0, Medium = 1, High = 2 };
 
 // TEMPORAL UPSCALING (upscaler.h): which upscaler replaces the TAA, and at what
 // render scale. None is our own TAA at the output size - the default, and the
-// frame exactly as it was. DLSS joins here as a second backend.
-enum class UpscalerKind { None = 0, Fsr = 1 };
+// frame exactly as it was. DLSS is the second backend (RTX only).
+enum class UpscalerKind { None = 0, Fsr = 1, Dlss = 2 };
 
 struct QualityTier
 {
@@ -80,10 +80,10 @@ public:
                 bool rayTracing = true);
     void OnResize(Device& dev, UINT width, UINT height);
 
-    // The upscaler and the render scale per axis (1 native; FSR's Quality is
-    // 0.67, Balanced 0.58, Performance 0.5). Resizes the render-size targets
-    // when it changes; call between frames. An upscaler that cannot run here
-    // leaves None (logged).
+    // The upscaler and the render scale per axis (1 native; FSR's and DLSS's
+    // Quality is 0.67, Balanced 0.58, Performance 0.5). Resizes the render-size
+    // targets when it changes; call between frames. An upscaler that cannot run
+    // here (DLSS without an RTX GPU) leaves None (logged).
     void SetUpscaling(Device& dev, UpscalerKind kind, float scale);
     UpscalerKind Upscaling() const      { return m_upKind; }
     float RenderScale() const           { return m_upKind == UpscalerKind::None ? 1.0f : m_renderScale; }
