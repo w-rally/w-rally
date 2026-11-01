@@ -6,102 +6,229 @@
 #include <cstdio>
 
 #include "imgui.h"
+#include "ui/menu_look.h"
 
 namespace wrally::ui {
 
 namespace {
 
-// The HUD's text, as ngg-api's shadowed labels were: a dark copy offset down-right, then the text. Big text from the
-// large font, so it is not a small one blown up.
-void Text(const ImGuiLayer& ui, float px, float x, float y, const char* text, uint32_t colour)
+// The design system's HUD colours beside the menus' (ui/menu_look.h).
+constexpr ImU32 kScrim = IM_COL32(10, 10, 11, 230), kWarning = IM_COL32(255, 194, 26, 255), kCritical = IM_COL32(255, 46, 58, 255);
+constexpr float kSafe = 48;   // the safe area's margin, px at 1080p
+// The HUD's plates and their text at 1.5 the design system's sizes (its 1080p px); the middle's big messages (the
+// countdown, GO, a false start, the finish) at 0.7 of theirs.
+constexpr float kHudSize = 1.5f, kMiddleSize = 0.7f;
+
+// A HUD's sizes: px at 1080p times `k`, as the menus'.
+float Scale(int width, int height) { return std::min(height / 1080.0f, width / 1280.0f); }
+
+ImDrawList* Draw() { return ImGui::GetForegroundDrawList(); }
+
+// `text`'s width at `size` (tracked by `spacing` em).
+float Width(ImFont* f, float size, const char* text, float spacing = 0) { return Tracked(nullptr, f, size, ImVec2(), 0, text, spacing); }
+
+// `text` with its capitals' middle on `mid` (the faces' capitals sit ~0.6 of the size below the line's top).
+float Line(ImFont* f, float size, float x, float mid, ImU32 col, const char* text, float spacing = 0)
 {
-    ImFont* font = px > 64.0f ? ui.HudLarge() : ui.HudSmall();
-    ImDrawList* d = ImGui::GetForegroundDrawList();
-    const float off = std::max(1.0f, px * 0.06f);
-    d->AddText(font, px, ImVec2(x + off, y + off), 0xc0000000u, text);
-    d->AddText(font, px, ImVec2(x, y), colour, text);
+    return Tracked(Draw(), f, size, ImVec2(x, mid - size * 0.6f), col, text, spacing);
 }
 
-float Width(const ImGuiLayer& ui, float px, const char* text)
+// mm:ss.hh, the design's timer.
+std::string Clock(float t)
 {
-    ImFont* font = px > 64.0f ? ui.HudLarge() : ui.HudSmall();
-    return (font ? font : ImGui::GetFont())->CalcTextSizeA(px, FLT_MAX, 0.0f, text).x;
+    const long cs = std::lround(std::max(0.0f, t) * 100);
+    char s[32];
+    std::snprintf(s, sizeof s, "%02ld:%02ld.%02ld", cs / 6000, cs / 100 % 60, cs % 100);
+    return s;
 }
+
+std::string Upper(std::string s)
+{
+    for (char& c : s)
+        if (c >= 'a' && c <= 'z') c = static_cast<char>(c - 'a' + 'A');
+    return s;
+}
+
+// The pacenote's arrow (the design's 24-unit glyph: up its stem, then across, the head at the end), `size` px square
+// at `at` (its top left), 3 units thick, pointing left or right.
+void Arrow(ImDrawList* d, ImVec2 at, float size, bool right, ImU32 col)
+{
+    const float u = size / 24;
+    auto p = [&](float x, float y) { return ImVec2(at.x + (right ? 24 - x : x) * u, at.y + y * u); };
+    const ImVec2 stem[3] = {p(18, 21), p(18, 10), p(7, 10)}, head[3] = {p(11, 5), p(6, 10), p(11, 15)};
+    d->AddPolyline(stem, 3, col, 0, 3 * u);
+    d->AddPolyline(head, 3, col, 0, 3 * u);
+}
+
+// One call at the top centre, its middle at `y` (its top): the grade's block, then its plate. `s` scales the design's
+// sizes (the next call is smaller); `a` its opacity.
+void Call(const ImGuiLayer& ui, const std::string& call, float centre, float y, float k, float s, float a)
+{
+    ImFont* item = ui.MenuItem();
+    const float size = 24 * k * s, pad = 8 * k * s, gap = 8 * k * s, h = size * 1.1f + 2 * pad, cut = 12 * k * s;
+    // The corner's grade (L1 .. R7, + / - on it) first, the rest after it; its numbers (distances) dimmer.
+    std::vector<std::string> words;
+    for (size_t i = 0; i < call.size();) {
+        const size_t j = std::min(call.find(' ', i), call.size());
+        if (j > i) words.push_back(Upper(call.substr(i, j - i)));
+        i = j + 1;
+    }
+    if (words.empty()) return;
+    const std::string& first = words[0];
+    const bool corner = first.size() >= 2 && (first[0] == 'L' || first[0] == 'R') && first[1] >= '1' && first[1] <= '7';
+    const std::string grade = corner ? first.substr(1) : "";
+    if (corner) words.erase(words.begin());
+    bool caution = false;
+    for (size_t i = 0; i < words.size(); ++i)
+        caution |= words[i] == "CAUTION" || words[i] == "WATER" || (words[i] == "DON'T" && i + 1 < words.size() && words[i + 1] == "CUT");
+
+    const float arrow = 22 * k * s, block = corner ? 12 * k * s + arrow + gap + Width(item, size, grade.c_str()) + 12 * k * s : 0;
+    float text = 0;
+    for (const std::string& w : words) text += Width(item, size, w.c_str()) + gap;
+    const float plate = words.empty() ? 0 : 12 * k * s + text - gap + 16 * k * s + cut;
+    float x = centre - (block + plate) * 0.5f;
+    const float mid = y + h * 0.5f;
+    ImDrawList* d = Draw();
+    if (corner) {
+        const ImU32 fill = Alpha(caution ? kWarning : kSignal, a), ink = Alpha(kSurfaceBase, a);
+        d->AddRectFilled(ImVec2(x, y), ImVec2(x + block, y + h), fill);
+        Arrow(d, ImVec2(x + 12 * k * s, mid - arrow * 0.5f), arrow, first[0] == 'R', ink);
+        Line(item, size, x + 12 * k * s + arrow + gap, mid, ink, grade.c_str());
+        x += block;
+    }
+    if (!words.empty()) {
+        Plate(d, ImVec2(x, y), plate, h, cut, Alpha(kScrim, a));
+        float tx = x + 12 * k * s;
+        for (const std::string& w : words) {
+            const bool number = std::isdigit(static_cast<unsigned char>(w[0])) != 0;
+            tx += Line(item, size, tx, mid, Alpha(number ? kInkSecondary : kInk, a), w.c_str()) + gap;
+        }
+    }
+}
+
+// The last split as it was crossed: the plate flashes once (~300 ms) when a new one comes.
+size_t g_splits = 0;
+float g_flash = 0;
 
 } // namespace
 
-// Where ngg-api's world labels put them: anchored at (x, y) in -1 .. 1 (y up), centred on the anchor and lifted 1.5
-// lines above it (ngg-core's Scene::SetLabels).
-void DrawDashboard(const ImGuiLayer& ui, const physics::Dashboard& d, int width, int height)
+void DrawDashboard(const ImGuiLayer& ui, const physics::Dashboard& dash, float rpmLimit, int width, int height)
 {
-    auto put = [&](float x, float y, const char* text, uint32_t colour, float px) {
-        const float ax = (x + 1) * 0.5f * static_cast<float>(width), ay = (1 - y) * 0.5f * static_cast<float>(height);
-        Text(ui, px, ax - 0.5f * Width(ui, px, text), ay - 1.5f * px, text, colour);
-    };
-    char speed[32], rpm[32], gear[8];
-    std::snprintf(speed, sizeof speed, "%3.0f km/h", std::fabs(d.speed) * 3.6f);
-    std::snprintf(rpm, sizeof rpm, "%5.0f rpm", d.rpm > 0 ? d.rpm : 0.0f);
-    std::snprintf(gear, sizeof gear, "%s", d.gear < 0 ? "R" : d.gear == 0 ? "N" : std::to_string(d.gear).c_str());
-    const float textPx = height * 0.045f, gearPx = height * 0.12f;
-    const uint32_t white = 0xf0ffffff, redline = d.rpm > 7000 ? 0xf03050ff : white;
-    put(0.72f, -0.62f, speed, white, textPx);
-    put(0.72f, -0.75f, rpm, redline, textPx);
-    put(0.90f, -0.68f, gear, 0xf040d0ff, gearPx);
-}
+    const float b = Scale(width, height), k = b * kHudSize, W = float(width), H = float(height);
+    ImDrawList* d = Draw();
+    ImFont* numeral = ui.Wordmark();
+    ImFont* text = ui.MenuText();
 
-void DrawPacenotes(const ImGuiLayer& ui, const std::string& current, const std::string& next, int width, int height)
-{
-    if (current.empty() && next.empty()) return;
-    // Each line centred: the current call, the next one under it, smaller.
-    const float px = height * 0.06f, nextPx = px * 0.6f;
-    const float y = height * 0.03f;
-    auto centred = [&](const std::string& s, float size, float at, uint32_t colour) {
-        Text(ui, size, (static_cast<float>(width) - Width(ui, size, s.c_str())) * 0.5f, at, s.c_str(), colour);
-    };
-    if (!current.empty()) centred(current, px, y, 0xf0ffffff);
-    if (!next.empty()) centred(next, nextPx, y + px * 1.15f, 0xe0d8d8d8);
+    // The plate: the speed (its unit under it) and the gear after a white rule, its left edge cut at the slant.
+    char speed[16];
+    std::snprintf(speed, sizeof speed, "%.0f", std::fabs(dash.speed) * 3.6f);
+    const char* gear = dash.gear < 0 ? "R" : dash.gear == 0 ? "N" : nullptr;
+    char gearNum[8];
+    if (!gear) std::snprintf(gearNum, sizeof gearNum, "%d", dash.gear), gear = gearNum;
+    const float size = 48 * k, pad = 8 * k, cut = 12 * k;
+    const float speedW = Width(numeral, size, "888"), gearW = Width(numeral, size, "8");
+    const float w = (16 + 12) * k + speedW + 12 * k + 2 * k + 12 * k + gearW + 16 * k, h = pad + size + 2 * k + 14 * k + pad;
+    const float x1 = W - kSafe * b, y1 = H - kSafe * b, x0 = x1 - w, y0 = y1 - h;
+    d->AddQuadFilled(ImVec2(x0 + cut, y0), ImVec2(x1, y0), ImVec2(x1, y1), ImVec2(x0, y1), kScrim);
+    const float sx = x0 + (16 + 12) * k + speedW;   // the speed's right edge
+    Tracked(d, numeral, size, ImVec2(sx - Width(numeral, size, speed), y0 + pad - size * 0.18f), kInk, speed, 0);
+    Tracked(d, text, 12 * k, ImVec2(sx - Width(text, 12 * k, "KM/H", 0.08f), y0 + pad + size + 2 * k), kInkSecondary, "KM/H", 0.08f);
+    const float rx = sx + 12 * k;
+    d->AddRectFilled(ImVec2(rx, y0 + pad), ImVec2(rx + 2 * k, y1 - pad), kInk);
+    const float gx = rx + 2 * k + 12 * k;
+    Tracked(d, numeral, size, ImVec2(gx + (gearW - Width(numeral, size, gear)) * 0.5f, y1 - pad - size * 1.18f), kSignal, gear, 0);
+
+    // The shift lights over it, right-aligned: lit from 60 % of the limiter, the last two hot; the limiter the whole bar.
+    const float limit = rpmLimit > 0 ? rpmLimit : 8000.0f, r = std::max(0.0f, dash.rpm) / limit;
+    const int lit = std::clamp(static_cast<int>(std::floor((r - 0.6f) / 0.4f * 8 + 0.5f)), 0, 8);
+    const bool limiter = r >= 0.98f;
+    const float segW = 10 * k, segH = 14 * k, segGap = 4 * k, lean = segH * 0.5f * kTanPlate;
+    const float top = y0 - 8 * k - segH;
+    for (int i = 0; i < 8; ++i) {
+        const float sx0 = x1 - (8 - i) * segW - (7 - i) * segGap - lean;
+        const ImU32 col = limiter ? kSignal : i < lit ? (i >= 6 ? kSignal : kInk) : kLineStrong;
+        d->AddQuadFilled(ImVec2(sx0 + lean, top), ImVec2(sx0 + segW + lean, top), ImVec2(sx0 + segW - lean, top + segH),
+                         ImVec2(sx0 - lean, top + segH), col);
+    }
 }
 
 void DrawStageClock(const ImGuiLayer& ui, const rules::StageClock& clock, int width, int height)
 {
-    auto put = [&](const std::vector<std::string>& lines, const std::vector<uint32_t>& colours, float px, float right,
-                   float y0, bool centre) {
-        for (size_t i = 0; i < lines.size(); ++i) {
-            const float w = Width(ui, px, lines[i].c_str());
-            const float x = centre ? (static_cast<float>(width) - w) * 0.5f : right - w;
-            Text(ui, px, x, y0 + static_cast<float>(i) * px * 1.2f, lines[i].c_str(), colours[std::min(i, colours.size() - 1)]);
-        }
-    };
-    const std::string shown = clock.Shown();
-    // the countdown's digits big; GO green, a false start red, a split / the finish smaller
-    const bool go = shown == "GO", warn = shown == "FALSE START", count = shown.size() == 1;
+    const float b = Scale(width, height), k = b * kHudSize, W = float(width), H = float(height);
+    ImDrawList* d = Draw();
+    ImFont* item = ui.MenuItem();
+    ImFont* text = ui.MenuText();
     const bool finished = clock.GetState() == rules::StageClock::State::Finished;
-    const float big = height * (count || go ? 0.22f : 0.09f);
-    put(shown.empty() ? std::vector<std::string>{} : std::vector<std::string>{shown},
-        {warn ? 0xf03030ffu : go || finished ? 0xf040e040u : 0xf0ffffffu}, big, 0, height * 0.32f - big * 0.5f, true);
-    std::vector<std::string> lines;
-    std::vector<uint32_t> colours;
-    const float px = std::max(14.0f, height * 0.04f);
-    lines.push_back(rules::StageClock::Text(clock.Time()));
-    colours.push_back(finished ? 0xf040e040u : 0xf0ffffffu);
-    if (clock.FalseStart()) {
-        lines.push_back("false start +10 s");
-        colours.push_back(0xf03030ffu);
+
+    // The timer's plate: STAGE, the time.
+    const float size = 26 * k, h = 44 * k, cut = 12 * k, x = kSafe * b;
+    float y = kSafe * b;
+    auto plate = [&](const char* label, const std::string& value, ImU32 ink, ImU32 back) {
+        const float lw = Width(text, 14 * k, label, 0.08f), vw = Width(item, size, value.c_str(), 0);
+        const float w = 12 * k + lw + 12 * k + vw + 16 * k + cut;
+        Plate(d, ImVec2(x, y), w, h, cut, back);
+        const float mid = y + h * 0.5f;
+        Line(text, 14 * k, x + 12 * k, mid, kInkMuted, label, 0.08f);
+        Line(item, size, x + 12 * k + lw + 12 * k, mid, ink, value.c_str());
+        y += h + 4 * k;
+    };
+    plate("STAGE", Clock(clock.Time()), kInk, kScrim);
+    // The last split: flashed once as it comes, then held.
+    const std::vector<float>& splits = clock.Splits();
+    if (splits.size() < g_splits) g_splits = 0;   // (a restart)
+    if (splits.size() > g_splits) g_splits = splits.size(), g_flash = 0.3f;
+    g_flash = std::max(0.0f, g_flash - ImGui::GetIO().DeltaTime);
+    if (!splits.empty()) {
+        const std::string label = "SPLIT " + std::to_string(splits.size());
+        plate(label.c_str(), Clock(splits.back()), kInkSecondary, g_flash > 0 ? Alpha(kSurfaceOverlay, 0.95f) : kScrim);
     }
-    for (size_t i = 0; i < clock.Splits().size(); ++i) {
-        lines.push_back("split " + std::to_string(i + 1) + "  " + rules::StageClock::Text(clock.Splits()[i]));
-        colours.push_back(0xf0c0e8ffu);
+    if (clock.FalseStart()) plate("FALSE START", "+10.00", kWarning, kScrim);
+
+    // The middle: the countdown's digits and GO, big; a false start's word; the finish's time on its plate.
+    const std::string shown = clock.Shown();
+    const float cx = W * 0.5f, cy = H * 0.32f, m = b * kMiddleSize, mcut = 12 * m;
+    if (finished) {
+        const std::string t = Clock(clock.Time());
+        ImFont* numeral = ui.Wordmark();
+        const float tw = Width(numeral, 48 * m, t.c_str()), w = std::max(tw, Width(text, 14 * m, "FINISH", 0.16f)) + 2 * 28 * m;
+        const float ph = 112 * m, px = cx - w * 0.5f, py = cy - ph * 0.5f;
+        Plate(d, ImVec2(px, py), w + mcut, ph, mcut, kScrim);
+        Tracked(d, text, 14 * m, ImVec2(px + 28 * m, py + 18 * m), kInkMuted, "FINISH", 0.16f);
+        Tracked(d, numeral, 48 * m, ImVec2(px + 28 * m, py + 34 * m), kInk, t.c_str(), 0);
+    } else if (shown == "FALSE START") {
+        const float fw = Width(item, 48 * m, shown.c_str()), ph = 80 * m, px = cx - fw * 0.5f - 28 * m;
+        Plate(d, ImVec2(px, cy - ph * 0.5f), fw + 56 * m + mcut, ph, mcut, kScrim);
+        Line(item, 48 * m, px + 28 * m, cy, kCritical, shown.c_str());
+    } else if (shown == "GO" || (shown.size() == 1 && shown[0] >= '1' && shown[0] <= '9')) {
+        ImFont* big = ui.HudDisplay();
+        const float bs = 180 * m, bw = Width(big, bs, shown.c_str());
+        Line(big, bs, cx - bw * 0.5f, cy, shown == "GO" ? kSignal : kInk, shown.c_str());
     }
-    put(lines, colours, px, static_cast<float>(width) - px * 0.8f, px * 0.6f, false);
+}
+
+void DrawPacenotes(const ImGuiLayer& ui, const std::string& current, const std::string& next, int width, int height)
+{
+    if (current.empty()) return;
+    const float b = Scale(width, height), k = b * kHudSize, cx = width * 0.5f, y = kSafe * b;
+    Call(ui, current, cx, y, k, 1.0f, 1.0f);
+    if (!next.empty()) Call(ui, next, cx, y + (24 * 1.1f + 16 + 8) * k, k, 0.75f, 0.75f);
 }
 
 void DrawReadout(const ImGuiLayer& ui, bool on, const std::vector<std::string>& lines, const std::string& warning, int height)
 {
+    // (Monospaced, a debugging aid: not the design's.) Under the timer's plates.
     const float px = std::max(12.0f, height * 0.022f);
-    float y = px * 0.6f;
-    for (size_t i = 0; on && i < lines.size(); ++i, y += px * 1.25f) Text(ui, px, px * 0.6f, y, lines[i].c_str(), 0xf0ffffff);
+    ImFont* font = ui.HudSmall();
+    ImDrawList* d = Draw();
+    auto put = [&](float x, float y, const char* text, ImU32 col) {
+        const float off = std::max(1.0f, px * 0.06f);
+        d->AddText(font, px, ImVec2(x + off, y + off), 0xc0000000u, text);
+        d->AddText(font, px, ImVec2(x, y), col, text);
+    };
+    float y = height * (270.0f / 1080.0f);
+    for (size_t i = 0; on && i < lines.size(); ++i, y += px * 1.25f) put(px * 0.6f, y, lines[i].c_str(), 0xf0ffffffu);
     if (on && !lines.empty()) y += px * 0.5f;
-    if (!warning.empty()) Text(ui, px, px * 0.6f, y, warning.c_str(), 0xf03030ffu);
+    if (!warning.empty()) put(px * 0.6f, y, warning.c_str(), kCritical);
 }
 
 } // namespace wrally::ui

@@ -3,10 +3,9 @@
 // atlas uploaded to the renderer (createTextureRgba), and each frame's draw data flattened into the renderer's
 // UiDrawList (the UI pass after the frame).
 //
-// The fonts: ImGui's own for small text, and Consolas Bold (the HUD's face since phys-drive) at a small and a large
-// size for the HUD - the large one so the countdown's digits are drawn from big glyphs rather than blown-up small ones;
-// Segoe UI for the menus, which the keyboard (arrows, Enter, Esc) works as well as the mouse; its italics and semibold
-// for the main menu.
+// The fonts: ImGui's own for small text, and Consolas Bold for the readout (F1); Segoe UI for the menus, which the
+// keyboard (arrows, Enter, Esc) works as well as the mouse; its italics and semibold for the main menu and the HUD, the
+// black italic again large for the HUD's countdown, so its digits are drawn from big glyphs rather than blown-up ones.
 
 #include <windows.h>
 
@@ -37,7 +36,8 @@ public:
     const iface::UiDrawList& Render();
 
     ImFont* HudSmall() const { return m_small; }
-    ImFont* HudLarge() const { return m_large; }
+    // The HUD's countdown: the wordmark's face loaded large, its digits and capitals only. Never null.
+    ImFont* HudDisplay() const { return m_display; }
     // The menus' face (Segoe UI; null: ImGui's own).
     ImFont* MenuFont() const { return m_menu; }
     // The main menu's: the wordmark (Segoe UI Black Italic), its items (Bold Italic), its labels and text (Semibold).
@@ -51,7 +51,7 @@ public:
 private:
     bool m_init = false;
     ImFont* m_small = nullptr;
-    ImFont* m_large = nullptr;
+    ImFont* m_display = nullptr;
     ImFont* m_menu = nullptr;
     ImFont* m_wordmark = nullptr;
     ImFont* m_menuItem = nullptr;

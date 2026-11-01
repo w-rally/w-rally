@@ -135,7 +135,7 @@ const MainItem kMainItems[] = {
     {"QUICK RALLY", "Pick a stage and a car, and go straight to the start line.", MainChoice::QuickRally},
     {"GARAGE", "Every car: what it is, its class, how it drives - and the one you drive.", MainChoice::Garage},
     {"MARKETPLACE", nullptr, MainChoice::None},
-    {"SETTINGS", "Content folders, graphics, sound and the controls.", MainChoice::Settings},
+    {"SETTINGS", "The RBR folder, graphics, sound and the controls.", MainChoice::Settings},
     {"EXIT", "Quit to desktop.", MainChoice::Exit},
 };
 constexpr int kMainCount = int(sizeof kMainItems / sizeof kMainItems[0]);

@@ -421,9 +421,17 @@ Interface: [`audio.h`](../include/wrally/iface/audio.h). Implementation: `plugin
     - **Next:** the one after it, when it is within 8 s at the car's speed (`--pacenote-next`, `hud_pacenote_next`),
       with a current only; centred under it, smaller and dimmer.
     - **Tuning:** the next call's time is in Settings → Sound → Pacenotes on the HUD.
-    - **Text:** temporary plain text until the HUD's design. Corners are L1/R1 (flat) .. L7/R7 (hairpin) as
-      Wallaby's editor names them, the rest short words (`crest`, `long`, `don't cut`, `>` for into), a distance
-      its number.
+    - **Look:** the design system's PaceNote. A corner (L1/R1 flat .. L7/R7 hairpin, as Wallaby's editor names
+      them) is a signal block with its arrow and grade, in the warning colour for a don't-cut, caution or water
+      call. The rest is upper case on a scrim plate: short words (`CREST`, `LONG`, `>` for into), a distance its
+      number in the secondary ink.
+  - **The rest of the HUD** (`ui/hud.*`, the design system's HUD): plates on the HUD scrim inside a 48 px safe area
+    at 1080p, scaled with the window. The stage time is top left as mm:ss.hh, with the last split under it, flashed
+    once as it is crossed, and a false start's +10. Speed, gear (signal) and 8 shift lights are bottom right. The
+    lights come on from 60 % of the rev limiter (the physics' `EngineInfo::rpmLimit`), the last two in signal, and
+    the whole bar at the limiter. The countdown's 3, 2, 1 and GO (signal) are big in the middle; the finish's time
+    is on a plate there. There is no split delta yet, as there is no reference time to compare against. Segoe UI
+    stands in for Saira, as in the menus.
     - **Without the voice:** with the sound or the co-driver off, it still shows. CTest `codriver-41` checks it on
       stage 41.
   - **Loaded on its own thread** (`CoDriver::LoadAsync`): `CoDriver.ini`, the recordings' decoding and the
