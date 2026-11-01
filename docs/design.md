@@ -204,7 +204,12 @@ environment → prepass → sun visibility (RT or cascades) → AO → sky → s
 - One scene at a time. Scene textures and models belong to the loaded scene, and loading another releases them.
   UI textures (`createTextureRgba`) are the renderer's and stay; `updateTextureRgba` (interface 10) replaces one's
   pixels, the same size - the main menu's video loop, a frame at a time.
-- Windowed only (`ErrNotSupported` for borderless and fullscreen). `renderScale` is ignored.
+- Windowed only (`ErrNotSupported` for borderless and fullscreen).
+- Temporal upscaling (interface 11): `upscaler` = `kUpscalerFsr` renders the scene, the prepass and the ray tracing at
+  `renderScale` per axis and AMD FSR (ffx-api, `core/fsr.cpp` behind `core/upscaler.h`) resolves it to the output in
+  place of the TAA; the tonemap, the HUD and the UI stay at the output. `kUpscalerNone` (the default) is the TAA at the
+  output, `renderScale` ignored. At half the output's pixels or fewer the AO traces twice the tier's rays. Without
+  AMD's DLLs beside the module there is no FSR and the TAA stays.
 - `kMaterialBlend` (glass) is drawn blended since 2026-10-30: after the opaque, far to near, premultiplied, no
   shadow and not ray traced (NGG design 5.0u). The car's glass uses it.
 - UI textures carry a high bit in their handle (`UiPass::kTextureBit`). A UI command naming any other texture draws

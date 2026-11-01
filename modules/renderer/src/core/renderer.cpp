@@ -36,6 +36,8 @@ bool Renderer::Create(Device& dev, DXGI_FORMAT outputFormat, UINT width, UINT he
     m_outputFormat = outputFormat;
     m_width = width;
     m_height = height;
+    m_renderWidth = width;
+    m_renderHeight = height;
 
     ID3D12Device* d = dev.device.Get();
     if (!m_sky.Create(d, PostFx::kHdrFormat)) Log("renderer: sky unavailable - frames clear instead");
@@ -61,14 +63,39 @@ void Renderer::OnResize(Device& dev, UINT width, UINT height)
 {
     m_width = width;
     m_height = height;
-    m_scene.OnResize(dev.device.Get(), width, height);
-    m_post.OnResize(dev.device.Get(), width, height);
+    m_renderWidth = width;
+    m_renderHeight = height;
+    if (m_upKind != UpscalerKind::None)
+        UpscaleRenderSize(width, height, m_renderScale, &m_renderWidth, &m_renderHeight);
+    m_scene.OnResize(dev.device.Get(), m_renderWidth, m_renderHeight);
+    m_scene.SetMipBias(m_renderWidth < width ? log2f((float)m_renderWidth / (float)width) : 0.0f);
+    m_post.OnResize(dev.device.Get(), m_renderWidth, m_renderHeight, width, height);
+    // (The ray tracer's targets follow the size it is traced at: Rt::Trace.)
+}
+
+void Renderer::SetUpscaling(Device& dev, UpscalerKind kind, float scale)
+{
+    if (!(scale > 0.0f) || scale > 1.0f) scale = 1.0f;
+    if (kind == m_upKind && (kind == UpscalerKind::None || scale == m_renderScale)) return;
+    if (kind == UpscalerKind::Fsr && !m_upscaler)
+    {
+        m_upscaler.reset(CreateFsrUpscaler(dev.device.Get()));
+        if (!m_upscaler) kind = UpscalerKind::None;
+    }
+    if (kind == UpscalerKind::None) scale = 1.0f;
+    if (kind == m_upKind && scale == m_renderScale) return;
+    m_upKind = kind;
+    m_renderScale = scale;
+    m_post.SetUpscaler(kind == UpscalerKind::None ? nullptr : m_upscaler.get());
+    if (kind == UpscalerKind::None) m_upscaler.reset();
+    Log("renderer: upscaling %s, render scale %.2f", kind == UpscalerKind::None ? "off (TAA)" : "FSR", scale);
+    if (m_width && m_height) OnResize(dev, m_width, m_height);
 }
 
 bool Renderer::Load(Device& dev, const wchar_t* path)
 {
     const bool ok = m_scene.Load(dev.device.Get(), dev.queue.Get(), path,
-                                 PostFx::kHdrFormat, m_width, m_height);
+                                 PostFx::kHdrFormat, m_renderWidth, m_renderHeight);
     m_rtRevision = 0xFFFFFFFFu;          // rebuilt on the next frame
     m_post.ResetHistory();
     return ok;
@@ -77,7 +104,7 @@ bool Renderer::Load(Device& dev, const wchar_t* path)
 bool Renderer::LoadFromMemory(Device& dev, const void* data, size_t bytes)
 {
     const bool ok = m_scene.LoadFromMemory(dev.device.Get(), dev.queue.Get(), data, bytes,
-                                           PostFx::kHdrFormat, m_width, m_height);
+                                           PostFx::kHdrFormat, m_renderWidth, m_renderHeight);
     m_rtRevision = 0xFFFFFFFFu;
     m_post.ResetHistory();
     return ok;
@@ -149,6 +176,19 @@ void Renderer::RecordFrame(Device& dev, D3D12_CPU_DESCRIPTOR_HANDLE outRtv,
     PixFrame();
     ID3D12GraphicsCommandList* list = dev.list.Get();
     if (!list) return;
+
+    // `width` x `height` is the client's target, the OUTPUT; everything up to the upscaler (or the TAA) runs at the
+    // RENDER size, which is the same without an upscaler.
+    if (width != m_width || height != m_height) OnResize(dev, width, height);
+    width = m_renderWidth;
+    height = m_renderHeight;
+    // The camera's planes and field of view, for the upscaler's depth (a conventional D3D projection: q = f/(f-n) at
+    // [10], -q*n at [14], 1/tan(fov/2) at [5]).
+    if (proj && proj[10] != 0.0f && proj[10] != 1.0f && proj[5] != 0.0f)
+    {
+        const float zNear = -proj[14] / proj[10];
+        m_post.SetCamera(zNear, proj[10] * zNear / (proj[10] - 1.0f), 2.0f * atanf(1.0f / proj[5]));
+    }
 
     // The whole frame's GPU time (LastFrameMs): last frame's, read now - the frame is synchronous, so it resolved.
     if (!m_frameTimer && dev.device && dev.queue && SUCCEEDED(dev.queue->GetTimestampFrequency(&m_frameHz)))
@@ -255,7 +295,7 @@ void Renderer::RecordFrame(Device& dev, D3D12_CPU_DESCRIPTOR_HANDLE outRtv,
                        m_scene.LastViewProjJittered(), m_scene.LastViewProj(),
                        m_scene.LastCameraPos(), sunTowards, 4000.0f,
                        0.00465f * sky.sunDiscSize,
-                       m_rt.AoAvailable() && m_ao, 3.0f, m_aoRays, width, height, &m_scene.GetLights());
+                       m_rt.AoAvailable() && m_ao, 3.0f, AoRaysTraced(), width, height, &m_scene.GetLights());
             m_rt.PrepareForRead(list);
             m_scene.SetRtVisibility(m_rt.Filtered());
             rtShadow = m_rt.Filtered();

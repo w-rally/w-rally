@@ -27,6 +27,7 @@ template <class F> void Fields(Settings& s, F&& f)
     f("quality", s.quality);
     f("ray_tracing", s.rayTracing);
     f("taa", s.taa);
+    f("upscaling", s.upscaling);
     f("shadows", s.shadows);
     f("vsync", s.vsync);
     f("sound", s.sound);

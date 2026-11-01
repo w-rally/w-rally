@@ -188,6 +188,8 @@ void Apply(Renderer& r)
     r.core.SetPreferRayTracedShadows(s.rayTracing != 0);
     r.scene.SetShadowsOn(s.shadows != 0);
     r.post.SetAutoExposure(s.autoExposure != 0);
+    r.core.SetUpscaling(r.dev, s.upscaler == kUpscalerFsr ? ngg::core::UpscalerKind::Fsr : ngg::core::UpscalerKind::None,
+                        s.renderScale);
 }
 
 void ToDesc(const ngg::core::WeatherPreset& w, WeatherDesc& d)
@@ -684,7 +686,9 @@ Status WRALLY_CALL RenderFrame(Renderer* r, const FrameDesc* f)
         r->core.SetTaa(r->settings.taa != 0);
         r->core.SetCurve(ngg::core::PostFx::kCurveAces);
         r->core.RecordFrame(r->dev, rtv, f->camera.view, f->camera.proj, r->sc.width, r->sc.height, sky);
-        r->scene.RenderEditorOverlay(r->dev.list.Get(), rtv, f->camera.view, f->camera.proj, r->sc.width, r->sc.height);
+        // (Depth-tested against the scene's depth, which is the render size: not drawn while upscaling.)
+        if (r->core.RenderWidth() == r->sc.width && r->core.RenderHeight() == r->sc.height)
+            r->scene.RenderEditorOverlay(r->dev.list.Get(), rtv, f->camera.view, f->camera.proj, r->sc.width, r->sc.height);
     } else {
         const float black[4] = {0, 0, 0, 1};
         r->dev.list->ClearRenderTargetView(rtv, black, 0, nullptr);
@@ -747,6 +751,9 @@ Status WRALLY_CALL Stats(Renderer* r, RenderStats* out)
     out->exposure = r->post.LastExposure();
     out->meteredEv = r->post.LastMeteredEv();
     out->adaptedEv = r->post.LastAdaptedEv();
+    out->renderWidth = r->core.RenderWidth();
+    out->renderHeight = r->core.RenderHeight();
+    strncpy_s(out->upscaler, sizeof out->upscaler, r->core.UpscalerName(), _TRUNCATE);
     return Status::Ok;
 }
 

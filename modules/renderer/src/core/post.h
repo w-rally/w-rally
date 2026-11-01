@@ -40,6 +40,8 @@
 #include <wrl/client.h>
 #include <stdint.h>
 
+#include "upscaler.h"
+
 namespace ngg {
 namespace core {
 
@@ -80,7 +82,27 @@ public:
     // Allocates the HDR target and the two history buffers. Call before the
     // first frame and on every resize; history is invalidated, because a
     // resized history is a different image.
-    bool OnResize(ID3D12Device* device, UINT width, UINT height);
+    bool OnResize(ID3D12Device* device, UINT width, UINT height)
+    {
+        return OnResize(device, width, height, width, height);
+    }
+    // With an upscaler (SetUpscaler): the HDR target, the TAA's histories and
+    // the upscaler's inputs at the RENDER size, its output and the tonemap at
+    // the OUTPUT size. Without one the two are the same.
+    bool OnResize(ID3D12Device* device, UINT renderWidth, UINT renderHeight,
+                  UINT outputWidth, UINT outputHeight);
+
+    // The temporal upscaler that replaces the TAA (upscaler.h), or null for
+    // our own TAA at the output size - the default, and exactly as before. Not
+    // owned; set before OnResize, which sizes it. It runs where the TAA would:
+    // not in debug views and not with TAA off, which then show the render-size
+    // image stretched.
+    void SetUpscaler(Upscaler* u)          { m_upscaler = u; m_historyValid = false; }
+    Upscaler* GetUpscaler() const          { return m_upscaler; }
+    bool Upscaling() const                 { return m_upscaler && m_upReady; }
+    // The camera, for the upscaler's depth: near and far planes, vertical
+    // field of view in radians.
+    void SetCamera(float zNear, float zFar, float fovY) { m_near = zNear; m_far = zFar; m_fovY = fovY; }
 
     // Where the sky and the scene draw. Transitions the HDR target and clears
     // nothing - the sky pass covers every pixel.
@@ -109,6 +131,7 @@ public:
     // The sub-pixel offset for THIS frame, in NDC. Both the scene and the sky
     // must apply it - a sky that does not jitter with the geometry anti-aliases
     // the world against a static background and the horizon crawls.
+    // With an upscaler its own sequence for the render-to-output ratio.
     void Jitter(UINT width, UINT height, float* outNdcX, float* outNdcY) const;
 
     void SetTaa(bool on)        { m_taa = on; }
@@ -174,7 +197,8 @@ private:
     UINT m_srvStride = 0;
 
     DXGI_FORMAT m_outputFormat = DXGI_FORMAT_R8G8B8A8_UNORM;
-    UINT  m_width = 0, m_height = 0;
+    UINT  m_width = 0, m_height = 0;              // the render size
+    UINT  m_outWidth = 0, m_outHeight = 0;        // the output size
     UINT  m_frame = 0;          // drives the jitter sequence and the ping-pong
     bool  m_historyValid = false;
     bool  m_taa = true;
@@ -184,6 +208,22 @@ private:
     float m_exposure = 1.0f;
     float m_prevViewProj[16] = {};
     bool  m_hdrIsTarget = false;
+
+    // The upscaler, when there is one: its inputs (render size: the motion,
+    // the reactive mask; the 1x1 exposure) and its output (output size), all
+    // PIXEL|NON_PIXEL_SHADER_RESOURCE between frames.
+    void Upscale(ID3D12GraphicsCommandList* list, ID3D12Resource* depth, ID3D12Resource* motion,
+                 const float* consts, D3D12_GPU_DESCRIPTOR_HANDLE taaGroup, bool autoExposure);
+    Upscaler* m_upscaler = nullptr;
+    bool  m_upReady = false;
+    int   m_upPhases = 8;
+    float m_near = 0.25f, m_far = 8000.0f, m_fovY = 1.0f;
+    LARGE_INTEGER m_upTick = {};
+    Microsoft::WRL::ComPtr<ID3D12PipelineState>  m_psoUpIn;
+    Microsoft::WRL::ComPtr<ID3D12Resource>       m_upMotion;
+    Microsoft::WRL::ComPtr<ID3D12Resource>       m_upReactive;
+    Microsoft::WRL::ComPtr<ID3D12Resource>       m_upExposure;
+    Microsoft::WRL::ComPtr<ID3D12Resource>       m_upOutput;
 
     // Auto exposure. The histogram is cleared by the pass that consumes it, so
     // it is all zeros between frames; the state buffer holds adapted log2

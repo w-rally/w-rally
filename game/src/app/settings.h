@@ -21,6 +21,7 @@ struct Settings {
     bool fullscreen = true;             // the whole screen (borderless), else a window
     uint32_t quality = 1;               // 0 low, 1 medium, 2 high
     bool rayTracing = true, taa = true, shadows = true, vsync = true;
+    uint32_t upscaling = 0;             // kUpscaleModes: 0 off (the renderer's TAA at the full size), 1.. FSR
 
     // Sound
     bool sound = true;
@@ -61,6 +62,23 @@ struct Settings {
     // The ';'-separated .ngg folders, or <rbr>/Ngg.
     std::string NggFolders() const;
 };
+
+// The upscaling modes (Settings::upscaling, W-Rally.ini's `upscaling`; PHYS_DRIVE_UPSCALE=<index or name> over it):
+// the upscaler, and the render scale per axis it upscales from - FSR's own ratios (1.5x, 1.7x, 2x).
+struct UpscaleMode {
+    const char* name;                   // as PHYS_DRIVE_UPSCALE takes it
+    const char* label;                  // the Settings screen's
+    uint32_t upscaler;                  // iface::kUpscaler*
+    float scale;
+};
+inline constexpr UpscaleMode kUpscaleModes[] = {
+    {"off", "OFF (TAA)", 0, 1.0f},
+    {"fsr-native", "FSR NATIVE AA", 1, 1.0f},
+    {"fsr-quality", "FSR QUALITY", 1, 1.0f / 1.5f},
+    {"fsr-balanced", "FSR BALANCED", 1, 1.0f / 1.7f},
+    {"fsr-performance", "FSR PERFORMANCE", 1, 0.5f},
+};
+inline constexpr uint32_t kUpscaleModeCount = sizeof kUpscaleModes / sizeof kUpscaleModes[0];
 
 std::filesystem::path SettingsPath();   // W-Rally.ini in the user folder (app/paths.h: beside the exe unless installed)
 Settings LoadSettings();

@@ -28,6 +28,7 @@
 #include <windows.h>
 #include <d3d12.h>
 #include <stdint.h>
+#include <memory>
 
 #include "device.h"
 #include "scene.h"
@@ -35,6 +36,7 @@
 #include "shadow.h"
 #include "post.h"
 #include "rt.h"
+#include "upscaler.h"
 
 namespace ngg {
 namespace core {
@@ -48,6 +50,11 @@ namespace core {
 // shadows (falling back to cascades only where RT is unavailable) and the
 // tiers differ in AO. New techniques join by adding a field here, not a mode.
 enum class Quality { Low = 0, Medium = 1, High = 2 };
+
+// TEMPORAL UPSCALING (upscaler.h): which upscaler replaces the TAA, and at what
+// render scale. None is our own TAA at the output size - the default, and the
+// frame exactly as it was. DLSS joins here as a second backend.
+enum class UpscalerKind { None = 0, Fsr = 1 };
 
 struct QualityTier
 {
@@ -73,6 +80,14 @@ public:
                 bool rayTracing = true);
     void OnResize(Device& dev, UINT width, UINT height);
 
+    // The upscaler and the render scale per axis (1 native; FSR's Quality is
+    // 0.67, Balanced 0.58, Performance 0.5). Resizes the render-size targets
+    // when it changes; call between frames. An upscaler that cannot run here
+    // leaves None (logged).
+    void SetUpscaling(Device& dev, UpscalerKind kind, float scale);
+    UpscalerKind Upscaling() const      { return m_upKind; }
+    float RenderScale() const           { return m_upKind == UpscalerKind::None ? 1.0f : m_renderScale; }
+
     bool Load(Device& dev, const wchar_t* path);
     bool LoadFromMemory(Device& dev, const void* data, size_t bytes);
 
@@ -92,6 +107,14 @@ public:
     bool AmbientOcclusion() const           { return m_ao; }
     void SetAoRays(uint32_t n)              { m_aoRays = n ? n : 1; }
     uint32_t AoRays() const                 { return m_aoRays; }
+    // What is traced: twice the rays when the render size has at most half the output's pixels (an upscaler at
+    // Quality and below), so the AO keeps about as many rays per OUTPUT pixel as native - its one-ray grain is
+    // otherwise denoised at the render size and blown up by the upscale, in blotches 1.5-2x the size. Paid out of the
+    // ray tracing the smaller frame saved.
+    uint32_t AoRaysTraced() const
+    {
+        return (uint64_t)m_renderWidth * m_renderHeight * 2 <= (uint64_t)m_width * m_height ? m_aoRays * 2 : m_aoRays;
+    }
     void SetSkyOn(bool on)                  { m_skyOn = on; }
     bool SkyOn() const                      { return m_skyOn; }
     void SetTaa(bool on)                    { m_taa = on; }
@@ -106,6 +129,10 @@ public:
     // The whole frame's GPU time (RecordFrame, first command to last), last frame's. The one number a change of
     // what the GPU does is judged by: a pass's own timestamps are not (design 5.4 N2c).
     double LastFrameMs() const          { return m_frameMs; }
+    // The size the scene is rendered at, and what upscales it ("" none: our own TAA, at the output size).
+    UINT RenderWidth() const            { return m_renderWidth; }
+    UINT RenderHeight() const           { return m_renderHeight; }
+    const char* UpscalerName() const    { return m_post.Upscaling() ? m_upscaler->Name() : ""; }
     bool RayTracingAvailable() const    { return m_rt.Ready(); }
     // Why RT shadows are not active this frame; null when they are.
     const char* RtFallbackReason() const;
@@ -131,7 +158,11 @@ private:
     Device     m_buildDev;
 
     DXGI_FORMAT m_outputFormat = DXGI_FORMAT_R8G8B8A8_UNORM;
-    UINT  m_width = 0, m_height = 0;
+    UINT  m_width = 0, m_height = 0;                 // the output
+    UINT  m_renderWidth = 0, m_renderHeight = 0;     // the scene, the prepass, the ray tracing
+    UpscalerKind m_upKind = UpscalerKind::None;
+    float m_renderScale = 1.0f;
+    std::unique_ptr<Upscaler> m_upscaler;
     bool  m_preferRt = true;
     bool  m_ao = true;
     uint32_t m_aoRays = 1;          // 5.0m: one ray, accumulated by the denoiser

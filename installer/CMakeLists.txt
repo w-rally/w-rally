@@ -7,6 +7,12 @@ install(TARGETS WAudio RUNTIME DESTINATION modules/audio)
 install(TARGETS WRenderer RUNTIME DESTINATION modules/renderer)
 install(FILES ${PROJECT_SOURCE_DIR}/third_party/dxc/dxcompiler.dll ${PROJECT_SOURCE_DIR}/third_party/dxc/dxil.dll
         DESTINATION modules/renderer)
+# FSR: AMD's signed ffx-api DLLs (fetched at configure, third_party/CMakeLists.txt) and their licence.
+if(WRALLY_FFX_DLLS)
+    install(FILES ${WRALLY_FFX_DLLS} DESTINATION modules/renderer)
+    install(FILES ${PROJECT_SOURCE_DIR}/third_party/fidelityfx/LICENSE.md DESTINATION modules/renderer
+            RENAME FidelityFX-LICENSE.md)
+endif()
 install(FILES ${PROJECT_SOURCE_DIR}/game/config/sound-mix.ini DESTINATION game/config)
 install(DIRECTORY ${PROJECT_SOURCE_DIR}/content/ DESTINATION content PATTERN ".git*" EXCLUDE)
 install(FILES ${PROJECT_SOURCE_DIR}/LICENSE.md ${PROJECT_SOURCE_DIR}/README.md DESTINATION .)

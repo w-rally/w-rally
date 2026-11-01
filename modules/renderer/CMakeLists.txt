@@ -6,9 +6,9 @@
 add_library(ngg-core STATIC src/core/device.cpp src/core/aerial.cpp src/core/renderer.cpp src/core/atmosphere_ms.cpp
             src/core/dxc.cpp src/core/env.cpp src/core/log.cpp src/core/mipgen.cpp src/core/post.cpp src/core/rt.cpp
             src/core/scene.cpp src/core/shadow.cpp src/core/sky.cpp src/core/weather.cpp
-            src/core/astronomy.cpp src/core/lights.cpp)
+            src/core/astronomy.cpp src/core/lights.cpp src/core/fsr.cpp)
 target_include_directories(ngg-core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src/core)
-target_link_libraries(ngg-core PUBLIC d3d12 dxgi d3dcompiler)
+target_link_libraries(ngg-core PUBLIC d3d12 dxgi d3dcompiler PRIVATE fidelityfx)
 target_compile_definitions(ngg-core PRIVATE _CRT_SECURE_NO_WARNINGS)
 target_compile_options(ngg-core PRIVATE /W3)
 set_target_properties(ngg-core PROPERTIES CXX_STANDARD 17)
@@ -32,3 +32,8 @@ wrally_build_hash(WRenderer WRENDERER_BUILD_HASH ${CMAKE_CURRENT_SOURCE_DIR}/src
 set(WRALLY_DXC_DLLS ${PROJECT_SOURCE_DIR}/third_party/dxc/dxcompiler.dll ${PROJECT_SOURCE_DIR}/third_party/dxc/dxil.dll)
 add_custom_command(TARGET WRenderer POST_BUILD COMMAND ${CMAKE_COMMAND} -E copy_if_different ${WRALLY_DXC_DLLS}
                    $<TARGET_FILE_DIR:WRenderer>)
+# FSR (core/fsr.cpp): AMD's signed ffx-api DLLs, fetched by third_party/CMakeLists.txt, beside the module that loads them.
+if(WRALLY_FFX_DLLS)
+    add_custom_command(TARGET WRenderer POST_BUILD COMMAND ${CMAKE_COMMAND} -E copy_if_different ${WRALLY_FFX_DLLS}
+                       $<TARGET_FILE_DIR:WRenderer>)
+endif()

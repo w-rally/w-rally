@@ -57,6 +57,11 @@ public:
     bool LoadFromMemory(ID3D12Device* device, ID3D12CommandQueue* queue,
                         const void* data, size_t bytes,
                         DXGI_FORMAT rtvFormat, UINT width, UINT height);
+    // The materials' texture LOD bias, from the next Load on (it is in the root
+    // signature's samplers): log2(render / output) under an upscaler, so the
+    // textures it reconstructs are picked at the output's texel density; 0
+    // native.
+    void SetMipBias(float bias)           { m_mipBias = bias; }
 
     // Dynamic content counts: an editor can open an empty project and start
     // adding, and a scene that draws must not report itself as not ready.
@@ -813,6 +818,7 @@ private:
     // Measured per asset by the converter - see SceneHeader::bakedScale.
     // Not a constant: it depends on which editor baked the track.
     float                    m_bakedScale = 1.0f;
+    float                    m_mipBias = 0.0f;
 
     enum { kProbeSlots = 16 };  // 15 reported groups + the FIRED marker
     Microsoft::WRL::ComPtr<ID3D12Resource> m_probe;
