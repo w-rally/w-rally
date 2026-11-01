@@ -744,6 +744,7 @@ constexpr int kPauseCount = int(sizeof kPauseItems / sizeof kPauseItems[0]);
 
 int g_pauseAt = 0;            // the selected row
 int g_pauseAsk = -1;          // the row whose question is up (-1 none)
+int g_pauseYes = 1;           // the question's focused answer: 1 yes (the verb), 0 cancel
 float g_pausePlate = -1;      // the selection's plate, in rows (eased; -1 not drawn yet)
 float g_pauseOn[kPauseCount];
 
@@ -848,12 +849,16 @@ PauseChoice PauseMenu(const ImGuiLayer& ui, const PauseInfo& info, int width, in
             }
         }
         if (picked >= 0) {
-            if (*kPauseItems[picked].ask) g_pauseAsk = picked;
+            if (*kPauseItems[picked].ask) g_pauseAsk = picked, g_pauseYes = 1;
             else c = kPauseItems[picked].choice;
         }
 
-        // The question under the rows: what is lost, yes (the signal's) or no.
+        // The question under the rows: what is lost, yes or no - the focused answer in the signal's, A / D (the arrows,
+        // Tab) moving it, Enter taking it; the mouse moving over an answer focuses it, a click takes it.
         if (asking) {
+            if (ImGui::IsKeyPressed(ImGuiKey_A) || ImGui::IsKeyPressed(ImGuiKey_LeftArrow)) g_pauseYes = 1;
+            if (ImGui::IsKeyPressed(ImGuiKey_D) || ImGui::IsKeyPressed(ImGuiKey_RightArrow)) g_pauseYes = 0;
+            if (ImGui::IsKeyPressed(ImGuiKey_Tab)) g_pauseYes = 1 - g_pauseYes;
             const PauseItem& m = kPauseItems[g_pauseAsk];
             const float y = rowsY + kPauseCount * pitch + 20, h = 178;
             d->AddRectFilled(P(x0, y), P(x0 + rowW, y + h), kSurfaceRaised);
@@ -863,24 +868,29 @@ PauseChoice PauseMenu(const ImGuiLayer& ui, const PauseInfo& info, int width, in
             std::snprintf(lost, sizeof lost, "The run so far is lost: %s%s.", RunClock(info.time).c_str(),
                           info.splits.empty() ? "" : info.splits.size() == 1 ? " and a split" : (" and " + std::to_string(info.splits.size()) + " splits").c_str());
             d->AddText(text, 21 * k, P(x0 + 28, y + 62), kInkSecondary, lost);
-            auto button = [&](float bx, const char* label, bool primary) {
+            auto button = [&](float bx, const char* label, int answer) {
                 const float bw = Tracked(nullptr, item, 22 * k, ImVec2(), 0, label, 0.02f) / k + 20 + 30;
                 const ImVec2 a = P(bx, y + 108), b = P(bx + bw, y + 156);
-                Plate(d, a, bw * k, 48 * k, 12 * k, primary ? kSignal : kSurfaceOverlay);
-                Tracked(d, item, 22 * k, ImVec2(a.x + 20 * k, a.y + 13 * k), primary ? kSurfaceBase : kInk, label, 0.02f);
-                return ImGui::IsMouseHoveringRect(a, b, false) && ImGui::IsMouseClicked(ImGuiMouseButton_Left);
+                const bool hot = ImGui::IsMouseHoveringRect(a, b, false);
+                if (hot && (moved.x || moved.y)) g_pauseYes = answer;
+                const bool focus = g_pauseYes == answer;
+                Plate(d, a, bw * k, 48 * k, 12 * k, focus ? kSignal : kSurfaceOverlay);
+                Tracked(d, item, 22 * k, ImVec2(a.x + 20 * k, a.y + 13 * k), focus ? kSurfaceBase : kInkSecondary, label, 0.02f);
+                return hot && ImGui::IsMouseClicked(ImGuiMouseButton_Left);
             };
             const float yesW = Tracked(nullptr, item, 22 * k, ImVec2(), 0, m.verb, 0.02f) / k + 50;
-            if (button(x0 + 28, m.verb, true) || enter) c = m.choice, g_pauseAsk = -1;
-            else if (button(x0 + 28 + yesW + 12, "CANCEL", false)) g_pauseAsk = -1;
+            const bool yes = button(x0 + 28, m.verb, 1), no = button(x0 + 28 + yesW + 12, "CANCEL", 0);
+            if (yes || (enter && g_pauseYes == 1)) c = m.choice, g_pauseAsk = -1;
+            else if (no || enter) g_pauseAsk = -1;
         }
 
         // What the selected row does; the keys.
         const float footY = 1080 - 80 - 34;
         if (!asking) d->AddText(text, 23 * k, P(x0 + 46, footY - 24 - 64), kInkSecondary, kPauseItems[g_pauseAt].help, nullptr, 600 * k);
         float x = x0 * k;
-        x += KeyHint(d, text, k, ImVec2(x, footY * k), "W S", "MOVE") + 24 * k;
-        x += KeyHint(d, text, k, ImVec2(x, footY * k), "ENTER", asking ? kPauseItems[g_pauseAsk].verb : kPauseItems[g_pauseAt].enter) + 24 * k;
+        x += KeyHint(d, text, k, ImVec2(x, footY * k), asking ? "A D" : "W S", "MOVE") + 24 * k;
+        const char* enterDoes = !asking ? kPauseItems[g_pauseAt].enter : g_pauseYes ? kPauseItems[g_pauseAsk].verb : "CANCEL";
+        x += KeyHint(d, text, k, ImVec2(x, footY * k), "ENTER", enterDoes) + 24 * k;
         KeyHint(d, text, k, ImVec2(x, footY * k), "ESC", asking ? "CANCEL" : "RESUME");
 
         // The run so far, beside the rows on the HUD's scrim.

@@ -423,15 +423,18 @@ void StagePage(const ImGuiLayer& ui, const assets::Catalog& catalog, app::Settin
     }
     // A stage chosen: back to Quick rally - taken after the page is drawn (the list's selection holds until then).
     int chosen = -1;
+    // The rows shown: as many as fit above the facts' plate (at 816); PgUp / PgDn a page of them.
+    constexpr int kShown = 8;
+    constexpr float kListY = 268, kRowH = 64, kColX = kX0 + 288, kColW = 420;
     if (dir && g_stageSide == 1) g_stageAt = std::clamp(g_stageAt + dir, 0, std::max(0, n - 1));
+    if (const int page = ImGui::IsKeyPressed(ImGuiKey_PageUp) ? -kShown : ImGui::IsKeyPressed(ImGuiKey_PageDown) ? kShown : 0; page && n)
+        g_stageSide = 1, g_stageAt = std::clamp(g_stageAt + page, 0, n - 1), g_stageTop = std::clamp(g_stageTop + page, 0, std::max(0, n - kShown));
     if (KeyEnter()) {
         if (g_stageSide == 0) g_stageSide = 1;
         else chosen = g_stageAt;
     }
     int collection = g_collection;   // a country clicked: from the next frame
 
-    constexpr int kShown = 9;
-    constexpr float kListY = 268, kRowH = 64, kColX = kX0 + 288, kColW = 420;
     g_stageTop = std::clamp(g_stageTop, std::max(0, g_stageAt - kShown + 1), std::max(0, std::min(g_stageAt, n - kShown)));
     FullScreen("Stage", ui, width, height, [&](const Look& l) {
         const float k = l.k;
@@ -464,6 +467,11 @@ void StagePage(const ImGuiLayer& ui, const assets::Catalog& catalog, app::Settin
         // The stages, scrolled to the selected one
         Tracked(l.d, l.text, 17 * k, l.P(kColX + 12, 228), g_stageSide == 1 ? kInk : kInkMuted,
                 (std::string("STAGES \xC2\xB7 ") + std::to_string(n)).c_str(), 0.16f);
+        if (n > kShown) {   // (the page keys by the list they move: the footer is full)
+            const char* pages = "PGUP PGDN: PAGE";
+            const float pw = Tracked(nullptr, l.text, 13 * k, ImVec2(), 0, pages, 0.16f);
+            Tracked(l.d, l.text, 13 * k, ImVec2((kColX + kColW) * k - pw, 230 * k), kInkMuted, pages, 0.16f);
+        }
         if (n) {
             const float target = kListY + (g_stageAt - g_stageTop) * (kRowH + 4);
             g_stagePlate = g_stagePlate < 0 ? target : g_stagePlate + (target - g_stagePlate) * ease;
