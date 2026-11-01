@@ -762,6 +762,8 @@ private:
     // The blended materials' (kMaterialBlend, glass), drawn after the opaque: [cull] none (two-sided), back, front
     // (a mirroring transform). Premultiplied (ONE, INV_SRC_ALPHA), depth tested, not written.
     Microsoft::WRL::ComPtr<ID3D12PipelineState>  m_psoBlend[3];
+    // The glass that moved, in the prepass: its mark in the motion target's alpha alone (PSPrepass). [cull] as above.
+    Microsoft::WRL::ComPtr<ID3D12PipelineState>  m_psoPrepassGlass[3];
     Microsoft::WRL::ComPtr<ID3D12Resource>       m_normal;
     Microsoft::WRL::ComPtr<ID3D12Resource>       m_motion;
     Microsoft::WRL::ComPtr<ID3D12Resource>       m_plantTarget;      // R32_UINT, plant + 1

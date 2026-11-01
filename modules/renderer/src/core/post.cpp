@@ -134,6 +134,11 @@ float4 PSTaa(VSOut i) : SV_Target
     // was somewhere else last frame. The prepass says where.
     const float4 motion = (gMotionOn > 0.5) ? gMotion.SampleLevel(sPoint, uv, 0) : float4(0, 0, 0, 0);
     const bool   moved  = motion.w > 0.5;
+    // MOVING GLASS over a still surface (Scene's PSPrepass, w = 0.25): not in the depth, so reprojected as what is
+    // behind it, but its own light is moving - never "still" (below), and marked in the history as a moved object's,
+    // so the pixels it leaves drop what it laid there. Without it a turning car's headlamp lens, the brightest thing
+    // on the showroom's dark, smeared across it at 0.97 a frame.
+    const bool   glass  = !moved && motion.w > 0.125;
     float2 prevUv = float2(0.0, 0.0);
     float  prevDepth = 0.0;               // reverse-Z depth this surface had then
     bool   usable;
@@ -186,7 +191,8 @@ float4 PSTaa(VSOut i) : SV_Target
             const float4 b = gHistory.GatherAlpha(sPoint, prevUv + float2( gTexel.x, -gTexel.y));
             const float4 c = gHistory.GatherAlpha(sPoint, prevUv + float2(-gTexel.x,  gTexel.y));
             const float4 d = gHistory.GatherAlpha(sPoint, prevUv + float2( gTexel.x,  gTexel.y));
-            usable = !any(min(min(a, b), min(c, d)) < 0.0);
+            // (The glass's own pixels keep theirs: it was there last frame too, and the clip judges it.)
+            usable = glass || !any(min(min(a, b), min(c, d)) < 0.0);
             fresh  = any(hd > 1.5);
         }
         else
@@ -242,7 +248,7 @@ float4 PSTaa(VSOut i) : SV_Target
     const int3   px = int3(i.pos.xy, 0);
     const bool   shadowMoved = !moved && usable && gShadow.Load(px).z > 0.5;
     const bool   aoMoved     = !moved && usable && gAo.Load(px).z > 0.5;
-    const float  still  = (usable && !shadowMoved && !aoMoved) ? saturate(1.0 - travel * 4.0) : 0.0;
+    const float  still  = (usable && !shadowMoved && !aoMoved && !glass) ? saturate(1.0 - travel * 4.0) : 0.0;
     const float3 clipLo = max(lo, mean - 1.25 * sigma);
     const float3 clipHi = min(hi, mean + 1.25 * sigma);
 
@@ -309,11 +315,11 @@ float4 PSTaa(VSOut i) : SV_Target
     const float wc = (1.0 - blend) / (1.0 + Luma(curr) * e);
     const float wh = blend         / (1.0 + Luma(hist) * e);
     const float3 outc = (curr * wc + hist * wh) / max(1e-5, wc + wh);
-    // Alpha: this pixel's depth, negative if it belongs to a moved object -
+    // Alpha: this pixel's depth, negative if it belongs to a moved object (or moving glass) -
     // what next frame's disocclusion test reads - and plus 2 for a static one
     // that took no history (`fresh` above); static depth is read for its sign
     // only. Nothing displays it: the tonemap and the meter read rgb.
-    return float4(outc, moved ? -max(depth, 1e-7) : (usable ? depth : depth + 2.0));
+    return float4(outc, (moved || glass) ? -max(depth, 1e-7) : (usable ? depth : depth + 2.0));
 }
 
 // ---------------------------------------------------------------------------
