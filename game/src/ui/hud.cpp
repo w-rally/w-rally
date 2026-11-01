@@ -50,22 +50,34 @@ std::string Upper(std::string s)
 }
 
 // The pacenote's arrow (the design's 24-unit glyph: up its stem, then across, the head at the end), `size` px square
-// at `at` (its top left), 3 units thick, pointing left or right.
+// at `at` (its top left), 4.5 units thick (bolder than the design's 3), pointing left or right.
 void Arrow(ImDrawList* d, ImVec2 at, float size, bool right, ImU32 col)
 {
-    const float u = size / 24;
+    const float u = size / 24, t = 4.5f * u;
     auto p = [&](float x, float y) { return ImVec2(at.x + (right ? 24 - x : x) * u, at.y + y * u); };
     const ImVec2 stem[3] = {p(18, 21), p(18, 10), p(7, 10)}, head[3] = {p(11, 5), p(6, 10), p(11, 15)};
-    d->AddPolyline(stem, 3, col, 0, 3 * u);
-    d->AddPolyline(head, 3, col, 0, 3 * u);
+    d->AddPolyline(stem, 3, col, 0, t);
+    d->AddPolyline(head, 3, col, 0, t);
+    // (Square caps: the stem's foot and the head's ends squared off by a half-thickness square each.)
+    for (const ImVec2& e : {stem[0], head[0], head[2]}) d->AddRectFilled(ImVec2(e.x - t * 0.5f, e.y - t * 0.5f), ImVec2(e.x + t * 0.5f, e.y + t * 0.5f), col);
 }
 
-// One call at the top centre, its middle at `y` (its top): the grade's block, then its plate. `s` scales the design's
-// sizes (the next call is smaller); `a` its opacity.
-void Call(const ImGuiLayer& ui, const std::string& call, float centre, float y, float k, float s, float a)
+// The corner's colour by its grade: 1 (flat) green, 4 yellow (the warning's), 7 (hairpin) red (the critical's).
+ImU32 Severity(int grade)
+{
+    constexpr ImU32 kGreen = IM_COL32(62, 207, 90, 255);
+    const float t = std::clamp((grade - 1) / 3.0f, 0.0f, 2.0f);
+    return t <= 1 ? Lerp(kGreen, kWarning, t) : Lerp(kWarning, kCritical, t - 1);
+}
+
+// One call at the top centre from `y` (its top): the grade's block (the pictogram, 1.5 the plate's size), then its
+// plate, centred on the block. `s` scales the design's sizes (the next call is smaller); `a` its opacity. Returns its
+// height.
+float Call(const ImGuiLayer& ui, const std::string& call, float centre, float y, float k, float s, float a)
 {
     ImFont* item = ui.MenuItem();
     const float size = 24 * k * s, pad = 8 * k * s, gap = 8 * k * s, h = size * 1.1f + 2 * pad, cut = 12 * k * s;
+    const float p = 1.5f;   // the pictogram's scale over the plate's
     // The corner's grade (L1 .. R7, + / - on it) first, the rest after it; its numbers (distances) dimmer.
     std::vector<std::string> words;
     for (size_t i = 0; i < call.size();) {
@@ -73,37 +85,36 @@ void Call(const ImGuiLayer& ui, const std::string& call, float centre, float y, 
         if (j > i) words.push_back(Upper(call.substr(i, j - i)));
         i = j + 1;
     }
-    if (words.empty()) return;
-    const std::string& first = words[0];
+    if (words.empty()) return 0;
+    const std::string first = words[0];   // (a copy: the word is erased below)
     const bool corner = first.size() >= 2 && (first[0] == 'L' || first[0] == 'R') && first[1] >= '1' && first[1] <= '7';
     const std::string grade = corner ? first.substr(1) : "";
     if (corner) words.erase(words.begin());
-    bool caution = false;
-    for (size_t i = 0; i < words.size(); ++i)
-        caution |= words[i] == "CAUTION" || words[i] == "WATER" || (words[i] == "DON'T" && i + 1 < words.size() && words[i + 1] == "CUT");
 
-    const float arrow = 22 * k * s, block = corner ? 12 * k * s + arrow + gap + Width(item, size, grade.c_str()) + 12 * k * s : 0;
+    const float ps = size * p, pp = 12 * k * s * p, arrow = 22 * k * s * p, pg = gap * p;
+    const float block = corner ? pp + arrow + pg + Width(ui.Wordmark(), ps, grade.c_str()) + pp : 0, bh = corner ? h * p : h;
     float text = 0;
     for (const std::string& w : words) text += Width(item, size, w.c_str()) + gap;
     const float plate = words.empty() ? 0 : 12 * k * s + text - gap + 16 * k * s + cut;
     float x = centre - (block + plate) * 0.5f;
-    const float mid = y + h * 0.5f;
+    const float mid = y + bh * 0.5f;
     ImDrawList* d = Draw();
     if (corner) {
-        const ImU32 fill = Alpha(caution ? kWarning : kSignal, a), ink = Alpha(kSurfaceBase, a);
-        d->AddRectFilled(ImVec2(x, y), ImVec2(x + block, y + h), fill);
-        Arrow(d, ImVec2(x + 12 * k * s, mid - arrow * 0.5f), arrow, first[0] == 'R', ink);
-        Line(item, size, x + 12 * k * s + arrow + gap, mid, ink, grade.c_str());
+        const ImU32 fill = Alpha(Severity(first[1] - '0'), a), ink = Alpha(kSurfaceBase, a);
+        d->AddRectFilled(ImVec2(x, y), ImVec2(x + block, y + bh), fill);
+        Arrow(d, ImVec2(x + pp, mid - arrow * 0.5f), arrow, first[0] == 'R', ink);
+        Line(ui.Wordmark(), ps, x + pp + arrow + pg, mid, ink, grade.c_str());   // (the black italic: as bold as the arrow)
         x += block;
     }
     if (!words.empty()) {
-        Plate(d, ImVec2(x, y), plate, h, cut, Alpha(kScrim, a));
+        Plate(d, ImVec2(x, mid - h * 0.5f), plate, h, cut, Alpha(kScrim, a));
         float tx = x + 12 * k * s;
         for (const std::string& w : words) {
             const bool number = std::isdigit(static_cast<unsigned char>(w[0])) != 0;
             tx += Line(item, size, tx, mid, Alpha(number ? kInkSecondary : kInk, a), w.c_str()) + gap;
         }
     }
+    return bh;
 }
 
 // The last split as it was crossed: the plate flashes once (~300 ms) when a new one comes.
@@ -210,8 +221,8 @@ void DrawPacenotes(const ImGuiLayer& ui, const std::string& current, const std::
 {
     if (current.empty()) return;
     const float b = Scale(width, height), k = b * kHudSize, cx = width * 0.5f, y = kSafe * b;
-    Call(ui, current, cx, y, k, 1.0f, 1.0f);
-    if (!next.empty()) Call(ui, next, cx, y + (24 * 1.1f + 16 + 8) * k, k, 0.75f, 0.75f);
+    const float h = Call(ui, current, cx, y, k, 1.0f, 1.0f);
+    if (!next.empty()) Call(ui, next, cx, y + h + 8 * k, k, 0.75f, 0.75f);
 }
 
 void DrawReadout(const ImGuiLayer& ui, bool on, const std::vector<std::string>& lines, const std::string& warning, int height)

@@ -21,8 +21,8 @@ void DrawDashboard(const ImGuiLayer& ui, const physics::Dashboard& d, float rpmL
 // countdown's digits and GO big in the middle, the finish's time on a plate there.
 void DrawStageClock(const ImGuiLayer& ui, const rules::StageClock& clock, int width, int height);
 // The co-driver's calls at the top centre ("": none), as CoDriver::Upcoming words them: a corner's grade (L1 .. R7) in
-// the signal block with its arrow (the warning colour for a don't-cut, caution or water call), the rest on a plate, its
-// distances dimmer; the next call under it, smaller and dimmer.
+// a block with its arrow, 1.5 the plate's size and coloured by the grade (1 green, 4 yellow, 7 red), the rest on a
+// plate, its distances dimmer; the next call under it, smaller and dimmer.
 void DrawPacenotes(const ImGuiLayer& ui, const std::string& current, const std::string& next, int width, int height);
 // The readout's lines under the stage timer; then `warning` in red under them ("" none). Off: the warning alone.
 void DrawReadout(const ImGuiLayer& ui, bool on, const std::vector<std::string>& lines, const std::string& warning, int height);
