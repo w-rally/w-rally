@@ -75,6 +75,30 @@ float2 Rand2(uint2 pixel, uint frame, uint salt)
     return float2((h & 0xFFFFu) / 65535.0, (h >> 16) / 65535.0);
 }
 
+// STRATIFIED over the screen, as the AO's samples are (AoSample): every 4x4
+// tile of pixels takes each of 16 strata once, with a white jitter inside its
+// stratum, the whole pattern shifted every frame. White noise let a 5x5
+// window draw its samples unevenly - one lamp of three for twelve of its
+// pixels and another for five, half the sun's disc for most of them - and
+// that luck was the blotches the denoiser blurred but kept: under the
+// Garage's car, its floor. Stratified, a window's mean has little luck left.
+// StratU: one number (which lamp, Pick), its stratum the tile's (x + 2y,
+// 2x + y) cell in 16ths - any 2x2 block of it spans the four quarters.
+float StratU(uint2 px, uint frame)
+{
+    const uint k = ((px.x + 2u * px.y) & 3u) + 4u * ((2u * px.x + px.y) & 3u);
+    return frac((float(k) + Rand2(px, frame, 101u).x) / 16.0 + float(frame) * 0.6180339887);
+}
+// StratDisc: a point on a light's disc (the square, mapped by the caller); a
+// second bijection of the tile, (x + 3y, 3x + 2y), so which lamp a pixel
+// takes says nothing of where on it the ray goes.
+float2 StratDisc(uint2 px, uint frame)
+{
+    const uint2 cell = uint2((px.x + 3u * px.y) & 3u, (3u * px.x + 2u * px.y) & 3u);
+    const float2 j = Rand2(px, frame, 7u);
+    return frac((float2(cell) + j) * 0.25 + frac(float(frame) * float2(0.7548776662, 0.5698402910)));
+}
+
 // Surface position from depth and the frame's JITTERED matrix, and the
 // prepass normal. Shared by every ray type, because a ray origin that differs
 // between them by half a pixel would be a different bias problem per feature.
@@ -272,7 +296,7 @@ void CSMain(uint3 tid : SV_DispatchThreadID)
     if (gSunAngle > 0.0)
     {
         float3 T, B; Basis(dir, T, B);
-        float2 r  = Rand2(tid.xy, gFrame, 0u);
+        float2 r  = StratDisc(tid.xy, gFrame);
         float rad = sqrt(r.x) * tan(gSunAngle);
         float ang = r.y * 6.28318530;
         dir = normalize(dir + T * (rad * cos(ang)) + B * (rad * sin(ang)));
@@ -481,8 +505,9 @@ void CSMain(uint3 tid : SV_DispatchThreadID)
         return;
     }
 #endif
+    // Each lamp in proportion to what it gives here: their sum, then the one
+    // whose share of it holds this pixel's stratified number (StratU).
     float total = 0.0;
-    uint chosen = 0xFFFFFFFFu;
     for (uint k = 0; k < c.y; ++k)
     {
         const uint li = gLightIndex[c.x + k];
@@ -491,10 +516,22 @@ void CSMain(uint3 tid : SV_DispatchThreadID)
         float dist;
         const float3 E = LightIrradiance(li, p, l, dist);
         // A plant's card takes light from both sides (its shading wraps), any other surface from its front.
+        total += max(dot(E, float3(0.2126, 0.7152, 0.0722)) * (plant != 0u ? 1.0 : saturate(dot(N, l))), 0.0);
+    }
+    if (total <= 0.0) { gOut[tid.xy] = 1.0; return; }
+    float pick = StratU(tid.xy, gFrame) * total;
+    uint chosen = 0xFFFFFFFFu;
+    for (uint k = 0; k < c.y && pick >= 0.0; ++k)
+    {
+        const uint li = gLightIndex[c.x + k];
+        if ((gLights[li].flags & kLightShadows) == 0u) continue;
+        float3 l;
+        float dist;
+        const float3 E = LightIrradiance(li, p, l, dist);
         const float w = dot(E, float3(0.2126, 0.7152, 0.0722)) * (plant != 0u ? 1.0 : saturate(dot(N, l)));
         if (w <= 0.0) continue;
-        total += w;
-        if (Rand2(tid.xy, gFrame, 101u + k).x * total < w) chosen = li;
+        chosen = li;
+        pick -= w;
     }
     if (chosen == 0xFFFFFFFFu) { gOut[tid.xy] = 1.0; return; }
 
@@ -504,7 +541,7 @@ void CSMain(uint3 tid : SV_DispatchThreadID)
     const float3 toL = lpos - p;
     const float3 d0 = toL / max(length(toL), 1e-4);
     float3 T, B; Basis(d0, T, B);
-    const float2 r = Rand2(tid.xy, gFrame, 7u);
+    const float2 r = StratDisc(tid.xy, gFrame);
     const float rad = sqrt(r.x) * lradius, ang = r.y * 6.28318530;
     const float3 target = lpos + T * (rad * cos(ang)) + B * (rad * sin(ang));
 
@@ -1961,6 +1998,8 @@ void Rt::Trace(Device& dev, ID3D12GraphicsCommandList* list, ID3D12Resource* dep
         dc.blendMoved = 0.25f;
         // A pixel still on the screen: three times the samples (see kDenoiseSrc's STILL).
         dc.blendStill = 0.95f;
+        // The sun's and the lamps' samples are stratified over 4x4 tiles (StratU, StratDisc), as the AO's.
+        dc.period4 = 1.0f;
         if (unjitteredViewProj) memcpy(m_prevViewProj, unjitteredViewProj, sizeof(m_prevViewProj));
     }
     Denoise(list, dc, m_result.Get(), kSlotPair0, kSlotPair1, kSlotHistUav0, kSlotHistUav1,
