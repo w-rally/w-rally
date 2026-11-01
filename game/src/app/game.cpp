@@ -1330,7 +1330,12 @@ int RunGame(const std::vector<std::string>& args)
     // --showroom <car folder> [--turn <degrees>]: the Garage's showroom with that car, one capture (showroom.bmp, in the
     // working folder) once it is loaded, then out - a look at a car's model without the menus.
     if (const auto it = std::find(args.begin(), args.end(), std::string("--showroom")); it != args.end() && it + 1 != args.end()) {
-        if (const char* off = std::getenv("PHYS_DRIVE_OFF"); off && std::strstr(off, "taa")) sh.settings.taa = false;   // as a stage's
+        if (const char* off = std::getenv("PHYS_DRIVE_OFF")) {   // as a stage's
+            if (std::strstr(off, "taa")) sh.settings.taa = false;
+            if (std::strstr(off, "ao")) sh.settings.quality = 0;
+            if (std::strstr(off, "shadows")) sh.settings.shadows = false;
+            if (std::strstr(off, "rt")) sh.settings.rayTracing = false;
+        }
         if (const std::string e = OpenShell(sh, "wrenderer"); !e.empty()) return std::fprintf(stderr, "%s\n", e.c_str()), 3;
         assets::Catalog catalog;
         catalog.Scan(sh.settings);
