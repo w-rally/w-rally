@@ -26,8 +26,11 @@ ByteAddressBuffer               gDynVerts     : register(t7);
 // Per TLAS instance (indexed by InstanceID): where its alpha triangles start
 // in gAlphaIndices/gTriMaterial, what to add to its indices, which vertex
 // buffer they index, and its material when the mesh's triangles do not say.
-// moved: the instance's transform changed since last frame (see Occluded).
-struct Inst { uint triBase; uint vertexBase; uint vb; uint material; uint moved; };
+// moved: the instance's transform changed since last frame (see Occluded);
+// was0..was3 then its LAST frame's object-to-world rows (row vectors), so a
+// ray's hit point can be put where it was.
+struct Inst { uint triBase; uint vertexBase; uint vb; uint material; uint moved;
+              float3 was0; float3 was1; float3 was2; float3 was3; };
 StructuredBuffer<Inst>          gInst         : register(t8);
 // Foliage: the plant each alpha triangle belongs to (~0 = none), and the
 // prepass's per-pixel plant (+ 1, 0 = none) - scene.cpp FindPlants.
@@ -107,7 +110,9 @@ void Basis(float3 d, out float3 T, out float3 B)
 // accepted or refused by the rasteriser's own test - texture alpha times
 // vertex alpha against the material's cutoff - so a leaf blocks exactly the
 // pixels it was drawn with. Returns true if anything blocks the ray, and in
-// `onMoved` whether what blocked it is an object that moved this frame.
+// `mover` - if what blocked it is an object that moved this frame - how far
+// the point the ray hit moved since last frame and how far along the ray it
+// is, metres; x < 0 when it did not move (Allow).
 //
 // FROM A PLANT (`fromPlant` = its index + 1), that plant's own cards do not
 // count. A tree here is 2-3 crossed flat cards, and a card's ray towards the
@@ -122,9 +127,9 @@ void Basis(float3 d, out float3 T, out float3 B)
 // How far from a legacy card its rays ignore other cards, metres: past a grass tuft (~0.5 m) and the near cards of a
 // tree, short of the canopy over the grass.
 static const float kLegacyCardSkip = 1.5;
-bool Occluded(RayDesc ray, bool count, uint fromPlant, out bool onMoved)
+bool Occluded(RayDesc ray, bool count, uint fromPlant, out float2 mover)
 {
-    onMoved = false;
+    mover = float2(-1.0, 0.0);
     RayQuery<RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH |
              RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES> q;
     // From a legacy card (~0, scene.cpp PSPrepass): the cards within kLegacyCardSkip of the start do not count -
@@ -200,13 +205,48 @@ bool Occluded(RayDesc ray, bool count, uint fromPlant, out bool onMoved)
         else if (count) InterlockedAdd(gCounters[3], 1);
     }
     if (q.CommittedStatus() != COMMITTED_TRIANGLE_HIT) return false;
-    onMoved = gInst[q.CommittedInstanceID()].moved != 0;
+    const Inst hit = gInst[q.CommittedInstanceID()];
+    if (hit.moved != 0)
+    {
+        const float  t   = q.CommittedRayT();
+        const float3 o   = q.CommittedObjectRayOrigin() + q.CommittedObjectRayDirection() * t;
+        const float3 was = o.x * hit.was0 + o.y * hit.was1 + o.z * hit.was2 + hit.was3;
+        mover = float2(length(ray.Origin + ray.Direction * t - was), t);
+    }
     return true;
 }
 
+// HOW MUCH HISTORY a pixel may keep when its ray hit a moved object (`mover`,
+// from Occluded), as a history weight; -1 when it hit none. Its history holds
+// the shadow where it was: with weight b the shadow on the ground lags its
+// occluder by b / (1 - b) frames of the occluder's travel. What that costs is
+// the lag against how SOFT the shadow is there - its penumbra, the hit's
+// distance times the light's angular size (`penumbra`, per metre): a lag well
+// inside the penumbra moves the visibility by little, while one frame's own
+// coin tosses are off by far more. So the weight is whatever keeps the lag
+// within kLagShare of the penumbra. A car driving lags a contact shadow by its
+// whole width in one frame: the weight goes to nothing, and the denoiser keeps
+// gBlendMoved, as it always did - no trail. A car on the Garage's turntable
+// moves its sill some 3-7 mm a frame under a soft spotlight's shadow and keeps
+// most of it: at a quarter of history the floor around it boiled every frame
+// it turned (the lights' frame-to-frame noise 6x the standing car's). 0.3:
+// 0.15 left half as much noise again; full history (0.85) a visible lag line
+// along the sill.
+static const float kLagShare = 0.3;
+float Allow(float2 mover, float penumbra)
+{
+    if (mover.x < 0.0) return -1.0;
+    const float w = kLagShare * mover.y * penumbra;
+    return w / (w + mover.x + 1e-6);
+}
+
 // The raw result, and whether a ray of it hit a moved object: R16_FLOAT,
-// negative for "touched" - the value then -(1 + v). The denoiser decodes it.
-float EncodeRaw(float v, bool touched) { return touched ? -(1.0 + v) : v; }
+// negative for "touched" - the value then -(1 + v + 2 k), k the history weight
+// it allows (Allow) in sevenths, rounded down. The denoiser decodes it.
+float EncodeRaw(float v, float allow)
+{
+    return allow < 0.0 ? v : -(1.0 + v + 2.0 * floor(saturate(allow) * 7.0));
+}
 )";
 
 // ---- sun shadow: one ray towards a random point on the sun's disc ---------
@@ -244,9 +284,10 @@ void CSMain(uint3 tid : SV_DispatchThreadID)
     ray.TMin      = 0.0;
     ray.TMax      = gTMax;
 
-    bool onMoved;
-    bool hit = Occluded(ray, true, plant, onMoved);
-    gOut[tid.xy] = EncodeRaw(hit ? 0.0 : 1.0, onMoved);
+    float2 mover;
+    bool hit = Occluded(ray, true, plant, mover);
+    // The sun's disc: the penumbra per metre of the hit's distance.
+    gOut[tid.xy] = EncodeRaw(hit ? 0.0 : 1.0, Allow(mover, 2.0 * tan(gSunAngle)));
     InterlockedAdd(gCounters[0], 1);
     if (hit) InterlockedAdd(gCounters[1], 1);
 }
@@ -303,7 +344,7 @@ void CSMain(uint3 tid : SV_DispatchThreadID)
     // far away also reflects light we are not simulating, so beyond the radius
     // the honest answer is "unknown", which is what unoccluded means here.
     float open = 0.0;
-    bool  touched = false;
+    float allow = -1.0;       // the least any ray allows (Allow), -1 none touched
     for (uint i = 0; i < gAoRays; ++i)
     {
         float2 r = AoSample(tid.xy, gFrame, i, gAoRays);
@@ -317,11 +358,14 @@ void CSMain(uint3 tid : SV_DispatchThreadID)
         ray.Direction = dir;
         ray.TMin      = 0.0;
         ray.TMax      = gAoRadius;
-        bool onMoved;
-        if (!Occluded(ray, false, plant, onMoved)) open += 1.0;
-        touched = touched || onMoved;
+        float2 mover;
+        if (!Occluded(ray, false, plant, mover)) open += 1.0;
+        // An occluder this far off changes the occlusion over about as far
+        // across the ground: its "penumbra" is its distance.
+        const float a = Allow(mover, 1.0);
+        if (a >= 0.0) allow = allow < 0.0 ? a : min(allow, a);
     }
-    gOut[tid.xy] = EncodeRaw(open / max(1.0, float(gAoRays)), touched);
+    gOut[tid.xy] = EncodeRaw(open / max(1.0, float(gAoRays)), allow);
 }
 )";
 
@@ -352,7 +396,7 @@ void CSMain(uint3 tid : SV_DispatchThreadID)
     // NGG_LIGHTS_REF=2: the estimator itself, 16 picks per pixel averaged - what the one pick converges to.
     {
         float vSum = 0.0;
-        bool anyMoved = false;
+        float allow = -1.0;
         for (uint s = 0; s < 16u; ++s)
         {
             float total = 0.0;
@@ -386,12 +430,13 @@ void CSMain(uint3 tid : SV_DispatchThreadID)
             ray.Direction = dv / max(len, 1e-4);
             ray.TMin = 0.0;
             ray.TMax = max(len - 0.02, 0.0);
-            bool onMoved;
-            const bool hit = Occluded(ray, false, plant, onMoved);
-            anyMoved = anyMoved || onMoved;
+            float2 mover;
+            const bool hit = Occluded(ray, false, plant, mover);
+            const float a = Allow(mover, 2.0 * gLights[chosen].radius / max(len, 1e-3));
+            if (a >= 0.0) allow = allow < 0.0 ? a : min(allow, a);
             vSum += hit ? 0.0 : 1.0;
         }
-        gOut[tid.xy] = EncodeRaw(vSum / 16.0, anyMoved);
+        gOut[tid.xy] = EncodeRaw(vSum / 16.0, allow);
         return;
     }
 #elif defined(LIGHTS_REF)
@@ -399,7 +444,7 @@ void CSMain(uint3 tid : SV_DispatchThreadID)
     // is checked against it (design 5.4 N3: the lamp lab, the test lamps' shadows).
     {
         float sumW = 0.0, sumV = 0.0;
-        bool anyMoved = false;
+        float allow = -1.0;
         for (uint k = 0; k < c.y; ++k)
         {
             const uint li = gLightIndex[c.x + k];
@@ -425,13 +470,14 @@ void CSMain(uint3 tid : SV_DispatchThreadID)
             ray.Direction = dv / max(len, 1e-4);
             ray.TMin = 0.0;
             ray.TMax = max(len - 0.02, 0.0);
-            bool onMoved;
-            const bool hit = Occluded(ray, false, plant, onMoved);
-            anyMoved = anyMoved || onMoved;
+            float2 mover;
+            const bool hit = Occluded(ray, false, plant, mover);
+            const float a = Allow(mover, 2.0 * gLights[li].radius / max(len, 1e-3));
+            if (a >= 0.0) allow = allow < 0.0 ? a : min(allow, a);
             sumW += w;
             sumV += hit ? 0.0 : w;
         }
-        gOut[tid.xy] = EncodeRaw(sumW > 0.0 ? sumV / sumW : 1.0, anyMoved);
+        gOut[tid.xy] = EncodeRaw(sumW > 0.0 ? sumV / sumW : 1.0, allow);
         return;
     }
 #endif
@@ -471,9 +517,10 @@ void CSMain(uint3 tid : SV_DispatchThreadID)
     ray.Direction = dv / max(len, 1e-4);
     ray.TMin = 0.0;
     ray.TMax = max(len - 0.02, 0.0);    // short of the emitter itself
-    bool onMoved;
-    const bool hit = Occluded(ray, false, plant, onMoved);
-    gOut[tid.xy] = EncodeRaw(hit ? 0.0 : 1.0, onMoved);
+    float2 mover;
+    const bool hit = Occluded(ray, false, plant, mover);
+    // The emitter's disc as seen from here: the penumbra per metre of the hit's distance.
+    gOut[tid.xy] = EncodeRaw(hit ? 0.0 : 1.0, Allow(mover, 2.0 * lradius / max(len, 1e-3)));
 }
 )";
 
@@ -490,7 +537,8 @@ void CSMain(uint3 tid : SV_DispatchThreadID)
 const char* kDenoiseSrc = R"(
 Texture2D<float>   gRaw     : register(t0);   // this frame (EncodeRaw: < 0 = hit a moved object)
 // Last frame: x filtered vis, y ndc depth, z 1 = a ray hit a moved object,
-// w 1 = the pixel was a moved object's.
+// w 1 = the pixel was a moved object's, else 0.45 x the history weight its
+// rays allowed (Allow) where they hit one.
 Texture2D<float4>  gHist    : register(t1);
 Texture2D<float>   gDepth   : register(t2);
 // Scene::MotionBuffer: w = 1 where an object moved, xy its NDC offset to last
@@ -573,6 +621,7 @@ void CSMain(uint3 tid : SV_DispatchThreadID, uint3 gid : SV_GroupID, uint gi : S
     const bool movedPixel = sDepth[lp.y * 12 + lp.x] < 0.0;
     float sum = 0.0, sum2 = 0.0, wsum = 0.0;
     bool  touched = false;      // a ray in the window hit a moved object
+    float allow = 1.0;          // the least history weight those rays allow
     const int c0 = lp.y * 12 + lp.x;
     const float2 slope = float2(Slope(depth, abs(sDepth[c0 - 1]),  abs(sDepth[c0 + 1])),
                                 Slope(depth, abs(sDepth[c0 - 12]), abs(sDepth[c0 + 12])));
@@ -592,7 +641,13 @@ void CSMain(uint3 tid : SV_DispatchThreadID, uint3 gid : SV_GroupID, uint gi : S
         float w = (rel < 0.03 && qMoved == movedPixel) ? 1.0 : 0.0;
         if (gPeriod4 > 0.5) w *= (abs(x) == 2 ? 0.5 : 1.0) * (abs(y) == 2 ? 0.5 : 1.0);
         float r = sRaw[k];
-        if (r < 0.0) { r = -r - 1.0; touched = touched || w > 0.0; }
+        if (r < 0.0)
+        {
+            r = -r - 1.0;                       // v + 2 k (EncodeRaw)
+            const float a = floor(r * 0.5);
+            r -= 2.0 * a;
+            if (w > 0.0) { touched = true; allow = min(allow, a / 7.0); }
+        }
         sum  += r * w;
         sum2 += r * r * w;
         wsum += w;
@@ -601,8 +656,10 @@ void CSMain(uint3 tid : SV_DispatchThreadID, uint3 gid : SV_GroupID, uint gi : S
     if (wsum <= 0.0)
     {
         const float r = gRaw.Load(int3(px, 0));
-        curr = r < 0.0 ? -r - 1.0 : r;
+        const float a = floor((-r - 1.0) * 0.5);
+        curr = r < 0.0 ? -r - 1.0 - 2.0 * a : r;
         touched = r < 0.0;
+        if (touched) allow = a / 7.0;
     }
 
     // TEMPORAL: reproject into last frame, homogeneous so the sky/far case
@@ -618,6 +675,7 @@ void CSMain(uint3 tid : SV_DispatchThreadID, uint3 gid : SV_GroupID, uint gi : S
     float  blend = 0.0;
     float2 hist = float2(curr, depth);
     float  histDistrust = 0.0;    // the history's z where it was taken, else 0
+    float  histAllow = 0.0;       // and the weight its rays allowed
     if (gValid > 0.5 && abs(pc.w) > 1e-7)
     {
         float3 pn = pc.xyz / pc.w;
@@ -633,7 +691,7 @@ void CSMain(uint3 tid : SV_DispatchThreadID, uint3 gid : SV_GroupID, uint gi : S
             // such strip: they started over as merely fresh, and TAA, which
             // reads the distrust (post.cpp), kept the shadow each strip was
             // first seen in - a band behind the car per frame.
-            if (h.y > 0.0 && h.w > 0.5 && !movedPixel) touched = true;
+            if (h.y > 0.0 && h.w > 0.5 && !movedPixel) { touched = true; allow = 0.0; }
             const bool histTouched = h.z > 0.5;
             // IDENTITY first, as TAA's (post.cpp): a moved object's history
             // never passes to a static pixel, nor the reverse. Depth cannot
@@ -659,11 +717,17 @@ void CSMain(uint3 tid : SV_DispatchThreadID, uint3 gid : SV_GroupID, uint gi : S
                 // by its own motion, and the occluder its rays hit is mostly
                 // itself, moving with it - the car's self-shadow is as valid
                 // a history as a wall's, and dropping it only makes it boil.
+                //
+                // How little is the rays' to say (Allow): the occluder's
+                // travel this frame against the softness of what it casts.
+                // Where none hit it now, the shadow has just left: the weight
+                // its rays allowed then, kept in the history's w.
                 const bool distrust = !movedPixel && (touched || histTouched);
                 if (rel < tol)
                 {
                     hist.x = h.x;
-                    blend = distrust ? gBlendMoved : gBlend;
+                    histAllow = histTouched ? h.w / 0.45 : 0.0;
+                    blend = distrust ? clamp(touched ? allow : histAllow, gBlendMoved, gBlend) : gBlend;
                     histDistrust = histTouched ? h.z : 0.0;
                 }
             }
@@ -699,7 +763,8 @@ void CSMain(uint3 tid : SV_DispatchThreadID, uint3 gid : SV_GroupID, uint gi : S
     const float fresh = blend <= 0.0 ? 0.5 : 0.0;
     const float fading = histDistrust - 0.125;
     const float level = touched ? 1.0 : (fading > 0.5 ? fading : fresh);
-    gOut[px] = float4(vis, depth, level, movedPixel ? 1.0 : 0.0);
+    const float allowed = touched ? allow : (fading > 0.5 ? histAllow : 0.0);
+    gOut[px] = float4(vis, depth, level, movedPixel ? 1.0 : 0.45 * allowed);
 }
 )";
 
@@ -737,8 +802,10 @@ void CSMain(uint3 tid : SV_DispatchThreadID)
     if (tid.x >= gSize.x || tid.y >= gSize.y) return;
     const int2 px = int2(tid.xy);
     const float4 c = gIn.Load(int3(px, 0));
-    // Static, with a cut or no history: the rest keep their own answer.
-    if (c.y <= 0.0 || c.z < 0.25 || c.w > 0.5) { gWide[px] = c.x; return; }
+    // Static, with a cut or no history: the rest keep their own answer - and
+    // so do pixels whose rays allowed most of the history even so (w over
+    // 0.3: a weight over two thirds, Allow), a slow occluder's.
+    if (c.y <= 0.0 || c.z < 0.25 || c.w > 0.3) { gWide[px] = c.x; return; }
     const float2 slope = float2(Slope(c.y, gIn.Load(int3(px - int2(1, 0), 0)).y, gIn.Load(int3(px + int2(1, 0), 0)).y),
                                 Slope(c.y, gIn.Load(int3(px - int2(0, 1), 0)).y, gIn.Load(int3(px + int2(0, 1), 0)).y));
     float sum = c.x, wsum = 1.0;
@@ -1378,7 +1445,7 @@ bool Rt::UpdateInstances(Device& dev, const std::vector<Scene::RtInstanceDesc>& 
     if (FAILED(dev.device.As(&dev5))) return false;
 
     std::vector<D3D12_RAYTRACING_INSTANCE_DESC> descs;
-    struct InstInfo { uint32_t triBase, vertexBase, vb, material, moved; };
+    struct InstInfo { uint32_t triBase, vertexBase, vb, material, moved; float was[12]; };
     std::vector<InstInfo> info;
     for (const Scene::RtInstanceDesc& d : instances)
     {
@@ -1392,8 +1459,11 @@ bool Rt::UpdateInstances(Device& dev, const std::vector<Scene::RtInstanceDesc>& 
                                  : D3D12_RAYTRACING_INSTANCE_FLAG_NONE;
         id.AccelerationStructure = it->second.as->GetGPUVirtualAddress();
         descs.push_back(id);
-        info.push_back({ it->second.triBase, it->second.vertexBase, it->second.vbSelect, d.material,
-                         d.moved ? 1u : 0u });
+        InstInfo in = { it->second.triBase, it->second.vertexBase, it->second.vbSelect, d.material,
+                        d.moved ? 1u : 0u };
+        for (int r = 0; r < 4; ++r)                  // the rows' xyz (row vectors)
+            for (int c = 0; c < 3; ++c) in.was[r * 3 + c] = d.prevXform[r * 4 + c];
+        info.push_back(in);
     }
     if (descs.empty()) { m_tlas.Reset(); return false; }
 
