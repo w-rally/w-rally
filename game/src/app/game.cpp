@@ -220,7 +220,10 @@ public:
         p.position[2] = m_height + assets::kShowroomDeck;
         p.rotation[2] = std::sin(view.turn * 0.5f), p.rotation[3] = std::cos(view.turn * 0.5f);
         m_instances.clear();
-        if (m_car && m_car->Ready()) {
+        const bool drawn = m_car && m_car->Ready();
+        const bool cut = drawn != m_drawn;
+        m_drawn = drawn;
+        if (drawn) {
             const float cog[3] = {};
             m_instances.push_back(m_car->Place(p, m_wheels, cog, m_parts));
             const bool lit[assets::kLampGroups] = {};
@@ -242,6 +245,10 @@ public:
         fd.lights = kLights, fd.lightCount = 3;
         fd.instances = m_instances.data(), fd.instanceCount = static_cast<uint32_t>(m_instances.size());
         fd.time = static_cast<float>(now);
+        // A car taken off or put on: TAA's history of the turntable dropped, as at a camera's cut. What stood still
+        // there (the glass, a part turning slower than the renderer calls moving) is the background's now, and that
+        // keeps its history unclipped - the car gone, a trail of it stayed a moment.
+        fd.camera.cut = cut ? 1u : 0u;
         return true;
     }
 
@@ -314,6 +321,7 @@ private:
 
     iface::SceneHandle m_scene = 0;
     std::unique_ptr<assets::CarRender> m_car;
+    bool m_drawn = false;   // the car on the turntable last frame (Frame: its coming and going drop TAA's history)
     std::string m_wanted, m_shown;
     double m_since = 0;
     physics::Wheel m_wheels[4] = {};
@@ -1351,7 +1359,13 @@ int RunGame(const std::vector<std::string>& args)
             spin = static_cast<float>(std::atof((t + 1)->c_str()) * 3.14159265 / 180 / 60);
         if (const auto t = std::find(args.begin(), args.end(), std::string("--shots")); t != args.end() && t + 1 != args.end())
             shots = std::clamp(std::atoi((t + 1)->c_str()), 1, 100);
+        // --then <car folder>: the carousel stepping on to that car a quarter of the way through the shots, which go on
+        // over the empty turntable - what the car taken off leaves behind.
+        std::string then;
+        if (const auto t = std::find(args.begin(), args.end(), std::string("--then")); t != args.end() && t + 1 != args.end())
+            then = *(t + 1);
         Showroom showroom;
+        int settle = 0;
         for (int frame = 0; frame < 400 + shots && sh.window.Pump(); ++frame) {
             sh.FollowSize();
             sh.ui.NewFrame();
@@ -1359,8 +1373,8 @@ int RunGame(const std::vector<std::string>& args)
             fd.flags = iface::kFrameNoWorld;
             const bool drawn = showroom.Frame(sh.renderer, catalog, view, sh.width, sh.height, fd);
             fd.ui = sh.ui.Render();
-            if (drawn && showroom.Ready()) {
-                static int settle = 0;
+            if (drawn && (showroom.Ready() || settle >= 40)) {
+                if (!then.empty() && settle == 40 + shots / 4) view.car = then;
                 view.turn += spin;
                 if (++settle >= 40 && settle < 40 + shots) {
                     char name[32];

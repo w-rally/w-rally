@@ -45,7 +45,7 @@ static const DXGI_FORMAT kNormalFormat = DXGI_FORMAT_R8G8B8A8_SNORM;
 static const float kVolumeScale = 0.25f;
 // The prepass's motion target (see PSPrepass). 16-bit is enough because xy is
 // a DIFFERENCE - small, where half floats are dense - and only moved objects
-// use it at all.
+// use it at all. w: 1 a moved object's pixel, 0.25 moving glass over a still one.
 static const DXGI_FORMAT kMotionFormat = DXGI_FORMAT_R16G16B16A16_FLOAT;
 // The prepass's third target: which PLANT a pixel is a card of (FindPlants),
 // + 1, or 0. The ray tracer compares it with the plant of what a ray hits.
@@ -314,7 +314,7 @@ cbuffer ObjectCB : register(b1)
 {
     uint  gObjectLayer;
     uint  gMatFlags;
-    uint  gObjectMoved;   // 1 = the transform differs from last frame's
+    uint  gObjectMoved;   // 1 = the transform differs from last frame's; 2 = and it is glass (the prepass's mark)
     uint  gObjectPad;
     row_major float4x4 gObjectXform;
     // The material, as root constants rather than a buffer. It changes every
@@ -620,7 +620,13 @@ PrepassOut PSPrepass(VSOut i, bool frontFace : SV_IsFrontFace)
     }
 #endif
     o.motion = float4(0.0, 0.0, 0.0, 0.0);
-    if (gObjectMoved != 0)
+    // MOVING GLASS: not in the depth, so where it lies over a still surface that surface's pixel would look still to
+    // TAA, which keeps a still pixel's history unclipped - a turning car's lamp lens left a smear on the dark beside it.
+    // w = 0.25 marks it, MAX-blended into alpha alone (m_psoPrepassGlass): over a moved object its 1 stays, and under
+    // 0.5 it is a still pixel to everything but TAA (rt.cpp reads w > 0.5).
+    if (gObjectMoved == 2)
+        o.motion = float4(0.0, 0.0, 0.0, 0.25);
+    else if (gObjectMoved != 0)
     {
         const float4 c = mul(float4(i.wpos, 1.0), gViewProjNoJitter);
         const float4 p = mul(float4(i.prevWpos, 1.0), gPrevViewProj);
@@ -3831,6 +3837,38 @@ bool Scene::LoadFromMemory(ID3D12Device* dev, ID3D12CommandQueue* queue,
             Log("scene: prepass shader failed to compile");
     }
 
+    // --- the moving glass's mark in the prepass (PSPrepass, gObjectMoved 2): the motion target's alpha alone, MAX -
+    // depth tested, not written, the normal and the plant untouched. [cull] none (two-sided), back, front.
+    if (psPre)
+    {
+        D3D12_GRAPHICS_PIPELINE_STATE_DESC gp = pso;
+        gp.NumRenderTargets = 3;
+        gp.RTVFormats[0] = kNormalFormat;
+        gp.RTVFormats[1] = kMotionFormat;
+        gp.RTVFormats[2] = kPlantFormat;
+        gp.PS = { psPre->GetBufferPointer(), psPre->GetBufferSize() };
+        gp.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ZERO;
+        gp.BlendState.IndependentBlendEnable = TRUE;
+        gp.BlendState.RenderTarget[0].RenderTargetWriteMask = 0;
+        gp.BlendState.RenderTarget[2].RenderTargetWriteMask = 0;
+        D3D12_RENDER_TARGET_BLEND_DESC& b = gp.BlendState.RenderTarget[1];
+        b.BlendEnable = TRUE;
+        b.SrcBlend = D3D12_BLEND_ONE;
+        b.DestBlend = D3D12_BLEND_ZERO;
+        b.BlendOp = D3D12_BLEND_OP_ADD;
+        b.SrcBlendAlpha = D3D12_BLEND_ONE;
+        b.DestBlendAlpha = D3D12_BLEND_ONE;
+        b.BlendOpAlpha = D3D12_BLEND_OP_MAX;
+        b.RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALPHA;
+        const D3D12_CULL_MODE culls[3] = { D3D12_CULL_MODE_NONE, D3D12_CULL_MODE_BACK, D3D12_CULL_MODE_FRONT };
+        for (int c = 0; c < 3; ++c)
+        {
+            gp.RasterizerState.CullMode = culls[c];
+            if (FAILED(dev->CreateGraphicsPipelineState(&gp, IID_PPV_ARGS(&m_psoPrepassGlass[c]))))
+                Log("scene: the glass's prepass PSO creation failed - moving glass unmarked for TAA");
+        }
+    }
+
     // --- shadow PSOs: depth only, no render target -------------------------
     {
         D3D12_GRAPHICS_PIPELINE_STATE_DESC sp = pso;
@@ -6073,8 +6111,12 @@ void Scene::RecordPass(ID3D12GraphicsCommandList* list, D3D12_CPU_DESCRIPTOR_HAN
     uint32_t drawn = 0, culled = 0;
     // The glass (kMaterialBlend) waits for everything opaque: it is drawn over it, after this loop. It has no part in
     // the prepass - no depth, no normal: what the ray tracer and TAA see through a window is what is behind it.
+    // In the prepass it holds the glass that moved, for its mark in the motion target (PSPrepass).
     std::vector<std::pair<float, const DrawItem*>> blended;
-    auto draw = [&](const DrawItem& o, ID3D12PipelineState* want) {
+    auto movedOf = [](const DrawItem& o) {
+        return (!o.identity || !o.prevIdentity) && Travel(o.bmin0, o.bmax0, o.xform, o.prevXform) > kRtMovedMin;
+    };
+    auto draw = [&](const DrawItem& o, ID3D12PipelineState* want, bool glassMark = false) {
         if (want != bound)
         {
             list->SetPipelineState(want);
@@ -6092,9 +6134,8 @@ void Scene::RecordPass(ID3D12GraphicsCommandList* list, D3D12_CPU_DESCRIPTOR_HAN
         // the idling car "moved" a hundredth of a millimetre a tick, and TAA
         // dropped the history of a band round its outline every frame - its
         // edges and its wheels flickered on a car standing still.
-        const bool moved = (!o.identity || !o.prevIdentity) &&
-                           Travel(o.bmin0, o.bmax0, o.xform, o.prevXform) > kRtMovedMin;
-        const uint32_t objConsts[3] = { o.layerId, o.matFlags, moved ? 1u : 0u };
+        const bool moved = movedOf(o);
+        const uint32_t objConsts[3] = { o.layerId, o.matFlags, moved ? (glassMark ? 2u : 1u) : 0u };
         list->SetGraphicsRoot32BitConstants(4, 3, objConsts, 0);
         if (moved) list->SetGraphicsRoot32BitConstants(4, 16, o.prevXform, 32);
         {
@@ -6129,7 +6170,7 @@ void Scene::RecordPass(ID3D12GraphicsCommandList* list, D3D12_CPU_DESCRIPTOR_HAN
         const uint32_t matFlags = m_materials[o.materialId].flags;
         if (matFlags & kMaterialBlend)
         {
-            if (!prepass && m_psoBlend[0])
+            if (prepass ? m_psoPrepassGlass[0] && movedOf(o) : m_psoBlend[0] != nullptr)
             {
                 // Far to near by the box's centre: a pane over a pane is drawn after it.
                 float d2 = 0.0f;
@@ -6211,7 +6252,10 @@ void Scene::RecordPass(ID3D12GraphicsCommandList* list, D3D12_CPU_DESCRIPTOR_HAN
         (void)d2;
         const uint32_t matFlags = m_materials[o->materialId].flags;
         const int cull = (matFlags & kMaterialTwoSided) ? 0 : Mirrors(o->xform) ? 2 : 1;
-        draw(*o, m_psoBlend[cull] ? m_psoBlend[cull].Get() : m_psoBlend[0].Get());
+        if (prepass)
+            draw(*o, m_psoPrepassGlass[cull] ? m_psoPrepassGlass[cull].Get() : m_psoPrepassGlass[0].Get(), true);
+        else
+            draw(*o, m_psoBlend[cull] ? m_psoBlend[cull].Get() : m_psoBlend[0].Get());
     }
     if (deferred)
     {
