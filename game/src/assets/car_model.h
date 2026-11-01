@@ -7,7 +7,7 @@
 // A mesh (0x1000acf0): cstr name, u32 id, u32 parent, f32[14] the local transform, f32[12] the world transform (rows
 // {r0 r1 r2 t}), f32[6] the bounds, u32 nv, u32 flags; with flags bit 0 nv x {position, normal} (f32[6]), bit 2 nv x uv
 // (f32[2]), bit 4 nv x u32 (skipped by the game); u32 nt, nt x u16[3]; u32 ng, ng x {cstr material, u32 triangles,
-// u32 first index, u32 vertices, u32 min index}.
+// u32 min index, u32 vertices, u32 first index}.
 //
 // Nodes (meshes, helpers kind 3, cameras kind 2, transform nodes kind 19) form a tree by their parent ids; a node's
 // 12-float matrix is relative to its parent. The root ("parent") is left out: the frame inside it is the renderer's
@@ -48,6 +48,7 @@ struct CarPart {
 struct CarTexture {
     std::string material;
     std::vector<uint8_t> dds;   // empty: none
+    uint32_t uploaded = 0;      // the renderer's texture made of it already (a frame at a time: the showroom's); 0 not yet
     float diffuse[3] = {0.5f, 0.5f, 0.5f};
     bool transparent = false;
 };
@@ -55,6 +56,16 @@ struct CarTexture {
 struct CarModel {
     std::vector<CarPart> parts;         // one per mesh and material group, in the car's frame
     std::vector<CarTexture> materials;  // per material name used
+    // Where the wheels stand without the physics (a car in a menu): each Point_e_wheel_<lf|rf|lb|rb>'s place in the car's
+    // frame (hubFound: the model has it), and the tyres' radius (the spinning wheel meshes' reach below their hub; 0
+    // none).
+    bool hubFound[4] = {};
+    float hubs[4][3] = {};
+    float wheelRadius = 0;
+    // Each wheel mesh's own node's place (e_wheel_<surface>_<w>): where its maker drew the wheel - the physics' place for
+    // it, where the hub helper is off it (Hyundai i20 R5's: 5 to 15 cm). wheelFound: the model has that wheel.
+    bool wheelFound[4] = {};
+    float wheelAt[4][3] = {};
 };
 
 // The exterior as seen from outside: the "e_" meshes, the wheels and spare wheel of `surface` only (tarmac, gravel,

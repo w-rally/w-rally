@@ -142,6 +142,20 @@ void PartNode(const float body[16], const physics::Part& p, const float car[16],
 void CarRender::Create(render::Renderer& renderer, const std::string& sgc, const std::string& surface,
                        const std::vector<phys::data::RecMesh>& collision, const std::vector<physics::Part>& parts)
 {
+    CarModel model;
+    bool read = false;
+    try {
+        model = ReadCarModel(sgc, surface);
+        read = true;
+    } catch (const std::exception& e) {
+        std::fprintf(stderr, "the car's model: %s\n", e.what());
+    }
+    Create(renderer, read ? &model : nullptr, collision, parts);
+}
+
+void CarRender::Create(render::Renderer& renderer, const CarModel* read, const std::vector<phys::data::RecMesh>& collision,
+                       const std::vector<physics::Part>& parts)
+{
     iface::MaterialDesc paint = iface::DefaultMaterialDesc();
     paint.flags = iface::kMaterialTwoSided;
     paint.baseColourFactor[0] = 0.55f;
@@ -218,11 +232,16 @@ void CarRender::Create(render::Renderer& renderer, const std::string& sgc, const
         meshes.push_back(mm);
         if (node >= kParts) ++perPart[node - kParts];
     };
-    try {
-        const CarModel model = ReadCarModel(sgc, surface);
+    if (read) {
+        const CarModel& model = *read;
+        // The wheels' places: their meshes' nodes where the model has all four, else the hub helpers.
+        const bool drawn = model.wheelFound[0] && model.wheelFound[1] && model.wheelFound[2] && model.wheelFound[3];
+        std::memcpy(m_hubFound, drawn ? model.wheelFound : model.hubFound, sizeof m_hubFound);
+        std::memcpy(m_hubs, drawn ? model.wheelAt : model.hubs, sizeof m_hubs);
+        m_wheelRadius = model.wheelRadius;
         size_t textured = 0;
         for (const CarTexture& t : model.materials) {
-            const iface::TextureHandle tex = t.dds.empty() ? 0 : renderer.CreateTexture(t.dds.data(), t.dds.size());
+            const iface::TextureHandle tex = t.uploaded ? t.uploaded : t.dds.empty() ? 0 : renderer.CreateTexture(t.dds.data(), t.dds.size());
             textured += tex != 0;
             if (std::getenv("PHYS_DRIVE_MATERIALS"))
                 std::printf("material %s: %zu bytes dds%s, diffuse %.2f %.2f %.2f\n", t.material.c_str(), t.dds.size(),
@@ -268,8 +287,6 @@ void CarRender::Create(render::Renderer& renderer, const std::string& sgc, const
             add(std::move(v), part.indices, static_cast<uint32_t>(mi + 1), node);
         }
         std::printf("the car: %zu parts, %zu materials (%zu textured)\n", meshes.size(), model.materials.size(), textured);
-    } catch (const std::exception& e) {
-        std::fprintf(stderr, "the car's model: %s\n", e.what());
     }
     if (meshes.empty() && !collision.empty()) {
         std::vector<iface::Vertex> v;
@@ -294,6 +311,7 @@ void CarRender::Create(render::Renderer& renderer, const std::string& sgc, const
     d.materials = materials.data(), d.materialCount = static_cast<uint32_t>(materials.size());
     const iface::ModelHandle model = meshes.empty() ? 0 : renderer.CreateModel(d);
     m_instance = model ? renderer.CreateInstance(model) : 0;
+    if (model) m_models.push_back(model);
     if (!m_instance) std::fprintf(stderr, "the car: %s\n", renderer.Error().c_str());
 
     // The lamps' models: one node (the body's, placed by PlaceLamps), the car's materials - a lit twin's glowing in its
@@ -343,6 +361,7 @@ void CarRender::Create(render::Renderer& renderer, const std::string& sgc, const
             ld.materials = mats.data(), ld.materialCount = static_cast<uint32_t>(mats.size());
             const iface::ModelHandle lmodel = renderer.CreateModel(ld);
             m_lamps[g][sd][lit] = lmodel ? renderer.CreateInstance(lmodel) : 0;
+            if (lmodel) m_models.push_back(lmodel);
             lampCount += lm.size();
         }
     if (lampCount) std::printf("the car's lamps: %zu meshes\n", lampCount);
@@ -392,6 +411,37 @@ void CarRender::Mounts(const std::vector<physics::Part>& parts, LampMounts& out)
             math::Mul44(restInv, now, out.delta[g][sd]);
             out.moved[g][sd] = true;
         }
+}
+
+void CarRender::Release(render::Renderer& renderer)
+{
+    const iface::RendererApi* api = renderer.Api();
+    if (!api) return;
+    if (m_instance) api->destroyInstance(renderer.Instance(), m_instance);
+    for (auto& group : m_lamps)
+        for (auto& side : group)
+            for (iface::InstanceHandle& h : side)
+                if (h) api->destroyInstance(renderer.Instance(), h), h = 0;
+    for (iface::ModelHandle m : m_models) api->releaseModel(renderer.Instance(), m);
+    m_instance = 0;
+    m_models.clear();
+}
+
+bool CarRender::Stance(physics::Wheel wheels[4], float& height) const
+{
+    float lowest = 1e30f;
+    for (int k = 0; k < 4; ++k) {
+        if (!m_hubFound[k]) return false;
+        const V3 hub = math::ToRender(V3{m_hubs[k][0], m_hubs[k][1], m_hubs[k][2]});   // (the swap is its own inverse)
+        wheels[k] = {};
+        wheels[k].position[0] = hub.x, wheels[k].position[1] = hub.y, wheels[k].position[2] = hub.z;
+        // The knuckle as the physics has it at rest: the right ones turned half about z (PartMatrix takes it out).
+        if (k == 1 || k == 3) wheels[k].rotation[2] = 1;
+        else wheels[k].rotation[3] = 1;
+        lowest = std::fmin(lowest, m_hubs[k][1]);
+    }
+    height = m_wheelRadius - lowest;
+    return true;
 }
 
 const iface::InstanceUpdate& CarRender::Place(const physics::Pose& pose, const physics::Wheel wheels[4], const float cog[3],

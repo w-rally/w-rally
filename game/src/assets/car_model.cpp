@@ -2,6 +2,7 @@
 
 #include <windows.h>
 
+#include <algorithm>
 #include <cctype>
 #include <cmath>
 #include <cstdio>
@@ -234,10 +235,38 @@ CarModel ReadCarModel(const std::string& sgcPath, const std::string& surface)
                 isWheel = true;
             }
         if (isWheel) {
-            const float right[12] = {-1, 0, 0, 0, 0, 1, 0, 0, 0, 0, -1, 0}, left[12] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0};
-            std::memcpy(world, wheel == 1 || wheel == 3 ? right : left, 48);
+            // Where its node has it: the wheel's place on the car as its maker drew it (CarModel::wheelAt).
+            float placed[12];
+            int under = -1;
+            frame(id, placed, &under);
+            model.wheelFound[wheel] = true;
+            model.wheelAt[wheel][0] = placed[3], model.wheelAt[wheel][1] = placed[7], model.wheelAt[wheel][2] = placed[11];
+            // In the hub's frame: its node's turn and scale without its place (the right wheels' turned half about y, a
+            // wheel's size - Skoda Octavia's 1.05), its object offset under it (below).
+            std::memcpy(world, placed, 48);
+            world[3] = world[7] = world[11] = 0;
         } else {
             frame(id, world, &wheel);
+        }
+        // The mesh's object offset (3ds Max's: its vertices are kept about a pivot of their own) first: the 14-float local
+        // transform - the offset's position, its rotation (an angle and its axis), its scale (and the scale's axis,
+        // left out: always none) - into the node's frame, then the node's matrix. Zero on most cars; a modder's car with
+        // pivoted parts (a door hinged where it opens) draws its parts away from their places without it.
+        {
+            const float angle = local[3], s[3] = {local[7], local[8], local[9]};
+            float ax[3] = {local[4], local[5], local[6]};
+            const float len = std::sqrt(ax[0] * ax[0] + ax[1] * ax[1] + ax[2] * ax[2]);
+            for (float& a : ax) a = len > 0 ? a / len : 0;
+            const float cs = std::cos(angle), sn = std::sin(angle), t = 1 - cs;
+            const float r[9] = {cs + t * ax[0] * ax[0],        t * ax[0] * ax[1] - sn * ax[2], t * ax[0] * ax[2] + sn * ax[1],
+                                t * ax[0] * ax[1] + sn * ax[2], cs + t * ax[1] * ax[1],        t * ax[1] * ax[2] - sn * ax[0],
+                                t * ax[0] * ax[2] - sn * ax[1], t * ax[1] * ax[2] + sn * ax[0], cs + t * ax[2] * ax[2]};
+            float offset[12];
+            for (int row = 0; row < 3; ++row) {
+                for (int col = 0; col < 3; ++col) offset[4 * row + col] = r[3 * row + col] * (s[col] != 0 ? s[col] : 1.0f);
+                offset[4 * row + 3] = local[row];
+            }
+            if (len > 0 || local[0] != 0 || local[1] != 0 || local[2] != 0) then(offset, world, world);
         }
         const uint32_t nv = c.U32(), flags = c.U32();
         if (!(flags & 1) || (flags >> 24)) {   // no positions, or the other vertex layout: not drawn
@@ -251,6 +280,9 @@ CarModel ReadCarModel(const std::string& sgcPath, const std::string& surface)
             apply(world, pn, verts[k].pos);   // to the car's (or the hub's) frame; normals turned alike
             turn(world, pn + 3, verts[k].normal);
         }
+        if (isWheel)   // the tyre's reach from its axle (+x): the radius
+            for (const CarVertex& v : verts)
+                model.wheelRadius = std::fmax(model.wheelRadius, std::sqrt(v.pos[1] * v.pos[1] + v.pos[2] * v.pos[2]));
         if (flags & 4)
             for (uint32_t k = 0; k < nv; ++k) c.F(verts[k].uv, 2);
         if (flags & 0x10) {
@@ -266,6 +298,22 @@ CarModel ReadCarModel(const std::string& sgcPath, const std::string& surface)
             idx[k] = v;
         }
         c.at += 6 * size_t(nt);
+        // A mesh mirrored in its making (a pipe copied to the other side) winds its triangles against its normals: wound
+        // back, it is not drawn inside out (the car's faces are one-sided).
+        {
+            size_t against = 0;
+            for (size_t k = 0; k + 2 < idx.size(); k += 3) {
+                if (idx[k] >= nv || idx[k + 1] >= nv || idx[k + 2] >= nv) continue;
+                const float *a = verts[idx[k]].pos, *b = verts[idx[k + 1]].pos, *e = verts[idx[k + 2]].pos;
+                const float u[3] = {b[0] - a[0], b[1] - a[1], b[2] - a[2]}, v[3] = {e[0] - a[0], e[1] - a[1], e[2] - a[2]};
+                const float n[3] = {u[1] * v[2] - u[2] * v[1], u[2] * v[0] - u[0] * v[2], u[0] * v[1] - u[1] * v[0]};
+                float vn[3];
+                for (int q = 0; q < 3; ++q) vn[q] = verts[idx[k]].normal[q] + verts[idx[k + 1]].normal[q] + verts[idx[k + 2]].normal[q];
+                against += n[0] * vn[0] + n[1] * vn[1] + n[2] * vn[2] < 0;
+            }
+            if (against * 2 > idx.size() / 3)
+                for (size_t k = 0; k + 2 < idx.size(); k += 3) std::swap(idx[k + 1], idx[k + 2]);
+        }
         // The names above it in the node tree (a grille under its bumper goes where the bumper goes).
         std::vector<std::string> parents;
         if (const auto self = nodes.find(id); self != nodes.end())
@@ -291,15 +339,34 @@ CarModel ReadCarModel(const std::string& sgcPath, const std::string& surface)
             if (const auto sec = carIni.find(name); sec != carIni.end())
                 if (const auto fb = sec->second.find("FaceBlock" + std::to_string(g) + "_Material"); fb != sec->second.end() && !fb->second.empty())
                     part.material = fb->second;
-            const uint32_t tris = c.U32(), first = c.U32();
+            // {triangles, the lowest vertex, the vertex count, the first index} - D3D's DrawIndexedPrimitive's MinIndex,
+            // NumVertices and StartIndex (the indices are the mesh's, not the group's).
+            const uint32_t tris = c.U32();
             c.U32();
             c.U32();
+            const uint32_t first = c.U32();
             for (size_t k = first; k < first + 3 * size_t(tris) && k < idx.size(); ++k) part.indices.push_back(idx[k]);
             part.vertices = verts;   // (each group keeps the mesh's vertices; its indices pick)
             if (!part.indices.empty()) model.parts.push_back(std::move(part));
         }
         at += 19 + h[4];
     }
+
+    // The hubs' places in the car's frame: each Point_e_wheel_<w>'s matrix through its parents (the root left out).
+    for (const auto& [id, node] : nodes)
+        for (int w = 0; w < 4; ++w) {
+            if (node.name != std::string("Point_e_wheel_") + kWheels[w]) continue;
+            float m[12];
+            std::memcpy(m, node.m, 48);
+            for (uint32_t p = node.parent, guard = 0; guard < 64; ++guard) {
+                const auto it = nodes.find(p);
+                if (it == nodes.end() || it->second.parent == 0xffffffffu) break;
+                then(m, it->second.m, m);
+                p = it->second.parent;
+            }
+            model.hubFound[w] = true;
+            model.hubs[w][0] = m[3], model.hubs[w][1] = m[7], model.hubs[w][2] = m[11];
+        }
 
     // The materials used: a texture through the shaders.ini (<material>_diffuse_bitmap, or <material>::..._diffuse_bitmap),
     // else the .sgc's texture name (or one in the textures folder ending as it does); without one, the ini's Diffuse.

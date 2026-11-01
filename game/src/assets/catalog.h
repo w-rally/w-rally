@@ -21,6 +21,8 @@
 #include <vector>
 
 #include "app/settings.h"
+#include "assets/car_register.h"
+#include "assets/track_register.h"
 
 namespace wrally::assets {
 
@@ -60,6 +62,10 @@ public:
     std::vector<Stage> stages;
     std::vector<std::string> protectedStages;   // encrypted, so not offered (no .ngg draws them, none is imported)
     std::vector<Car> cars;
+    // What W-Rally knows of them (assets/car_register.h, track_register.h), built with them: a car's friendly name and
+    // its car.json's physics are the catalog's car's too, a track's name its stages' titles.
+    CarRegister carRegister;
+    TrackRegister trackRegister;
     std::vector<Setup> SetupsFor(const Car& car) const;
     const Stage* FindStage(const std::string& key) const;
     const Car* FindCar(const std::string& folder) const;

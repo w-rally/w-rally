@@ -472,6 +472,13 @@ with a source tag on each.
 - Without RBR, the RBR entries do not exist and nothing in the game refers to them. The game never assumes
   `physics.rbz` or `Maps/` exists.
 
+**Registers** (`assets::CarRegister`, `assets::TrackRegister`): what W-Rally knows of each car and track in the
+catalog, in layers, a later one winning field by field - RBR's files (`Cars.ini`'s names, `Tracks.ini`'s stage names
+and particle sets, the surface rule), then the server's list (hardcoded until there is a server), then the item's own
+manifest: `Cars/<folder>/car.json` (name, maker, year, class, drive, power, weight, physics) and `track-<n>.json`
+beside the stage's `.ngg` or in `Maps` (name, country, surface, length). A car neither the server nor a `car.json`
+knows is listed but not usable by W-Rally: nothing says what it is or how it drives.
+
 ### 6.2 Formats — `wrally::formats`
 
 One static library used by the game and by modules that need it. Readers only, with one exception: the NGG writer the

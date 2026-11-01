@@ -45,7 +45,13 @@ public:
     // the physics' parts that can come loose (their names place the meshes of the same names on their nodes).
     void Create(render::Renderer& renderer, const std::string& sgc, const std::string& surface,
                 const std::vector<phys::data::RecMesh>& collision, const std::vector<physics::Part>& parts);
+    // The same from a model read already (ReadCarModel: any thread - the reading is the slow part; null: it failed).
+    void Create(render::Renderer& renderer, const CarModel* model, const std::vector<phys::data::RecMesh>& collision,
+                const std::vector<physics::Part>& parts);
     bool Ready() const { return m_instance != 0; }
+    // Its instances and models gone from the renderer's scene (its textures stay with the scene: a scene's go with it).
+    // For a car taken off while the scene stays (the showroom's).
+    void Release(render::Renderer& renderer);
 
     // The frame's placement: the car at `pose`, its wheels (in its frame) at `wheels`, `cog` the body's centre of
     // gravity in the model's frame, `parts` as Create had them (in that order). Valid until the next call.
@@ -61,9 +67,18 @@ public:
     // Where the lamps sit, for their lights (assets::CarLights): their parts gone or moved, by the last Place.
     void Mounts(const std::vector<physics::Part>& parts, LampMounts& out) const;
 
+    // The car standing without the physics (a menu's): its wheels where the model's hubs are (physics axes, in the
+    // model's frame - the body's origin - as Place takes them), and how far the origin stands over the ground (the hubs'
+    // height plus the tyres' radius). False when the model has no hubs.
+    bool Stance(physics::Wheel wheels[4], float& height) const;
+
 private:
+    bool m_hubFound[4] = {};
+    float m_hubs[4][3] = {};     // the model's (render axes)
+    float m_wheelRadius = 0;
     static constexpr uint32_t kBody = 0, kHub = 1, kSpin = 5, kParts = 9;
     iface::InstanceHandle m_instance = 0;
+    std::vector<iface::ModelHandle> m_models;   // the car's and its lamps' (Release)
     uint32_t m_partNodes = 0;    // the parts' nodes (9 ..)
     std::vector<float> m_nodes;  // 16 a node
     iface::InstanceUpdate m_update{};

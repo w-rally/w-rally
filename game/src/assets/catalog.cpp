@@ -264,6 +264,22 @@ std::string Catalog::Scan(const app::Settings& s)
         else if (car.slot >= 0) car.engine = IniString(audioIni, "CARS", ("Car" + std::to_string(car.slot)).c_str());
         cars.push_back(std::move(car));
     }
+
+    // What W-Rally knows of them: the registers over RBR's files, the server's list and the cars' and tracks' own
+    // manifests.
+    carRegister.Build(s.rbrPath, cars);
+    for (Car& car : cars) {
+        const CarInfo* info = carRegister.Find(car.folder);
+        if (!info) continue;
+        car.name = info->name;
+        if (!info->physics.empty() && info->physics != car.physics) car.physics = info->physics, car.physicsFrom = "car.json (" + info->physics + ")";
+    }
+    trackRegister.Build(s.rbrPath, stages);
+    for (Stage& st : stages)
+        if (const TrackInfo* t = trackRegister.Find(st.map); t && !t->name.empty()) {
+            const char* tod = TimeOfDay(st.stage.size() >= 2 ? st.stage.back() : ' ');
+            st.title = t->name + (tod[0] ? std::string(" (") + tod + ")" : "");
+        }
     std::sort(cars.begin(), cars.end(), [](const Car& a, const Car& b) { return Lower(a.name) < Lower(b.name); });
     if (stages.empty()) return "no stages: no .ngg with a matching Maps/track-<n>_*.trk in " + folders;
     return "";
