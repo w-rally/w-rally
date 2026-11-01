@@ -11,17 +11,19 @@ namespace {
 constexpr float kLiveryShift = 150;
 float g_videoOn = 0;   // the video window's fade in, 0..1 (once there is a frame, over ~300 ms)
 float g_stripeOn = 1;  // the video's stripe itself, 0..1: eased toward the screen's (~200 ms), so it fades in and out
+float g_liveryOn = 1;  // the signal and white stripes, 0..1: the same, for a screen without them (the Garage)
 
 // A screen's ground and its livery: the signal stripe and the white one beside it, each fading into the ground toward
-// the bottom as the video's window does. `shift` (px at 1080p) moves them right.
-void Livery(ImDrawList* d, float W, float H, float k, float shift, ImU32 ground)
+// the bottom as the video's window does, as far as `on` (0..1) shows them. `shift` (px at 1080p) moves them right.
+void Livery(ImDrawList* d, float W, float H, float k, float shift, ImU32 ground, float on)
 {
     d->AddRectFilled(ImVec2(0, 0), ImVec2(W, H), ground);
+    if (on <= 0.01f) return;
     ImVec2 q[4];
     Stripe(W, H, k, 1430, 220, shift, q);
-    FadeQuad(d, q, kSignal, ground);
+    FadeQuad(d, q, Alpha(kSignal, on), Alpha(ground, on));
     Stripe(W, H, k, 1690, 28, shift, q);
-    FadeQuad(d, q, kInk, ground);
+    FadeQuad(d, q, Alpha(kInk, on), Alpha(ground, on));
 }
 
 // The livery's third stripe, left of the signal one: a window onto the video loop, the video covering the stripe's
@@ -101,12 +103,13 @@ void FadeQuad(ImDrawList* d, const ImVec2 q[4], ImU32 top, ImU32 bottom)
     d->PrimWriteVtx(q[2], white, bottom), d->PrimWriteVtx(q[3], white, bottom);
 }
 
-void Backdrop(ImDrawList* d, float W, float H, float k, ImU32 ground, const VideoFrame& video, bool window)
+void Backdrop(ImDrawList* d, float W, float H, float k, ImU32 ground, const VideoFrame& video, bool window, bool stripes)
 {
-    Livery(d, W, H, k, kLiveryShift, ground);
-    const float dt = ImGui::GetIO().DeltaTime;
+    const float dt = ImGui::GetIO().DeltaTime, ease = 1 - std::exp(-dt / 0.07f);
+    g_liveryOn += ((stripes ? 1.0f : 0.0f) - g_liveryOn) * ease;
+    Livery(d, W, H, k, kLiveryShift, ground, g_liveryOn);
     if (video.texture) g_videoOn = std::min(1.0f, g_videoOn + dt / 0.3f);
-    g_stripeOn += ((window ? 1.0f : 0.0f) - g_stripeOn) * (1 - std::exp(-dt / 0.07f));
+    g_stripeOn += ((window ? 1.0f : 0.0f) - g_stripeOn) * ease;
     VideoWindow(d, W, H, k, kLiveryShift, ground, video, g_videoOn, g_stripeOn);
 }
 

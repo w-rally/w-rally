@@ -33,8 +33,9 @@ void Stripe(float W, float H, float k, float left, float w, float shift, ImVec2 
 void FadeQuad(ImDrawList* d, const ImVec2 q[4], ImU32 top, ImU32 bottom);
 // A full screen's ground, its livery and the video's window, the stripes where every screen has them. `window`: whether
 // the screen has the video's stripe (a screen whose content runs where it is has not: it fades out as the screen opens,
-// in again when one with it does).
-void Backdrop(ImDrawList* d, float W, float H, float k, ImU32 ground, const VideoFrame& video, bool window);
+// in again when one with it does). `stripes`: whether it has the signal and white stripes at all (the Garage has not: its
+// car is the picture) - they fade likewise.
+void Backdrop(ImDrawList* d, float W, float H, float k, ImU32 ground, const VideoFrame& video, bool window, bool stripes = true);
 // The video's stripe gone at once (a screen over a stage, where it never was).
 void HideVideoStripe();
 // A row's plate from `a`, `w` x `h`, its right edge cut in by `cut`.
