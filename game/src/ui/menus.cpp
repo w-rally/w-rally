@@ -214,7 +214,7 @@ MainChoice MainMenu(const ImGuiLayer& ui, int width, int height, const std::stri
             const float y = rowsY + i * pitch, mid = y + kRowH * k * 0.5f;
             Marker(d, x0 + 12 * k, mid, 12 * k, 34 * k, on, k);
             const ImU32 ink = m.desc ? Lerp(kInkSecondary, kInk, on) : Alpha(kInkMuted, 0.55f);
-            Tracked(d, item, 28 * k, ImVec2(x0 + 46 * k, mid - 28 * k * 0.5f), ink, m.label, 0.02f);
+            Tracked(d, item, 34 * k, ImVec2(x0 + 46 * k, mid - 34 * k * 0.5f), ink, m.label, 0.02f);
         }
 
         // What the selected one does, then what is missing (the note), in the signal.
@@ -720,16 +720,199 @@ SettingsChoice SettingsUi(const ImGuiLayer& ui, app::Settings& s, bool inStage, 
 
 bool CapturingKey() { return g_capturing >= 0 || ImGui::GetIO().WantTextInput; }
 
-PauseChoice PauseMenu(const ImGuiLayer& ui, int width, int height)
+namespace {
+
+struct PauseItem {
+    const char* label;
+    const char* tag;       // beside the label, muted ("" none)
+    const char* help;
+    const char* enter;     // what Enter does
+    PauseChoice choice;
+    const char* ask;       // asked first ("" not): the question, then the verb
+    const char* verb;
+};
+const PauseItem kPauseItems[] = {
+    {"RESUME", "", "Back to the stage, where it was held.", "RESUME", PauseChoice::Resume, "", ""},
+    {"RESTART STAGE", "", "From the start line again: the countdown, the clock at zero.", "RESTART", PauseChoice::Restart,
+     "RESTART THE STAGE?", "RESTART"},
+    {"SETTINGS", "", "Graphics, sound and the controls. The content is changed from the main menu.", "OPEN", PauseChoice::Settings, "", ""},
+    {"DEBUG", "DEVELOPMENT", "What the keys switch - the renderer, the cameras, the sound - and the sound mix.", "OPEN",
+     PauseChoice::Debug, "", ""},
+    {"EXIT TO MAIN MENU", "", "Leave the stage. The run is not kept.", "EXIT", PauseChoice::ExitToMenu, "LEAVE THE STAGE?", "EXIT"},
+};
+constexpr int kPauseCount = int(sizeof kPauseItems / sizeof kPauseItems[0]);
+
+int g_pauseAt = 0;            // the selected row
+int g_pauseAsk = -1;          // the row whose question is up (-1 none)
+float g_pausePlate = -1;      // the selection's plate, in rows (eased; -1 not drawn yet)
+float g_pauseOn[kPauseCount];
+
+// mm:ss.hh, the HUD's timer.
+std::string RunClock(float t)
 {
+    const long cs = std::lround(std::max(0.0f, t) * 100);
+    char s[32];
+    std::snprintf(s, sizeof s, "%02ld:%02ld.%02ld", cs / 6000, cs / 100 % 60, cs % 100);
+    return s;
+}
+
+std::string Caps(std::string s)
+{
+    for (char& ch : s)
+        if (ch >= 'a' && ch <= 'z') ch = static_cast<char>(ch - 'a' + 'A');
+    return s;
+}
+
+} // namespace
+
+void OpenPause() { g_pauseAt = 0, g_pauseAsk = -1, g_pausePlate = -1; }
+
+bool PauseEscape()
+{
+    if (g_pauseAsk < 0) return false;
+    g_pauseAsk = -1;
+    return true;
+}
+
+PauseChoice PauseMenu(const ImGuiLayer& ui, const PauseInfo& info, int width, int height)
+{
+    const float k = std::min(height / 1080.0f, width / 1280.0f), W = float(width), H = float(height);
+    auto P = [&](float x, float y) { return ImVec2(x * k, y * k); };
+    ImGui::SetNextWindowPos(ImVec2(0, 0));
+    ImGui::SetNextWindowSize(ImVec2(W, H));
+    constexpr ImGuiWindowFlags kFull = ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings |
+                                       ImGuiWindowFlags_NoNav | ImGuiWindowFlags_NoBackground | ImGuiWindowFlags_NoScrollWithMouse;
     PauseChoice c = PauseChoice::None;
-    Screen(ui, "Paused", width, height, 320.0f, [&] {
-        if (Button("Resume", true)) c = PauseChoice::Resume;
-        if (Button("Restart stage")) c = PauseChoice::Restart;
-        if (Button("Settings")) c = PauseChoice::Settings;
-        if (Button("Debug")) c = PauseChoice::Debug;
-        if (Button("Exit to main menu")) c = PauseChoice::ExitToMenu;
-    });
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0);
+    if (ImGui::Begin("Paused", nullptr, kFull)) {
+        ImDrawList* d = ImGui::GetWindowDrawList();
+        ImFont* mark = ui.Wordmark();
+        ImFont* item = ui.MenuItem();
+        ImFont* text = ui.MenuText();
+        // The held stage veiled, darker under the column; the livery's stripes over it (no video in a stage).
+        const ImU32 left = IM_COL32(10, 10, 11, 240), right = IM_COL32(10, 10, 11, 158);
+        d->AddRectFilledMultiColor(ImVec2(0, 0), ImVec2(W, H), left, right, right, left);
+        HideVideoStripe();
+        Backdrop(d, W, H, k, IM_COL32(10, 10, 11, 0), VideoFrame{}, false);
+
+        // The head: where, the stage, what the run is.
+        const float x0 = 80;
+        Tracked(d, text, 17 * k, P(x0, 80), kInkMuted, "W-RALLY \xC2\xB7 PAUSED", 0.16f);
+        d->AddText(mark, 48 * k, P(x0, 100), kInk, info.stage.empty() ? "STAGE" : Caps(info.stage).c_str());
+        std::string what;
+        for (const std::string& s : {info.car, info.surface, info.weather})
+            if (!s.empty()) what += (what.empty() ? "" : " \xC2\xB7 ") + Caps(s);
+        Tracked(d, text, 17 * k, P(x0, 172), kInkMuted, what.c_str(), 0.16f);
+        d->AddRectFilled(P(x0, 208), P(x0 + 640, 209), kLine);
+
+        // The rows: W / S (the arrows) move, Enter picks, the mouse selects what it moves over and picks what it
+        // clicks. A question up: Enter answers yes, Esc (PauseEscape) no, the rows held.
+        const float rowsY = 236, rowW = 640, rowH = 68, pitch = rowH + 4;
+        const bool asking = g_pauseAsk >= 0;
+        if (!asking) {
+            if (ImGui::IsKeyPressed(ImGuiKey_W) || ImGui::IsKeyPressed(ImGuiKey_UpArrow)) g_pauseAt = std::max(0, g_pauseAt - 1);
+            if (ImGui::IsKeyPressed(ImGuiKey_S) || ImGui::IsKeyPressed(ImGuiKey_DownArrow)) g_pauseAt = std::min(kPauseCount - 1, g_pauseAt + 1);
+        }
+        int picked = -1;
+        const ImVec2 moved = ImGui::GetIO().MouseDelta;
+        for (int i = 0; i < kPauseCount && !asking; ++i) {
+            ImGui::SetCursorScreenPos(P(x0, rowsY + i * pitch));
+            ImGui::PushID(i);
+            const bool clicked = ImGui::InvisibleButton("row", ImVec2(rowW * k, rowH * k));
+            ImGui::PopID();
+            if (ImGui::IsItemHovered() && (moved.x || moved.y)) g_pauseAt = i;
+            if (clicked) g_pauseAt = i, picked = i;
+        }
+        const bool enter = ImGui::IsKeyPressed(ImGuiKey_Enter, false) || ImGui::IsKeyPressed(ImGuiKey_KeypadEnter, false) ||
+                           ImGui::IsKeyPressed(ImGuiKey_Space, false);
+        if (enter && !asking) picked = g_pauseAt;
+        const float ease = Ease();
+        if (g_pausePlate < 0) {
+            g_pausePlate = float(g_pauseAt);
+            for (int i = 0; i < kPauseCount; ++i) g_pauseOn[i] = i == g_pauseAt ? 1.0f : 0.0f;
+        }
+        g_pausePlate += (g_pauseAt - g_pausePlate) * ease;
+        Plate(d, P(x0, rowsY + g_pausePlate * pitch), rowW * k, rowH * k, 12 * k, kSurfaceRaised);
+        for (int i = 0; i < kPauseCount; ++i) {
+            const PauseItem& m = kPauseItems[i];
+            float& on = g_pauseOn[i];
+            on += ((i == g_pauseAt ? 1.0f : 0.0f) - on) * ease;
+            const float mid = (rowsY + i * pitch + rowH * 0.5f) * k;
+            const float fade = asking && i != g_pauseAt ? 0.45f : 1.0f;
+            Marker(d, (x0 + 12) * k, mid, 12 * k, 34 * k, on, k);
+            Tracked(d, item, 28 * k, ImVec2((x0 + 46) * k, mid - 14 * k), Alpha(Lerp(kInkSecondary, kInk, on), fade), m.label, 0.02f);
+            if (*m.tag) {
+                const float tw = Tracked(nullptr, text, 13 * k, ImVec2(), 0, m.tag, 0.16f);
+                Tracked(d, text, 13 * k, ImVec2((x0 + rowW - 24) * k - tw, mid - 7 * k), Alpha(kInkMuted, fade), m.tag, 0.16f);
+            }
+        }
+        if (picked >= 0) {
+            if (*kPauseItems[picked].ask) g_pauseAsk = picked;
+            else c = kPauseItems[picked].choice;
+        }
+
+        // The question under the rows: what is lost, yes (the signal's) or no.
+        if (asking) {
+            const PauseItem& m = kPauseItems[g_pauseAsk];
+            const float y = rowsY + kPauseCount * pitch + 20, h = 178;
+            d->AddRectFilled(P(x0, y), P(x0 + rowW, y + h), kSurfaceRaised);
+            d->AddRectFilled(P(x0, y), P(x0 + 4, y + h), kSignal);
+            d->AddText(mark, 30 * k, P(x0 + 28, y + 18), kInk, m.ask);
+            char lost[96];
+            std::snprintf(lost, sizeof lost, "The run so far is lost: %s%s.", RunClock(info.time).c_str(),
+                          info.splits.empty() ? "" : info.splits.size() == 1 ? " and a split" : (" and " + std::to_string(info.splits.size()) + " splits").c_str());
+            d->AddText(text, 21 * k, P(x0 + 28, y + 62), kInkSecondary, lost);
+            auto button = [&](float bx, const char* label, bool primary) {
+                const float bw = Tracked(nullptr, item, 22 * k, ImVec2(), 0, label, 0.02f) / k + 20 + 30;
+                const ImVec2 a = P(bx, y + 108), b = P(bx + bw, y + 156);
+                Plate(d, a, bw * k, 48 * k, 12 * k, primary ? kSignal : kSurfaceOverlay);
+                Tracked(d, item, 22 * k, ImVec2(a.x + 20 * k, a.y + 13 * k), primary ? kSurfaceBase : kInk, label, 0.02f);
+                return ImGui::IsMouseHoveringRect(a, b, false) && ImGui::IsMouseClicked(ImGuiMouseButton_Left);
+            };
+            const float yesW = Tracked(nullptr, item, 22 * k, ImVec2(), 0, m.verb, 0.02f) / k + 50;
+            if (button(x0 + 28, m.verb, true) || enter) c = m.choice, g_pauseAsk = -1;
+            else if (button(x0 + 28 + yesW + 12, "CANCEL", false)) g_pauseAsk = -1;
+        }
+
+        // What the selected row does; the keys.
+        const float footY = 1080 - 80 - 34;
+        if (!asking) d->AddText(text, 23 * k, P(x0 + 46, footY - 24 - 64), kInkSecondary, kPauseItems[g_pauseAt].help, nullptr, 600 * k);
+        float x = x0 * k;
+        x += KeyHint(d, text, k, ImVec2(x, footY * k), "W S", "MOVE") + 24 * k;
+        x += KeyHint(d, text, k, ImVec2(x, footY * k), "ENTER", asking ? kPauseItems[g_pauseAsk].verb : kPauseItems[g_pauseAt].enter) + 24 * k;
+        KeyHint(d, text, k, ImVec2(x, footY * k), "ESC", asking ? "CANCEL" : "RESUME");
+
+        // The run so far, beside the rows on the HUD's scrim.
+        {
+            const float px = 980, py = 236, pw = 520;
+            std::vector<std::pair<std::string, std::string>> facts;
+            for (size_t i = 0; i < info.splits.size(); ++i) facts.push_back({"SPLIT " + std::to_string(i + 1), RunClock(info.splits[i])});
+            if (info.splits.empty()) facts.push_back({"SPLITS", "-"});
+            char dist[48];
+            if (info.finish > 0) std::snprintf(dist, sizeof dist, "%.1f / %.1f KM", std::max(0.0f, info.distance) / 1000, info.finish / 1000);
+            else std::snprintf(dist, sizeof dist, "%.1f KM", std::max(0.0f, info.distance) / 1000);
+            facts.push_back({"DISTANCE", dist});
+            static const char* const kDamage[4] = {"OFF", "SAFE", "REDUCED", "REALISTIC"};
+            facts.push_back({"DAMAGE", info.damage >= 0 && info.damage < 4 ? kDamage[info.damage] : "-"});
+            facts.push_back({"PENALTY", info.falseStart ? "+10 S" : "NONE"});
+            facts.push_back({"CAR", info.car.empty() ? "-" : Caps(info.car)});
+            const float rows = std::ceil(facts.size() / 2.0f), ph = 24 + 20 + 18 + 18 + 48 + 18 + rows * 62 + 10;
+            Plate(d, P(px, py), pw * k, ph * k, 12 * k, IM_COL32(10, 10, 11, 230));
+            Tracked(d, text, 17 * k, P(px + 28, py + 24), kInkMuted, "THE RUN SO FAR", 0.16f);
+            Tracked(d, text, 13 * k, P(px + 28, py + 62), kInkMuted, "STAGE TIME", 0.16f);
+            d->AddText(mark, 48 * k, P(px + 28, py + 78), kInk, RunClock(info.time).c_str());
+            for (size_t i = 0; i < facts.size(); ++i) {
+                const float fx = px + 28 + (i % 2) * 244, fy = py + 156 + (i / 2) * 62;
+                Tracked(d, text, 13 * k, P(fx, fy), kInkMuted, facts[i].first.c_str(), 0.16f);
+                d->PushClipRect(P(fx, fy), P(fx + 230, fy + 60), true);
+                Tracked(d, item, 24 * k, P(fx, fy + 18), kInk, facts[i].second.c_str(), 0.02f);
+                d->PopClipRect();
+            }
+        }
+    }
+    ImGui::End();
+    ImGui::PopStyleVar(2);
     return c;
 }
 
