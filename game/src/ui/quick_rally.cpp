@@ -578,6 +578,9 @@ void GaragePage(const ImGuiLayer& ui, const assets::Catalog& catalog, app::Setti
     if (n && (KeyA() || KeyW())) g_garageAt = (g_garageAt + n - 1) % n;
     if (n && (KeyD() || KeyS())) g_garageAt = (g_garageAt + 1) % n;
     if (n && KeyEnter()) choose(g_garageAt);
+    // The wheel steps along the carousel (down: the next car), stopping at its ends rather than wrapping.
+    if (const float wheel = ImGui::GetIO().MouseWheel; n && wheel != 0)
+        g_garageAt = std::clamp(g_garageAt + (wheel < 0 ? 1 : -1), 0, n - 1);
 
     // The turntable: dragged by the mouse above the carousel, else turning by itself (after a pause once dragged).
     {
@@ -597,9 +600,9 @@ void GaragePage(const ImGuiLayer& ui, const assets::Catalog& catalog, app::Setti
 
     FullScreen("Garage", ui, width, height, [&](const Look& l) {
         const float k = l.k;
-        // The showroom shows through: no ground, the video's stripe faded out; the stripes over it, darkened to the left
+        // The showroom shows through: no ground, no livery (faded out: the car is the picture), darkened to the left
         // behind the column and to the foot behind the carousel.
-        Backdrop(l.d, l.W, l.H, k, IM_COL32(10, 10, 11, 0), video, false);
+        Backdrop(l.d, l.W, l.H, k, IM_COL32(10, 10, 11, 0), video, false, false);
         const ImU32 shade = IM_COL32(10, 10, 11, 235), clear = IM_COL32(10, 10, 11, 0);
         l.d->AddRectFilledMultiColor(ImVec2(0, 0), l.P(900, 1080), shade, clear, clear, shade);
         l.d->AddRectFilledMultiColor(ImVec2(0, l.H - 420 * k), ImVec2(l.W, l.H), clear, clear, shade, shade);
