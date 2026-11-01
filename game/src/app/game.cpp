@@ -552,6 +552,10 @@ StageEnd RunStage(Shell& sh, const Options& o, bool fromMenu, std::string& error
             std::fprintf(stderr, "the replay cameras: %s\n", e.what());
         }
     }
+    // What the beside camera may not go through (camera/scenery.h): the stage's collision, a copy of the cameras' own.
+    camera::Scenery scenery;
+    if (const std::string e = scenery.Load(o.session.physics.col); !e.empty())
+        std::fprintf(stderr, "the cameras' scenery: %s\n", e.c_str());
     const int cameras = tv ? 5 : 4;
     int cameraMode = (o.camera >= 0 ? o.camera : tv ? camera::kTv : camera::kChase) % cameras;
     float orbit = o.cameraAngle;   // the beside camera's place round the car, radians from its left side toward its front
@@ -797,7 +801,7 @@ StageEnd RunStage(Shell& sh, const Options& o, bool fromMenu, std::string& error
         }
         for (const iface::InstanceUpdate& u : fences.Step(in.seconds, p, snap.centerOfGravity)) instances.push_back(u);
         const V3 chaseEye = snap.before.chase.eye + (snap.after.chase.eye - snap.before.chase.eye) * t;
-        const camera::View view = camera::Look(cameraMode, p, chaseEye, orbit, tv.get());
+        const camera::View view = camera::Look(cameraMode, p, chaseEye, orbit, tv.get(), &scenery);
         sh.FollowSize();
         const int shownWidth = sh.width, shownHeight = sh.height;
         float viewM[16], proj[16];

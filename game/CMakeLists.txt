@@ -17,7 +17,7 @@
 add_executable(W-Rally
     src/app/main.cpp src/app/options.cpp src/app/settings.cpp src/app/window.cpp src/app/game.cpp
     src/session/session.cpp src/session/sim_thread.cpp src/input/bindings.cpp
-    src/camera/camera.cpp src/camera/replay_camera.cpp
+    src/camera/camera.cpp src/camera/replay_camera.cpp src/camera/scenery.cpp
     src/rules/stage.cpp
     src/assets/car_lights.cpp src/assets/car_model.cpp src/assets/lamp_lab.cpp src/assets/showroom.cpp src/assets/car_render.cpp src/assets/catalog.cpp src/assets/car_register.cpp src/assets/track_register.cpp src/assets/fences.cpp src/assets/legacy_stage.cpp src/assets/legacy_weather.cpp
     src/formats/lbs_geometry.cpp src/formats/json.cpp src/formats/fnc.cpp src/formats/track_settings.cpp
@@ -28,7 +28,7 @@ add_executable(W-Rally
 target_include_directories(W-Rally PRIVATE src)
 wrally_build_info(W-Rally)   # the version and commit in the screens' corner
 # Media Foundation: the main menu's video loop.
-target_link_libraries(W-Rally PRIVATE phys-data ngg-format wrally-modules wrally-signals imgui mfplat mfreadwrite mfuuid)
+target_link_libraries(W-Rally PRIVATE phys-data rbr-collision ngg-format wrally-modules wrally-signals imgui mfplat mfreadwrite mfuuid)
 # Not linked: loaded at run time from bin/modules - but built with the game.
 add_dependencies(W-Rally WPhysicsRBR WAudio WRenderer)
 # Where WRallyFile finds content/ and game/config/ when they are not beside the exe (a build run from its tree).

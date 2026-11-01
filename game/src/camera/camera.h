@@ -10,6 +10,7 @@
 #include <cstdint>
 
 #include "camera/replay_camera.h"
+#include "camera/scenery.h"
 #include "core/math.h"
 #include "physics/physics.h"
 
@@ -54,7 +55,8 @@ struct View {
 
 // The view of `mode` at the car's pose `p` (the frame's); `chaseEye` the chase camera's eye for this frame, `orbit` the
 // beside camera's place round the car (radians from its left toward its front). A TV mode without a TV camera there
-// is the chase camera.
-View Look(int mode, const physics::Pose& p, math::V3 chaseEye, float orbit, ReplayCameras* tv);
+// is the chase camera. `scenery` (null: none) keeps the beside camera on the car's side of a wall.
+View Look(int mode, const physics::Pose& p, math::V3 chaseEye, float orbit, ReplayCameras* tv,
+          const Scenery* scenery = nullptr);
 
 } // namespace wrally::camera

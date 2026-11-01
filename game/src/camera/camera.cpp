@@ -45,7 +45,7 @@ Chase ChaseRig::Follow(const Chase& before, const physics::Pose& p, float dt) co
     return c;
 }
 
-View Look(int mode, const physics::Pose& p, V3 chaseEye, float orbit, ReplayCameras* tv)
+View Look(int mode, const physics::Pose& p, V3 chaseEye, float orbit, ReplayCameras* tv, const Scenery* scenery)
 {
     const V3 pos{p.position[0], p.position[1], p.position[2]};
     const V3 fwd = math::Rotate(p.rotation, {0, -1, 0}), upv = math::Rotate(p.rotation, {0, 0, 1});
@@ -65,6 +65,16 @@ View Look(int mode, const physics::Pose& p, V3 chaseEye, float orbit, ReplayCame
         const V3 side = left * ca + fwd * sa, ahead = fwd * ca - left * sa;   // left and fwd turned by the orbit
         v.at = pos + fwd * 0.4f;
         v.eye = v.at + side * 4.5f + ahead * 0.2f + upv * 0.6f;
+        // Not through the scenery: 1.2 m short of what stands between - in front of the banners and barriers that
+        // stand against a wall too, which are not in the collision - and at least 1 m out.
+        if (scenery) {
+            const V3 from = v.at + upv * 0.6f, out = v.eye - from;
+            const float clear = scenery->Clear(from, v.eye);
+            if (clear < 1.0f) {
+                const float length = std::sqrt(out.x * out.x + out.y * out.y + out.z * out.z), keep = std::max(1.0f, clear * length - 1.2f);
+                if (keep < length) v.eye = from + out * (keep / length);
+            }
+        }
     } else if (mode == kAbove) {   // north up: a check of the car's placement
         v.eye = pos + V3{0, -0.01f, 25.0f};
         v.at = pos;
