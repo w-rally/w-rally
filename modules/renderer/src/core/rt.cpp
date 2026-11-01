@@ -713,6 +713,7 @@ void CSMain(uint3 tid : SV_DispatchThreadID, uint3 gid : SV_GroupID, uint gi : S
     float2 hist = float2(curr, depth);
     float  histDistrust = 0.0;    // the history's z where it was taken, else 0
     float  histAllow = 0.0;       // and the weight its rays allowed
+    float  histYouth = 0.0;       // a moved pixel's history: 8 one frame old, down to 0 (w)
     if (gValid > 0.5 && abs(pc.w) > 1e-7)
     {
         float3 pn = pc.xyz / pc.w;
@@ -778,6 +779,16 @@ void CSMain(uint3 tid : SV_DispatchThreadID, uint3 gid : SV_GroupID, uint gi : S
                     histAllow = histTouched ? h.w / 0.45 : 0.0;
                     blend = distrust ? clamp(touched ? allow : histAllow, gBlendMoved, top) : top;
                     histDistrust = histTouched ? h.z : 0.0;
+                    // A YOUNG moved pixel's history - the car just out from
+                    // behind a panel, which cut it - holds only the frames
+                    // since: a running mean of them, not 0.85 of the first
+                    // one's raw 5x5, which kept the car blotchy for a dozen.
+                    if (movedPixel)
+                    {
+                        histYouth = round((1.0 - h.w) * 32.0);
+                        const float frames = 9.0 - histYouth;
+                        blend = min(blend, frames / (frames + 1.0));
+                    }
                 }
             }
         }
@@ -813,7 +824,10 @@ void CSMain(uint3 tid : SV_DispatchThreadID, uint3 gid : SV_GroupID, uint gi : S
     const float fading = histDistrust - 0.125;
     const float level = touched ? 1.0 : (fading > 0.5 ? fading : fresh);
     const float allowed = touched ? allow : (fading > 0.5 ? histAllow : 0.0);
-    gOut[px] = float4(vis, depth, level, movedPixel ? 1.0 : 0.45 * allowed);
+    // A moved pixel's w counts its history's youth down in 32nds, 8 where it
+    // started over: 0.75 to 1, still > 0.5 for the identity tests.
+    const float youth = blend <= 0.0 ? 8.0 : max(histYouth - 1.0, 0.0);
+    gOut[px] = float4(vis, depth, level, movedPixel ? 1.0 - youth / 32.0 : 0.45 * allowed);
 }
 )";
 
@@ -856,7 +870,14 @@ void CSMain(uint3 tid : SV_DispatchThreadID)
     // the history (w 0.45, Allow): under the Garage's turning car they keep
     // 0.7-0.85 of it, a third of what a still pixel keeps (gBlendStill), and
     // were the grainiest floor there - widened, smoother than the car standing.
-    if (c.y <= 0.0 || c.z < 0.25 || c.w > 0.44) { gWide[px] = c.x; return; }
+    //
+    // And a moved object's pixels while their history is young (w < 1, its
+    // youth, kDenoiseSrc): the car come out from behind a panel had a single
+    // frame's 5x5 of the sky's occlusion, then a few frames' - the whole side
+    // of it blotchy. Widened over its own pixels only, less as it ages.
+    const bool moved = c.w > 0.5;
+    const float youth = moved ? (1.0 - c.w) * 4.0 : 1.0;     // 1 fresh .. 0 grown up
+    if (c.y <= 0.0 || (moved ? youth <= 0.0 : (c.z < 0.25 || c.w > 0.44))) { gWide[px] = c.x; return; }
     const float2 slope = float2(Slope(c.y, gIn.Load(int3(px - int2(1, 0), 0)).y, gIn.Load(int3(px + int2(1, 0), 0)).y),
                                 Slope(c.y, gIn.Load(int3(px - int2(0, 1), 0)).y, gIn.Load(int3(px + int2(0, 1), 0)).y));
     float sum = c.x, wsum = 1.0;
@@ -867,12 +888,12 @@ void CSMain(uint3 tid : SV_DispatchThreadID)
         const int2 q = px + int2(x, y) * 3;
         if (any(q < 0) || any(q >= int2(gSize))) continue;
         const float4 h = gIn.Load(int3(q, 0));
-        if (h.y <= 0.0 || h.w > 0.5) continue;
+        if (h.y <= 0.0 || (h.w > 0.5) != moved) continue;
         const float e = max(c.y + dot(slope, float2(x, y) * 3.0), 1e-7);
         if (abs(1.0 / h.y - 1.0 / e) * e >= 0.03) continue;
         sum += h.x; wsum += 1.0;
     }
-    gWide[px] = sum / wsum;
+    gWide[px] = lerp(c.x, sum / wsum, youth);
 }
 )";
 
