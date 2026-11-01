@@ -1,5 +1,6 @@
 #pragma once
-// The HUD (docs/design.md 6.5, wrally::ui), drawn with Dear ImGui on its foreground draw list - the renderer's UI pass -
+// The HUD (docs/design.md 6.5, wrally::ui), drawn with Dear ImGui on its background draw list (under the menus'
+// windows, which veil it with the stage) - the renderer's UI pass -
 // to the W-Rally design system's HUD (its StageTimer, PaceNote and Speedometer): plates on the HUD scrim, cut at the
 // livery's slant, inside a 48 px safe area (at 1080p, scaled with the window). The stage timer at the top left, the
 // co-driver's call at the top centre, the shift lights, speed and gear at the bottom right; the countdown and the finish
