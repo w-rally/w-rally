@@ -567,14 +567,15 @@ StageEnd RunStage(Shell& sh, const Options& o, bool fromMenu, std::string& error
         std::printf("test lights: %s\n", testLampOnly ? "the lamp behind" : (std::to_string(testLamps.size()) + " lamps").c_str());
     // THE CAR'S LAMPS (NGG design 5.4 N3b): its own (assets::LoadCarLamps, at the first frame - the centre of gravity
     // is the physics'), switched by the driver (headlights, ramp, indicators, hazard) and by the car (the brake pedal,
-    // reverse). After dusk they start lit - main beam and the ramp; by day off, and the small lamps' light not given (it
-    // would show only on their glass, and costs the GPU what the beams do).
+    // reverse). Until the driver touches the headlights they follow the sun: lit after dusk - main beam and the ramp -,
+    // off by day; and by day the small lamps' light is not given (it would show only on their glass, and costs the GPU
+    // what the beams do).
     assets::CarLamps carLamps;
     bool carLampsLoaded = false;
     size_t lampLayout = 0;
     assets::LampSwitches lampSwitch;
-    bool lampSwitchSet = false;
-    int lampFrames = 0;   // the frames drawn: the second one's stats know the sun
+    bool lampSwitchSet = false;   // the driver's (or PHYS_DRIVE_LAMPS'): no longer the sun's
+    int lampFrames = 0;           // the frames drawn: from the third the stats are the stage's sun
     Press headlightsKey, rampKey, indicatorLeftKey, indicatorRightKey, hazardKey;
     static const char* const kBeams[] = {"off", "dipped", "main"};
     // PHYS_DRIVE_LAMPS=<0|1|2>[,noramp][,brake][,reverse][,left][,right][,hazard]: the switches from the start, the
@@ -687,6 +688,7 @@ StageEnd RunStage(Shell& sh, const Options& o, bool fromMenu, std::string& error
         // The lamps' switches (assets::LampSwitches).
         if (headlightsKey(focused && keys.Down(Action::Headlights))) {
             lampSwitch.beam = (lampSwitch.beam + 1) % 3;
+            lampSwitchSet = true;
             std::printf("headlights: %s\n", kBeams[lampSwitch.beam]);
         }
         if (rampKey(focused && keys.Down(Action::Ramp))) {
@@ -1006,12 +1008,14 @@ StageEnd RunStage(Shell& sh, const Options& o, bool fromMenu, std::string& error
                     std::printf("the car's lamps: %s places; the ramp \"%s\", %zu lamps\n", carLamps.fromCar ? "its own" : "default",
                                 carLamps.layouts[lampLayout].name.c_str(), carLamps.layouts[lampLayout].lamps.size());
                 }
-                // The sun the renderer drew last frame: lit after dusk (and the small lamps' light given) - the switch
-                // set once, at the first frame that knows, the driver's after that.
+                // The sun the renderer drew last frame: lit after dusk (and the small lamps' light given) - every frame
+                // until the driver switches them, so not latched from a frame that still had the menu's showroom sky
+                // (a night). Its first two frames' stats may be the menu's: off until then.
                 const float sun = renderer.Stats().sunElevationDeg;
-                if (!lampSwitchSet && ++lampFrames > 2) {
-                    lampSwitchSet = true;
-                    if (sun < 3.0f) lampSwitch.beam = 2;
+                if (!lampSwitchSet) {
+                    const int beam = ++lampFrames > 2 && sun < 3.0f ? 2 : 0;
+                    if (beam != lampSwitch.beam) std::printf("headlights: %s (the sun %.1f degrees up)\n", kBeams[beam], sun);
+                    lampSwitch.beam = beam;
                 }
                 lampSwitch.smallLamps = sun < 6.0f;
                 lampSwitch.brake = in.brake || (lampsForced && std::strstr(lampsEnv, "brake"));
