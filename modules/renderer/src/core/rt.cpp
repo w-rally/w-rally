@@ -555,7 +555,7 @@ cbuffer K : register(b0)
     float  gMotionOn;
     float  gBlendMoved;           // history weight where a moved object was hit
     float  gPeriod4;              // 1 = the window spans 4 pixels each way (the AO's)
-    float  gPad;
+    float  gBlendStill;           // history weight where the pixel stays put on the screen
 };
 
 // The depth one pixel along an axis, as the surface's PLANE predicts it.
@@ -685,6 +685,18 @@ void CSMain(uint3 tid : SV_DispatchThreadID, uint3 gid : SV_GroupID, uint gi : S
             int2 pp = int2(puv * float2(gSize));
             pp = clamp(pp, int2(0, 0), int2(gSize) - 1);
             float4 h = gHist.Load(int3(pp, 0));
+            // STILL: a pixel that stays put on the screen (under a quarter
+            // pixel of motion, as TAA's `still`) reads its history without
+            // resampling it, so a longer one costs no blur: from 0.85 it goes
+            // to gBlendStill. One ray a pixel, among three spotlights in the
+            // Garage, averaged over 5x5 and a dozen frames left the floor's
+            // shadows blotchy under a camera that never moves, the car
+            // standing or turning; three dozen halve that. The neighbourhood
+            // clamp below still pulls a stale value in at once where every
+            // sample disagrees with it.
+            const float still = movedPixel ? 0.0
+                              : saturate(1.0 - length(puv * float2(gSize) - (float2(px) + 0.5)) * 4.0);
+            const float top = lerp(gBlend, gBlendStill, still);
             // Ground the car uncovered: last frame this spot was the moved
             // object, so its history is cut below - and that, too, is "a moved
             // object was involved". Without it the distrust broke on every
@@ -727,7 +739,7 @@ void CSMain(uint3 tid : SV_DispatchThreadID, uint3 gid : SV_GroupID, uint gi : S
                 {
                     hist.x = h.x;
                     histAllow = histTouched ? h.w / 0.45 : 0.0;
-                    blend = distrust ? clamp(touched ? allow : histAllow, gBlendMoved, gBlend) : gBlend;
+                    blend = distrust ? clamp(touched ? allow : histAllow, gBlendMoved, top) : top;
                     histDistrust = histTouched ? h.z : 0.0;
                 }
             }
@@ -802,10 +814,12 @@ void CSMain(uint3 tid : SV_DispatchThreadID)
     if (tid.x >= gSize.x || tid.y >= gSize.y) return;
     const int2 px = int2(tid.xy);
     const float4 c = gIn.Load(int3(px, 0));
-    // Static, with a cut or no history: the rest keep their own answer - and
-    // so do pixels whose rays allowed most of the history even so (w over
-    // 0.3: a weight over two thirds, Allow), a slow occluder's.
-    if (c.y <= 0.0 || c.z < 0.25 || c.w > 0.3) { gWide[px] = c.x; return; }
+    // Static, with a cut or no history: the rest keep their own answer. A
+    // slow occluder's pixels too are widened unless their rays allowed all of
+    // the history (w 0.45, Allow): under the Garage's turning car they keep
+    // 0.7-0.85 of it, a third of what a still pixel keeps (gBlendStill), and
+    // were the grainiest floor there - widened, smoother than the car standing.
+    if (c.y <= 0.0 || c.z < 0.25 || c.w > 0.44) { gWide[px] = c.x; return; }
     const float2 slope = float2(Slope(c.y, gIn.Load(int3(px - int2(1, 0), 0)).y, gIn.Load(int3(px + int2(1, 0), 0)).y),
                                 Slope(c.y, gIn.Load(int3(px - int2(0, 1), 0)).y, gIn.Load(int3(px + int2(0, 1), 0)).y));
     float sum = c.x, wsum = 1.0;
@@ -834,7 +848,7 @@ struct DenoiseCB
     float    motionOn;
     float    blendMoved;
     float    period4;
-    float    pad;
+    float    blendStill;
 };
 static_assert(sizeof(DenoiseCB) % 16 == 0, "DenoiseCB must be whole float4s");
 
@@ -988,7 +1002,9 @@ enum { kSlotTlas = 0, kSlotDepth = 1, kSlotOut = 2, kSlotCounters = 3,
        // shape.
        kSlotLightOut = 29, kSlotLightCounters = 30,
        kSlotLightPair0 = 31, kSlotLightPair1 = 33, kSlotLightHistUav0 = 35, kSlotLightHistUav1 = 36,
-       kSlotTextures = 37 };
+       // Their wide pass output (kAoWideSrc, as the AO's).
+       kSlotLightWideUav = 37,
+       kSlotTextures = 38 };
 
 } // namespace
 
@@ -1740,6 +1756,21 @@ bool Rt::CreateTargets(ID3D12Device* dev, UINT width, UINT height)
         wh.ptr += (SIZE_T)kSlotAoWideUav * m_stride;
         dev->CreateUnorderedAccessView(m_aoWide.Get(), nullptr, &wu, wh);
     }
+    // And the local lights' (the same pass, the same format).
+    m_lightWide.Reset();
+    if (FAILED(dev->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &d,
+                                            D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                                            nullptr, IID_PPV_ARGS(&m_lightWide))))
+        return false;
+    m_lightWideState = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+    {
+        D3D12_UNORDERED_ACCESS_VIEW_DESC wu = {};
+        wu.Format = DXGI_FORMAT_R16_FLOAT;
+        wu.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
+        D3D12_CPU_DESCRIPTOR_HANDLE wh = m_heap->GetCPUDescriptorHandleForHeapStart();
+        wh.ptr += (SIZE_T)kSlotLightWideUav * m_stride;
+        dev->CreateUnorderedAccessView(m_lightWide.Get(), nullptr, &wu, wh);
+    }
 
     D3D12_UNORDERED_ACCESS_VIEW_DESC cv = {};
     cv.ViewDimension = D3D12_UAV_DIMENSION_BUFFER;
@@ -1928,6 +1959,8 @@ void Rt::Trace(Device& dev, ID3D12GraphicsCommandList* list, ID3D12Resource* dep
         // car's own shadow from boiling, little enough that a stale one is
         // gone in two or three frames (0.25^3 < 2%).
         dc.blendMoved = 0.25f;
+        // A pixel still on the screen: three times the samples (see kDenoiseSrc's STILL).
+        dc.blendStill = 0.95f;
         if (unjitteredViewProj) memcpy(m_prevViewProj, unjitteredViewProj, sizeof(m_prevViewProj));
     }
     Denoise(list, dc, m_result.Get(), kSlotPair0, kSlotPair1, kSlotHistUav0, kSlotHistUav1,
@@ -1941,7 +1974,9 @@ void Rt::Trace(Device& dev, ID3D12GraphicsCommandList* list, ID3D12Resource* dep
     {
         Denoise(list, dcAo, m_aoResult.Get(), kSlotAoPair0, kSlotAoPair1, kSlotAoHistUav0, kSlotAoHistUav1,
                 m_aoHist, m_aoHistState, m_aoHistValid, m_filteredAo);
-        if (m_psoAoWide && m_aoWide) WidenAo(list, dcAo);
+        if (m_psoAoWide && m_aoWide)
+            Widen(list, dcAo, m_aoHist, m_aoHistState, kSlotAoPair0, kSlotAoPair1, m_aoWide.Get(), m_aoWideState,
+                  kSlotAoWideUav, m_filteredAo);
     }
     else
         m_filteredAo = nullptr;
@@ -1950,6 +1985,12 @@ void Rt::Trace(Device& dev, ID3D12GraphicsCommandList* list, ID3D12Resource* dep
     if (doLights)
         Denoise(list, dc, m_lightResult.Get(), kSlotLightPair0, kSlotLightPair1, kSlotLightHistUav0,
                 kSlotLightHistUav1, m_lightHist, m_lightHistState, m_lightHistValid, m_filteredLights);
+    // And widened where their history was cut, as the AO is: under the Garage's turning car, the floor's
+    // spotlit shadow - one ray a pixel among three lamps, its rays' hits right above it allowing little
+    // history (Allow) - stayed grainy, and those penumbrae are wider than the pass's 13 pixels anyway.
+    if (doLights && m_psoAoWide && m_lightWide)
+        Widen(list, dc, m_lightHist, m_lightHistState, kSlotLightPair0, kSlotLightPair1, m_lightWide.Get(),
+              m_lightWideState, kSlotLightWideUav, m_filteredLights);
     else
         m_filteredLights = nullptr;
     if (m_timestamps)
@@ -2036,17 +2077,20 @@ void Rt::Denoise(ID3D12GraphicsCommandList* list, const DenoiseCB& base, ID3D12R
     histValid = true;
 }
 
-// kAoWideSrc over this frame's denoised AO (the history just written), into
-// m_aoWide, which then is the AO the scene reads.
-void Rt::WidenAo(ID3D12GraphicsCommandList* list, const DenoiseCB& dc)
+// kAoWideSrc over this frame's denoised result (the history just written, of
+// the pair pair0/pair1), into `wide`, which then is what the scene reads.
+void Rt::Widen(ID3D12GraphicsCommandList* list, const DenoiseCB& dc,
+               Microsoft::WRL::ComPtr<ID3D12Resource>* hists, D3D12_RESOURCE_STATES* histState,
+               UINT pair0, UINT pair1, ID3D12Resource* wide, D3D12_RESOURCE_STATES& wideState, UINT uav,
+               ID3D12Resource*& filtered)
 {
     const int write = (int)((m_frame - 1) & 1);
-    ID3D12Resource* hist = m_aoHist[write].Get();
+    ID3D12Resource* hist = hists[write].Get();
     D3D12_RESOURCE_BARRIER pre[2] = {
-        Transition(hist, m_aoHistState[write], D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE),
-        Transition(m_aoWide.Get(), m_aoWideState, D3D12_RESOURCE_STATE_UNORDERED_ACCESS),
+        Transition(hist, histState[write], D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE),
+        Transition(wide, wideState, D3D12_RESOURCE_STATE_UNORDERED_ACCESS),
     };
-    list->ResourceBarrier(m_aoWideState == D3D12_RESOURCE_STATE_UNORDERED_ACCESS ? 1 : 2, pre);
+    list->ResourceBarrier(wideState == D3D12_RESOURCE_STATE_UNORDERED_ACCESS ? 1 : 2, pre);
 
     auto gpu = [&](UINT slot) {
         D3D12_GPU_DESCRIPTOR_HANDLE h = m_heap->GetGPUDescriptorHandleForHeapStart();
@@ -2056,21 +2100,20 @@ void Rt::WidenAo(ID3D12GraphicsCommandList* list, const DenoiseCB& dc)
     list->SetComputeRootSignature(m_denoiseRootSig.Get());
     list->SetPipelineState(m_psoAoWide.Get());
     // The pair whose t1 is the history just written.
-    list->SetComputeRootDescriptorTable(0, gpu(write == 0 ? kSlotAoPair0 : kSlotAoPair1));
+    list->SetComputeRootDescriptorTable(0, gpu(write == 0 ? pair0 : pair1));
     list->SetComputeRootDescriptorTable(1, gpu(kSlotDepth));
-    list->SetComputeRootDescriptorTable(2, gpu(kSlotAoWideUav));
+    list->SetComputeRootDescriptorTable(2, gpu(uav));
     list->SetComputeRoot32BitConstants(3, sizeof(DenoiseCB) / 4, &dc, 0);
     list->SetComputeRootDescriptorTable(4, gpu(kSlotMotion));
     list->Dispatch((m_width + 7) / 8, (m_height + 7) / 8, 1);
 
     D3D12_RESOURCE_BARRIER post[2] = {
-        Transition(hist, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, m_aoHistState[write]),
-        Transition(m_aoWide.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
-                   D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE),
+        Transition(hist, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, histState[write]),
+        Transition(wide, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE),
     };
     list->ResourceBarrier(2, post);
-    m_aoWideState = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
-    m_filteredAo = m_aoWide.Get();
+    wideState = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+    filtered = wide;
 }
 
 void Rt::ReadStats()
