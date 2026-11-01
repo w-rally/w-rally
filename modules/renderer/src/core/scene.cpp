@@ -1959,6 +1959,7 @@ void Scene::DescribeRt(std::vector<uint64_t>& meshes, std::vector<RtInstanceDesc
             d.mesh = kRtMoved | (uint64_t)i;
             memcpy(d.xform, o.xform, sizeof(d.xform));
             d.moved = Travel(o.bmin0, o.bmax0, o.xform, o.prevXform) > kRtMovedMin;
+            memcpy(d.prevXform, o.prevXform, sizeof(d.prevXform));
             meshes.push_back(d.mesh);
             instances.push_back(d);
         }
@@ -1970,6 +1971,7 @@ void Scene::DescribeRt(std::vector<uint64_t>& meshes, std::vector<RtInstanceDesc
             d.material = o.materialId;
             d.forceOpaque = (o.matFlags & kMaterialAlphaTest) == 0;
             d.moved = Travel(o.bmin0, o.bmax0, o.xform, o.prevXform) > kRtMovedMin;
+            memcpy(d.prevXform, o.prevXform, sizeof(d.prevXform));
             if (std::find(meshes.begin(), meshes.end(), d.mesh) == meshes.end())
                 meshes.push_back(d.mesh);
             instances.push_back(d);

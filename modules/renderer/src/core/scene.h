@@ -582,6 +582,9 @@ public:
         // that hits it sees an occluder that was elsewhere, so the denoiser
         // must not trust the past.
         bool     moved = false;
+        // Its transform last frame, so the denoiser can tell how far what a
+        // ray hit moved (rt.cpp Allow).
+        float    prevXform[16] = { 1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1 };
     };
     struct RtShared
     {

@@ -1330,6 +1330,7 @@ int RunGame(const std::vector<std::string>& args)
     // --showroom <car folder> [--turn <degrees>]: the Garage's showroom with that car, one capture (showroom.bmp, in the
     // working folder) once it is loaded, then out - a look at a car's model without the menus.
     if (const auto it = std::find(args.begin(), args.end(), std::string("--showroom")); it != args.end() && it + 1 != args.end()) {
+        if (const char* off = std::getenv("PHYS_DRIVE_OFF"); off && std::strstr(off, "taa")) sh.settings.taa = false;   // as a stage's
         if (const std::string e = OpenShell(sh, "wrenderer"); !e.empty()) return std::fprintf(stderr, "%s\n", e.c_str()), 3;
         assets::Catalog catalog;
         catalog.Scan(sh.settings);
@@ -1337,8 +1338,16 @@ int RunGame(const std::vector<std::string>& args)
         view.car = *(it + 1);
         if (const auto t = std::find(args.begin(), args.end(), std::string("--turn")); t != args.end() && t + 1 != args.end())
             view.turn = static_cast<float>(std::atof((t + 1)->c_str()) * 3.14159265 / 180);
+        // --spin <degrees / s>: the turntable turning, a 60th of that a frame (the Garage turns at 12.6); --shots <n>:
+        // n captures, frame after frame (showroom-00.bmp ...) - the denoisers' grain around a moving car, measured.
+        float spin = 0;
+        int shots = 1;
+        if (const auto t = std::find(args.begin(), args.end(), std::string("--spin")); t != args.end() && t + 1 != args.end())
+            spin = static_cast<float>(std::atof((t + 1)->c_str()) * 3.14159265 / 180 / 60);
+        if (const auto t = std::find(args.begin(), args.end(), std::string("--shots")); t != args.end() && t + 1 != args.end())
+            shots = std::clamp(std::atoi((t + 1)->c_str()), 1, 100);
         Showroom showroom;
-        for (int frame = 0; frame < 400 && sh.window.Pump(); ++frame) {
+        for (int frame = 0; frame < 400 + shots && sh.window.Pump(); ++frame) {
             sh.FollowSize();
             sh.ui.NewFrame();
             iface::FrameDesc fd{};
@@ -1347,8 +1356,13 @@ int RunGame(const std::vector<std::string>& args)
             fd.ui = sh.ui.Render();
             if (drawn && showroom.Ready()) {
                 static int settle = 0;
-                if (++settle == 40) sh.renderer.CaptureFrame("showroom.bmp");
-                if (settle == 42) break;
+                view.turn += spin;
+                if (++settle >= 40 && settle < 40 + shots) {
+                    char name[32];
+                    std::snprintf(name, sizeof name, "showroom-%02d.bmp", settle - 40);
+                    sh.renderer.CaptureFrame(shots == 1 ? "showroom.bmp" : name);
+                }
+                if (settle == 41 + shots) break;
             }
             const auto r0 = std::chrono::steady_clock::now();
             sh.renderer.RenderFrame(fd);
