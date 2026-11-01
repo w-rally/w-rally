@@ -8,8 +8,10 @@
 #include <cstdlib>
 #include <cstring>
 #include <cwchar>
+#include <chrono>
 #include <filesystem>
 #include <fstream>
+#include <future>
 #include <iterator>
 #include <memory>
 #include <string>
@@ -20,6 +22,7 @@
 #include "app/window.h"
 #include "assets/car_lights.h"
 #include "assets/lamp_lab.h"
+#include "assets/showroom.h"
 #include "assets/car_render.h"
 #include "assets/fences.h"
 #include "assets/catalog.h"
@@ -126,17 +129,208 @@ std::string OpenShell(Shell& sh, const std::string& rendererId)
     return "";
 }
 
-// One frame of the menus without a stage: the window's messages, `draw`'s ImGui on the backdrop. False once the window
-// was closed.
-template <class F> bool MenuFrame(Shell& sh, F&& draw)
+// The Garage's showroom (Quick rally -> Garage): the car it shows on a turntable in a synthetic scene
+// (assets/showroom.h), lit by three spots in the night, the camera fixed and the car turning.
+//
+// The scene is loaded once - its load takes the renderer a second or two, so it is done where the menus stall anyway
+// (Prepare: as they open, after a stage) - and kept while the menus run (a stage loads its own: one scene at a time).
+// A car is read on a thread of its own once the Garage has rested on it a moment (stepping through the cars reads none
+// of those passed), the menu running meanwhile, the turntable empty; read, its textures go to the renderer a few a
+// frame, then its model, and it stands on the turntable. The car before it is taken off (its models released); its
+// textures stay the scene's, so after a number of cars the scene is loaded afresh.
+class Showroom {
+public:
+    ~Showroom()
+    {
+        if (m_reading.valid()) m_reading.wait();   // (a read in flight: done before its results go)
+    }
+
+    // The scene loaded, if it is not (the menus opening, back from a stage).
+    void Prepare(render::Renderer& renderer)
+    {
+        if (m_scene) return;
+        const auto t0 = std::chrono::steady_clock::now();
+        const std::vector<uint8_t> bytes = assets::BuildShowroom();
+        m_scene = renderer.LoadScene(bytes.data(), bytes.size());
+        m_carsInScene = 0;
+        if (!m_scene) return void(std::fprintf(stderr, "the showroom: %s\n", renderer.Error().c_str()));
+        std::printf("the showroom: its scene loaded in %.0f ms\n", std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count());
+    }
+
+    // The scene gone without unloading it: a stage loaded its own in its place (which released it).
+    void Forget()
+    {
+        m_car.reset(), m_pending.reset();
+        m_scene = 0, m_shown.clear();
+    }
+
+    // The world under the menu for `view` into `fd` (true), or nothing to draw (the Garage closed).
+    bool Frame(render::Renderer& renderer, const assets::Catalog& catalog, const ui::ShowroomView& view, int width, int height,
+               iface::FrameDesc& fd)
+    {
+        if (view.car.empty()) return false;
+        Prepare(renderer);
+        if (!m_scene) return false;
+        const double now = GetTickCount64() / 1000.0;
+        if (view.car != m_wanted) m_wanted = view.car, m_since = now;
+        if (m_wanted != m_shown && now - m_since >= (m_car || m_pending || m_reading.valid() ? 0.25 : 0.0)) Load(renderer, catalog);
+        // A read done: kept, if it is still the car shown, to be made the renderer's a few textures a frame (each an upload
+        // the renderer waits for), the model last.
+        if (m_reading.valid() && m_reading.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
+            Read r = m_reading.get();
+            if (r.folder == m_shown) m_pending = std::make_unique<Read>(std::move(r));
+        }
+        if (m_pending) {
+            const auto t0 = std::chrono::steady_clock::now();
+            auto spent = [&] { return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count(); };
+            bool all = true;
+            for (assets::CarTexture& t : m_pending->model.materials) {
+                if (t.uploaded || t.dds.empty()) continue;
+                if (spent() > 4.0) {   // (this frame's share spent: the rest next frame)
+                    all = false;
+                    break;
+                }
+                const double before = spent();
+                t.uploaded = renderer.CreateTexture(t.dds.data(), t.dds.size());
+                if (!t.uploaded) t.dds.clear();   // (refused: the material's colour instead)
+                if (std::getenv("WRALLY_SHOWROOM_TIMES"))
+                    std::printf("the showroom: texture %s (%zu KB) in %.0f ms\n", t.material.c_str(), t.dds.size() / 1024, spent() - before);
+            }
+            if (all && spent() <= 4.0) {
+                m_car = std::make_unique<assets::CarRender>();
+                m_car->Create(renderer, m_pending->ok ? &m_pending->model : nullptr, {}, m_parts);
+                m_height = 0.5f;
+                if (!m_car->Stance(m_wheels, m_height)) std::printf("the showroom: %s has no wheel hubs in its model\n", m_pending->folder.c_str());
+                std::printf("the showroom: %s read in %.0f ms (its thread), its model made in %.0f ms\n", m_pending->folder.c_str(),
+                            m_pending->readMs, spent());
+                m_pending.reset();
+            }
+        }
+
+        // The car on the turntable, its wheels where the model's hubs are, turned about the up axis through the middle of
+        // its hubs (the model's origin is often at the rear axle): that middle kept over the turntable's centre.
+        physics::Pose p{};
+        float mid[2] = {};
+        for (const physics::Wheel& w : m_wheels) mid[0] += w.position[0] * 0.25f, mid[1] += w.position[1] * 0.25f;
+        const float c = std::cos(view.turn), s = std::sin(view.turn);
+        p.position[0] = -(c * mid[0] - s * mid[1]), p.position[1] = -(s * mid[0] + c * mid[1]);
+        p.position[2] = m_height + assets::kShowroomDeck;
+        p.rotation[2] = std::sin(view.turn * 0.5f), p.rotation[3] = std::cos(view.turn * 0.5f);
+        m_instances.clear();
+        if (m_car && m_car->Ready()) {
+            const float cog[3] = {};
+            m_instances.push_back(m_car->Place(p, m_wheels, cog, m_parts));
+            const bool lit[assets::kLampGroups] = {};
+            m_car->PlaceLamps(lit, false, m_parts, m_instances);
+        }
+
+        // The camera: three quarters from the front left, a little above, its picture's centre moved to `view`'s.
+        constexpr float kFov = 0.52f;
+        float viewM[16], proj[16];
+        math::LookAt(V3{-6.9f, 2.1f, -7.8f}, V3{0.0f, 0.55f, 0.0f}, viewM);
+        math::Perspective(kFov, height ? float(width) / float(height) : 16.0f / 9.0f, 0.2f, 400.0f, proj);
+        proj[8] = view.centreX * 2 - 1, proj[9] = 1 - view.centreY * 2;   // (row vectors: x, y += shift * w)
+        fd.flags = 0;
+        fd.scene = m_scene;
+        std::memcpy(fd.camera.view, viewM, sizeof viewM);
+        std::memcpy(fd.camera.proj, proj, sizeof proj);
+        fd.camera.nearZ = 0.2f, fd.camera.farZ = 400.0f, fd.camera.fovY = kFov;
+        fd.skyTime = {1, 2026, 11, 9, 23.0f, 1.0f, 50.0f, 14.4f, 0.0f};   // a moonless late evening: the spots' light alone
+        fd.lights = kLights, fd.lightCount = 3;
+        fd.instances = m_instances.data(), fd.instanceCount = static_cast<uint32_t>(m_instances.size());
+        fd.time = static_cast<float>(now);
+        return true;
+    }
+
+    // The car is loaded and drawn.
+    bool Ready() const { return m_scene && m_car && m_car->Ready(); }
+
+    void Unload(render::Renderer& renderer)
+    {
+        m_car.reset();
+        m_pending.reset();   // (its textures were the scene's: gone with it)
+        if (m_scene) renderer.Api()->unloadScene(renderer.Instance(), m_scene);
+        m_scene = 0, m_shown.clear();
+    }
+
+private:
+    // The car before taken off, the new one's model read on a thread (one at a time: a later car waits for the read in
+    // flight, which Frame then throws away). A car W-Rally cannot use stays off: the turntable empty.
+    void Load(render::Renderer& renderer, const assets::Catalog& catalog)
+    {
+        if (m_reading.valid()) return;
+        if (m_car) m_car->Release(renderer);
+        m_car.reset(), m_pending.reset();
+        if (++m_carsInScene > kCarsPerScene) Unload(renderer), Prepare(renderer);   // (their textures piled up: afresh)
+        if (!m_scene) return;
+        m_shown = m_wanted;
+        const assets::Car* car = catalog.FindCar(m_wanted);
+        const assets::CarInfo* info = car ? catalog.carRegister.Find(car->folder) : nullptr;
+        if (!car || !info || !info->known) return;
+        m_reading = std::async(std::launch::async, [folder = car->folder, sgc = car->sgc] {
+            Read r;
+            r.folder = folder;
+            const auto t0 = std::chrono::steady_clock::now();
+            try {
+                r.model = assets::ReadCarModel(sgc, "gravel");
+                r.ok = true;
+            } catch (const std::exception& e) {
+                std::fprintf(stderr, "the car's model: %s\n", e.what());
+            }
+            r.readMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+            return r;
+        });
+    }
+
+    static constexpr int kCarsPerScene = 8;   // cars shown before the scene is loaded afresh (their textures freed)
+    int m_carsInScene = 0;
+
+    struct Read {
+        std::string folder;
+        assets::CarModel model;
+        bool ok = false;
+        double readMs = 0;
+    };
+    std::future<Read> m_reading;
+    std::unique_ptr<Read> m_pending;   // read, being made the renderer's
+
+    // Three spots from above (render axes, y up): the key at the car's front left, a fill at its right, a rim behind.
+    static iface::LightDesc Spot(V3 at, float candela)
+    {
+        iface::LightDesc l{};
+        l.type = iface::kLightSpot;
+        l.position[0] = at.x, l.position[1] = at.y, l.position[2] = at.z;
+        const V3 d = math::Norm(V3{0, 0.4f, 0} - at);
+        l.direction[0] = d.x, l.direction[1] = d.y, l.direction[2] = d.z;
+        l.colour[0] = l.colour[1] = l.colour[2] = 1;
+        l.intensity = candela, l.radius = 0.6f, l.innerDeg = 22, l.outerDeg = 40;
+        return l;
+    }
+    inline static const iface::LightDesc kLights[3] = {Spot(V3{-3.5f, 6.0f, -4.0f}, 9000), Spot(V3{4.5f, 4.5f, -1.0f}, 3500),
+                                                       Spot(V3{0.5f, 5.0f, 5.0f}, 6000)};
+
+    iface::SceneHandle m_scene = 0;
+    std::unique_ptr<assets::CarRender> m_car;
+    std::string m_wanted, m_shown;
+    double m_since = 0;
+    physics::Wheel m_wheels[4] = {};
+    float m_height = 0.5f;
+    std::vector<physics::Part> m_parts;   // (none: the car whole)
+    std::vector<iface::InstanceUpdate> m_instances;
+};
+
+// One frame of the menus without a stage: the window's messages, `draw`'s ImGui on the backdrop - over `world`'s scene
+// when it fills one in (the Garage's showroom). False once the window was closed.
+template <class F, class W> bool MenuFrame(Shell& sh, F&& draw, W&& world)
 {
     if (!sh.window.Pump()) return false;
     sh.FollowSize();
     sh.ui.NewFrame();
-    ui::DrawBackdrop(sh.width, sh.height);
     draw();
     iface::FrameDesc fd{};
     fd.flags = iface::kFrameNoWorld;
+    world(fd);
+    if (fd.flags & iface::kFrameNoWorld) ui::DrawBackdrop(sh.width, sh.height);   // (ImGui's background: behind all)
     fd.ui = sh.ui.Render();
     if (!sh.renderer.RenderFrame(fd)) std::fprintf(stderr, "renderer: %s\n", sh.renderer.Error().c_str());
     sh.renderer.Present();
@@ -936,6 +1130,13 @@ int Menus(Shell& sh, std::string note)
     // The main menu's video loop (content/video/menu.mp4; none: the window dark).
     ui::MenuVideo video;
     if (const std::string e = video.Open(WRallyFile("content/video/menu.mp4")); !e.empty()) std::printf("%s\n", e.c_str());
+    Showroom showroom;
+    showroom.Prepare(sh.renderer);   // (its scene's load stalls the menus once, now)
+    struct Unload {   // (the showroom's scene gone before the renderer)
+        Showroom& s;
+        render::Renderer& r;
+        ~Unload() { s.Unload(r); }
+    } unloadShowroom{showroom, sh.renderer};
     for (;;) {
         video.Update(sh.renderer);   // (outside the frame: the upload is its own)
         bool start = false, exit = false;
@@ -946,6 +1147,7 @@ int Menus(Shell& sh, std::string note)
             case Screen::Main:
                 switch (ui::MainMenu(sh.ui, sh.width, sh.height, note, video.Frame())) {
                 case ui::MainChoice::QuickRally: screen = Screen::Quick; break;
+                case ui::MainChoice::Garage: screen = Screen::Quick, ui::OpenGarage(); break;
                 case ui::MainChoice::Settings: screen = Screen::Settings, atOpen = sh.settings, settingsLog.clear(); break;
                 case ui::MainChoice::Exit: exit = true; break;
                 case ui::MainChoice::None: break;
@@ -990,6 +1192,8 @@ int Menus(Shell& sh, std::string note)
                 SaveSettings(sh.settings);
                 screen = Screen::Main;
             }
+        }, [&](iface::FrameDesc& fd) {   // the Garage's car under it
+            showroom.Frame(sh.renderer, catalog, screen == Screen::Quick ? ui::Showroom() : ui::ShowroomView{}, sh.width, sh.height, fd);
         });
         if (!open || exit) return 0;
         if (!start) continue;
@@ -1006,7 +1210,9 @@ int Menus(Shell& sh, std::string note)
         for (const std::string& a : args) line += (line.empty() ? "" : " ") + a;
         std::printf("quick rally: %s\n", line.c_str());
         StageEnd end;
+        showroom.Unload(sh.renderer);   // (the stage's scene in its place)
         while ((end = RunStage(sh, o, true, error)) == StageEnd::Restart) {}
+        showroom.Prepare(sh.renderer);
         if (end == StageEnd::Quit) return 0;
         note = end == StageEnd::Failed ? error : "";
         screen = Screen::Main;
@@ -1105,6 +1311,40 @@ int RunGame(const std::vector<std::string>& args)
     if (std::find(args.begin(), args.end(), std::string("--lab")) != args.end()) {
         if (const std::string e = OpenShell(sh, "wrenderer"); !e.empty()) return std::fprintf(stderr, "%s\n", e.c_str()), 3;
         return RunLab(sh, args);
+    }
+    // --showroom <car folder> [--turn <degrees>]: the Garage's showroom with that car, one capture (showroom.bmp, in the
+    // working folder) once it is loaded, then out - a look at a car's model without the menus.
+    if (const auto it = std::find(args.begin(), args.end(), std::string("--showroom")); it != args.end() && it + 1 != args.end()) {
+        if (const std::string e = OpenShell(sh, "wrenderer"); !e.empty()) return std::fprintf(stderr, "%s\n", e.c_str()), 3;
+        assets::Catalog catalog;
+        catalog.Scan(sh.settings);
+        ui::ShowroomView view;
+        view.car = *(it + 1);
+        if (const auto t = std::find(args.begin(), args.end(), std::string("--turn")); t != args.end() && t + 1 != args.end())
+            view.turn = static_cast<float>(std::atof((t + 1)->c_str()) * 3.14159265 / 180);
+        Showroom showroom;
+        for (int frame = 0; frame < 400 && sh.window.Pump(); ++frame) {
+            sh.FollowSize();
+            sh.ui.NewFrame();
+            iface::FrameDesc fd{};
+            fd.flags = iface::kFrameNoWorld;
+            const bool drawn = showroom.Frame(sh.renderer, catalog, view, sh.width, sh.height, fd);
+            fd.ui = sh.ui.Render();
+            if (drawn && showroom.Ready()) {
+                static int settle = 0;
+                if (++settle == 40) sh.renderer.CaptureFrame("showroom.bmp");
+                if (settle == 42) break;
+            }
+            const auto r0 = std::chrono::steady_clock::now();
+            sh.renderer.RenderFrame(fd);
+            sh.renderer.Present();
+            if (const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - r0).count();
+                std::getenv("WRALLY_SHOWROOM_TIMES") && ms > 30)
+                std::printf("the showroom: frame %d drawn in %.0f ms\n", frame, ms);
+            if (const std::string log = sh.renderer.TakeLog(); sh.rendererLog && !log.empty()) std::printf("%s", log.c_str());
+        }
+        showroom.Unload(sh.renderer);
+        return 0;
     }
     // A command line: that stage at once (its Esc menu's "Exit to main menu" goes to the menus).
     if (args.size() > 1) {

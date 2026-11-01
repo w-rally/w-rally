@@ -2133,6 +2133,11 @@ bool Scene::SetMaterial(ID3D12Device* dev, uint32_t index, const MaterialSlot& i
         o.matFlags = m.flags | (o.measuredSingleStage ? (uint32_t)kDrawSingleStage : 0u);
     }
 
+    if (texturesChanged && m_materialBatch)
+    {
+        m_srvStale = true;                     // (EndMaterialBatch rebuilds the heap, once)
+        return true;
+    }
     if (texturesChanged && dev && !RebuildSrvHeap(dev))
     {
         Log("scene: material %u textures changed but the SRV heap rebuild failed", index);
@@ -4128,12 +4133,25 @@ uint32_t Scene::AddMaterial(ID3D12Device* dev, uint32_t tex0, uint32_t tex1, uin
     m.alphaCutoff = d.alphaCutoff;
     m_materials.push_back(m);
 
+    if (m_materialBatch)
+    {
+        m_srvStale = true;                     // (EndMaterialBatch rebuilds the heap, once)
+        return (uint32_t)m_materials.size();
+    }
     if (!RebuildSrvHeap(dev))
     {
         m_materials.pop_back();
         return 0;
     }
     return (uint32_t)m_materials.size();       // 1-based
+}
+
+bool Scene::EndMaterialBatch(ID3D12Device* dev)
+{
+    m_materialBatch = false;
+    if (!m_srvStale) return true;
+    m_srvStale = false;
+    return RebuildSrvHeap(dev);
 }
 
 uint32_t Scene::AddInstance(uint32_t mesh, uint32_t material, uint32_t layer,

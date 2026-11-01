@@ -3,7 +3,7 @@
 // between ImGuiLayer::NewFrame and Render, returning what was chosen. The screens hold no state of their own beyond
 // ImGui's and Controls' wait for a key; what they edit is the caller's (Settings, the debug switches).
 //
-//   MainMenu     Quick rally, Settings, Exit (Online events, Garage, Marketplace: not there yet): the whole window, drawn to the W-Rally design -
+//   MainMenu     Quick rally, Garage, Settings, Exit (Online events, Marketplace: not there yet): the whole window, drawn to the W-Rally design -
 //                W / S or the arrows slide the selection, Enter or Space picks it; the video loop in the livery
 //   QuickRally   stage, car, setup, damage, weather - Start / Back (the choice kept in Settings), and the pages they
 //                open: Stage, Garage, Car setup, Weather (ui/quick_rally.cpp)
@@ -28,7 +28,7 @@ class ImGuiLayer;
 // The menus' backdrop when no stage is drawn behind them.
 void DrawBackdrop(int width, int height);
 
-enum class MainChoice { None, QuickRally, Settings, Exit };
+enum class MainChoice { None, QuickRally, Garage, Settings, Exit };
 // `note`: shown under the buttons ("" none) - what is missing for Quick rally. `video`: the loop in the livery's window
 // (MenuVideo; no texture: the window dark).
 MainChoice MainMenu(const ImGuiLayer& ui, int width, int height, const std::string& note, const VideoFrame& video);
@@ -39,6 +39,16 @@ enum class QuickChoice { None, Start, Back };
 // back to Quick rally, on Quick rally Back. `video`: the main menu's loop, in the livery's window.
 QuickChoice QuickRally(const ImGuiLayer& ui, const assets::Catalog& catalog, app::Settings& s, int width, int height,
                        const VideoFrame& video);
+// The next QuickRally opens on the Garage, from the main menu: leaving it (Esc, a car chosen) is Back, to the main menu.
+void OpenGarage();
+// What the Garage shows while it is open, for the game to render under it: the car (its folder; "" the Garage closed),
+// how far its turntable has turned (radians), and where the car's middle goes on the screen (x, y 0..1 of the window).
+struct ShowroomView {
+    std::string car;
+    float turn = 0;
+    float centreX = 0.6f, centreY = 0.45f;
+};
+ShowroomView Showroom();
 
 enum class SettingsChoice { None, Back, Graphics, Rescan, Extract };
 // Graphics: a graphics field changed (to apply now). `inStage`: the content's part is shown but not editable.

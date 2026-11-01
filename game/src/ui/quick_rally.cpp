@@ -270,6 +270,8 @@ std::string FileName(const std::string& path)
     return slash == std::string::npos ? path : path.substr(slash + 1);
 }
 
+std::string Fmt(const char* format, float x);   // (below: a value, "-" for NaN)
+
 const char* const kDamage[4] = {"OFF", "SAFE", "REDUCED", "REALISTIC"};
 const char* const kSeasons[4] = {"SPRING", "SUMMER", "AUTUMN", "WINTER"};
 const char* const kRoads[4] = {"FROM THE WEATHER", "DRY", "DAMP", "WET"};
@@ -285,7 +287,17 @@ QuickChoice QuickPage(const ImGuiLayer& ui, const assets::Catalog& catalog, app:
     const assets::Stage* st = catalog.FindStage(s.stage);
     if (!st && !catalog.stages.empty()) st = &catalog.stages.front(), s.stage = st->key;
     const assets::Car* car = catalog.FindCar(s.car);
-    if (!car && !catalog.cars.empty()) car = &catalog.cars.front(), s.car = car->folder;
+    auto usableCar = [&](const assets::Car& c) {
+        const assets::CarInfo* info = catalog.carRegister.Find(c.folder);
+        return info && info->known;
+    };
+    if (!car)   // none chosen yet: the first W-Rally can use
+        for (const assets::Car& each : catalog.cars)
+            if (usableCar(each)) {
+                car = &each, s.car = each.folder;
+                break;
+            }
+    const bool carOk = car && usableCar(*car);
 
     std::vector<Row> rows(6);
     Row& stage = rows[0];
@@ -296,7 +308,8 @@ QuickChoice QuickPage(const ImGuiLayer& ui, const assets::Catalog& catalog, app:
     Row& carRow = rows[1];
     carRow.kind = Row::Open, carRow.label = "CAR";
     carRow.shown = car ? Upper(car->name) : "NO CARS";
-    carRow.sub = car ? "PHYSICS: " + Upper(car->physicsFrom) : "SEE SETTINGS";
+    carRow.sub = !car ? "SEE SETTINGS" : carOk ? "PHYSICS: " + Upper(car->physicsFrom) : "NOT USABLE BY W-RALLY";
+    carRow.subSignal = car && !carOk;
     carRow.help = "The car from the garage. Enter opens the garage: every car, to choose one.";
 
     const std::vector<assets::Setup> setups = car ? catalog.SetupsFor(*car) : std::vector<assets::Setup>{};
@@ -334,7 +347,7 @@ QuickChoice QuickPage(const ImGuiLayer& ui, const assets::Catalog& catalog, app:
 
     Row& start = rows[5];
     start.kind = Row::Open, start.label = "START STAGE", start.shown = "", start.sub = "";
-    start.off = !st || !car;
+    start.off = !st || !carOk;
     start.help = "To the start line.";
 
     FullScreen("Quick rally", ui, width, height, [&](const Look& l) {
@@ -352,7 +365,7 @@ QuickChoice QuickPage(const ImGuiLayer& ui, const assets::Catalog& catalog, app:
         else if (done == 3) Change(damageRow, +1);
         else if (done == 5 && !start.off) c = QuickChoice::Start;
         const Row& sel = rows[g_quick.at];
-        Help(l, start.off && g_quick.at == 5 ? "Choose a stage and a car first: see Settings for the folders." : sel.help);
+        Help(l, g_quick.at == 1 && car && !carOk ? "W-Rally does not know this car: choose another in the garage." : sel.help);
         const char* enter = g_quick.at == 0 ? "CHOOSE" : g_quick.at == 1 ? "GARAGE" : g_quick.at == 2 ? "DETAILS"
                             : g_quick.at == 4 && weather == custom ? "EDIT" : g_quick.at == 5 ? "START" : "SELECT";
         if (Footer(l, {{"W S", "MOVE"}, {"A D", "CHANGE"}, {"ENTER", enter}, {"ESC", "BACK"}})) c = QuickChoice::Back;
@@ -369,8 +382,8 @@ QuickChoice QuickPage(const ImGuiLayer& ui, const assets::Catalog& catalog, app:
 
 // ---------------------------------------------------------------- Stage
 
-int g_stageSide = 1;          // 0 the collections, 1 the stages
-int g_collection = 0;         // 0 all, 1 .ngg, 2 RBR's
+int g_stageSide = 1;          // 0 the countries, 1 the stages
+int g_collection = 0;         // the country: 0 all, then the register's countries, then the stages of none known
 int g_stageAt = -1;           // in the collection's list (-1: the chosen stage's)
 int g_stageTop = 0;           // the first row shown
 float g_stagePlate = -1;
@@ -378,15 +391,30 @@ float g_stagePlate = -1;
 void StagePage(const ImGuiLayer& ui, const assets::Catalog& catalog, app::Settings& s, int width, int height,
                const VideoFrame& video)
 {
-    static const char* const kCollections[3] = {"ALL", ".NGG STAGES", "RBR STAGES"};
-    // The keys that change the collection first: the list is the new collection's from this frame on.
+    // The countries (assets::TrackRegister): all, each the tracks are in, and "other" for the stages of none known.
+    std::vector<std::string> groups = {"ALL"};
+    for (const std::string& c : catalog.trackRegister.Countries()) groups.push_back(Upper(c));
+    auto countryOf = [&](const assets::Stage& st) {
+        const assets::TrackInfo* t = catalog.trackRegister.Find(st.map);
+        return t ? Upper(t->country) : std::string();
+    };
+    bool other = false;
+    for (const assets::Stage& st : catalog.stages) other |= countryOf(st).empty();
+    if (other) groups.push_back("OTHER");
+    const int ng = static_cast<int>(groups.size());
+    g_collection = std::clamp(g_collection, 0, ng - 1);
+    auto inGroup = [&](const assets::Stage& st, int g) {
+        const std::string c = countryOf(st);
+        return g == 0 || (other && g == ng - 1 ? c.empty() : c == groups[g]);
+    };
+    // The keys that change the country first: the list is the new country's from this frame on.
     if (KeyA()) g_stageSide = 0;
     if (KeyD()) g_stageSide = 1;
     const int dir = KeyW() ? -1 : KeyS() ? +1 : 0;
-    if (dir && g_stageSide == 0 && g_collection + dir >= 0 && g_collection + dir <= 2) g_collection += dir, g_stageAt = -1;
+    if (dir && g_stageSide == 0 && g_collection + dir >= 0 && g_collection + dir < ng) g_collection += dir, g_stageAt = -1;
     std::vector<const assets::Stage*> list;
     for (const assets::Stage& st : catalog.stages)
-        if (g_collection == 0 || (g_collection == 1) == !st.imported) list.push_back(&st);
+        if (inGroup(st, g_collection)) list.push_back(&st);
     const int n = static_cast<int>(list.size());
     if (g_stageAt < 0 || g_stageAt >= n) {   // (-1: the chosen stage's place in the list, else its first)
         g_stageAt = 0;
@@ -400,7 +428,7 @@ void StagePage(const ImGuiLayer& ui, const assets::Catalog& catalog, app::Settin
         if (g_stageSide == 0) g_stageSide = 1;
         else chosen = g_stageAt;
     }
-    int collection = g_collection;   // a collection clicked: from the next frame
+    int collection = g_collection;   // a country clicked: from the next frame
 
     constexpr int kShown = 9;
     constexpr float kListY = 268, kRowH = 64, kColX = kX0 + 288, kColW = 420;
@@ -414,9 +442,9 @@ void StagePage(const ImGuiLayer& ui, const assets::Catalog& catalog, app::Settin
         const bool moved = io.MouseDelta.x || io.MouseDelta.y, click = ImGui::IsMouseClicked(ImGuiMouseButton_Left);
         const float ease = Ease();
 
-        // The collections
-        Tracked(l.d, l.text, 17 * k, l.P(kX0 + 12, 228), g_stageSide == 0 ? kInk : kInkMuted, "COLLECTION", 0.16f);
-        for (int i = 0; i < 3; ++i) {
+        // The countries
+        Tracked(l.d, l.text, 17 * k, l.P(kX0 + 12, 228), g_stageSide == 0 ? kInk : kInkMuted, "COUNTRY", 0.16f);
+        for (int i = 0; i < ng; ++i) {
             const float y = kListY + i * 56, mid = (y + 26) * k;
             const bool on = i == g_collection;
             const bool hot = ImGui::IsMouseHoveringRect(l.P(kX0, y), l.P(kX0 + 260, y + 52), false);
@@ -424,8 +452,10 @@ void StagePage(const ImGuiLayer& ui, const assets::Catalog& catalog, app::Settin
             if (on) Plate(l.d, l.P(kX0, y), 260 * k, 52 * k, 10 * k, g_stageSide == 0 ? kSurfaceRaised : IM_COL32(16, 16, 18, 255));
             Marker(l.d, (kX0 + 10) * k, mid, 10 * k, 28 * k, on && g_stageSide == 0 ? 1.0f : 0.0f, k);
             int count = 0;
-            for (const assets::Stage& st : catalog.stages) count += i == 0 || (i == 1) == !st.imported;
-            Tracked(l.d, l.item, 24 * k, ImVec2((kX0 + 36) * k, mid - 12 * k), on ? kInk : kInkSecondary, kCollections[i], 0.02f);
+            for (const assets::Stage& st : catalog.stages) count += inGroup(st, i);
+            l.d->PushClipRect(l.P(kX0, y), l.P(kX0 + 214, y + 52), true);
+            Tracked(l.d, l.item, 22 * k, ImVec2((kX0 + 36) * k, mid - 11 * k), on ? kInk : kInkSecondary, groups[i].c_str(), 0.02f);
+            l.d->PopClipRect();
             const std::string cnt = std::to_string(count);
             const float cw = Tracked(nullptr, l.text, 16 * k, ImVec2(), 0, cnt.c_str(), 0.08f);
             Tracked(l.d, l.text, 16 * k, ImVec2((kX0 + 244) * k - cw, mid - 8 * k), kInkMuted, cnt.c_str(), 0.08f);
@@ -450,8 +480,10 @@ void StagePage(const ImGuiLayer& ui, const assets::Catalog& catalog, app::Settin
             l.d->PushClipRect(l.P(kColX, y), l.P(kColX + kColW - (st.key == s.stage ? 100 : 20), y + kRowH), true);
             Tracked(l.d, l.item, 22 * k, ImVec2((kColX + 40) * k, mid - 20 * k), on ? kInk : kInkSecondary, Upper(st.title).c_str(), 0.02f);
             l.d->PopClipRect();
-            const std::string facts = std::string(st.imported ? "RBR" : ".NGG") + (st.map >= 0 ? " \xC2\xB7 MAP " + std::to_string(st.map) : "") +
-                                      " \xC2\xB7 " + std::to_string(st.weathers.size()) + " WEATHERS";
+            const assets::TrackInfo* track = catalog.trackRegister.Find(st.map);
+            std::string facts = countryOf(st).empty() ? std::string(st.imported ? "RBR" : ".NGG") : countryOf(st);
+            if (track && !track->surface.empty()) facts += " \xC2\xB7 " + Upper(track->surface);
+            facts += " \xC2\xB7 " + std::to_string(st.weathers.size()) + " WEATHERS";
             Tracked(l.d, l.text, 14 * l.k, ImVec2((kColX + 40) * k, mid + 8 * k), kInkMuted, facts.c_str(), 0.16f);
             if (st.key == s.stage) {
                 const float cw = Tracked(nullptr, l.text, 13 * k, ImVec2(), 0, "CHOSEN", 0.16f);
@@ -471,9 +503,12 @@ void StagePage(const ImGuiLayer& ui, const assets::Catalog& catalog, app::Settin
             const float y = 900 - 84;
             Plate(l.d, l.P(kX0, y), 680 * k, 80 * k, 12 * k, kSurfaceRaised);
             float x = kX0 + 24;
+            const assets::TrackInfo* track = catalog.trackRegister.Find(st.map);
             const std::string map = st.map >= 0 ? std::to_string(st.map) : "-";
-            const std::pair<const char*, std::string> facts[3] = {
-                {"MAP", map}, {"WEATHERS", std::to_string(st.weathers.size())}, {"FILE", Upper(FileName(st.ngg))}};
+            const std::string length = track && track->lengthKm > 0 ? Fmt("%.1f KM", track->lengthKm) : "-";
+            const std::pair<const char*, std::string> facts[4] = {
+                {"SURFACE", track && !track->surface.empty() ? Upper(track->surface) : "-"}, {"LENGTH", length}, {"MAP", map},
+                {"FILE", Upper(FileName(st.ngg))}};
             for (const auto& [label, value] : facts) {
                 Tracked(l.d, l.text, 13 * k, l.P(x, y + 16), kInkMuted, label, 0.16f);
                 l.d->PushClipRect(l.P(x, y), l.P(kX0 + 660, y + 80), true);
@@ -482,7 +517,7 @@ void StagePage(const ImGuiLayer& ui, const assets::Catalog& catalog, app::Settin
                 x += std::max(110.0f, vw / k + 40);
             }
         }
-        if (Footer(l, {{"W S", "MOVE"}, {"A D", "COLLECTION / STAGE"}, {"ENTER", "CHOOSE"}, {"ESC", "BACK"}})) g_page = Page::Quick;
+        if (Footer(l, {{"W S", "MOVE"}, {"A D", "COUNTRY / STAGE"}, {"ENTER", "CHOOSE"}, {"ESC", "BACK"}})) g_page = Page::Quick;
     });
     if (collection != g_collection) g_collection = collection, g_stageAt = -1, g_stageTop = 0;
     if (chosen >= 0 && chosen < n) {
@@ -498,43 +533,132 @@ void StagePage(const ImGuiLayer& ui, const assets::Catalog& catalog, app::Settin
 
 int g_garageAt = -1;
 float g_garageScroll = -1;
+// The showroom under the page (game.cpp renders it): the car shown, its turntable's turn - slowly by itself, by the
+// mouse dragged over the car (which holds it still a while).
+std::string g_showCar;
+float g_turn = 0.6f, g_turnHeld = 0;
+float g_showX = 0.6f, g_showY = 0.45f;   // where the car's middle goes (0..1 of the window)
+
+int g_garageClass = 0;   // the class tab: 0 all, then the register's classes
+bool g_garageFromMain = false;   // opened from the main menu (ui::OpenGarage): leaving it is back there
 
 void GaragePage(const ImGuiLayer& ui, const assets::Catalog& catalog, app::Settings& s, int width, int height,
                 const VideoFrame& video)
 {
-    const int n = static_cast<int>(catalog.cars.size());
+    // The class tabs (Q / E): all, then the classes the known cars have.
+    std::vector<std::string> classes = {"ALL"};
+    for (const std::string& c : catalog.carRegister.Classes()) classes.push_back(c);
+    const int nc = static_cast<int>(classes.size());
+    g_garageClass = std::clamp(g_garageClass, 0, nc - 1);
+    int cls = g_garageClass;
+    if (ImGui::IsKeyPressed(ImGuiKey_Q, false) && cls > 0) --cls;
+    if (ImGui::IsKeyPressed(ImGuiKey_E, false) && cls < nc - 1) ++cls;
+    if (cls != g_garageClass) g_garageClass = cls, g_garageAt = -1, g_garageScroll = -1;
+
+    // The class's cars (all: every car, the unusable ones too).
+    std::vector<int> shown;
+    for (int i = 0; i < static_cast<int>(catalog.cars.size()); ++i) {
+        const assets::CarInfo* info = catalog.carRegister.Find(catalog.cars[i].folder);
+        if (g_garageClass == 0 || (info && info->known && info->carClass == classes[g_garageClass])) shown.push_back(i);
+    }
+    const int n = static_cast<int>(shown.size());
     if (g_garageAt < 0 || g_garageAt >= n) {
         g_garageAt = 0;
         for (int i = 0; i < n; ++i)
-            if (!_stricmp(catalog.cars[i].folder.c_str(), s.car.c_str())) g_garageAt = i;
+            if (!_stricmp(catalog.cars[shown[i]].folder.c_str(), s.car.c_str())) g_garageAt = i;
     }
-    // A car chosen: back to Quick rally - taken after the page is drawn (the selection holds until then).
+    auto infoOf = [&](int i) { return catalog.carRegister.Find(catalog.cars[shown[i]].folder); };
+    auto usable = [&](int i) { const assets::CarInfo* info = infoOf(i); return info && info->known; };
+    // A car chosen: back to Quick rally - taken after the page is drawn (the selection holds until then). Only a usable
+    // one.
     int chosen = -1;
-    auto choose = [&](int i) { chosen = i; };
+    auto choose = [&](int i) {
+        if (usable(i)) chosen = i;
+    };
     if (n && (KeyA() || KeyW())) g_garageAt = (g_garageAt + n - 1) % n;
     if (n && (KeyD() || KeyS())) g_garageAt = (g_garageAt + 1) % n;
-    if (KeyEnter()) choose(g_garageAt);
+    if (n && KeyEnter()) choose(g_garageAt);
+
+    // The turntable: dragged by the mouse above the carousel, else turning by itself (after a pause once dragged).
+    {
+        const ImGuiIO& io = ImGui::GetIO();
+        const float carouselTop = (1080 - 150 - 132 - 24) * std::min(height / 1080.0f, width / 1280.0f);
+        if (ImGui::IsMouseDragging(ImGuiMouseButton_Left, 2.0f) && io.MouseClickedPos[0].y < carouselTop)
+            g_turn += io.MouseDelta.x * 0.008f, g_turnHeld = 2.5f;
+        else if ((g_turnHeld -= io.DeltaTime) <= 0)
+            g_turn += io.DeltaTime * 0.22f;
+        g_turn = std::remainder(g_turn, 6.2831853f);
+    }
+    g_showCar = n ? catalog.cars[shown[g_garageAt]].folder : "";
+    {   // between the column (from the left edge) and the signal stripe (from the right), over the carousel
+        const float k = std::min(height / 1080.0f, width / 1280.0f);
+        g_showX = (760 * k + width - 360 * k) * 0.5f / width, g_showY = 470 * k / height;
+    }
 
     FullScreen("Garage", ui, width, height, [&](const Look& l) {
         const float k = l.k;
-        Backdrop(l.d, l.W, l.H, k, kSurfaceBase, video, true);
+        // The showroom shows through: no ground, the video's stripe faded out; the stripes over it, darkened to the left
+        // behind the column and to the foot behind the carousel.
+        Backdrop(l.d, l.W, l.H, k, IM_COL32(10, 10, 11, 0), video, false);
+        const ImU32 shade = IM_COL32(10, 10, 11, 235), clear = IM_COL32(10, 10, 11, 0);
+        l.d->AddRectFilledMultiColor(ImVec2(0, 0), l.P(900, 1080), shade, clear, clear, shade);
+        l.d->AddRectFilledMultiColor(ImVec2(0, l.H - 420 * k), ImVec2(l.W, l.H), clear, clear, shade, shade);
         Header(l, "W-RALLY \xC2\xB7 QUICK RALLY", "GARAGE");
-        Tracked(l.d, l.text, 17 * k, l.P(kX0, 196), kInkMuted, (std::to_string(n) + " CARS").c_str(), 0.16f);
+
+        // The class tabs between their keys
+        float tx = kX0 * k;
+        tx += KeyHint(l.d, l.text, k, ImVec2(tx, 196 * k), "Q", "") + 22 * k;
+        for (int t = 0; t < nc; ++t) {
+            const std::string label = Upper(classes[t]);
+            const float w = Tracked(nullptr, l.item, 22 * k, ImVec2(), 0, label.c_str(), 0.02f);
+            Tracked(l.d, l.item, 22 * k, ImVec2(tx, 200 * k), t == g_garageClass ? kInk : kInkMuted, label.c_str(), 0.02f);
+            if (t == g_garageClass) {
+                const float by = 234 * k, bh = 4 * k, lean = bh * 0.5f * kTanPlate;
+                l.d->AddQuadFilled(ImVec2(tx + lean, by), ImVec2(tx + w + lean, by), ImVec2(tx + w - lean, by + bh), ImVec2(tx - lean, by + bh), kSignal);
+            }
+            if (ImGui::IsMouseClicked(ImGuiMouseButton_Left) && ImGui::IsMouseHoveringRect(ImVec2(tx - 4 * k, 190 * k), ImVec2(tx + w + 4 * k, 242 * k), false))
+                g_garageClass = t, g_garageAt = -1, g_garageScroll = -1;
+            tx += w + 22 * k;
+        }
+        KeyHint(l.d, l.text, k, ImVec2(tx - 6 * k, 196 * k), "E", "");
+        Tracked(l.d, l.text, 14 * k, l.P(kX0, 252), kInkMuted, (std::to_string(n) + (n == 1 ? " CAR" : " CARS")).c_str(), 0.16f);
+
         if (!n) {
-            l.d->AddText(l.text, 23 * k, l.P(kX0, 260), kInkSecondary, "No cars found: see Settings for the RBR folder.");
+            l.d->AddText(l.text, 23 * k, l.P(kX0, 300), kInkSecondary, "No cars found: see Settings for the RBR folder.");
         } else {
-            const assets::Car& car = catalog.cars[g_garageAt];
-            l.d->AddText(l.mark, 56 * k, l.P(kX0, 300), kInk, Upper(car.name).c_str(), nullptr, 0);
-            const std::string slot = car.slot >= 0 ? "SLOT " + std::to_string(car.slot + 1) : "-";
-            const std::string engine = car.engine.empty() ? "THE DEFAULT" : Upper(FileName(car.engine));
-            const std::pair<const char*, std::string> specs[4] = {
-                {"PHYSICS", Upper(car.physicsFrom)}, {"RBR SLOT", slot}, {"ENGINE SOUND", engine}, {"MODEL", Upper(FileName(car.sgc))}};
-            for (int i = 0; i < 4; ++i) {
-                const float x = kX0 + float(i % 2) * 300, y = 400 + float(i / 2) * 76;
+            const assets::Car& car = catalog.cars[shown[g_garageAt]];
+            const assets::CarInfo* info = infoOf(g_garageAt);
+            const bool ok = usable(g_garageAt);
+            if (info && !info->carClass.empty()) Tracked(l.d, l.text, 17 * k, l.P(kX0, 300), kInkMuted, Upper(info->carClass).c_str(), 0.16f);
+            l.d->AddText(l.mark, 52 * k, l.P(kX0, 324), kInk, Upper(car.name).c_str(), nullptr, 0);
+            auto num = [](float v, const char* unit) { return v > 0 ? std::to_string(static_cast<int>(std::lround(v))) + unit : std::string("-"); };
+            const std::string maker = info && !info->maker.empty() ? Upper(info->maker) + (info->year ? " \xC2\xB7 " + std::to_string(info->year) : "") : "-";
+            const std::pair<const char*, std::string> specs[6] = {
+                {"MAKER", maker},
+                {"DRIVE", info && !info->drive.empty() ? Upper(info->drive) : "-"},
+                {"POWER", num(info ? info->powerHp : 0, " HP")},
+                {"WEIGHT", num(info ? info->weightKg : 0, " KG")},
+                {"PHYSICS", Upper(car.physicsFrom)},
+                {"KNOWN FROM", info ? Upper(info->from) : "-"}};
+            for (int i = 0; i < 6; ++i) {
+                const float x = kX0 + float(i % 2) * 300, y = 410 + float(i / 2) * 70;
                 Tracked(l.d, l.text, 13 * k, l.P(x, y), kInkMuted, specs[i].first, 0.16f);
                 l.d->PushClipRect(l.P(x, y), l.P(x + 280, y + 60), true);
-                Tracked(l.d, l.item, 26 * k, l.P(x, y + 22), kInk, specs[i].second.c_str(), 0.02f);
+                Tracked(l.d, l.item, 24 * k, l.P(x, y + 20), kInk, specs[i].second.c_str(), 0.02f);
                 l.d->PopClipRect();
+            }
+            if (info && !info->error.empty()) l.d->AddText(l.text, 18 * k, l.P(kX0, 626), kSignal, info->error.c_str(), nullptr, 600 * k);
+
+            // A car nothing knows: over the showroom, big, why it cannot be driven.
+            if (!ok) {
+                const float cx = l.W * g_showX, cy = l.H * g_showY;
+                const char* big = "NOT USABLE BY W-RALLY";
+                const float bw = l.mark->CalcTextSizeA(64 * k, FLT_MAX, 0, big).x;
+                l.d->AddRectFilled(ImVec2(cx - bw * 0.5f - 40 * k, cy - 70 * k), ImVec2(cx + bw * 0.5f + 40 * k, cy + 76 * k), IM_COL32(10, 10, 11, 210));
+                l.d->AddText(l.mark, 64 * k, ImVec2(cx - bw * 0.5f, cy - 52 * k), kSignal, big);
+                const char* why = "Neither W-Rally's car list nor a car.json in its folder says what it is or how it drives.";
+                const float ww = l.text->CalcTextSizeA(20 * k, FLT_MAX, 0, why).x;
+                l.d->AddText(l.text, 20 * k, ImVec2(cx - ww * 0.5f, cy + 26 * k), kInkSecondary, why);
             }
 
             // The carousel along the foot, eased to keep the chosen card in view.
@@ -548,13 +672,15 @@ void GaragePage(const ImGuiLayer& ui, const assets::Catalog& catalog, app::Setti
             for (int i = 0; i < n; ++i) {
                 const float x = x0 + (i - g_garageScroll) * (cardW + gap);
                 if (x + cardW < x0 - 200 || x > x0 + span + 200) continue;
-                const bool on = i == g_garageAt;
+                const bool on = i == g_garageAt, use = usable(i);
                 const float h = on ? 132.0f : cardH, top = y + (132 - h);
                 Plate(l.d, l.P(x, top), cardW * k, h * k, 12 * k, on ? kSurfaceOverlay : kSurfaceRaised);
-                if (on) l.d->AddRectFilled(l.P(x, top + h - 4), l.P(x + cardW - 1, top + h), kSignal);
-                const std::string name = Upper(catalog.cars[i].name);
+                if (on) l.d->AddRectFilled(l.P(x, top + h - 4), l.P(x + cardW - 1, top + h), use ? kSignal : kLineStrong);
+                const std::string name = Upper(catalog.cars[shown[i]].name);
                 l.d->PushClipRect(l.P(x, top), l.P(x + cardW - 14, top + h), true);
-                l.d->AddText(l.item, 18 * k, l.P(x + 14, top + h - 58), on ? kInk : kInkSecondary, name.c_str(), nullptr, (cardW - 28) * k);
+                const ImU32 ink = use ? (on ? kInk : kInkSecondary) : Alpha(kInkMuted, 0.7f);
+                l.d->AddText(l.item, 18 * k, l.P(x + 14, top + h - 58), ink, name.c_str(), nullptr, (cardW - 28) * k);
+                if (!use) Tracked(l.d, l.text, 12 * k, l.P(x + 14, top + 12), kSignal, "NOT USABLE", 0.16f);
                 l.d->PopClipRect();
                 if (click && ImGui::IsMouseHoveringRect(l.P(x, top), l.P(x + cardW, top + h), false)) {
                     if (on) choose(i);
@@ -565,15 +691,16 @@ void GaragePage(const ImGuiLayer& ui, const assets::Catalog& catalog, app::Setti
             Chevron(l.d, l.P(kX0 + 22, y + 66), 26 * k, false, kInkSecondary);
             Chevron(l.d, l.P(1920 - kX0 - 22, y + 66), 26 * k, true, kInkSecondary);
         }
-        if (Footer(l, {{"A D", "CAR"}, {"ENTER", "CHOOSE"}, {"ESC", "BACK"}})) g_page = Page::Quick;
+        if (Footer(l, {{"Q E", "CLASS"}, {"A D", "CAR"}, {"ENTER", "CHOOSE"}, {"ESC", "BACK"}})) g_page = Page::Quick;
     });
     if (chosen >= 0 && chosen < n) {
-        if (_stricmp(catalog.cars[chosen].folder.c_str(), s.car.c_str())) s.setup.clear();
-        s.car = catalog.cars[chosen].folder;
+        const assets::Car& car = catalog.cars[shown[chosen]];
+        if (_stricmp(car.folder.c_str(), s.car.c_str())) s.setup.clear();
+        s.car = car.folder;
         g_page = Page::Quick;
     }
     if (KeyEsc()) g_page = Page::Quick;
-    if (g_page != Page::Garage) g_garageAt = -1, g_garageScroll = -1;   // (opened again: on the chosen car)
+    if (g_page != Page::Garage) g_garageAt = -1, g_garageScroll = -1, g_showCar.clear();   // (opened again: on the chosen car)
 }
 
 // ---------------------------------------------------------------- Car setup
@@ -850,6 +977,17 @@ void WeatherPage(const ImGuiLayer& ui, const assets::Catalog& catalog, app::Sett
 
 } // namespace
 
+void OpenGarage() { g_page = Page::Garage, g_garageFromMain = true; }
+
+ShowroomView Showroom()
+{
+    ShowroomView v;
+    if (g_page == Page::Garage) v.car = g_showCar;
+    v.turn = g_turn;
+    v.centreX = g_showX, v.centreY = g_showY;
+    return v;
+}
+
 QuickChoice QuickRally(const ImGuiLayer& ui, const assets::Catalog& catalog, app::Settings& s, int width, int height,
                        const VideoFrame& video)
 {
@@ -858,7 +996,13 @@ QuickChoice QuickRally(const ImGuiLayer& ui, const assets::Catalog& catalog, app
     switch (g_page) {
     case Page::Quick: return QuickPage(ui, catalog, s, width, height, video);
     case Page::Stage: StagePage(ui, catalog, s, width, height, video); break;
-    case Page::Garage: GaragePage(ui, catalog, s, width, height, video); break;
+    case Page::Garage:
+        GaragePage(ui, catalog, s, width, height, video);
+        if (g_garageFromMain && g_page != Page::Garage) {   // opened from the main menu: back to it
+            g_garageFromMain = false, g_page = Page::Quick;
+            return QuickChoice::Back;
+        }
+        break;
     case Page::Setup: SetupPage(ui, catalog, s, width, height, video); break;
     case Page::Weather: WeatherPage(ui, catalog, s, width, height, video); break;
     }

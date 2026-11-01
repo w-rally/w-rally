@@ -475,6 +475,12 @@ Status WRALLY_CALL CreateModel(Renderer* r, const ModelDesc* d, ModelHandle* out
     // The materials as ngg-api made them: add (two texture handles and the flags), then the descriptor read back,
     // changed and written (ngg_get_material / ngg_set_material).
     std::vector<uint32_t> mats;
+    // The SRV heap rebuilt once for all of them, not twice a material (a car's dozen: ~0.2 s at once).
+    r->scene.BeginMaterialBatch();
+    struct Batch {
+        Renderer* r;
+        ~Batch() { r->scene.EndMaterialBatch(r->dev.device.Get()); }
+    } batch{r};
     for (uint32_t i = 0; i < d->materialCount; ++i) {
         const MaterialDesc& in = d->materials[i];
         // The interface's flags as the format's: alpha test and two-sided are the same bits; blend is bit 2 here and

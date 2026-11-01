@@ -133,7 +133,7 @@ struct MainItem {
 const MainItem kMainItems[] = {
     {"ONLINE EVENTS", nullptr, MainChoice::None},
     {"QUICK RALLY", "Pick a stage and a car, and go straight to the start line.", MainChoice::QuickRally},
-    {"GARAGE", nullptr, MainChoice::None},
+    {"GARAGE", "Every car: what it is, its class, how it drives - and the one you drive.", MainChoice::Garage},
     {"MARKETPLACE", nullptr, MainChoice::None},
     {"SETTINGS", "Content folders, graphics, sound and the controls.", MainChoice::Settings},
     {"EXIT", "Quit to desktop.", MainChoice::Exit},
@@ -172,7 +172,7 @@ MainChoice MainMenu(const ImGuiLayer& ui, int width, int height, const std::stri
         d->AddText(mark, 72 * k, ImVec2(x0 + wr, y0), kInkMuted, "ally");
 
         // The rows under the wordmark, no overline over them: the main menu needs no name.
-        const float rowsY = y0 + 72 * k + 260 * k, pitch = (kRowH + kRowGap) * k;
+        const float rowsY = y0 + 72 * k + 116 * k, pitch = (kRowH + kRowGap) * k;
 
         // The selection: W / S (and the arrows) move it, skipping what is not there yet; Enter or Space picks it; the
         // mouse selects what it moves over and picks what it clicks.

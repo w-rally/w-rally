@@ -488,6 +488,10 @@ public:
     uint32_t MaterialCount() const { return (uint32_t)m_materials.size(); }
     bool GetMaterial(uint32_t index, MaterialSlot* out) const;
     bool SetMaterial(ID3D12Device* device, uint32_t index, const MaterialSlot& m);
+    // Many materials added or changed at once (a car's): the SRV heap - a new heap and every material's descriptors -
+    // rebuilt once at the end rather than at each AddMaterial / SetMaterial. Between the two nothing may draw.
+    void BeginMaterialBatch() { m_materialBatch = true; }
+    bool EndMaterialBatch(ID3D12Device* device);
 
     // The material's base-colour texture name, which is how RBR names materials
     // anyway - an editor listing "material 82" helps nobody.
@@ -717,6 +721,8 @@ private:
 
     bool UploadDynamic(ID3D12Device*);
     bool RebuildSrvHeap(ID3D12Device*);
+    bool m_materialBatch = false;    // BeginMaterialBatch: the SRV heap's rebuild waits for EndMaterialBatch
+    bool m_srvStale = false;         // a rebuild was put off by the batch
 
     std::vector<DrawItem>                                     m_objects;
     std::vector<MaterialSlot>                                 m_materials;

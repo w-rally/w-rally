@@ -1,0 +1,49 @@
+#pragma once
+// wrally::assets::CarRegister - what W-Rally knows of each car the catalog found (assets/catalog.h): its friendly name,
+// maker, class, drive, power, weight, physics - in layers, a later one winning field by field:
+//
+//   1. RBR's files     Cars.ini's CarName, the physics the catalog picked (its own, its slot's, the base)
+//   2. the server      W-Rally's car list (hardcoded until there is a server: car_register.cpp kServerCars)
+//   3. car.json        in the car's folder (Cars/<folder>/car.json): the car's own manifest, for a mod or a fix
+//
+// A car neither the server nor a car.json knows is shown, but not usable by W-Rally (CarInfo::known): nothing says
+// what it is or how it drives.
+//
+// car.json (every key optional):
+//   { "name": "Hyundai i20 R5", "maker": "Hyundai", "year": 2016, "class": "R5", "drive": "4WD",
+//     "power_hp": 280, "weight_kg": 1230, "physics": "s_i2003" | "Cars/i20_R5/physics/" }
+
+#include <string>
+#include <vector>
+
+namespace wrally::assets {
+
+struct Car;
+
+struct CarInfo {
+    std::string id;                 // the car's folder (Cars/<id>)
+    std::string name;               // friendly: "Hyundai i20 R5"
+    std::string maker;
+    int year = 0;                   // 0 unknown
+    std::string carClass;           // "WRC", "Group N", "Super 1600", "R5", "S2000", "Group A", "Kit car" ("" none)
+    std::string drive;              // "4WD", "FWD", "RWD" ("" unknown)
+    float powerHp = 0, weightKg = 0;   // 0 unknown
+    std::string physics;            // a physics.rbz folder, or Cars/<folder>/physics/ ("" the catalog's pick)
+    bool known = false;             // the server or a car.json knows it: usable by W-Rally
+    std::string from;               // the layers that said something: "RBR", "RBR + server", "RBR + server + car.json"
+    std::string error;              // its car.json's, if it could not be read ("" none)
+};
+
+class CarRegister {
+public:
+    // The register for the catalog's cars (RBR's layer) under `rbrPath`.
+    void Build(const std::string& rbrPath, const std::vector<Car>& cars);
+    const CarInfo* Find(const std::string& id) const;
+    // The classes the known cars have, in the register's order (WRC first).
+    std::vector<std::string> Classes() const;
+
+private:
+    std::vector<CarInfo> m_cars;
+};
+
+} // namespace wrally::assets
