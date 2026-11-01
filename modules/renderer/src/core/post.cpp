@@ -179,31 +179,55 @@ float4 PSTaa(VSOut i) : SV_Target
     // it had, so the car's own edges still accumulate. Static against static
     // is left exactly as it was - the camera reprojection is exact there.
     bool fresh = false;     // the history there had none itself: one raw frame (alpha + 2, below)
+    bool masked = false;    // a moved pixel behind a still occluder: its own texels only (below)
+    float4 own = 0.0;       // and their bilinear weights, in GatherAlpha's order
     if (usable && gMotionOn > 0.5)
     {
         const float4 hd = gHistory.GatherAlpha(sPoint, prevUv);
+        // The whole 4x4 the Catmull-Rom fetch reads, not just the 2x2:
+        // its outer taps reach two texels out, with negative weights, and
+        // that alone lays a ringing copy of the car's edge on the road.
+        const float4 a = gHistory.GatherAlpha(sPoint, prevUv + float2(-gTexel.x, -gTexel.y));
+        const float4 b = gHistory.GatherAlpha(sPoint, prevUv + float2( gTexel.x, -gTexel.y));
+        const float4 c = gHistory.GatherAlpha(sPoint, prevUv + float2(-gTexel.x,  gTexel.y));
+        const float4 d = gHistory.GatherAlpha(sPoint, prevUv + float2( gTexel.x,  gTexel.y));
         if (!moved)
         {
-            // The whole 4x4 the Catmull-Rom fetch reads, not just the 2x2:
-            // its outer taps reach two texels out, with negative weights, and
-            // that alone lays a ringing copy of the car's edge on the road.
-            const float4 a = gHistory.GatherAlpha(sPoint, prevUv + float2(-gTexel.x, -gTexel.y));
-            const float4 b = gHistory.GatherAlpha(sPoint, prevUv + float2( gTexel.x, -gTexel.y));
-            const float4 c = gHistory.GatherAlpha(sPoint, prevUv + float2(-gTexel.x,  gTexel.y));
-            const float4 d = gHistory.GatherAlpha(sPoint, prevUv + float2( gTexel.x,  gTexel.y));
             // (The glass's own pixels keep theirs: it was there last frame too, and the clip judges it.)
             usable = glass || !any(min(min(a, b), min(c, d)) < 0.0);
             fresh  = any(hd > 1.5);
         }
         else
         {
-            bool same = false;
+            float4 same = 0.0;
             [unroll] for (int k = 0; k < 4; ++k)
             {
                 const float h = -hd[k];             // > 0 only for a moved texel
-                if (h > 0.0) same = same || abs(prevDepth / h - 1.0) < 0.05;
+                same[k] = (h > 0.0 && abs(prevDepth / h - 1.0) < 0.05) ? 1.0 : 0.0;
             }
-            usable = same;
+            usable = any(same > 0.0);
+            // A STILL OCCLUDER where the car was. A car driving behind a fence
+            // reprojects onto last frame's fence bars: one texel of the car in
+            // the 2x2 passed it, and the Catmull-Rom's 4x4 read the bars along
+            // with it. The thin light bars sit inside the clip of a grainy
+            // white door, so each frame laid their edges on the car, and the
+            // car carried them off: copies of the bars trailing on its side.
+            // So where any texel of the 4x4 is a still surface IN FRONT of
+            // the car (reverse-Z: a greater depth; the + 2 of a fresh one
+            // taken off), the history is the car's own texels of the 2x2
+            // alone, bilinear. Still surfaces BEHIND it - the background at
+            // its outline - are left as they were, so its edges keep their
+            // filtering.
+            const float near = prevDepth * 1.05;
+            [unroll] for (int g = 0; g < 4; ++g)
+            {
+                const float4 t  = (g == 0) ? a : (g == 1) ? b : (g == 2) ? c : d;
+                const float4 td = (t > 1.5) ? t - 2.0 : t;
+                masked = masked || any(t >= 0.0 && td > near);
+            }
+            masked = masked && usable;
+            const float2 f = frac(prevUv / gTexel - 0.5);
+            own = same * float4((1.0 - f.x) * f.y, f.x * f.y, f.x * (1.0 - f.y), (1.0 - f.x) * (1.0 - f.y));
         }
     }
 
@@ -254,6 +278,14 @@ float4 PSTaa(VSOut i) : SV_Target
 
     float3 hist = (gHistoryCubic > 0.5) ? HistoryCatmullRom(prevUv)
                                         : gHistory.SampleLevel(sLinear, prevUv, 0).rgb;
+    if (masked)
+    {
+        // The 2x2 GatherAlpha read, in its order: (0,1) (1,1) (1,0) (0,0).
+        const int2 t0 = int2(floor(prevUv / gTexel - 0.5));
+        hist = (gHistory.Load(int3(t0 + int2(0, 1), 0)).rgb * own.x + gHistory.Load(int3(t0 + int2(1, 1), 0)).rgb * own.y
+              + gHistory.Load(int3(t0 + int2(1, 0), 0)).rgb * own.z + gHistory.Load(int3(t0, 0)).rgb * own.w)
+             / max(dot(own, 1.0), 1e-5);
+    }
     // So there the history is RELIT: scaled so its local mean (four bilinear
     // taps, a 3x3 tent) is this frame's 3x3 mean. The light changes slowly
     // across the screen and the texture does not, so the ratio moves the
