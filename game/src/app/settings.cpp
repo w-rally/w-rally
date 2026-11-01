@@ -23,7 +23,7 @@ template <class F> void Fields(Settings& s, F&& f)
 {
     f("rbr_path", s.rbrPath);
     f("ngg_folders", s.nggFolders);
-    f("base_physics", s.basePhysics);
+    f("fullscreen", s.fullscreen);
     f("quality", s.quality);
     f("ray_tracing", s.rayTracing);
     f("taa", s.taa);

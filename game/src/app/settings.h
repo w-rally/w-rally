@@ -15,10 +15,10 @@ namespace wrally::app {
 struct Settings {
     // Content
     std::string rbrPath;                // the RBR folder ("" not set: Settings asks for it)
-    std::string nggFolders;             // folders of stage .ngg files, ';' between them ("": <rbr>/Ngg)
-    std::string basePhysics = "s_i2003";   // the physics of a car without its own (a physics.rbz folder)
+    std::string nggFolders;             // folders of stage .ngg files, ';' between them ("": <rbr>/Ngg) - the .ini's alone, for development
 
     // Graphics
+    bool fullscreen = true;             // the whole screen (borderless), else a window
     uint32_t quality = 1;               // 0 low, 1 medium, 2 high
     bool rayTracing = true, taa = true, shadows = true, vsync = true;
 

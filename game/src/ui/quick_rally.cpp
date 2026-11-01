@@ -289,7 +289,7 @@ QuickChoice QuickPage(const ImGuiLayer& ui, const assets::Catalog& catalog, app:
     const assets::Car* car = catalog.FindCar(s.car);
     auto usableCar = [&](const assets::Car& c) {
         const assets::CarInfo* info = catalog.carRegister.Find(c.folder);
-        return info && info->known;
+        return info && info->known && !c.physics.empty();
     };
     if (!car)   // none chosen yet: the first W-Rally can use
         for (const assets::Car& each : catalog.cars)
@@ -568,7 +568,10 @@ void GaragePage(const ImGuiLayer& ui, const assets::Catalog& catalog, app::Setti
             if (!_stricmp(catalog.cars[shown[i]].folder.c_str(), s.car.c_str())) g_garageAt = i;
     }
     auto infoOf = [&](int i) { return catalog.carRegister.Find(catalog.cars[shown[i]].folder); };
-    auto usable = [&](int i) { const assets::CarInfo* info = infoOf(i); return info && info->known; };
+    auto usable = [&](int i) {   // known to W-Rally, and with physics of its own
+        const assets::CarInfo* info = infoOf(i);
+        return info && info->known && !catalog.cars[shown[i]].physics.empty();
+    };
     // A car chosen: back to Quick rally - taken after the page is drawn (the selection holds until then). Only a usable
     // one.
     int chosen = -1;

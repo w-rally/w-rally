@@ -1,5 +1,5 @@
 #pragma once
-// The game's window (wrally::app): 3/4 of the screen's work area at 16:9, its messages pumped once a frame (ImGui's
+// The game's window (wrally::app): 3/4 of the screen's work area at 16:9 or the whole screen, its messages pumped once a frame (ImGui's
 // Win32 backend sees them first), closed by its close box. Esc is the game's (its menus): TakeEscape.
 
 #include <windows.h>
@@ -25,12 +25,17 @@ public:
     int Height() const;
     bool Focused() const { return GetForegroundWindow() == m_hwnd; }
     void SetTitle(const wchar_t* title) { SetWindowTextW(m_hwnd, title); }
+    // The whole of its monitor, borderless (the window's place kept), or back to that window. The new size shows at the
+    // next Pump, as a resize does.
+    void SetFullscreen(bool on);
     // The client area to a 24-bit .bmp, as shown (PrintWindow with the full content, which reads a flip-model swap
     // chain too).
     bool Screenshot(const std::string& path) const;
 
 private:
     HWND m_hwnd = nullptr;
+    bool m_fullscreen = false;
+    WINDOWPLACEMENT m_windowed{sizeof(WINDOWPLACEMENT)};   // where the window was before the full screen
 };
 
 } // namespace wrally::app

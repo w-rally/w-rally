@@ -115,6 +115,7 @@ iface::RenderSettings ToRender(const Settings& s)
 std::string OpenShell(Shell& sh, const std::string& rendererId)
 {
     if (std::string e = sh.window.Create(L"W-Rally"); !e.empty()) return e;
+    sh.window.SetFullscreen(sh.settings.fullscreen);
     // The renderer: a module DLL in modules/renderer (--renderer, "wrenderer" by default: WRenderer.dll, NGG), on the
     // window. PHYS_DRIVE_NGGLOG: its log on stdout.
     sh.rendererLog = std::getenv("PHYS_DRIVE_NGGLOG") != nullptr;
@@ -266,7 +267,7 @@ private:
         m_shown = m_wanted;
         const assets::Car* car = catalog.FindCar(m_wanted);
         const assets::CarInfo* info = car ? catalog.carRegister.Find(car->folder) : nullptr;
-        if (!car || !info || !info->known) return;
+        if (!car || !info || !info->known || car->physics.empty()) return;
         m_reading = std::async(std::launch::async, [folder = car->folder, sgc = car->sgc] {
             Read r;
             r.folder = folder;
@@ -885,6 +886,7 @@ StageEnd RunStage(Shell& sh, const Options& o, bool fromMenu, std::string& error
         } else if (menu == StageMenu::Settings) {
             const ui::SettingsChoice c = ui::SettingsUi(ui, sh.settings, true, settingsLog, keyDown, shownWidth, shownHeight);
             if (c == ui::SettingsChoice::Graphics) {
+                sh.window.SetFullscreen(sh.settings.fullscreen);
                 settings = ToRender(sh.settings);
                 taa = settings.taa != 0, ao = settings.quality != 0, shadows = settings.shadows != 0, rt = settings.rayTracing != 0;
                 renderer.ApplySettings(settings);
@@ -1162,24 +1164,19 @@ int Menus(Shell& sh, std::string note)
                 break;
             case Screen::Settings:
                 switch (ui::SettingsUi(sh.ui, sh.settings, false, settingsLog, keyDown, sh.width, sh.height, video.Frame())) {
-                case ui::SettingsChoice::Graphics: sh.renderer.ApplySettings(ToRender(sh.settings)); break;
+                case ui::SettingsChoice::Graphics:
+                    sh.window.SetFullscreen(sh.settings.fullscreen);
+                    sh.renderer.ApplySettings(ToRender(sh.settings));
+                    break;
                 case ui::SettingsChoice::Rescan: {
                     const std::string e = scan();
                     settingsLog = std::to_string(catalog.stages.size()) + " stages, " + std::to_string(catalog.cars.size()) + " cars" +
                                   (e.empty() ? "" : "\n" + e);
                     break;
                 }
-                case ui::SettingsChoice::Extract:
-                    scan();
-                    settingsLog = assets::ExtractSlotPhysics(sh.settings.rbrPath, catalog);
-                    std::printf("%s", settingsLog.c_str());
-                    scan();
-                    break;
                 case ui::SettingsChoice::Back:
                     if (const std::string e = SaveSettings(sh.settings); !e.empty()) std::fprintf(stderr, "%s\n", e.c_str());
-                    if (sh.settings.rbrPath != atOpen.rbrPath || sh.settings.nggFolders != atOpen.nggFolders ||
-                        sh.settings.basePhysics != atOpen.basePhysics)
-                        scanned = scan();
+                    if (sh.settings.rbrPath != atOpen.rbrPath || sh.settings.nggFolders != atOpen.nggFolders) scanned = scan();
                     note = scanned;
                     screen = Screen::Main;
                     break;
@@ -1311,6 +1308,14 @@ int RunGame(const std::vector<std::string>& args)
     if (std::find(args.begin(), args.end(), std::string("--lab")) != args.end()) {
         if (const std::string e = OpenShell(sh, "wrenderer"); !e.empty()) return std::fprintf(stderr, "%s\n", e.c_str()), 3;
         return RunLab(sh, args);
+    }
+    // --extract-slot-physics: each slot car's physics out of physics.rbz into its own folder (Cars/<folder>/physics/),
+    // then out - for development, not the player's.
+    if (std::find(args.begin(), args.end(), std::string("--extract-slot-physics")) != args.end()) {
+        assets::Catalog catalog;
+        catalog.Scan(sh.settings);
+        std::printf("%s", assets::ExtractSlotPhysics(sh.settings.rbrPath, catalog).c_str());
+        return 0;
     }
     // --showroom <car folder> [--turn <degrees>]: the Garage's showroom with that car, one capture (showroom.bmp, in the
     // working folder) once it is loaded, then out - a look at a car's model without the menus.

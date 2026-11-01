@@ -256,10 +256,7 @@ std::string Catalog::Scan(const app::Settings& s)
         } else if (car.slot >= 0) {
             car.physics = SlotPhysics(car.slot);
             car.physicsFrom = "slot " + std::to_string(car.slot) + " (" + car.physics + ")";
-        } else {
-            car.physics = s.basePhysics;
-            car.physicsFrom = "base (" + s.basePhysics + ")";
-        }
+        }   // (else none: unless its car.json names some, it cannot be driven)
         if (!eng.empty()) car.engine = eng;
         else if (car.slot >= 0) car.engine = IniString(audioIni, "CARS", ("Car" + std::to_string(car.slot)).c_str());
         cars.push_back(std::move(car));

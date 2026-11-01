@@ -7,7 +7,7 @@
 //                W / S or the arrows slide the selection, Enter or Space picks it; the video loop in the livery
 //   QuickRally   stage, car, setup, damage, weather - Start / Back (the choice kept in Settings), and the pages they
 //                open: Stage, Garage, Car setup, Weather (ui/quick_rally.cpp)
-//   SettingsUi   tabs: the content (folders, base physics, Extract the slot cars' physics), graphics, sound, controls -
+//   SettingsUi   tabs: the content (the RBR folder, Rescan), graphics, sound, controls -
 //                the whole window, drawn to the W-Rally design: Q / E the tabs, W / S the rows, A / D the values
 //   PauseMenu    the in-stage menu (Esc): Resume, Restart stage, Settings, Debug, Exit to main menu
 //   DebugMenu    what the keys switch (the renderer's, the cameras, the sound), the sound mix
@@ -50,9 +50,9 @@ struct ShowroomView {
 };
 ShowroomView Showroom();
 
-enum class SettingsChoice { None, Back, Graphics, Rescan, Extract };
-// Graphics: a graphics field changed (to apply now). `inStage`: the content's part is shown but not editable.
-// `log`: the last Rescan / Extract's report.
+enum class SettingsChoice { None, Back, Graphics, Rescan };
+// Graphics: a graphics field changed (to apply now: the full screen too). `inStage`: the content's part is shown but not
+// editable. `log`: the last Rescan's report.
 // The screen has tabs: Content, Graphics, Sound, Controls (the keys). `keyDown`: the key pressed this frame
 // (Window::TakeKeyDown), which Controls binds while it waits for one. `video`: the main menu's loop, in the video's
 // stripe as it fades out (the screen's livery holds the main menu's place, without that stripe).
