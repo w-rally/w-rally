@@ -564,7 +564,8 @@ StageEnd RunStage(Shell& sh, const Options& o, bool fromMenu, std::string& error
         if (testLamps.empty()) testLamps = assets::TestLayout("ramp");
     }
     if (testLights_)
-        std::printf("test lights: %s\n", testLampOnly ? "the lamp behind" : (std::to_string(testLamps.size()) + " lamps").c_str());
+        std::printf("test lights (PHYS_DRIVE_TEST_LIGHTS=%s): %s, always lit, in place of the car's own lamps\n", testLightsEnv,
+                    testLampOnly ? "the lamp behind" : (std::to_string(testLamps.size()) + " lamps").c_str());
     // THE CAR'S LAMPS (NGG design 5.4 N3b): its own (assets::LoadCarLamps, at the first frame - the centre of gravity
     // is the physics'), switched by the driver (headlights, ramp, indicators, hazard) and by the car (the brake pedal,
     // reverse). Until the driver touches the headlights they follow the sun: lit after dusk - main beam and the ramp -,
