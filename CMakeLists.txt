@@ -13,7 +13,7 @@ cmake_minimum_required(VERSION 3.20)
 # them behind the module interfaces (include/wrally/iface).
 # --------------------------------------------------------------------------
 
-project(wrally VERSION 0.1.0 LANGUAGES CXX)
+project(wrally VERSION 0.0.1 LANGUAGES CXX)   # the one version: the game, the installer (cmake/BuildInfo.cmake)
 
 if(NOT CMAKE_SIZEOF_VOID_P EQUAL 8)
     message(FATAL_ERROR "W-Rally is x64 only: configure with -A x64")

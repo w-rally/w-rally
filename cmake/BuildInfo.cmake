@@ -1,17 +1,14 @@
 # wrally_build_info(<target>): the game's version and the commit it was built from, for the corner of its screens -
 # <build>/generated/build_info.h (WRALLY_VERSION, WRALLY_COMMIT), written on every build and touched only when it
-# changes. The version: WRALLY_VERSION (CI passes 0.1.<run number>), else the project's. The commit: git's short hash,
-# "+" when the tree has changes of its own; "" outside a git checkout.
+# changes. The version: the project's (CMakeLists.txt), the same in CI; installer/build-msi.ps1 reads both from this
+# header, so the MSI shows what the game does. The commit: git's short hash, "+" when the tree has changes of its own;
+# "" outside a git checkout.
 #
 # Run as a script (cmake -P) it writes the header: -DOUT= -DVERSION= -DSRC=.
-if(NOT CMAKE_SCRIPT_MODE_FILE)
-    set(WRALLY_VERSION "${PROJECT_VERSION}" CACHE STRING "The version the game shows (CI: 0.1.<run number>)")
-endif()
-
 function(wrally_build_info target)
     set(out ${CMAKE_BINARY_DIR}/generated/build_info.h)
     add_custom_target(${target}-build-info
-        COMMAND ${CMAKE_COMMAND} -DOUT=${out} -DVERSION=${WRALLY_VERSION} -DSRC=${PROJECT_SOURCE_DIR}
+        COMMAND ${CMAKE_COMMAND} -DOUT=${out} -DVERSION=${PROJECT_VERSION} -DSRC=${PROJECT_SOURCE_DIR}
                 -P ${PROJECT_SOURCE_DIR}/cmake/BuildInfo.cmake
         BYPRODUCTS ${out}
         COMMENT "the build's version and commit")
