@@ -6,8 +6,25 @@
 add_library(ngg-core STATIC src/core/device.cpp src/core/aerial.cpp src/core/renderer.cpp src/core/atmosphere_ms.cpp
             src/core/dxc.cpp src/core/env.cpp src/core/log.cpp src/core/mipgen.cpp src/core/post.cpp src/core/rt.cpp
             src/core/scene.cpp src/core/shadow.cpp src/core/sky.cpp src/core/weather.cpp
-            src/core/astronomy.cpp src/core/lights.cpp src/core/fsr.cpp src/core/dlss.cpp)
+            src/core/astronomy.cpp src/core/lights.cpp src/core/fsr.cpp src/core/dlss.cpp src/core/gtao.cpp
+            src/core/visibility.cpp)
 target_include_directories(ngg-core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src/core)
+# Intel XeGTAO (third_party/xegtao, MIT, unchanged): its HLSL is compiled at run time like every shader here
+# (core/gtao.cpp), so the two files are embedded as bytes - xegtao_src.h, written at configure; XeGTAO.h is also the
+# C++ side's constants.
+set(XEGTAO_DIR ${PROJECT_SOURCE_DIR}/third_party/xegtao)
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS ${XEGTAO_DIR}/XeGTAO.h ${XEGTAO_DIR}/XeGTAO.hlsli)
+set(xegtao_src "// Generated at configure from third_party/xegtao (modules/renderer/CMakeLists.txt). Do not edit.\n#pragma once\n")
+foreach(var_file kXeGtaoH=XeGTAO.h kXeGtaoHlsli=XeGTAO.hlsli)
+    string(REPLACE "=" ";" var_file ${var_file})
+    list(GET var_file 0 var)
+    list(GET var_file 1 file)
+    file(READ ${XEGTAO_DIR}/${file} hex HEX)
+    string(REGEX REPLACE "([0-9a-f][0-9a-f])" "0x\\1," hex "${hex}")
+    string(APPEND xegtao_src "static const unsigned char ${var}[] = {${hex}0x00};\n")
+endforeach()
+file(CONFIGURE OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/generated/xegtao_src.h CONTENT "${xegtao_src}" @ONLY)
+target_include_directories(ngg-core PRIVATE ${CMAKE_CURRENT_BINARY_DIR}/generated ${XEGTAO_DIR})
 target_link_libraries(ngg-core PUBLIC d3d12 dxgi d3dcompiler PRIVATE fidelityfx)
 # DLSS (core/dlss.cpp) when its SDK was fetched (third_party/CMakeLists.txt). NVIDIA's NGX library is built against the
 # static release C runtime (/MT), so a Debug build leaves DLSS out (dlss.cpp's stub: no DLSS, logged).

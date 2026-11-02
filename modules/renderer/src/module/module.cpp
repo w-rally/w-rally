@@ -647,7 +647,7 @@ Status WRALLY_CALL RenderFrame(Renderer* r, const FrameDesc* f)
             r->scene.SetOverlayLines(r->dev.device.Get(), 0, nullptr, 0, 0);
             r->linesSet = false;
         }
-        if (f->camera.cut) r->post.ResetHistory(), r->core.Raytracer().ResetHistory();
+        if (f->camera.cut) r->core.ResetHistory();
     }
 
     if (!r->dev.Begin()) return r->Fail(Status::ErrDevice, "renderFrame: the command list would not open");
@@ -747,7 +747,9 @@ Status WRALLY_CALL Stats(Renderer* r, RenderStats* out)
     out->quality = (uint32_t)r->core.GetQuality();
     out->taa = r->post.Taa() ? 1u : 0u;
     out->shadows = r->scene.ShadowsOn() ? 1u : 0u;
-    out->ambientOcclusion = (out->rtActive && r->core.AmbientOcclusion()) ? 1u : 0u;
+    out->ambientOcclusion = r->core.AoApplied() ? 1u : 0u;
+    strncpy_s(out->aoSource, sizeof out->aoSource, r->core.AoSourceName(), _TRUNCATE);
+    if (!out->rtActive || r->core.GetAoSource() != ngg::core::AoSource::Traced) out->aoMs = (float)r->core.AoMs();
     out->autoExposure = r->post.AutoExposure() ? 1u : 0u;
     out->debugView = (uint32_t)r->scene.DebugMode();
     out->exposure = r->post.LastExposure();
@@ -834,9 +836,20 @@ WRALLY_EXPORT Status WRALLY_CALL InitWInterface(uint32_t gameVersion, const Stru
         if (r->settings.mode != WindowMode::Windowed) r->settings.mode = WindowMode::Windowed;
         Apply(*r);
         // ngg-api's environment switches, after the settings (a quality tier sets the AO's rays): NGG_DEBUG_VIEW,
-        // NGG_AO_RAYS, NGG_LIGHT_MODE, NGG_LEGACY_PROFILE.
+        // NGG_AO_RAYS, NGG_LIGHT_MODE, NGG_LEGACY_PROFILE; NGG_AO_SOURCE=screen (a ray-traced frame takes XeGTAO's AO),
+        // NGG_GTAO_QUALITY=0..3 (over the tiers), NGG_GTAO_RADIUS=<m>, NGG_GTAO_NORMALS=prepass|depth,
+        // NGG_GTAO_THIN=0..0.7, NGG_GTAO_DENOISE=1..3.
         if (const char* dv = std::getenv("NGG_DEBUG_VIEW")) r->scene.SetDebugMode(std::atoi(dv));
         if (const char* ar = std::getenv("NGG_AO_RAYS")) r->core.SetAoRays((uint32_t)std::atoi(ar));
+        if (const char* as = std::getenv("NGG_AO_SOURCE"))
+            r->core.SetAoSource(std::strcmp(as, "screen") == 0 ? ngg::core::AoSource::ScreenSpace
+                                                               : ngg::core::AoSource::Traced);
+        if (const char* gq = std::getenv("NGG_GTAO_QUALITY")) r->core.ScreenSpaceAo().ForceQuality(std::atoi(gq));
+        if (const char* gr = std::getenv("NGG_GTAO_RADIUS")) r->core.ScreenSpaceAo().SetRadius((float)std::atof(gr));
+        if (const char* gn = std::getenv("NGG_GTAO_NORMALS"))
+            r->core.ScreenSpaceAo().SetDepthNormals(std::strcmp(gn, "prepass") != 0);
+        if (const char* gt = std::getenv("NGG_GTAO_THIN")) r->core.ScreenSpaceAo().SetThinOccluders((float)std::atof(gt));
+        if (const char* gd = std::getenv("NGG_GTAO_DENOISE")) r->core.ScreenSpaceAo().SetDenoisePasses(std::atoi(gd));
         if (const char* lm = std::getenv("NGG_LIGHT_MODE")) r->scene.SetLightMode(std::atoi(lm));
         if (const char* lp = std::getenv("NGG_LEGACY_PROFILE")) r->scene.SetLegacyProfile(std::atoi(lp));
         ngg::core::Log("wrenderer: %ux%u ready", input.width, input.height);

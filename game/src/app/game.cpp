@@ -879,13 +879,17 @@ StageEnd RunStage(Shell& sh, const Options& o, bool fromMenu, std::string& error
                  o.fixedStep > 0.0 ? "   fixed step" : "");
             line("K ray tracing %s   L shadows %s   O AO %s   T TAA %s   quality %s",
                  !st.rtAvailable ? "n/a" : !rt ? "off" : st.rtActive ? "ON" : "wanted", st.shadows ? "on" : "off",
-                 st.ambientOcclusion ? "on" : "off", st.taa ? "on" : "off", kQuality[st.quality > 2 ? 1 : st.quality]);
+                 st.ambientOcclusion ? st.aoSource : "off", st.taa ? "on" : "off",
+                 kQuality[st.quality > 2 ? 1 : st.quality]);
+            const bool aoTraced = st.ambientOcclusion && std::strncmp(st.aoSource, "ray", 3) == 0;
             if (st.rtActive)
                 line("   rt %.2f ms (ao %.2f, lights %.2f, denoise %.2f)   %u px, %.1f%% shadowed   %u lights", st.rtMs,
-                     st.aoMs, st.lightsMs, st.denoiseMs, st.rtPixels, st.rtPixels ? 100.0 * st.rtShadowed / st.rtPixels : 0.0,
+                     aoTraced ? st.aoMs : 0.0f, st.lightsMs, st.denoiseMs, st.rtPixels, st.rtPixels ? 100.0 * st.rtShadowed / st.rtPixels : 0.0,
                      st.lightCount);
             else if (st.rtFallback[0])
                 line("   shadows from cascades: %s", st.rtFallback);
+            if (st.ambientOcclusion && !aoTraced)
+                line("   ao %.2f ms (%s)", st.aoMs, st.aoSource);
             if (st.upscaler[0])
                 line("upscaled by %s from %ux%u (%.0f%%)", st.upscaler, st.renderWidth, st.renderHeight,
                      shownWidth ? 100.0 * st.renderWidth / shownWidth : 0.0);
