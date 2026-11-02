@@ -1,5 +1,5 @@
 # On every push: build W-Rally (Release, x64, the runner's newest Visual Studio), run the tests that need no RBR folder, and build the MSI
-# (installer/build-msi.ps1) - the run's artifact "W-Rally-<version>-<commit>", the version the project's (CMakeLists.txt).
+# (installer/build-msi.ps1) - the run's artifact the .msi itself, "W-Rally-<version>-<commit>.msi", the version the project's (CMakeLists.txt).
 name: Installer
 
 on:
@@ -32,8 +32,8 @@ jobs:
         id: msi
         run: ./installer/build-msi.ps1 -Build build -Config Release
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
-          name: ${{ steps.msi.outputs.name }}
           path: build/${{ steps.msi.outputs.name }}.msi
+          archive: false              # the .msi itself, named after the file (not a zip)
           if-no-files-found: error
