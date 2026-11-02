@@ -510,6 +510,7 @@ Status WRALLY_CALL CreateModel(Renderer* r, const ModelDesc* d, ModelHandle* out
         s.occlusionStrength = in.occlusionStrength;
         s.emissiveStrength = in.emissiveStrength;
         s.alphaCutoff = in.alphaCutoff;
+        s.clearCoat = in.clearCoat;
         if (!r->scene.SetMaterial(r->dev.device.Get(), h - 1, s)) return r->Fail(Status::ErrDevice, "createModel: material update failed");
         mats.push_back(h);
     }

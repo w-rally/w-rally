@@ -1,9 +1,11 @@
 #include "assets/car_render.h"
 
+#include <cctype>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <map>
 
 #include "assets/car_model.h"
 #include "core/math.h"
@@ -163,6 +165,7 @@ void CarRender::Create(render::Renderer& renderer, const CarModel* read, const s
     paint.baseColourFactor[2] = 0.03f;
     paint.baseColourFactor[3] = 1.0f;
     paint.roughness = 0.35f;
+    paint.clearCoat = 1.0f;
     std::vector<iface::MaterialDesc> materials{paint};
 
     // The nodes: the body, the hubs, the spins under them, the parts that can come loose.
@@ -258,6 +261,30 @@ void CarRender::Create(render::Renderer& renderer, const CarModel* read, const s
             m.roughness = t.transparent ? 0.05f : 0.45f;
             materials.push_back(m);
         }
+        // The finish, by the group's shader class (CarPart::shader): CarPaint (and CarPaintInt) is lacquered
+        // (MaterialDesc::clearCoat) - the colour and the livery's decals on it under one clear coat, as a rally car's
+        // are -, CarTire rough rubber; the rest (plastic, rims, the textured and coloured parts, the glass) as above. A
+        // material drawn with two finishes is two materials.
+        enum Finish { kAsIs, kPaint, kRubber };
+        auto finishOf = [](std::string c) {
+            for (char& ch : c) ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+            if (c.rfind("carpaint", 0) == 0) return kPaint;
+            if (c == "cartire") return kRubber;
+            return kAsIs;
+        };
+        std::map<std::pair<size_t, int>, uint32_t> finished;
+        auto materialOf = [&](size_t mi, const std::string& shader) -> uint32_t {
+            const Finish f = model.materials[mi].transparent ? kAsIs : finishOf(shader);
+            if (f == kAsIs) return static_cast<uint32_t>(mi + 1);
+            const auto [it, made] = finished.try_emplace({mi, f}, static_cast<uint32_t>(materials.size()));
+            if (made) {
+                iface::MaterialDesc m = materials[mi + 1];
+                if (f == kPaint) m.clearCoat = 1.0f;
+                else m.roughness = 0.85f;
+                materials.push_back(m);
+            }
+            return it->second;
+        };
         for (const CarPart& part : model.parts) {
             std::vector<iface::Vertex> v(part.vertices.size());
             for (size_t k = 0; k < v.size(); ++k) {
@@ -280,11 +307,11 @@ void CarRender::Create(render::Renderer& renderer, const CarModel* read, const s
             if (part.lampGroup >= 0) {   // a lamp's: its own instance, on its part's node (assets::CarRender::PlaceLamps)
                 const int sd = sideOf(part.name);
                 lampMeshes[part.lampGroup][sd][part.lit ? 1 : 0].push_back({std::move(v), part.indices,
-                                                                            static_cast<uint32_t>(mi + 1), node});
+                                                                            materialOf(mi, part.shader), node});
                 if (m_lampPart[part.lampGroup][sd] == -2) m_lampPart[part.lampGroup][sd] = node >= kParts ? static_cast<int>(node - kParts) : -1;
                 continue;
             }
-            add(std::move(v), part.indices, static_cast<uint32_t>(mi + 1), node);
+            add(std::move(v), part.indices, materialOf(mi, part.shader), node);
         }
         std::printf("the car: %zu parts, %zu materials (%zu textured)\n", meshes.size(), model.materials.size(), textured);
     }

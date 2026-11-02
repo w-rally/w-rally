@@ -138,6 +138,7 @@ public:
         float    baseColourFactor[4];
         float    roughness, metallic, normalScale;
         float    occlusionStrength, emissiveStrength, alphaCutoff;
+        float    clearCoat;   // 0..1 (MaterialDesc::clearCoat); the .ngg's materials have none
     };
 
     // Debug views - isolate one shader input so an artefact can be ATTRIBUTED
