@@ -36,6 +36,8 @@
 #include "shadow.h"
 #include "post.h"
 #include "rt.h"
+#include "gtao.h"
+#include "visibility.h"
 #include "upscaler.h"
 
 namespace ngg {
@@ -49,6 +51,8 @@ namespace core {
 // and cheaper than the cascades on real geometry - so every tier keeps RT
 // shadows (falling back to cascades only where RT is unavailable) and the
 // tiers differ in AO. New techniques join by adding a field here, not a mode.
+// Where the frame has no RT AO (the cascades, or AoSource::ScreenSpace) the AO
+// is XeGTAO's at the tier's gtaoQuality.
 enum class Quality { Low = 0, Medium = 1, High = 2 };
 
 // TEMPORAL UPSCALING (upscaler.h): which upscaler replaces the TAA, and at what
@@ -61,6 +65,7 @@ struct QualityTier
     const char* name;
     bool        ao;           // RT ambient occlusion
     uint32_t    aoRays;       // per pixel per frame; the denoiser accumulates
+    int         gtaoQuality;  // the screen-space AO's (Gtao::SetQuality)
     float       sharpen;      // TAA post-sharpen
 };
 
@@ -106,6 +111,12 @@ public:
     void SetAmbientOcclusion(bool on)       { m_ao = on; m_scene.SetAmbientOcclusion(on); }
     bool AmbientOcclusion() const           { return m_ao; }
     void SetAoRays(uint32_t n)              { m_aoRays = n ? n : 1; }
+    // The AO a ray-traced frame takes: its own (Traced, the default) or XeGTAO's (ScreenSpace), the cheap mode. The
+    // cascades always take XeGTAO's.
+    void SetAoSource(AoSource s)            { m_rtVis.SetAoSource(s); }
+    AoSource GetAoSource() const            { return m_rtVis.GetAoSource(); }
+    // The screen-space AO's knobs (the tier sets the quality).
+    Gtao& ScreenSpaceAo()                   { return m_gtao; }
     uint32_t AoRays() const                 { return m_aoRays; }
     // What is traced: twice the rays when the render size has at most half the output's pixels (an upscaler at
     // Quality and below), so the AO keeps about as many rays per OUTPUT pixel as native - its one-ray grain is
@@ -126,6 +137,13 @@ public:
 
     // ---- state, for readouts
     bool RayTracedShadowsActive() const { return m_rtActive; }   // this frame
+    // This frame's AO: applied at all, where it came from ("ray traced, 1 ray", "XeGTAO medium", "off") and its GPU
+    // time, last frame's.
+    bool AoApplied() const              { return m_ao && m_vis.ao != nullptr; }
+    const char* AoSourceName() const    { return AoApplied() ? m_vis.aoSource : "off"; }
+    double AoMs() const                 { return AoApplied() ? m_vis.aoMs : 0.0; }
+    // A camera's cut: TAA's history (and the upscaler's), the shadow and AO sources' - whatever each keeps.
+    void ResetHistory();
     // The whole frame's GPU time (RecordFrame, first command to last), last frame's. The one number a change of
     // what the GPU does is judged by: a pass's own timestamps are not (design 5.4 N2c).
     double LastFrameMs() const          { return m_frameMs; }
@@ -152,6 +170,11 @@ private:
     ShadowMaps m_shadows;
     PostFx     m_post;
     Rt         m_rt;
+    Gtao       m_gtao;
+    // The sources of the sun's visibility and the AO (visibility.h), one of them per frame.
+    RtVisibility      m_rtVis{ m_rt, m_gtao };
+    CascadeVisibility m_cascadeVis{ m_scene, m_gtao };
+    Visibility        m_vis;                       // this frame's
     // Out-of-band work while the client's list is open: the BVH rebuild after
     // an edit. Rt::Build is synchronous on whatever context it is given; on the
     // client's own one it reset an allocator mid-recording and failed.
