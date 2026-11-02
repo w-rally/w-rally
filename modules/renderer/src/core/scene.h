@@ -78,7 +78,9 @@ public:
     // camera moves - and (b) the main pass, testing GREATER_EQUAL against
     // depth it already has, shades every pixel exactly once. The second is the
     // classic Z-prepass win and it is why this is not RT-only plumbing.
-    void RecordPrepass(ID3D12GraphicsCommandList* list,
+    // False when it could not run (no prepass pipeline): the main pass then
+    // writes the depth itself, and nothing else has this frame's targets.
+    bool RecordPrepass(ID3D12GraphicsCommandList* list,
                        const float* view, const float* proj, UINT width, UINT height);
     ID3D12Resource* NormalBuffer() const { return m_normal.Get(); }
     // The prepass's motion target, RGBA16F, in RENDER_TARGET between frames
@@ -277,7 +279,13 @@ public:
     // This frame's ray-traced ambient occlusion (rt.h, denoised), applied to
     // the ambient terms. Null when there is none; SetAmbientOcclusion toggles
     // its use without unbinding it, for A/B.
-    void SetRtAo(ID3D12Resource* tex) { m_rtAo = tex; m_aoSrvReady = false; }   // see SetRtVisibility
+    // `view`: the format it is read through, for a typeless one (Gtao's); UNKNOWN reads it as its own.
+    void SetRtAo(ID3D12Resource* tex, DXGI_FORMAT view = DXGI_FORMAT_UNKNOWN)   // see SetRtVisibility
+    {
+        m_rtAo = tex;
+        m_rtAoView = view;
+        m_aoSrvReady = false;
+    }
     void ClearRtAo() { m_rtAo = nullptr; m_aoSrvReady = false; }
 
     // LOCAL LIGHTS (lights.h, design 5.4 N2): this frame's lights, their clusters for this view (before the ray
@@ -881,6 +889,7 @@ private:
 
     ID3D12Resource*          m_rtVis = nullptr;
     ID3D12Resource*          m_rtAo = nullptr;
+    DXGI_FORMAT              m_rtAoView = DXGI_FORMAT_UNKNOWN;
     UINT                     m_aoSrvSlot = 0;
     bool                     m_aoSrvReady = false;
     // The froxel aerial-perspective table: two SRVs (in-scatter, transmittance)
