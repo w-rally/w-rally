@@ -11,6 +11,7 @@
 #include "imgui.h"
 #include "ui/imgui_layer.h"
 #include "ui/menu_look.h"
+#include "wrally/iface/renderer.h"
 
 namespace wrally::ui {
 
@@ -270,6 +271,7 @@ struct SetRow {
     std::string hint;
     int* at = nullptr;                      // Choice: the chosen one of `options`
     std::vector<std::string> options;
+    std::vector<bool> optionOff;            // Choice: options shown but skipped (DLSS without an NVIDIA RTX GPU)
     bool* on = nullptr;                     // Toggle
     float* value = nullptr;                 // Slider: `min`..`max` in `step`s, shown with `format`
     float min = 0, max = 1, step = 0.1f;
@@ -281,7 +283,7 @@ struct SetRow {
 } // namespace
 
 SettingsChoice SettingsUi(const ImGuiLayer& ui, app::Settings& s, bool inStage, const std::string& log, UINT keyDown,
-                          int width, int height, const VideoFrame& video)
+                          int width, int height, const VideoFrame& video, uint32_t upscalers)
 {
     using input::Action;
     const float k = std::min(height / 1080.0f, width / 1280.0f), W = float(width), H = float(height);
@@ -333,12 +335,19 @@ SettingsChoice SettingsUi(const ImGuiLayer& ui, app::Settings& s, bool inStage, 
         add(SetRow::Toggle, "FULL SCREEN", "The whole screen, or a window on the desktop. Applies at once.").on = &s.fullscreen;
         add(SetRow::Toggle, "RAY TRACING", "Ray tracing in the renderer. Applies at once.").on = &s.rayTracing;
         add(SetRow::Toggle, "TAA", "Temporal anti-aliasing. Applies at once.").on = &s.taa;
+        const bool dlss = upscalers & (1u << iface::kUpscalerDlss);
         SetRow& up = add(SetRow::Choice, "UPSCALING",
-                         "Render below the screen's resolution and upscale with AMD FSR or NVIDIA DLSS (RTX graphics "
-                         "cards only) in place of TAA: faster, softer. DLAA: DLSS at full resolution. "
-                         "Off: TAA at full resolution. Applies at once.");
+                         dlss ? "Render below the screen's resolution and upscale with AMD FSR or NVIDIA DLSS in place "
+                                "of TAA: faster, softer. DLAA: DLSS at full resolution. Off: TAA at full resolution. "
+                                "Applies at once."
+                              : "Render below the screen's resolution and upscale with AMD FSR in place of TAA: faster, "
+                                "softer. NVIDIA DLSS needs an NVIDIA RTX graphics card: not available on this one. "
+                                "Off: TAA at full resolution. Applies at once.");
         up.at = &upscaling;
-        for (const app::UpscaleMode& m : app::kUpscaleModes) up.options.push_back(m.label);
+        for (const app::UpscaleMode& m : app::kUpscaleModes) {
+            up.options.push_back(m.label);
+            up.optionOff.push_back(!(upscalers & (1u << m.upscaler)));
+        }
         add(SetRow::Toggle, "SHADOWS", "Shadows. Applies at once.").on = &s.shadows;
         add(SetRow::Toggle, "VERTICAL SYNC", "Frames in step with the display. Applies at once.").on = &s.vsync;
     } else if (tab == 2) {
@@ -413,7 +422,12 @@ SettingsChoice SettingsUi(const ImGuiLayer& ui, app::Settings& s, bool inStage, 
         if (r.off) return;
         if (r.kind == SetRow::Choice) {
             const int n = static_cast<int>(r.options.size());
-            *r.at = (*r.at + dir + n) % n;
+            int next = *r.at;
+            for (int tries = 0; tries < n; ++tries) {   // past the options this machine cannot run
+                next = (next + dir + n) % n;
+                if (next >= static_cast<int>(r.optionOff.size()) || !r.optionOff[next]) break;
+            }
+            *r.at = next;
         } else if (r.kind == SetRow::Slider) {
             *r.value = std::clamp(std::round((*r.value + dir * r.step) / r.step) * r.step, r.min, r.max);
         } else if (r.kind == SetRow::Toggle) {
@@ -576,7 +590,9 @@ SettingsChoice SettingsUi(const ImGuiLayer& ui, app::Settings& s, bool inStage, 
                     for (int p = 0; p < n; ++p) {
                         const float px = cx - total * 0.5f + p * (pw + 4 * k), py = mid + 12 * k;
                         d->AddQuadFilled(ImVec2(px + lean, py), ImVec2(px + pw + lean, py), ImVec2(px + pw - lean, py + ph), ImVec2(px - lean, py + ph),
-                                         Alpha(p == *r.at ? kSignal : kLineStrong, fade));
+                                         Alpha(p == *r.at ? kSignal
+                                               : p < static_cast<int>(r.optionOff.size()) && r.optionOff[p] ? kLine
+                                                                                                          : kLineStrong, fade));
                     }
                 } else if (r.kind == SetRow::Slider) {
                     char shown[32];

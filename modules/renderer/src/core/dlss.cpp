@@ -33,6 +33,8 @@
 #include <stdlib.h>
 
 #if defined(WRALLY_DLSS)
+#include <dxgi1_6.h>
+#include <wrl/client.h>
 #include <nvsdk_ngx.h>
 #include <nvsdk_ngx_helpers.h>
 #endif
@@ -107,6 +109,19 @@ public:
     bool Load(ID3D12Device* device)
     {
         m_device = device;
+        // NVIDIA's GPUs only: elsewhere NGX is not even loaded (the settings menu probes every adapter).
+        {
+            Microsoft::WRL::ComPtr<IDXGIFactory4> factory;
+            Microsoft::WRL::ComPtr<IDXGIAdapter1> adapter;
+            DXGI_ADAPTER_DESC1 desc = {};
+            if (SUCCEEDED(CreateDXGIFactory1(IID_PPV_ARGS(&factory))) &&
+                SUCCEEDED(factory->EnumAdapterByLuid(device->GetAdapterLuid(), IID_PPV_ARGS(&adapter))) &&
+                SUCCEEDED(adapter->GetDesc1(&desc)) && desc.VendorId != 0x10DE)
+            {
+                Log("dlss: not an NVIDIA GPU (vendor %04x) - no DLSS", desc.VendorId);
+                return false;
+            }
+        }
         wchar_t folder[MAX_PATH], data[MAX_PATH];
         if (!ModuleFolder(folder, MAX_PATH)) folder[0] = 0;
         // NGX's own files (its logs, when on) under the temp folder: the module's may be Program Files.

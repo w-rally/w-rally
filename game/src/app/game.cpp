@@ -951,7 +951,8 @@ StageEnd RunStage(Shell& sh, const Options& o, bool fromMenu, std::string& error
             case ui::PauseChoice::None: break;
             }
         } else if (menu == StageMenu::Settings) {
-            const ui::SettingsChoice c = ui::SettingsUi(ui, sh.settings, true, settingsLog, keyDown, shownWidth, shownHeight);
+            const ui::SettingsChoice c = ui::SettingsUi(ui, sh.settings, true, settingsLog, keyDown, shownWidth, shownHeight, {},
+                                                              renderer.Stats().upscalersAvailable);
             if (c == ui::SettingsChoice::Graphics) {
                 sh.window.SetFullscreen(sh.settings.fullscreen);
                 settings = ToRender(sh.settings);
@@ -1247,7 +1248,8 @@ int Menus(Shell& sh, std::string note)
                 }
                 break;
             case Screen::Settings:
-                switch (ui::SettingsUi(sh.ui, sh.settings, false, settingsLog, keyDown, sh.width, sh.height, video.Frame())) {
+                switch (ui::SettingsUi(sh.ui, sh.settings, false, settingsLog, keyDown, sh.width, sh.height, video.Frame(),
+                                   sh.renderer.Stats().upscalersAvailable)) {
                 case ui::SettingsChoice::Graphics:
                     sh.window.SetFullscreen(sh.settings.fullscreen);
                     sh.renderer.ApplySettings(ToRender(sh.settings));

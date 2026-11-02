@@ -86,6 +86,10 @@ public:
     // here (DLSS without an RTX GPU) leaves None (logged).
     void SetUpscaling(Device& dev, UpscalerKind kind, float scale);
     UpscalerKind Upscaling() const      { return m_upKind; }
+    // Whether a backend can run on this adapter (probed once at Create: its DLL, the GPU, the driver) - what a
+    // settings menu may offer. None is always available.
+    bool UpscalerAvailable(UpscalerKind kind) const
+    { return kind == UpscalerKind::None || (kind == UpscalerKind::Fsr ? m_fsrAvailable : m_dlssAvailable); }
     float RenderScale() const           { return m_upKind == UpscalerKind::None ? 1.0f : m_renderScale; }
 
     bool Load(Device& dev, const wchar_t* path);
@@ -163,6 +167,7 @@ private:
     UpscalerKind m_upKind = UpscalerKind::None;
     float m_renderScale = 1.0f;
     std::unique_ptr<Upscaler> m_upscaler;
+    bool m_fsrAvailable = false, m_dlssAvailable = false;
     bool  m_preferRt = true;
     bool  m_ao = true;
     uint32_t m_aoRays = 1;          // 5.0m: one ray, accumulated by the denoiser
