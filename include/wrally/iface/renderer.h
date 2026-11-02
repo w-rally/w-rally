@@ -44,7 +44,8 @@ namespace wrally::iface {
 // 10: updateTextureRgba (a UI texture's pixels again: the main menu's video).
 // 11: RenderSettings::upscaler (temporal upscaling at renderScale), RenderStats' render size and upscaler.
 // 12: kUpscalerDlss (NVIDIA DLSS Super Resolution; where it cannot run, the renderer's TAA).
-constexpr uint32_t kRendererInterfaceVer = 12;
+// 13: RenderStats::aoSource (ray traced or XeGTAO); ambientOcclusion and aoMs whatever the shadow source.
+constexpr uint32_t kRendererInterfaceVer = 13;
 
 struct Renderer;                     // the module's instance, opaque
 typedef uint32_t SceneHandle;        // a loaded .ngg stage
@@ -312,11 +313,11 @@ constexpr uint32_t kUpscalerDlss = 2;    // NVIDIA DLSS Super Resolution, RTX GP
 // What the last finished frame did - ngg_stats, the renderer's own readout.
 struct RenderStats {
     float    passMs, envMs, aerialMs;      // the main pass; its environment and aerial-table parts (GPU ms)
-    float    rtMs, aoMs, denoiseMs;        // the ray tracing: all of it, the AO's part, the denoise
+    float    rtMs, aoMs, denoiseMs;        // the ray tracing: all of it, the AO's part (XeGTAO's own when it is aoSource), the denoise
     uint32_t rtAvailable, rtActive;        // the adapter can ray trace; this frame's shadows were ray traced
     uint32_t rtPixels, rtShadowed;         // pixels traced, of them in shadow
     uint32_t quality;                      // 0 low, 1 medium, 2 high
-    uint32_t taa, shadows, ambientOcclusion, autoExposure;
+    uint32_t taa, shadows, ambientOcclusion, autoExposure;   // ambientOcclusion: applied this frame, from aoSource
     uint32_t debugView;
     float    exposure;                     // applied last frame
     float    meteredEv, adaptedEv;         // auto exposure: log2 luminance, this frame / adapted
@@ -327,6 +328,7 @@ struct RenderStats {
     float    sunElevationDeg;              // the last frame's sun over the horizon, degrees (a game's lamps by it)
     uint32_t renderWidth, renderHeight;    // the size the scene is rendered at (the output's without an upscaler)
     char     upscaler[48];                 // what upscales it, "FSR 3.1.x"; "" none (the renderer's TAA)
+    char     aoSource[32];                 // "ray traced, 1 ray", "XeGTAO medium"; "off"
 };
 
 #pragma pack(pop)

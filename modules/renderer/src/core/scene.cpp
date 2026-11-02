@@ -5457,13 +5457,14 @@ void Scene::Record(ID3D12GraphicsCommandList* list, D3D12_CPU_DESCRIPTOR_HANDLE 
     RecordPass(list, rtv, view, proj, width, height, false);
 }
 
-void Scene::RecordPrepass(ID3D12GraphicsCommandList* list,
+bool Scene::RecordPrepass(ID3D12GraphicsCommandList* list,
                           const float* view, const float* proj, UINT width, UINT height)
 {
-    if (!m_psoPrepass || !m_normal || !m_motion || !m_normalRtvHeap) return;
+    if (!m_psoPrepass || !m_normal || !m_motion || !m_normalRtvHeap || !Ready()) return false;
     RecordPass(list, m_normalRtvHeap->GetCPUDescriptorHandleForHeapStart(),
                view, proj, width, height, true);
     m_prepassThisFrame = true;
+    return true;
 }
 
 void Scene::RecordPass(ID3D12GraphicsCommandList* list, D3D12_CPU_DESCRIPTOR_HANDLE rtv,
@@ -5962,7 +5963,7 @@ void Scene::RecordPass(ID3D12GraphicsCommandList* list, D3D12_CPU_DESCRIPTOR_HAN
             if (d)
             {
                 D3D12_SHADER_RESOURCE_VIEW_DESC sd = {};
-                sd.Format = m_rtAo->GetDesc().Format;
+                sd.Format = m_rtAoView != DXGI_FORMAT_UNKNOWN ? m_rtAoView : m_rtAo->GetDesc().Format;
                 sd.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
                 sd.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
                 sd.Texture2D.MipLevels = 1;

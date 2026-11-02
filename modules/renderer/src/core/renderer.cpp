@@ -11,9 +11,9 @@ const QualityTier& Renderer::Tier(Quality q)
     // Costs on the development machine's integrated Radeon, lab forest view
     // (965k geometry pixels) - see design 5.0p for the measurement.
     static const QualityTier kTiers[3] = {
-        { "low",    false, 0, 0.25f },   // RT sun shadows only - the VR baseline
-        { "medium", true,  1, 0.50f },   // + RT AO, one ray (the default)
-        { "high",   true,  2, 0.50f },   // + RT AO, two rays: less noise at rest
+        { "low",    false, 0, 0, 0.25f },   // RT sun shadows only - the VR baseline
+        { "medium", true,  1, 1, 0.50f },   // + RT AO, one ray (the default); XeGTAO medium (2 slices x 2 steps)
+        { "high",   true,  2, 2, 0.50f },   // + RT AO, two rays: less noise at rest; XeGTAO high (3 x 3)
     };
     const int i = (int)q;
     return kTiers[(i < 0 || i > 2) ? 1 : i];
@@ -25,6 +25,7 @@ void Renderer::SetQuality(Quality q)
     m_quality = q;
     SetAmbientOcclusion(t.ao);
     if (t.aoRays) SetAoRays(t.aoRays);
+    m_gtao.SetQuality(t.gtaoQuality);
     m_post.SetSharpen(t.sharpen);
     Log("renderer: quality %s (AO %s, %u ray(s), sharpen %.2f)",
         t.name, t.ao ? "on" : "off", t.ao ? t.aoRays : 0, t.sharpen);
@@ -42,6 +43,7 @@ bool Renderer::Create(Device& dev, DXGI_FORMAT outputFormat, UINT width, UINT he
     ID3D12Device* d = dev.device.Get();
     if (!m_sky.Create(d, PostFx::kHdrFormat)) Log("renderer: sky unavailable - frames clear instead");
     if (!m_shadows.Create(d, 2048)) Log("renderer: cascaded shadow maps unavailable");
+    if (!m_gtao.Create(d, dev.queue.Get())) Log("renderer: no screen-space AO - the cascades go without AO");
     m_scene.SetShadowMaps(&m_shadows);
 
     // Built here rather than at load: overlays depend on the OUTPUT format,
@@ -94,6 +96,13 @@ void Renderer::SetUpscaling(Device& dev, UpscalerKind kind, float scale)
     Log("renderer: upscaling %s, render scale %.2f",
         kind == UpscalerKind::None ? "off (TAA)" : kind == UpscalerKind::Dlss ? "DLSS" : "FSR", scale);
     if (m_width && m_height) OnResize(dev, m_width, m_height);
+}
+
+void Renderer::ResetHistory()
+{
+    m_post.ResetHistory();
+    m_rtVis.ResetHistory();
+    m_cascadeVis.ResetHistory();
 }
 
 bool Renderer::Load(Device& dev, const wchar_t* path)
@@ -257,12 +266,8 @@ void Renderer::RecordFrame(Device& dev, D3D12_CPU_DESCRIPTOR_HANDLE outRtv,
     m_sky.SetJitter(jx, jy);
 
     m_rtActive = false;
-    // The motion of moved objects comes from the prepass; without one, TAA
-    // reprojects every pixel by the camera, as it always did.
+    m_vis = Visibility();
     ID3D12Resource* motion = nullptr;
-    ID3D12Resource* rtShadow = nullptr;     // for TAA: where a moved object's shadow fell
-    ID3D12Resource* rtAo = nullptr;         // and its occlusion, this frame and last
-    ID3D12Resource* rtAoPrev = nullptr;
     if (m_scene.Ready())
     {
         KeepRtCurrent(dev);
@@ -270,53 +275,45 @@ void Renderer::RecordFrame(Device& dev, D3D12_CPU_DESCRIPTOR_HANDLE outRtv,
         // scene pass after it.
         m_scene.PrepareLights(list, view, proj, width, height);
 
-        // DEPTH + NORMAL PREPASS whenever there is a BVH: the main pass then
-        // shades each pixel once, which pays for itself whatever the shadow
-        // source (5.0e).
-        const bool prepass = m_rt.HasScene();
-        if (prepass)
-        {
-            m_scene.RecordPrepass(list, view, proj, width, height);
-            motion = m_scene.MotionBuffer();
-        }
+        // DEPTH + NORMAL + MOTION PREPASS, whatever the shadow source: the main pass then shades each pixel once
+        // (5.0e), the AO - traced or screen-space - reads its depth and normals, and TAA and the upscalers its
+        // motion. It is drawn with the jitter set above, so the main pass's GREATER_EQUAL finds its depth exactly.
+        const bool prepass = m_scene.RecordPrepass(list, view, proj, width, height);
+        if (prepass) motion = m_scene.MotionBuffer();
 
-        m_rtActive = m_preferRt && prepass && m_rtValid && m_scene.ShadowsOn();
+        m_rtActive = m_preferRt && prepass && m_rt.HasScene() && m_rtValid && m_scene.ShadowsOn();
 
-        if (m_rtActive)
-        {
-            float sunTowards[3];
-            {
-                float len = sqrtf(sky.sunDir[0]*sky.sunDir[0] + sky.sunDir[1]*sky.sunDir[1] +
-                                  sky.sunDir[2]*sky.sunDir[2]);
-                if (len < 1e-6f) len = 1.0f;
-                for (int k = 0; k < 3; ++k) sunTowards[k] = -sky.sunDir[k] / len;
-            }
-            // JITTERED matrix: this reconstructs the surface the prepass wrote.
-            // The sun disc is the same one the sky draws, so the shadow's
-            // softness and the visible sun agree by construction. AO only when
-            // it is applied (5.0m).
-            m_rt.Trace(dev, list, m_scene.Depth(), m_scene.NormalBuffer(), motion, m_scene.PlantBuffer(),
-                       m_scene.LastViewProjJittered(), m_scene.LastViewProj(),
-                       m_scene.LastCameraPos(), sunTowards, 4000.0f,
-                       0.00465f * sky.sunDiscSize,
-                       m_rt.AoAvailable() && m_ao, 3.0f, AoRaysTraced(), width, height, &m_scene.GetLights());
-            m_rt.PrepareForRead(list);
-            m_scene.SetRtVisibility(m_rt.Filtered());
-            rtShadow = m_rt.Filtered();
-            if (m_ao && m_rt.FilteredAo()) m_scene.SetRtAo(m_rt.FilteredAo()), rtAo = m_rt.AoDenoised(), rtAoPrev = m_rt.AoPrevDenoised();
-            else                           m_scene.ClearRtAo();
-            if (m_rt.FilteredLights()) m_scene.SetRtLights(m_rt.FilteredLights());
-            else                       m_scene.ClearRtLights();
-            m_scene.SetShadowSource(1);
-        }
-        else
-        {
-            m_scene.RenderShadows(list, view, proj, sky.sunDir);
-            m_scene.ClearRtVisibility();
-            m_scene.ClearRtAo();
-            m_scene.ClearRtLights();   // (local lights unshadowed without ray tracing)
-            m_scene.SetShadowSource(0);
-        }
+        // The sun's visibility and the AO (visibility.h): the ray tracer's, or the cascades' and XeGTAO's.
+        VisibilityFrame f;
+        f.depth = m_scene.Depth();
+        f.normal = m_scene.NormalBuffer();
+        f.motion = motion;
+        f.plant = m_scene.PlantBuffer();
+        f.view = view;
+        f.proj = proj;
+        f.viewProjJittered = m_scene.LastViewProjJittered();
+        f.viewProj = m_scene.LastViewProj();
+        f.camPos = m_scene.LastCameraPos();
+        f.jitter[0] = jx;
+        f.jitter[1] = jy;
+        for (int k = 0; k < 3; ++k) f.sunTravel[k] = sky.sunDir[k];
+        f.sunAngle = 0.00465f * sky.sunDiscSize;
+        f.ao = m_ao && prepass;
+        f.aoRays = AoRaysTraced();
+        f.temporal = m_taa && m_scene.DebugMode() == 0;
+        f.width = width;
+        f.height = height;
+        f.lights = &m_scene.GetLights();
+        VisibilityProvider& source = m_rtActive ? static_cast<VisibilityProvider&>(m_rtVis) : m_cascadeVis;
+        source.Record(dev, list, f, m_vis);
+
+        m_scene.SetShadowSource(m_vis.shadowSource);
+        if (m_vis.sun)    m_scene.SetRtVisibility(m_vis.sun);
+        else              m_scene.ClearRtVisibility();
+        if (m_vis.ao)     m_scene.SetRtAo(m_vis.ao, m_vis.aoView);
+        else              m_scene.ClearRtAo();
+        if (m_vis.lights) m_scene.SetRtLights(m_vis.lights);
+        else              m_scene.ClearRtLights();   // (local lights unshadowed without ray tracing)
     }
 
     // Sky and scene draw into the HDR intermediate; PostFx puts the result in
@@ -330,7 +327,9 @@ void Renderer::RecordFrame(Device& dev, D3D12_CPU_DESCRIPTOR_HANDLE outRtv,
     if (m_scene.Ready())
         m_scene.Record(list, hdrRtv, view, proj, width, height);
 
-    m_post.Resolve(list, outRtv, m_scene.Depth(), motion, rtShadow, rtAo, rtAoPrev, m_scene.LastViewProj(), width, height);
+    // TAA: where a moved object's shadow fell and its occlusion, this frame and last (the RT denoisers' only).
+    m_post.Resolve(list, outRtv, m_scene.Depth(), motion, m_vis.sun, m_vis.aoTaa, m_vis.aoTaaPrev, m_scene.LastViewProj(),
+                   width, height);
 
     if (m_frameTimer)
     {
