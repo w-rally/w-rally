@@ -160,7 +160,7 @@ int Rows(const Look& l, std::vector<Row>& rows, List& list, float y0, float w, f
         const Row& sel = rows[list.at];
         if (list.plateY < 0) list.plateY = sel.y, list.plateH = sel.h;
         list.plateY += (sel.y - list.plateY) * ease, list.plateH += (sel.h - list.plateH) * ease;
-        if (sel.kind != Row::Heading) Plate(l.d, l.P(kX0, list.plateY), w * k, list.plateH * k, 12 * k, kSurfaceRaised);
+        if (sel.kind != Row::Heading) Plate(l.d, l.P(kX0, list.plateY), w * k, list.plateH * k, 12 * k, kSelect);
     }
     const float xr = (kX0 + w - 24) * k;   // the values' right edge
     for (int i = 0; i < static_cast<int>(rows.size()); ++i) {
@@ -452,7 +452,7 @@ void StagePage(const ImGuiLayer& ui, const assets::Catalog& catalog, app::Settin
             const bool on = i == g_collection;
             const bool hot = ImGui::IsMouseHoveringRect(l.P(kX0, y), l.P(kX0 + 260, y + 52), false);
             if (hot && click) collection = i, g_stageSide = 0;
-            if (on) Plate(l.d, l.P(kX0, y), 260 * k, 52 * k, 10 * k, g_stageSide == 0 ? kSurfaceRaised : IM_COL32(16, 16, 18, 255));
+            if (on) Plate(l.d, l.P(kX0, y), 260 * k, 52 * k, 10 * k, g_stageSide == 0 ? kSelect : kSelectIdle);
             Marker(l.d, (kX0 + 10) * k, mid, 10 * k, 28 * k, on && g_stageSide == 0 ? 1.0f : 0.0f, k);
             int count = 0;
             for (const assets::Stage& st : catalog.stages) count += inGroup(st, i);
@@ -475,7 +475,7 @@ void StagePage(const ImGuiLayer& ui, const assets::Catalog& catalog, app::Settin
         if (n) {
             const float target = kListY + (g_stageAt - g_stageTop) * (kRowH + 4);
             g_stagePlate = g_stagePlate < 0 ? target : g_stagePlate + (target - g_stagePlate) * ease;
-            Plate(l.d, l.P(kColX, g_stagePlate), kColW * k, kRowH * k, 12 * k, g_stageSide == 1 ? kSurfaceRaised : IM_COL32(16, 16, 18, 255));
+            Plate(l.d, l.P(kColX, g_stagePlate), kColW * k, kRowH * k, 12 * k, g_stageSide == 1 ? kSelect : kSelectIdle);
         }
         for (int i = g_stageTop; i < std::min(n, g_stageTop + kShown); ++i) {
             const assets::Stage& st = *list[i];

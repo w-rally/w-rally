@@ -15,6 +15,9 @@ inline constexpr ImU32 kSurfaceBase = IM_COL32(10, 10, 11, 255), kSurfaceRaised 
                        kInk = IM_COL32(255, 255, 255, 255), kInkSecondary = IM_COL32(196, 196, 200, 255),
                        kInkMuted = IM_COL32(140, 140, 144, 255), kSignal = IM_COL32(255, 75, 31, 255),
                        kLine = IM_COL32(44, 44, 48, 255);
+// The selection's plate under the selected row: brighter than surface-raised, so it shows on a dim screen too; a list
+// that has not the keys (the Stage page's other side) keeps its selection on kSelectIdle.
+inline constexpr ImU32 kSelect = IM_COL32(42, 42, 47, 255), kSelectIdle = IM_COL32(28, 28, 31, 255);
 inline const float kTanStripe = std::tan(22.0f * 3.14159265f / 180.0f);   // slant-stripe, the livery's
 inline const float kTanPlate = std::tan(14.0f * 3.14159265f / 180.0f);    // slant-plate, the marker's
 inline constexpr float kEase = 0.04f;   // the selection's ease (s): settled in ~120 ms, as the design's transitions
