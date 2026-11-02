@@ -336,9 +336,12 @@ CarModel ReadCarModel(const std::string& sgcPath, const std::string& surface)
             part.wheel = wheel;
             part.spins = wheel >= 0 && (Starts(name, "e_wheel_") || Starts(name, "e_brakedisc_"));
             part.material = c.Str();
-            if (const auto sec = carIni.find(name); sec != carIni.end())
+            if (const auto sec = carIni.find(name); sec != carIni.end()) {
                 if (const auto fb = sec->second.find("FaceBlock" + std::to_string(g) + "_Material"); fb != sec->second.end() && !fb->second.empty())
                     part.material = fb->second;
+                if (const auto fs = sec->second.find("FaceBlock" + std::to_string(g) + "_Shader"); fs != sec->second.end())
+                    part.shader = fs->second;
+            }
             // {triangles, the lowest vertex, the vertex count, the first index} - D3D's DrawIndexedPrimitive's MinIndex,
             // NumVertices and StartIndex (the indices are the mesh's, not the group's).
             const uint32_t tris = c.U32();

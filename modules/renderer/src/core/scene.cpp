@@ -176,7 +176,15 @@ float WetNoise(float2 p)
 
 // Declared ahead of its use; defined after the BRDF helpers below.
 float3 LocalLights(float3 p, float3 N, float3 V, float3 diffuseCol, float3 f0, float a, float specScale, float2 px,
-                   float wrap, float trans, bool withSpec);
+                   float wrap, float trans, bool withSpec, float coat);
+
+// CLEAR COAT (MaterialDesc::clearCoat): car paint's lacquer - a smooth dielectric film over the base layer. Its own
+// GGX lobe (f0 0.04, this gloss: a factory finish, 0.03-0.05) reflects the light and the environment sharply, and
+// what it reflects does not reach the base below: the base's diffuse and specular are scaled by 1 - coat x F. The
+// same normal for both layers (RBR's paint has no normal map). The deferred local lights know only coated or not
+// (GBUF kind 3).
+static const float kCoatRoughness = 0.04;
+static const float kCoatF0 = 0.04;
 
 // Standard GGX: Trowbridge-Reitz distribution, height-correlated Smith
 // visibility, Schlick Fresnel. Nothing bespoke here on purpose - the value of a
@@ -225,7 +233,7 @@ float VisSmith(float ndv, float ndl, float a)
 // `trans`: a foliage card's transmission, as for the sun - a leaf with the lamp behind it is backlit, not black
 // (design 5.4 N3: grass tufts lit by the lamps had black lower halves, their volume normals turned away).
 void ShadeLocalLight(uint li, LightRec L, float3 p, float3 N, float3 V, float ndv, float3 diffuseCol, float3 f0,
-                     float a, float specScale, float wrap, float trans, bool withSpec, inout float3 shadowed,
+                     float a, float specScale, float wrap, float trans, bool withSpec, float coat, inout float3 shadowed,
                      inout float3 open)
 {
     float3 l;
@@ -251,25 +259,36 @@ void ShadeLocalLight(uint li, LightRec L, float3 p, float3 N, float3 V, float nd
         const float vden = lerp(2.0 * ndlTrue * ndv, ndlTrue + ndv, aw);
         const float dv = aw2 / max(1e-6, 3.14159265 * d * d * 2.0 * vden);
         c3 += F * (dv * specScale * ndlTrue) * E;
+        // The clear coat (kCoatRoughness): its own lobe over the base, widened by the emitter as the base's is.
+        if (coat > 0.0)
+        {
+            const float cw = saturate(kCoatRoughness * kCoatRoughness + L.radius / (2.0 * max(dist, 1e-3)));
+            const float cw2 = cw * cw;
+            const float dc = ndh * ndh * (cw2 - 1.0) + 1.0;
+            const float vdc = lerp(2.0 * ndlTrue * ndv, ndlTrue + ndv, cw);
+            const float Fc = (kCoatF0 + (1.0 - kCoatF0) * (x2 * x2 * x)) * coat;
+            c3 = c3 * (1.0 - Fc) + E * (Fc * cw2 / max(1e-6, 3.14159265 * dc * dc * 2.0 * vdc) * specScale * ndlTrue);
+        }
     }
     if (L.flags & kLightShadows) shadowed += c3;
     else open += c3;
 }
 
 void ShadeLightCluster(uint ci, float3 p, float3 N, float3 V, float ndv, float3 diffuseCol, float3 f0, float a,
-                       float specScale, float wrap, float trans, bool withSpec, inout float3 shadowed, inout float3 open)
+                       float specScale, float wrap, float trans, bool withSpec, float coat, inout float3 shadowed,
+                       inout float3 open)
 {
     const uint2 c = gClusters[ci];
     for (uint k = 0; k < c.y; ++k)
     {
         const uint li = gLightIndex[c.x + k];
-        ShadeLocalLight(li, LightLoad(li), p, N, V, ndv, diffuseCol, f0, a, specScale, wrap, trans, withSpec, shadowed,
-                        open);
+        ShadeLocalLight(li, LightLoad(li), p, N, V, ndv, diffuseCol, f0, a, specScale, wrap, trans, withSpec, coat,
+                        shadowed, open);
     }
 }
 
 float3 LocalLights(float3 p, float3 N, float3 V, float3 diffuseCol, float3 f0, float a, float specScale, float2 px,
-                   float wrap, float trans, bool withSpec)
+                   float wrap, float trans, bool withSpec, float coat)
 {
     if (gLightsOn < 0.5) return float3(0.0, 0.0, 0.0);
     const uint ci = LightCluster(px, dot(p - gCamPos, gCamFwd), gClusterParams);
@@ -282,13 +301,14 @@ float3 LocalLights(float3 p, float3 N, float3 V, float3 diffuseCol, float3 f0, f
         const uint cu = WaveReadLaneFirst(ci);   // wave-uniform
         [branch] if (cu == ci)
         {
-            ShadeLightCluster(cu, p, N, V, ndv, diffuseCol, f0, a, specScale, wrap, trans, withSpec, shadowed, open);
+            ShadeLightCluster(cu, p, N, V, ndv, diffuseCol, f0, a, specScale, wrap, trans, withSpec, coat, shadowed,
+                              open);
             done = true;
         }
     }
 #endif
     [branch] if (!done)
-        ShadeLightCluster(ci, p, N, V, ndv, diffuseCol, f0, a, specScale, wrap, trans, withSpec, shadowed, open);
+        ShadeLightCluster(ci, p, N, V, ndv, diffuseCol, f0, a, specScale, wrap, trans, withSpec, coat, shadowed, open);
 #ifdef BLEND
     const float vis = 1.0;
 #else
@@ -323,7 +343,7 @@ cbuffer ObjectCB : register(b1)
     // is a reason to stop having one draw per object.
     float4 gBaseColourFactor;
     float4 gPbrA;    // roughness, metallic, normalScale, occlusionStrength
-    float4 gPbrB;    // emissiveStrength, alphaCutoff, -, -
+    float4 gPbrB;    // emissiveStrength, alphaCutoff, clearCoat, -
     // Last frame's transform, bound only when gObjectMoved says it differs:
     // where this object's surface WAS, for the motion target.
     row_major float4x4 gPrevObjectXform;
@@ -684,7 +704,7 @@ void AerialAt(float3 wpos, float2 px, out float3 tr, out float3 inscatter)
 }
 
 // What the deferred local lights' pass needs of a surface (GBUF; PSDeferredLights): its shading normal, its kind
-// (0 no surface, 1 opaque, 2 a foliage card) and roughness, albedo and metallic. Packed into two 32-bit targets
+// (0 no surface, 1 opaque, 2 a foliage card, 3 opaque under a clear coat) and roughness, albedo and metallic. Packed into two 32-bit targets
 // (kGbufFormats): every byte is written per FRAGMENT, foliage's overdraw included - a third target with the aerial
 // transmittance (and the normal in half floats) cost the opaque world +3.8 ms in PIX's replay; the transmittance is
 // computed again where it is used (AerialAt).
@@ -950,7 +970,7 @@ float4 Shade(VSOut i, bool frontFace, out GBufOut g)
 #if defined(ALPHA_TEST)
         g.kind = 2.0;
 #else
-        g.kind = 1.0;
+        g.kind = gPbrB.z > 0.5 ? 3.0 : 1.0;   // 3: under a clear coat
 #endif
         g.rough = saturate(roughness);
         g.albedoMetal = float4(saturate(albedo), saturate(metallic));
@@ -962,11 +982,12 @@ float4 Shade(VSOut i, bool frontFace, out GBufOut g)
             const float3 lV    = normalize(gCamPos - i.wpos);
             const float  lspec = physical ? 1.0 : 3.14159265;
 #if defined(ALPHA_TEST)
-            localLight = LocalLights(i.wpos, N, lV, ldiff, lf0, la, lspec, i.pos.xy, kFoliageWrap, kFoliageTransmission, false);
+            localLight = LocalLights(i.wpos, N, lV, ldiff, lf0, la, lspec, i.pos.xy, kFoliageWrap, kFoliageTransmission, false,
+                                     0.0);
 #elif defined(BLEND)
-            localLight = LocalLights(i.wpos, N, lV, ldiff * coverage, lf0, la, lspec, i.pos.xy, 0.0, 0.0, true);
+            localLight = LocalLights(i.wpos, N, lV, ldiff * coverage, lf0, la, lspec, i.pos.xy, 0.0, 0.0, true, 0.0);
 #else
-            localLight = LocalLights(i.wpos, N, lV, ldiff, lf0, la, lspec, i.pos.xy, 0.0, 0.0, true);
+            localLight = LocalLights(i.wpos, N, lV, ldiff, lf0, la, lspec, i.pos.xy, 0.0, 0.0, true, saturate(gPbrB.z));
 #endif
         }
 #endif
@@ -1148,6 +1169,17 @@ float4 Shade(VSOut i, bool frontFace, out GBufOut g)
         float  vdh = saturate(dot(V, H));
         float3 spec = FresnelSchlick(f0, vdh) * DistributionGGX(ndh, a) * VisSmith(ndv, ndl, a);
 
+        // THE CLEAR COAT (kCoatRoughness): the sun's sharp highlight in the lacquer, and the share of the light it
+        // reflects (Fresnel at the view: it rises to a mirror at grazing angles) kept from the base below.
+        const float coat = saturate(gPbrB.z);
+        float coatSun = 0.0, coatKeep = 1.0;
+        if (coat > 0.0)
+        {
+            const float ca = max(0.002, kCoatRoughness * kCoatRoughness);
+            coatSun = coat * FresnelSchlick(kCoatF0.xxx, vdh).x * DistributionGGX(ndh, ca) * VisSmith(ndv, ndl, ca);
+            coatKeep = 1.0 - coat * FresnelSchlick(kCoatF0.xxx, ndv).x;
+        }
+
         // AMBIENT SPECULAR - the split sum. What the surface reflects of
         // everything that is not the sun, which until now was nothing at all:
         // a polished surface and a rough one differed only in the size of one
@@ -1167,6 +1199,12 @@ float4 Shade(VSOut i, bool frontFace, out GBufOut g)
             // is albedo*E rather than albedo/PI*E, so every specular term has
             // to carry the factor or the balance is off by PI.
             ambSpec = envRad * EnvBRDFApprox(f0, roughness, ndv) * kSpecScale * matAo;
+            if (coat > 0.0)
+            {
+                const float3 coatRad = gEnv.SampleLevel(gSampLinear, euv, kCoatRoughness * (gEnvMips - 1.0)).rgb;
+                ambSpec = ambSpec * coatKeep
+                        + coatRad * (coat * EnvBRDFApprox(kCoatF0.xxx, kCoatRoughness, ndv).x * kSpecScale * matAo);
+            }
         }
         gProbeAmbSpec = ambSpec;
 
@@ -1176,8 +1214,10 @@ float4 Shade(VSOut i, bool frontFace, out GBufOut g)
             + spec * kSpecScale * sunColour * ndl * vis
             + ambSpec;
 #else
-        lit = diffuseCol * (sunColour * ndl * vis + ambient * matAo)
-            + spec * kSpecScale * sunColour * ndl * vis
+        // (ambSpec has the coat's share already; the coat's highlight is uncoloured, as the lacquer is)
+        lit = (diffuseCol * (sunColour * ndl * vis + ambient * matAo)
+               + spec * kSpecScale * sunColour * ndl * vis) * coatKeep
+            + coatSun * kSpecScale * sunColour * ndl * vis
             + ambSpec;
 #endif
         lit += localLight;   // (computed above, before the sun and the sky)
@@ -1417,9 +1457,9 @@ float4 PSDeferredLights(float4 pos : SV_Position) : SV_Target
     const float3 ldiff = am.rgb * (1.0 - am.a) * (physical ? 1.0 / 3.14159265 : 1.0);
     const float la = max(0.002, roughness * roughness);
     const float lspec = physical ? 1.0 : 3.14159265;
-    const bool foliage = kind > 1.5;
+    const bool foliage = kind > 1.5 && kind < 2.5;
     const float3 L = LocalLights(p, N, V, ldiff, lf0, la, lspec, pos.xy, foliage ? kFoliageWrap : 0.0,
-                                 foliage ? kFoliageTransmission : 0.0, !foliage);
+                                 foliage ? kFoliageTransmission : 0.0, !foliage, kind > 2.5 ? 1.0 : 0.0);
     float3 tr = float3(1.0, 1.0, 1.0), inscatter;
     if (gAerial > 0.5)
     {
@@ -6146,7 +6186,7 @@ void Scene::RecordPass(ID3D12GraphicsCommandList* list, D3D12_CPU_DESCRIPTOR_HAN
                 m.baseColourFactor[0], m.baseColourFactor[1],
                 m.baseColourFactor[2], m.baseColourFactor[3],
                 m.roughness, m.metallic, m.normalScale, m.occlusionStrength,
-                m.emissiveStrength, m.alphaCutoff, 0.0f, 0.0f,
+                m.emissiveStrength, m.alphaCutoff, m.clearCoat, 0.0f,
             };
             list->SetGraphicsRoot32BitConstants(4, 12, pbr, 20);
         }
