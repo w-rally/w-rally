@@ -12,6 +12,17 @@ constexpr float kLiveryShift = 150;
 float g_videoOn = 0;   // the video window's fade in, 0..1 (once there is a frame, over ~300 ms)
 float g_stripeOn = 1;  // the video's stripe itself, 0..1: eased toward the screen's (~200 ms), so it fades in and out
 float g_liveryOn = 1;  // the signal and white stripes, 0..1: the same, for a screen without them (the Garage)
+double g_entrance = -1;  // when the menus' entrance began (ImGui's time; -1 none)
+bool g_entranceStripes = true;   // the entrance's stripes fall in too (the intro's), else they hold (the loading's)
+float g_lift = 0;        // the livery lifted out of the window, 0..1 (a stage's start)
+
+// A stripe `q` lifted up out of the window as far as the entrance has it not yet in (its start `delay` s in), and as
+// far as it is lifted out.
+void Drop(ImVec2 q[4], float H, float k, float delay)
+{
+    const float off = (H + 80 * k) * ((g_entranceStripes ? 1 - Entrance(delay) : 0.0f) + g_lift);
+    for (int i = 0; i < 4; ++i) q[i].y -= off;
+}
 
 // A screen's ground and its livery: the signal stripe and the white one beside it, each fading into the ground toward
 // the bottom as the video's window does, as far as `on` (0..1) shows them. `shift` (px at 1080p) moves them right.
@@ -21,8 +32,10 @@ void Livery(ImDrawList* d, float W, float H, float k, float shift, ImU32 ground,
     if (on <= 0.01f) return;
     ImVec2 q[4];
     Stripe(W, H, k, 1430, 220, shift, q);
+    Drop(q, H, k, 0.1f);
     FadeQuad(d, q, Alpha(kSignal, on), Alpha(ground, on));
     Stripe(W, H, k, 1690, 28, shift, q);
+    Drop(q, H, k, 0.0f);
     FadeQuad(d, q, Alpha(kInk, on), Alpha(ground, on));
 }
 
@@ -36,6 +49,7 @@ void VideoWindow(ImDrawList* d, float W, float H, float k, float shift, ImU32 gr
     if (stripe <= 0.01f) return;
     ImVec2 q[4];
     Stripe(W, H, k, 990, 400, shift, q);
+    Drop(q, H, k, 0.2f);
     const float see = float((ground >> IM_COL32_A_SHIFT) & 0xff) / 255 * stripe;
     FadeQuad(d, q, Alpha(kSurfaceOverlay, see), Alpha(kSurfaceBase, see));
     on *= stripe;
@@ -114,6 +128,19 @@ void Backdrop(ImDrawList* d, float W, float H, float k, ImU32 ground, const Vide
 }
 
 void HideVideoStripe() { g_stripeOn = 0; }
+
+void StartEntrance(bool stripes) { g_entrance = ImGui::GetTime(), g_entranceStripes = stripes; }
+
+void LiftLivery(float lift) { g_lift = lift; }
+
+float Entrance(float delay, float duration)
+{
+    if (g_entrance < 0) return 1;
+    const double t = (ImGui::GetTime() - g_entrance) * 1.25;   // (its delays and durations played 25 % faster)
+    if (t > 3) return g_entrance = -1, 1.0f;   // (long over: none)
+    const float x = std::clamp(static_cast<float>(t - delay) / duration, 0.0f, 1.0f);
+    return 1 - (1 - x) * (1 - x) * (1 - x);
+}
 
 void Plate(ImDrawList* d, ImVec2 a, float w, float h, float cut, ImU32 col)
 {

@@ -28,6 +28,7 @@
 #include "assets/fences.h"
 #include "assets/catalog.h"
 #include "assets/legacy_stage.h"
+#include "assets/splash.h"
 #include "camera/camera.h"
 #include "camera/replay_camera.h"
 #include "core/math.h"
@@ -379,11 +380,65 @@ StageEnd RunStage(Shell& sh, const Options& o, bool fromMenu, std::string& error
     const input::Bindings& keys = sh.settings.keys;   // (Settings -> Controls: changes apply at once)
     // The engine's rev limiter for the HUD's shift lights: its EngineInfo, at the car's load (from the physics' thread).
     std::atomic<float> rpmLimit{0};
+    // The loading screen (ui::DrawLoading) up while the stage loads, a frame drawn between its steps: in from the left
+    // first (~0.36 s), at the end the livery lifted out into the stage. False: the window was closed.
+    ui::LoadingInfo loadingInfo;
+    {
+        auto caps = [](std::string s) {
+            for (char& c : s)
+                if (c >= 'a' && c <= 'z') c = static_cast<char>(c - 'a' + 'A');
+            return s;
+        };
+        static const char* const kDamage[4] = {"OFF", "SAFE", "REDUCED", "REALISTIC"};
+        const uint32_t options = o.session.physics.settings;
+        loadingInfo.stage = caps(!o.stageTitle.empty() ? o.stageTitle : o.stage);
+        loadingInfo.facts = caps(!o.stageFacts.empty() ? o.stageFacts : o.session.physics.surface);
+        loadingInfo.car = caps(!o.carName.empty() ? o.carName : std::filesystem::path(o.session.physics.sgc).stem().string());
+        loadingInfo.weather = caps(!o.weatherName.empty() ? o.weatherName : !o.weather.empty() ? o.weather : "stage default");
+        loadingInfo.damage = options & 0x10u ? kDamage[std::min(3u, options >> 8 & 0xffu)] : "";
+        loadingInfo.setup = caps(!o.setupName.empty() ? o.setupName : o.session.physics.setup.empty() ? "default" : "its own");
+    }
+    // The stage's splash in the stripe: a UI texture (the scenes come and go under it), released with the run.
+    struct Splash {
+        render::Renderer& r;
+        iface::TextureHandle t = 0;
+        ~Splash() { if (t) r.Api()->releaseTexture(r.Instance(), t); }
+    } splash{renderer};
+    std::string splashPath = o.splash;
+    if (splashPath.empty()) {   // a command line's: Tracks.ini's, by the stage's map
+        char v[512] = {};
+        const std::string sec = "Map" + std::to_string(rules::StageMap(o.stage));
+        GetPrivateProfileStringA(sec.c_str(), "SplashScreen", "", v, sizeof v, (o.game + "\\Maps\\Tracks.ini").c_str());
+        splashPath = v;
+        if (splashPath.size() >= 2 && splashPath.front() == '"') splashPath = splashPath.substr(1, splashPath.find('"', 1) - 1);
+    }
+    if (!splashPath.empty()) {
+        formats::Image img;
+        float aspect = 1;
+        if (const std::string e = assets::ReadSplash(o.game, splashPath, img, aspect); !e.empty()) {
+            std::printf("the stage's splash: %s\n", e.c_str());
+        } else if ((splash.t = renderer.CreateTextureRgba(img.rgba.data(), uint32_t(img.width), uint32_t(img.height)))) {
+            loadingInfo.splash = {splash.t, int(std::lround(img.height * aspect)), img.height};   // (its shown shape)
+        }
+    }
+    auto loadingFor = [&](int step, float seconds, float leaveFrom, float leaveTo) {
+        const auto t0 = std::chrono::steady_clock::now();
+        do {
+            const float t = std::chrono::duration<float>(std::chrono::steady_clock::now() - t0).count(), u = seconds > 0 ? std::min(1.0f, t / seconds) : 1;
+            const float leave = leaveFrom + (leaveTo - leaveFrom) * u * u;
+            if (!MenuFrame(sh, [&] { ui::DrawLoading(ui, loadingInfo, step, leave, sh.width, sh.height); }, [](iface::FrameDesc&) {}))
+                return false;
+            if (u >= 1) return true;
+        } while (true);
+    };
+    ui::StartMenuEntrance(false);
+    if (!loadingFor(0, 0.36f, 0, 0)) return StageEnd::Quit;
     // The modules hear the physics on the bus (before what it connects, which goes first).
     signals::Bus bus;
     // The physics, through the session (a module DLL in modules/physics: --physics, "rbr" by default).
     session::Session sim;
     if (const std::string e = sim.Open(o.session); !e.empty()) return fail(e);
+    if (!loadingFor(1, 0, 0, 0)) return StageEnd::Quit;
     // The sound plays from its device's thread, a few ticks behind the physics.
     std::string mixPath;   // the mix file, watched ("" none)
     FILETIME mixWritten{};
@@ -432,6 +487,7 @@ StageEnd RunStage(Shell& sh, const Options& o, bool fromMenu, std::string& error
     const std::vector<phys::data::RecMesh> collision =
         phys::data::CarCollisionMeshes(phys::data::ReadSgcCollision(o.session.physics.sgc));
 
+    if (!loadingFor(2, 0, 0, 0)) return StageEnd::Quit;
     std::vector<char> bytes;
     // An RBR .lbs instead of an .ngg: imported here (assets/legacy_stage.h), its textures for the road's wetness. Its
     // cards are lit by the renderer's legacy profile (B unless NGG_LEGACY_PROFILE says; the Debug menu switches it).
@@ -508,6 +564,7 @@ StageEnd RunStage(Shell& sh, const Options& o, bool fromMenu, std::string& error
         else
             std::printf("movable objects: the .ngg has no object keys (NGGK) - reconvert it; nothing will move\n");
     }
+    if (!loadingFor(3, 0, 0, 0)) return StageEnd::Quit;
     render::StageObjects stageObjects;
     assets::CarRender car;
     std::vector<physics::Part> parts;   // the car's parts that can come loose, as the physics loaded them
@@ -522,7 +579,13 @@ StageEnd RunStage(Shell& sh, const Options& o, bool fromMenu, std::string& error
     if (!collision.empty()) fences.SetCar(collision[0]);
     std::vector<iface::InstanceUpdate> instances;   // the frame's: the car's, the fences' that moved
 
+    if (!loadingFor(4, 0, 0, 0)) return StageEnd::Quit;
     if (const std::string e = sim.Start(); !e.empty()) return fail(e);
+    if (!loadingFor(ui::kLoadingSteps, 0, 0, 0)) return StageEnd::Quit;
+    // Loaded: the loading screen stays over the stage's first frames (the first takes its time), then lifts off it -
+    // the livery up and out, the rest faded (from the second frame, over 0.4 s).
+    std::chrono::steady_clock::time_point leaveFrom{};
+    int stageFrames = 0;
 
     // The renderer's switches: T its TAA, O its ambient occlusion (quality medium / low), L its shadows, K its ray
     // tracing (off: the cascaded shadow maps, no RT AO), V its debug views, F1 its readout. P a pause (the physics, a
@@ -854,6 +917,9 @@ StageEnd RunStage(Shell& sh, const Options& o, bool fromMenu, std::string& error
             codriver.Upcoming(snap.distance, std::fabs(snap.dash.speed), o.pacenoteNext, current, next);
             ui::DrawPacenotes(ui, current, next, shownWidth, shownHeight);
         }
+        if (++stageFrames <= 2) leaveFrom = std::chrono::steady_clock::now();   // (the first frames: the screen held)
+        if (const float leave = std::chrono::duration<float>(std::chrono::steady_clock::now() - leaveFrom).count() / 0.4f; leave < 1)
+            ui::DrawLoading(ui, loadingInfo, ui::kLoadingSteps, stageFrames <= 2 ? 0.0f : leave * leave, shownWidth, shownHeight);
         {   // the readout: last frame's numbers (the renderer's are read after its frame)
             LARGE_INTEGER tn;
             QueryPerformanceCounter(&tn);
@@ -1204,8 +1270,9 @@ std::vector<std::string> QuickArgs(const Settings& s, const assets::Catalog& cat
 
 enum class Screen { Main, Quick, Settings };
 
-// The main menu and its screens until Exit or the window closes. Returns the exit code.
-int Menus(Shell& sh, std::string note)
+// The main menu and its screens until Exit or the window closes. Returns the exit code. `intro`: the game's start - the
+// intro up while the content loads (a step a frame), then the menu's entrance.
+int Menus(Shell& sh, std::string note, bool intro)
 {
     assets::Catalog catalog;
     auto scan = [&] {
@@ -1213,21 +1280,55 @@ int Menus(Shell& sh, std::string note)
         std::printf("content: %zu stages, %zu cars%s%s\n", catalog.stages.size(), catalog.cars.size(), e.empty() ? "" : " - ", e.c_str());
         return e;
     };
-    std::string scanned = scan();
-    if (note.empty()) note = scanned;
+    std::string scanned;
     Screen screen = Screen::Main;
     std::string settingsLog;
     Settings atOpen;   // the settings as the Settings screen opened (the content changed: scanned again)
     // The main menu's video loop (content/video/menu.mp4; none: the window dark).
     ui::MenuVideo video;
-    if (const std::string e = video.Open(WRallyFile("content/video/menu.mp4")); !e.empty()) std::printf("%s\n", e.c_str());
     Showroom showroom;
-    showroom.Prepare(sh.renderer);   // (its scene's load stalls the menus once, now)
     struct Unload {   // (the showroom's scene gone before the renderer)
         Showroom& s;
         render::Renderer& r;
         ~Unload() { s.Unload(r); }
     } unloadShowroom{showroom, sh.renderer};
+    // The loading: the content scanned, the video opened, the showroom's scene loaded (its load stalls once, now).
+    static const char* const kDoing[] = {"READING THE STAGES AND THE CARS", "OPENING THE MENU'S VIDEO", "SETTING UP THE GARAGE"};
+    constexpr int kSteps = int(std::size(kDoing));
+    auto load = [&](int step) {
+        if (step == 0) scanned = scan();
+        else if (step == 1) {
+            if (const std::string e = video.Open(WRallyFile("content/video/menu.mp4")); !e.empty()) std::printf("%s\n", e.c_str());
+        } else showroom.Prepare(sh.renderer);
+    };
+    if (!intro) {
+        for (int i = 0; i < kSteps; ++i) load(i);
+    } else {
+        // The intro drawn, then a step loaded - each one's frame up while it runs; held 4 s at least (Enter, Esc or a
+        // click skip once it is loaded), then 0.4 s out to the ground, and the menu's entrance.
+        const auto t0 = std::chrono::steady_clock::now();
+        auto since = [](auto t) { return std::chrono::duration<float>(std::chrono::steady_clock::now() - t).count(); };
+        int done = 0;
+        float fadeAt = -1;   // when the fade out began (s since t0; -1 not yet)
+        for (;;) {
+            const float t = since(t0);
+            const bool ready = done == kSteps;
+            bool skip = false;
+            const float alpha = fadeAt < 0 ? 1.0f : std::max(0.0f, 1 - (t - fadeAt) / 0.4f);
+            if (!MenuFrame(sh, [&] { skip = ui::DrawIntro(sh.ui, sh.width, sh.height, float(done) / kSteps, ready ? "READY" : kDoing[done], ready, alpha); },
+                           [](iface::FrameDesc&) {}))
+                return 0;
+            if (!ready) {
+                load(done++);
+                continue;
+            }
+            if (fadeAt < 0 && (skip || t >= 4.0f)) fadeAt = t;
+            if (fadeAt >= 0 && t - fadeAt >= 0.4f) break;
+        }
+        sh.window.TakeEscape(), sh.window.TakeKeyDown();   // (a skip's key is not the menu's)
+        ui::StartMenuEntrance();
+    }
+    if (note.empty()) note = scanned;
     for (;;) {
         video.Update(sh.renderer);   // (outside the frame: the upload is its own)
         bool start = false, exit = false;
@@ -1296,6 +1397,23 @@ int Menus(Shell& sh, std::string note)
         o.stageTitle = catalog.FindStage(sh.settings.stage)->title;
         o.carName = catalog.FindCar(sh.settings.car)->name;
         o.weatherName = sh.settings.weatherCustom ? "custom weather" : sh.settings.weather.empty() ? "stage default" : sh.settings.weather;
+        {   // the loading screen's line: the country, the surface, the length (as the register knows the track)
+            const assets::Stage* st = catalog.FindStage(sh.settings.stage);
+            std::string facts;
+            if (const assets::TrackInfo* t = catalog.trackRegister.Find(st->map)) {
+                o.splash = t->splash;
+                for (const std::string& s : {t->country, t->surface}) facts += s.empty() ? "" : (facts.empty() ? "" : " \xC2\xB7 ") + s;
+                if (t->lengthKm > 0) {
+                    char km[32];
+                    std::snprintf(km, sizeof km, "%.1f km", t->lengthKm);
+                    facts += (facts.empty() ? "" : " \xC2\xB7 ") + std::string(km);
+                }
+            }
+            o.stageFacts = facts;
+            o.setupName = "default";
+            for (const assets::Setup& su : catalog.SetupsFor(*catalog.FindCar(sh.settings.car)))
+                if (su.path == sh.settings.setup) o.setupName = su.name;
+        }
         std::string line;
         for (const std::string& a : args) line += (line.empty() ? "" : " ") + a;
         std::printf("quick rally: %s\n", line.c_str());
@@ -1479,10 +1597,10 @@ int RunGame(const std::vector<std::string>& args)
         while ((end = RunStage(sh, o, false, error)) == StageEnd::Restart) {}
         if (end == StageEnd::Quit) return 0;
         if (end == StageEnd::Failed) return 3;
-        return Menus(sh, "");
+        return Menus(sh, "", false);
     }
     if (const std::string e = OpenShell(sh, "wrenderer"); !e.empty()) return std::fprintf(stderr, "%s\n", e.c_str()), 3;
-    return Menus(sh, "");
+    return Menus(sh, "", true);
 }
 
 } // namespace wrally::app

@@ -9,12 +9,15 @@
 #include <string>
 #include <vector>
 
+#include "imgui.h"
 #include "physics/physics.h"
 #include "rules/stage.h"
 #include "ui/imgui_layer.h"
 
 namespace wrally::ui {
 
+// A corner's colour by its grade: 1 (flat) green, 4 yellow (the warning's), 7 (hairpin) red (the critical's).
+ImU32 CornerColour(int grade);
 // Speed, gear and the shift lights: `rpmLimit` the engine's rev limiter (0 unknown: 8000), the lights lit from 60 % of
 // it, the last two in the signal colour, the whole bar so at the limiter.
 void DrawDashboard(const ImGuiLayer& ui, const physics::Dashboard& d, float rpmLimit, int width, int height);

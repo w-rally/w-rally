@@ -41,6 +41,14 @@ void FadeQuad(ImDrawList* d, const ImVec2 q[4], ImU32 top, ImU32 bottom);
 void Backdrop(ImDrawList* d, float W, float H, float k, ImU32 ground, const VideoFrame& video, bool window, bool stripes = true);
 // The video's stripe gone at once (a screen over a stage, where it never was).
 void HideVideoStripe();
+// The menus' entrance after the intro: from now the livery's stripes fall in from the top (white, signal, the video's,
+// 0.1 s apart; `stripes` false: they hold where they are) and the screen's column slides in from the left (its parts
+// by Entrance's delays).
+void StartEntrance(bool stripes = true);
+// The livery lifted up out of the window, 0 (in place) .. 1 (gone) - into a stage.
+void LiftLivery(float lift);
+// How far a part of the entrance starting `delay` s into it is in, 0..1 eased (1: no entrance, or over).
+float Entrance(float delay, float duration = 0.6f);
 // A row's plate from `a`, `w` x `h`, its right edge cut in by `cut`.
 void Plate(ImDrawList* d, ImVec2 a, float w, float h, float cut, ImU32 col);
 // The selection's marker, `w` x `h` and slanted, at `x` centred on `mid`: `on` 0..1 slides it in from 12 px left.

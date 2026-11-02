@@ -9,6 +9,7 @@
 
 #include "assets/car_lights.h"
 #include "imgui.h"
+#include "ui/hud.h"
 #include "ui/imgui_layer.h"
 #include "ui/menu_look.h"
 #include "wrally/iface/renderer.h"
@@ -168,9 +169,12 @@ MainChoice MainMenu(const ImGuiLayer& ui, int width, int height, const std::stri
         ImFont* mark = ui.Wordmark();
         ImFont* item = ui.MenuItem();
         ImFont* text = ui.MenuText();
+        // The entrance after the intro: each part in from the left as it fades in (1: in place).
+        auto inX = [&](float e) { return -90 * k * (1 - e); };
+        const float eMark = Entrance(0.5f);
         const float wr = mark->CalcTextSizeA(72 * k, FLT_MAX, 0, "W-R").x;
-        d->AddText(mark, 72 * k, ImVec2(x0, y0), kInk, "W-R");
-        d->AddText(mark, 72 * k, ImVec2(x0 + wr, y0), kInkMuted, "ally");
+        d->AddText(mark, 72 * k, ImVec2(x0 + inX(eMark), y0), Alpha(kInk, eMark), "W-R");
+        d->AddText(mark, 72 * k, ImVec2(x0 + wr + inX(eMark), y0), Alpha(kInkMuted, eMark), "ally");
 
         // The rows under the wordmark, no overline over them: the main menu needs no name.
         const float rowsY = y0 + 72 * k + 116 * k, pitch = (kRowH + kRowGap) * k;
@@ -206,35 +210,40 @@ MainChoice MainMenu(const ImGuiLayer& ui, int width, int height, const std::stri
         }
         g_mainPlate += (g_mainAt - g_mainPlate) * ease;
         if (std::fabs(g_mainAt - g_mainPlate) < 0.002f) g_mainPlate = float(g_mainAt);
-        Plate(d, ImVec2(x0, rowsY + g_mainPlate * pitch), kRowW * k, kRowH * k, kCut * k, kSelect);
+        auto eRow = [&](int i) { return Entrance(0.55f + 0.05f * i); };
+        const float ePlate = eRow(g_mainAt);
+        Plate(d, ImVec2(x0 + inX(ePlate), rowsY + g_mainPlate * pitch), kRowW * k, kRowH * k, kCut * k, Alpha(kSelect, ePlate));
 
         for (int i = 0; i < kMainCount; ++i) {
             const MainItem& m = kMainItems[i];
             float& on = g_mainOn[i];
             on += ((i == g_mainAt ? 1.0f : 0.0f) - on) * ease;
-            const float y = rowsY + i * pitch, mid = y + kRowH * k * 0.5f;
-            Marker(d, x0 + 12 * k, mid, 12 * k, 34 * k, on, k);
+            const float y = rowsY + i * pitch, mid = y + kRowH * k * 0.5f, e = eRow(i), x = x0 + inX(e);
+            Marker(d, x + 12 * k, mid, 12 * k, 34 * k, on * e, k);
             const ImU32 ink = m.desc ? Lerp(kInkSecondary, kInk, on) : Alpha(kInkMuted, 0.55f);
-            Tracked(d, item, 34 * k, ImVec2(x0 + 46 * k, mid - 34 * k * 0.5f), ink, m.label, 0.02f);
+            Tracked(d, item, 34 * k, ImVec2(x + 46 * k, mid - 34 * k * 0.5f), Alpha(ink, e), m.label, 0.02f);
         }
+        const float eFoot = Entrance(0.9f);
 
         // What the selected one does, then what is missing (the note), in the signal.
         float y = rowsY + kMainCount * pitch - kRowGap * k + 24 * k;
         const float wrap = 560 * k;
         if (const char* desc = kMainItems[g_mainAt].desc) {
-            d->AddText(text, 23 * k, ImVec2(x0 + 46 * k, y), kInkSecondary, desc, nullptr, wrap);
+            d->AddText(text, 23 * k, ImVec2(x0 + 46 * k + inX(eFoot), y), Alpha(kInkSecondary, eFoot), desc, nullptr, wrap);
             y += std::max(64 * k, text->CalcTextSizeA(23 * k, FLT_MAX, wrap, desc).y);
         }
-        if (!note.empty()) d->AddText(text, 23 * k, ImVec2(x0 + 46 * k, y + 8 * k), kSignal, note.c_str(), nullptr, wrap);
+        if (!note.empty()) d->AddText(text, 23 * k, ImVec2(x0 + 46 * k + inX(eFoot), y + 8 * k), Alpha(kSignal, eFoot), note.c_str(), nullptr, wrap);
 
-        // The keys, at the column's foot.
+        // The keys, at the column's foot (the entrance: last, the keys' chips as they are - KeyHint has no fade).
         const float footY = H - 80 * k - 34 * k;
-        float x = x0;
-        x += KeyHint(d, text, k, ImVec2(x, footY), "W S", "MOVE") + 24 * k;
-        KeyHint(d, text, k, ImVec2(x, footY), "ENTER", "SELECT");
+        if (eFoot > 0.99f) {
+            float x = x0;
+            x += KeyHint(d, text, k, ImVec2(x, footY), "W S", "MOVE") + 24 * k;
+            KeyHint(d, text, k, ImVec2(x, footY), "ENTER", "SELECT");
+        }
 
         // The credits the upscalers' licences ask for, under the keys, ink-muted.
-        d->AddText(text, 15 * k, ImVec2(x0, footY + 48 * k), kInkMuted,
+        d->AddText(text, 15 * k, ImVec2(x0 + inX(eFoot), footY + 48 * k), Alpha(kInkMuted, eFoot),
                    "Upscaling: NVIDIA\xC2\xAE DLSS \xC2\xB7 AMD FidelityFX\xE2\x84\xA2 Super Resolution");
     }
     ImGui::End();
@@ -735,6 +744,156 @@ SettingsChoice SettingsUi(const ImGuiLayer& ui, app::Settings& s, bool inStage, 
 }
 
 bool CapturingKey() { return g_capturing >= 0 || ImGui::GetIO().WantTextInput; }
+
+void StartMenuEntrance(bool stripes) { StartEntrance(stripes); }
+
+void DrawLoading(const ImGuiLayer& ui, const LoadingInfo& info, int step, float leave, int width, int height)
+{
+    static const char* const kSteps[kLoadingSteps] = {"THE PHYSICS", "THE SOUND", "THE STAGE", "THE CAR", "THE START LINE"};
+    const float k = std::min(height / 1080.0f, width / 1280.0f), W = float(width), H = float(height);
+    auto P = [&](float x, float y) { return ImVec2(x * k, y * k); };
+    ImGui::SetNextWindowPos(ImVec2(0, 0));
+    ImGui::SetNextWindowSize(ImVec2(W, H));
+    constexpr ImGuiWindowFlags kFull = ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings |
+                                       ImGuiWindowFlags_NoNav | ImGuiWindowFlags_NoBackground | ImGuiWindowFlags_NoInputs;
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0);
+    if (ImGui::Begin("Loading", nullptr, kFull)) {
+        ImDrawList* d = ImGui::GetWindowDrawList();
+        ImFont* mark = ui.Wordmark();
+        ImFont* item = ui.MenuItem();
+        ImFont* text = ui.MenuText();
+        // The livery held from Quick rally, the stage's splash in the video's stripe (none: dark); lifted out at the end.
+        LiftLivery(leave);
+        Backdrop(d, W, H, k, Alpha(kSurfaceBase, 1 - leave), info.splash, true);   // (the ground fading off the stage)
+        LiftLivery(0);
+        // Each part in from the left as the entrance has it, out to black as the stage comes.
+        const float out = 1 - leave;
+        auto inX = [&](float e) { return -90 * k * (1 - e); };
+        const float e0 = Entrance(0.0f), e1 = Entrance(0.08f), e2 = Entrance(0.16f), e3 = Entrance(0.24f);
+        const float x0 = 80;
+        Tracked(d, text, 17 * k, ImVec2(x0 * k + inX(e0), 80 * k), Alpha(kInkMuted, e0 * out), "W-RALLY \xC2\xB7 QUICK RALLY \xC2\xB7 TO THE START LINE", 0.16f);
+        d->AddText(mark, 72 * k, ImVec2(x0 * k + inX(e0), 104 * k), Alpha(kInk, e0 * out), info.stage.c_str());
+        if (!info.facts.empty()) Tracked(d, item, 22 * k, ImVec2(x0 * k + inX(e1), 196 * k), Alpha(kInkSecondary, e1 * out), info.facts.c_str(), 0.02f);
+        d->AddRectFilled(ImVec2(x0 * k + inX(e1), 248 * k), ImVec2((x0 + 860) * k + inX(e1), 249 * k), Alpha(kLine, e1 * out));
+        const std::pair<const char*, const std::string*> facts[4] = {
+            {"CAR", &info.car}, {"WEATHER", &info.weather}, {"DAMAGE", &info.damage}, {"CAR SETUP", &info.setup}};
+        for (int i = 0; i < 4; ++i) {
+            const float fx = (x0 + i * 220) * k + inX(e2);
+            Tracked(d, text, 13 * k, ImVec2(fx, 276 * k), Alpha(kInkMuted, e2 * out), facts[i].first, 0.16f);
+            d->PushClipRect(ImVec2(fx, 270 * k), ImVec2(fx + 210 * k, 340 * k), true);
+            Tracked(d, item, 24 * k, ImVec2(fx, 296 * k), Alpha(kInk, e2 * out), facts[i].second->empty() ? "-" : facts[i].second->c_str(), 0.02f);
+            d->PopClipRect();
+        }
+
+        // The co-driver's calls: the grades' colours, as the HUD has them.
+        {
+            const float cx = x0 * k + inX(e3), cy = 396 * k;
+            d->AddRectFilled(ImVec2(cx, cy), ImVec2(cx + 860 * k, cy + 140 * k), Alpha(kSurfaceRaised, e3 * out));
+            Tracked(d, text, 17 * k, ImVec2(cx + 28 * k, cy + 22 * k), Alpha(kInkMuted, e3 * out), "THE CO-DRIVER'S CALLS", 0.16f);
+            for (int g = 1; g <= 7; ++g) {
+                const ImVec2 a(cx + (28 + (g - 1) * 54) * k, cy + 66 * k);
+                d->AddRectFilled(a, ImVec2(a.x + 44 * k, a.y + 44 * k), Alpha(CornerColour(g), e3 * out));
+                const char n[2] = {char('0' + g), 0};
+                const float nw = mark->CalcTextSizeA(26 * k, FLT_MAX, 0, n).x;
+                d->AddText(mark, 26 * k, ImVec2(a.x + (44 * k - nw) * 0.5f, a.y + 4 * k), Alpha(kSurfaceBase, e3 * out), n);
+            }
+            d->AddText(text, 21 * k, ImVec2(cx + (28 + 7 * 54 + 14) * k, cy + 64 * k), Alpha(kInkSecondary, e3 * out),
+                       "1 flat out, 7 a hairpin - green to red on the HUD, with the arrow the corner's way.", nullptr, 440 * k);
+        }
+
+        // The steps, each lit as it is done, the one loading now brighter; the bar.
+        const float sy = H - 72 * k - 3 * k - 16 * k - 17 * k, e4 = Entrance(0.3f);
+        float x = x0 * k + inX(e4);
+        for (int i = 0; i < kLoadingSteps; ++i) {
+            const ImU32 c = i < step ? kInk : i == step ? kInkSecondary : kLineStrong;
+            x += Tracked(d, text, 14 * k, ImVec2(x, sy), Alpha(c, e4 * out), kSteps[i], 0.16f) + 32 * k;
+        }
+        const float bx0 = x0 * k + inX(e4), bx1 = W - x0 * k, by = H - 72 * k - 3 * k;
+        d->AddRectFilled(ImVec2(bx0, by), ImVec2(bx1, by + 3 * k), Alpha(kLine, e4 * out));
+        d->AddRectFilled(ImVec2(bx0, by), ImVec2(bx0 + (bx1 - bx0) * std::min(1.0f, float(step) / kLoadingSteps), by + 3 * k),
+                         Alpha(kSignal, e4 * out));
+    }
+    ImGui::End();
+    ImGui::PopStyleVar(2);
+}
+
+bool DrawIntro(const ImGuiLayer& ui, int width, int height, float progress, const char* doing, bool ready, float alpha)
+{
+    const bool skip = ImGui::IsKeyPressed(ImGuiKey_Enter, false) || ImGui::IsKeyPressed(ImGuiKey_Escape, false) ||
+                      ImGui::IsKeyPressed(ImGuiKey_Space, false) || ImGui::IsMouseClicked(ImGuiMouseButton_Left);
+    const float k = std::min(height / 1080.0f, width / 1280.0f), W = float(width), H = float(height), cx = W * 0.5f;
+    ImGui::SetNextWindowPos(ImVec2(0, 0));
+    ImGui::SetNextWindowSize(ImVec2(W, H));
+    constexpr ImGuiWindowFlags kFull = ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings |
+                                       ImGuiWindowFlags_NoNav | ImGuiWindowFlags_NoBackground | ImGuiWindowFlags_NoInputs;
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0);
+    if (ImGui::Begin("Intro", nullptr, kFull)) {
+        ImDrawList* d = ImGui::GetWindowDrawList();
+        ImFont* big = ui.HudDisplay();
+        ImFont* item = ui.MenuItem();
+        ImFont* text = ui.MenuText();
+        auto a = [&](ImU32 c) { return Alpha(c, alpha); };
+        d->AddRectFilled(ImVec2(0, 0), ImVec2(W, H), kSurfaceBase);   // (the ground stays: the menu's comes after)
+        auto centred = [&](ImFont* f, float size, float y, ImU32 col, const char* s, float spacing) {
+            Tracked(d, f, size, ImVec2(cx - Tracked(nullptr, f, size, ImVec2(), 0, s, spacing) * 0.5f, y), col, s, spacing);
+        };
+
+        // The wordmark, its livery under it.
+        const float ms = 132 * k, wr = big->CalcTextSizeA(ms, FLT_MAX, 0, "W-R").x, wa = big->CalcTextSizeA(ms, FLT_MAX, 0, "ally").x;
+        const float mx = cx - (wr + wa) * 0.5f, my = 230 * k;
+        d->AddText(big, ms, ImVec2(mx, my), a(kInk), "W-R");
+        d->AddText(big, ms, ImVec2(mx + wr, my), a(kInkMuted), "ally");
+        auto bar = [&](float x, float w, ImU32 col) {
+            const float y = 420 * k, h = 6 * k, lean = h * kTanStripe;
+            d->AddQuadFilled(ImVec2(x + lean, y), ImVec2(x + w + lean, y), ImVec2(x + w, y + h), ImVec2(x, y + h), a(col));
+        };
+        bar(cx - 71 * k, 120 * k, kSignal);
+        bar(cx + 55 * k, 16 * k, kInk);
+
+        // The pre-alpha notice.
+        {
+            const ImU32 kWarn = IM_COL32(255, 194, 26, 255);
+            const float nw = 760 * k, nx = cx - nw * 0.5f, ny = 490 * k, nh = 148 * k;
+            d->AddRectFilled(ImVec2(nx, ny), ImVec2(nx + nw, ny + nh), a(kSurfaceRaised));
+            d->AddRectFilled(ImVec2(nx, ny), ImVec2(nx + 4 * k, ny + nh), a(kWarn));
+            Tracked(d, text, 17 * k, ImVec2(nx + 28 * k, ny + 20 * k), a(kWarn), "PRE-ALPHA", 0.16f);
+            d->AddText(text, 21 * k, ImVec2(nx + 28 * k, ny + 50 * k), a(kInkSecondary),
+                       "An early build: things are missing, things will change, and some will break. Not for distribution.",
+                       nullptr, nw - 56 * k);
+            d->AddText(text, 21 * k, ImVec2(nx + 28 * k, ny + 98 * k), a(kInkSecondary),
+                       "W-Rally plays Richard Burns Rally's stages and cars: it needs your own copy of the game.", nullptr, nw - 56 * k);
+        }
+
+        // The upscalers whose licences ask to be named: their names on plates, until their brand kits' logos.
+        {
+            const float ly = H - 300 * k;
+            const char* names[2] = {"NVIDIA\xC2\xAE DLSS", "AMD FidelityFX\xE2\x84\xA2 Super Resolution"};
+            float widths[2], total = 48 * k;
+            for (int i = 0; i < 2; ++i) total += widths[i] = std::max(300 * k, Tracked(nullptr, item, 26 * k, ImVec2(), 0, names[i], 0.02f) + 56 * k);
+            float x = cx - total * 0.5f;
+            for (int i = 0; i < 2; ++i) {
+                const ImVec2 p0(x, ly + 32 * k), p1(x + widths[i], ly + 128 * k);
+                d->AddRect(p0, p1, a(kLineStrong), 0, 0, std::max(1.0f, k));
+                const float nw = Tracked(nullptr, item, 26 * k, ImVec2(), 0, names[i], 0.02f);
+                Tracked(d, item, 26 * k, ImVec2(x + (widths[i] - nw) * 0.5f, ly + 63 * k), a(kInk), names[i], 0.02f);
+                x += widths[i] + 48 * k;
+            }
+        }
+
+        // What loads, its bar; Enter to skip once it is all loaded.
+        const float fy = H - 56 * k - 17 * k;
+        const float tw = Tracked(d, text, 14 * k, ImVec2(80 * k, fy + 10 * k), a(kInkMuted), doing, 0.16f);
+        const float bx0 = 80 * k + tw + 24 * k, bx1 = W - 80 * k - (ready ? 140 * k : 0), by = fy + 16 * k;
+        d->AddRectFilled(ImVec2(bx0, by), ImVec2(bx1, by + 3 * k), a(kLine));
+        d->AddRectFilled(ImVec2(bx0, by), ImVec2(bx0 + (bx1 - bx0) * std::clamp(progress, 0.0f, 1.0f), by + 3 * k), a(kSignal));
+        if (ready && alpha > 0.99f) KeyHint(d, text, k, ImVec2(W - 80 * k - 116 * k, fy), "ENTER", "SKIP");
+    }
+    ImGui::End();
+    ImGui::PopStyleVar(2);
+    return skip;
+}
 
 namespace {
 

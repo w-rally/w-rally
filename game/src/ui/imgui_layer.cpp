@@ -48,7 +48,7 @@ std::string ImGuiLayer::Init(HWND window, render::Renderer& renderer)
     // The main menu's faces (its design's Saira: Segoe UI's black and bold italics, its semibold), drawn at the window's
     // height - loaded large, so 1440p is drawn from big enough glyphs.
     // Latin-1 and Latin Extended-A: the key names of a Czech (or other central European) layout.
-    static const ImWchar kLatin[] = {0x0020, 0x017f, 0};
+    static const ImWchar kLatin[] = {0x0020, 0x017f, 0x2122, 0x2122, 0};   // (and the trademark sign)
     auto face = [&](const char* file, float px) -> ImFont* {
         const std::string path = std::string(fonts) + "\\Fonts\\" + file;
         if (GetFileAttributesA(path.c_str()) == INVALID_FILE_ATTRIBUTES) return m_menu ? m_menu : io.Fonts->Fonts[0];
@@ -57,8 +57,8 @@ std::string ImGuiLayer::Init(HWND window, render::Renderer& renderer)
     m_wordmark = face("seguibli.ttf", 100.0f);
     m_menuItem = face("segoeuiz.ttf", 56.0f);   // (the HUD's timer and calls too, ~40 px at 1080p)
     m_menuText = face("seguisb.ttf", 32.0f);
-    // The countdown's (3, 2, 1, GO) and the like: digits, + - . : and capitals.
-    static const ImWchar kDigitsCaps[] = {0x0020, 0x0020, 0x002b, 0x003a, 0x0041, 0x005a, 0};
+    // The countdown's (3, 2, 1, GO) and the intro's wordmark: digits, + - . :, capitals and small letters.
+    static const ImWchar kDigitsCaps[] = {0x0020, 0x0020, 0x002b, 0x003a, 0x0041, 0x005a, 0x0061, 0x007a, 0};
     const std::string black = std::string(fonts) + "\\Fonts\\seguibli.ttf";
     m_display = GetFileAttributesA(black.c_str()) != INVALID_FILE_ATTRIBUTES
                     ? io.Fonts->AddFontFromFileTTF(black.c_str(), 240.0f, nullptr, kDigitsCaps) : m_wordmark;

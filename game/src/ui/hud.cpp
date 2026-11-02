@@ -63,13 +63,7 @@ void Arrow(ImDrawList* d, ImVec2 at, float size, bool right, ImU32 col)
     for (const ImVec2& e : {stem[0], head[0], head[2]}) d->AddRectFilled(ImVec2(e.x - t * 0.5f, e.y - t * 0.5f), ImVec2(e.x + t * 0.5f, e.y + t * 0.5f), col);
 }
 
-// The corner's colour by its grade: 1 (flat) green, 4 yellow (the warning's), 7 (hairpin) red (the critical's).
-ImU32 Severity(int grade)
-{
-    constexpr ImU32 kGreen = IM_COL32(62, 207, 90, 255);
-    const float t = std::clamp((grade - 1) / 3.0f, 0.0f, 2.0f);
-    return t <= 1 ? Lerp(kGreen, kWarning, t) : Lerp(kWarning, kCritical, t - 1);
-}
+ImU32 Severity(int grade) { return CornerColour(grade); }
 
 // One call at the top centre from `y` (its top): the grade's block (the pictogram, 1.5 the plate's size), then its
 // plate, centred on the block. `s` scales the design's sizes (the next call is smaller); `a` its opacity. Returns its
@@ -123,6 +117,13 @@ size_t g_splits = 0;
 float g_flash = 0;
 
 } // namespace
+
+ImU32 CornerColour(int grade)
+{
+    constexpr ImU32 kGreen = IM_COL32(62, 207, 90, 255);
+    const float t = std::clamp((grade - 1) / 3.0f, 0.0f, 2.0f);
+    return t <= 1 ? Lerp(kGreen, kWarning, t) : Lerp(kWarning, kCritical, t - 1);
+}
 
 void DrawDashboard(const ImGuiLayer& ui, const physics::Dashboard& dash, float rpmLimit, int width, int height)
 {

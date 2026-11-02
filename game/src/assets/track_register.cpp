@@ -14,16 +14,20 @@ namespace wrally::assets {
 
 namespace {
 
-// The server's track list, until there is a server: by the map's number. Empty for now - what is not sure is not
-// written (a name, a country and a length the server will give; RBR's files and track-<n>.json meanwhile).
+// The server's track list, until there is a server (its API): by the map's number. Empty for now - what is not sure is
+// not written (a name, a country, a length and the splash the server will give; RBR's files and track-<n>.json
+// meanwhile). The original stages' splashes come this way: RBR picks them (Textures\splash.dat's load_NN.dds) by a
+// table in its code, so a list says which is which - `splash` a path in the RBR folder
+// ("Textures\\Splash\\load_23.dds") or a URL the server serves it at.
 struct ServerTrack {
     int map;
     const char* name;
     const char* country;
     const char* surface;
     float lengthKm;
+    const char* splash;
 };
-const ServerTrack kServerTracks[] = {{-1, "", "", "", 0}};
+const ServerTrack kServerTracks[] = {{-1, "", "", "", 0, ""}};
 
 std::string IniString(const std::string& file, const std::string& section, const char* key)
 {
@@ -60,6 +64,7 @@ void TrackRegister::Build(const std::string& rbrPath, const std::vector<Stage>& 
         t.map = st.map;
         const std::string sec = "Map" + std::to_string(st.map);
         t.name = IniString(tracksIni, sec, "StageName");
+        t.splash = IniString(tracksIni, sec, "SplashScreen");
         t.country = CountryOfParticles(IniString(tracksIni, sec, "Particles"));
         t.surface = rules::StageSurface(rbrPath, st.map);
         t.from = "RBR";
@@ -70,6 +75,7 @@ void TrackRegister::Build(const std::string& rbrPath, const std::vector<Stage>& 
                 if (*s.country) t.country = s.country;
                 if (*s.surface) t.surface = s.surface;
                 if (s.lengthKm > 0) t.lengthKm = s.lengthKm;
+                if (*s.splash) t.splash = s.splash;
                 t.from += " + server";
             }
         // 3. track-<n>.json: beside the stage's .ngg, else in Maps
@@ -84,6 +90,7 @@ void TrackRegister::Build(const std::string& rbrPath, const std::vector<Stage>& 
             t.country = j.Str("country", t.country);
             t.surface = j.Str("surface", t.surface);
             t.lengthKm = static_cast<float>(j.Num("length_km", t.lengthKm));
+            t.splash = j.Str("splash", t.splash);
             t.from += " + " + file;
         } else if (error != "no file") {
             t.error = file + ": " + error;
