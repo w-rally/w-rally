@@ -7,10 +7,17 @@
   - The folder goes to install.ini beside the exe (rbr_path, read by the game before the user's W-Rally.ini) and to
     HKLM\Software\W-Rally (RbrPath), where an upgrade finds it again.
 -->
+<!-- The name as the game's corner shows the build: "W-Rally <version> · <commit>" (build-msi.ps1 passes both). -->
+<?if $(var.Commit) != "" ?>
+<?define ProductName = "W-Rally $(var.Version) · $(var.Commit)" ?>
+<?else?>
+<?define ProductName = "W-Rally $(var.Version)" ?>
+<?endif?>
 <Wix xmlns="http://wixtoolset.org/schemas/v4/wxs" xmlns:ui="http://wixtoolset.org/schemas/v4/wxs/ui">
-  <Package Name="W-Rally" Manufacturer="W-Rally" Version="$(var.Version)" UpgradeCode="93B65FF8-4655-40B1-A738-C49E352EED8C"
-           Scope="perMachine" Compressed="yes">
-    <MajorUpgrade DowngradeErrorMessage="A newer version of W-Rally is already installed." />
+  <Package Name="$(var.ProductName)" Manufacturer="W-Rally" Version="$(var.Version)" UpgradeCode="93B65FF8-4655-40B1-A738-C49E352EED8C"
+           Scope="perMachine" Compressed="yes" Codepage="1252">
+    <!-- Every build is the same version for now: a newer build of it replaces the installed one (same-version upgrade). -->
+    <MajorUpgrade AllowSameVersionUpgrades="yes" DowngradeErrorMessage="A newer version of W-Rally is already installed." />
     <MediaTemplate EmbedCab="yes" CompressionLevel="high" />
 
     <Property Id="ARPURLINFOABOUT" Value="https://github.com/w-rally/w-rally" />

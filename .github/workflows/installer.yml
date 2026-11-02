@@ -1,5 +1,5 @@
 # On every push: build W-Rally (Release, x64, the runner's newest Visual Studio), run the tests that need no RBR folder, and build the MSI
-# (installer/build-msi.ps1) - the run's artifact "W-Rally-<version>", version 0.1.<run number>.
+# (installer/build-msi.ps1) - the run's artifact "W-Rally-<version>-<commit>", the version the project's (CMakeLists.txt).
 name: Installer
 
 on:
@@ -9,8 +9,6 @@ on:
 jobs:
   msi:
     runs-on: windows-2025
-    env:
-      VERSION: 0.1.${{ github.run_number }}
     steps:
       - uses: actions/checkout@v5
         with:
@@ -22,7 +20,7 @@ jobs:
           wix extension add -g WixToolset.UI.wixext/5.0.2
 
       - name: Configure
-        run: cmake -A x64 -S . -B build -DWRALLY_VERSION=$env:VERSION   # the newest Visual Studio on the runner
+        run: cmake -A x64 -S . -B build   # the newest Visual Studio on the runner
 
       - name: Build
         run: cmake --build build --config Release --parallel
@@ -31,10 +29,11 @@ jobs:
         run: ctest --test-dir build -C Release --output-on-failure
 
       - name: MSI
-        run: ./installer/build-msi.ps1 -Build build -Config Release -Version $env:VERSION
+        id: msi
+        run: ./installer/build-msi.ps1 -Build build -Config Release
 
       - uses: actions/upload-artifact@v4
         with:
-          name: W-Rally-${{ env.VERSION }}
-          path: build/W-Rally-${{ env.VERSION }}.msi
+          name: ${{ steps.msi.outputs.name }}
+          path: build/${{ steps.msi.outputs.name }}.msi
           if-no-files-found: error
