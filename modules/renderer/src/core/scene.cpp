@@ -128,7 +128,8 @@ cbuffer Camera : register(b0)
     float4             gClusterParams;
     float              gLightsOn;
     float              gLightsVisOn;
-    float2             gLightPad;
+    float              gReflProbeOn;   // the cube probe (probe.h) is whole: the focus's objects read it
+    float              gReflProbeMips;
     // The deferred local lights' pass (PSDeferredLights): the jittered view-projection's inverse - the matrix the
     // depth was written with.
     row_major float4x4 gInvViewProj;
@@ -291,9 +292,18 @@ float3 LocalLights(float3 p, float3 N, float3 V, float3 diffuseCol, float3 f0, f
                    float wrap, float trans, bool withSpec, float coat)
 {
     if (gLightsOn < 0.5) return float3(0.0, 0.0, 0.0);
-    const uint ci = LightCluster(px, dot(p - gCamPos, gCamFwd), gClusterParams);
     const float ndv = saturate(dot(N, V)) + 1e-5;
     float3 shadowed = float3(0.0, 0.0, 0.0), open = float3(0.0, 0.0, 0.0);
+    if (gLightsOn > 1.5)
+    {
+        // The cube probe's faces (probe.h): no clusters of their own, so every light (gClusterParams.x of them), and
+        // no ray-traced fraction - unshadowed.
+        for (uint li = 0; li < (uint)gClusterParams.x; ++li)
+            ShadeLocalLight(li, LightLoad(li), p, N, V, ndv, diffuseCol, f0, a, specScale, wrap, trans, withSpec, coat,
+                            shadowed, open);
+        return shadowed + open;
+    }
+    const uint ci = LightCluster(px, dot(p - gCamPos, gCamFwd), gClusterParams);
     bool done = false;
 #if __SHADER_TARGET_MAJOR >= 6
     [loop] for (uint turn = 0; turn < 4u && !done; ++turn)
@@ -335,7 +345,7 @@ cbuffer ObjectCB : register(b1)
     uint  gObjectLayer;
     uint  gMatFlags;
     uint  gObjectMoved;   // 1 = the transform differs from last frame's; 2 = and it is glass (the prepass's mark)
-    uint  gObjectPad;
+    uint  gObjectProbe;   // 1: this object reflects the cube probe, not the sky (Scene::SetReflectionFocus)
     row_major float4x4 gObjectXform;
     // The material, as root constants rather than a buffer. It changes every
     // draw exactly as the transform does, and the root signature has the room
@@ -353,6 +363,8 @@ Texture2DArray          gShadow     : register(t5);
 // The prefiltered sky (env.h). Mip 0 is the mirror, the last mip is very nearly
 // the hemisphere average, and roughness picks a level.
 Texture2D               gEnv        : register(t6);
+// The world around the car (probe.h): the same octahedral mapping and roughness axis, for the reflection focus.
+Texture2D               gReflProbe  : register(t19);
 // THIS frame's ray-traced sun visibility (rt.h), from the depth+normal prepass.
 Texture2D<float>        gRtVis      : register(t7);
 // And this frame's ray-traced ambient occlusion, same source, denoised.
@@ -715,6 +727,15 @@ struct GBufOut
     float  rough;
     float4 albedoMetal;
 };
+
+// What a surface reflects towards the reflection vector (`euv`, octahedral) at `roughness`: the sky, or for the car the
+// world around it - the cube probe (gObjectProbe), which has the sky behind its world already.
+float3 EnvRadiance(float2 euv, float roughness)
+{
+    if (gObjectProbe != 0 && gReflProbeOn > 0.5)
+        return gReflProbe.SampleLevel(gSampLinear, euv, roughness * (gReflProbeMips - 1.0)).rgb;
+    return gEnv.SampleLevel(gSampLinear, euv, roughness * (gEnvMips - 1.0)).rgb;
+}
 
 float4 Shade(VSOut i, bool frontFace, out GBufOut g)
 {
@@ -1193,15 +1214,14 @@ float4 Shade(VSOut i, bool frontFace, out GBufOut g)
         {
             float3 R = reflect(-V, N);
             float2 euv = AtmOctEncode(R);
-            float  lod = roughness * (gEnvMips - 1.0);
-            float3 envRad = gEnv.SampleLevel(gSampLinear, euv, lod).rgb;
+            float3 envRad = EnvRadiance(euv, roughness);
             // Same PI as the direct lobe, and for the same reason: our diffuse
             // is albedo*E rather than albedo/PI*E, so every specular term has
             // to carry the factor or the balance is off by PI.
             ambSpec = envRad * EnvBRDFApprox(f0, roughness, ndv) * kSpecScale * matAo;
             if (coat > 0.0)
             {
-                const float3 coatRad = gEnv.SampleLevel(gSampLinear, euv, kCoatRoughness * (gEnvMips - 1.0)).rgb;
+                const float3 coatRad = EnvRadiance(euv, kCoatRoughness);
                 ambSpec = ambSpec * coatKeep
                         + coatRad * (coat * EnvBRDFApprox(kCoatF0.xxx, kCoatRoughness, ndv).x * kSpecScale * matAo);
             }
@@ -1523,7 +1543,7 @@ struct CameraCB
     float viewProjNoJitter[16];
     float prevViewProj[16];
     float clusterParams[4];
-    float lightsOn, lightsVisOn, lightPad[2];
+    float lightsOn, lightsVisOn, reflProbeOn, reflProbeMips;
     float invViewProj[16];
 };
 static_assert(sizeof(CameraCB) % 16 == 0,
@@ -3534,7 +3554,7 @@ bool Scene::LoadFromMemory(ID3D12Device* dev, ID3D12CommandQueue* queue,
     srvRange.NumDescriptors = kMaterialSrvCount;   // t0..t4, contiguous per material
     srvRange.BaseShaderRegister = 0;
 
-    D3D12_ROOT_PARAMETER params[12] = {};
+    D3D12_ROOT_PARAMETER params[13] = {};
     params[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;
     params[0].Descriptor.ShaderRegister = 0;
     params[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
@@ -3644,6 +3664,16 @@ bool Scene::LoadFromMemory(ID3D12Device* dev, ID3D12CommandQueue* queue,
     params[11].DescriptorTable.pDescriptorRanges = &lightRange;
     params[11].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
 
+    // The cube probe around the car (probe.h), t19.
+    static D3D12_DESCRIPTOR_RANGE reflRange = {};
+    reflRange.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+    reflRange.NumDescriptors = 1;
+    reflRange.BaseShaderRegister = 19;
+    params[12].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+    params[12].DescriptorTable.NumDescriptorRanges = 1;
+    params[12].DescriptorTable.pDescriptorRanges = &reflRange;
+    params[12].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+
     // THREE samplers so the atlas-bleed diagnosis can be A/B'd live in the
     // viewer instead of argued about.
     //
@@ -3703,7 +3733,7 @@ bool Scene::LoadFromMemory(ID3D12Device* dev, ID3D12CommandQueue* queue,
     samp[5] = AtmosphereMs::MsSampler(D3D12_SHADER_VISIBILITY_PIXEL);   // s0 space1
 
     D3D12_ROOT_SIGNATURE_DESC rs = {};
-    rs.NumParameters = 12;
+    rs.NumParameters = 13;
     rs.pParameters = params;
     rs.NumStaticSamplers = 6;
     rs.pStaticSamplers = samp;
@@ -4085,6 +4115,8 @@ bool Scene::LoadFromMemory(ID3D12Device* dev, ID3D12CommandQueue* queue,
         Log("scene: multiple-scattering table unavailable - single scattering");
     if (!m_ownEnv.Ready() && !m_ownEnv.Create(dev))
         Log("scene: environment unavailable - no ambient specular, sky ambient marches per pixel");
+    if (!m_reflProbe.Ready() && !m_reflProbe.Create(dev))
+        Log("scene: reflection probe unavailable - the car reflects the sky alone");
 
     // No path here on purpose: this loads from bytes, and the caller may have no
     // file at all. Load() logs the name before calling in.
@@ -4393,6 +4425,25 @@ bool Scene::UploadDynamic(ID3D12Device* dev)
     m_dynIbv.SizeInBytes = (UINT)iBytes;
     m_dynIbv.Format = DXGI_FORMAT_R32_UINT;
     return true;
+}
+
+void Scene::SetReflectionFocus(const uint32_t* objects, uint32_t count, const float centre[3])
+{
+    for (uint32_t o : m_probeObjects)
+        if (o < m_objects.size()) m_objects[o].probeFocus = false;
+    m_probeObjects.assign(objects, objects + count);
+    for (uint32_t o : m_probeObjects)
+        if (o < m_objects.size()) m_objects[o].probeFocus = true;
+    if (!count)
+    {
+        m_probeFacesDrawn = 0;
+        return;
+    }
+    // A jump (a reset onto the road, another car): the faces hold the old place - all six again before it is read.
+    float d2 = 0.0f;
+    for (int k = 0; k < 3; ++k) d2 += (centre[k] - m_probeCentre[k]) * (centre[k] - m_probeCentre[k]);
+    if (d2 > 25.0f * 25.0f) m_probeFacesDrawn = 0;
+    for (int k = 0; k < 3; ++k) m_probeCentre[k] = centre[k];
 }
 
 bool Scene::SetObjectVisible(uint32_t index, bool visible)
@@ -5783,6 +5834,12 @@ void Scene::RecordPass(ID3D12GraphicsCommandList* list, D3D12_CPU_DESCRIPTOR_HAN
         m_ms.Update(list, m_atmosphere.turbidity, m_atmosphere.groundAlbedo, m_msOn);
     if (!prepass && m_env && m_env->Ready())
         m_env->Record(list, m_atmosphere, &m_ms);
+    // The probe's faces drawn last frame, into its chain (probe.h) - its own heap, so before the scene binds its own.
+    const bool probing = !prepass && !m_probeObjects.empty() && m_reflProbe.Ready() && m_env && m_env->Ready();
+    if (probing && m_probeFacesDrawn > 0)
+        m_reflProbe.Resolve(list, m_env->Texture());
+    cb.reflProbeOn = probing && m_probeFacesDrawn >= 6 ? 1.0f : 0.0f;
+    cb.reflProbeMips = (float)ReflectionProbe::kOctMips;
 
     if (timed) list->EndQuery(m_timer.Get(), D3D12_QUERY_TYPE_TIMESTAMP, 1);
 
@@ -5864,20 +5921,25 @@ void Scene::RecordPass(ID3D12GraphicsCommandList* list, D3D12_CPU_DESCRIPTOR_HAN
     const bool deferred = !prepass && m_deferredReady && cb.lightsOn > 0.5f && m_debugMode == 0 && !forwardLights;
     // The prepass writes three targets, normal, motion and plant, adjacent in
     // their heap - so `rtv` is the start of a three-descriptor range there.
+    D3D12_CPU_DESCRIPTOR_HANDLE targets[3] = { rtv };
     if (deferred)
-    {
-        D3D12_CPU_DESCRIPTOR_HANDLE targets[3] = { rtv };
         for (int k = 0; k < 2; ++k)
         {
             targets[1 + k] = m_gbufRtvHeap->GetCPUDescriptorHandleForHeapStart();
             targets[1 + k].ptr += (SIZE_T)k * m_prepassRtvStride;
         }
-        list->OMSetRenderTargets(3, targets, FALSE, &dsv);
+    auto bindTargets = [&]() {   // (again after the probe's faces)
+        if (deferred)
+            list->OMSetRenderTargets(3, targets, FALSE, &dsv);
+        else
+            list->OMSetRenderTargets(prepass ? 3 : 1, &rtv, prepass ? TRUE : FALSE, &dsv);
+    };
+    bindTargets();
+    if (deferred)
+    {
         const float none[4] = { 0.0f, 0.0f, 0.0f, 0.0f };   // kind 0: no surface (the sky)
         list->ClearRenderTargetView(targets[1], none, 0, nullptr);
     }
-    else
-        list->OMSetRenderTargets(prepass ? 3 : 1, &rtv, prepass ? TRUE : FALSE, &dsv);
     // Depth is cleared by whichever pass comes FIRST this frame. After a
     // prepass the main pass must keep it: that depth is what it tests EQUAL
     // against, and what the ray tracer already traced from.
@@ -6125,6 +6187,23 @@ void Scene::RecordPass(ID3D12GraphicsCommandList* list, D3D12_CPU_DESCRIPTOR_HAN
         D3D12_GPU_DESCRIPTOR_HANDLE mh = m_srvHeap->GetGPUDescriptorHandleForHeapStart();
         mh.ptr += (UINT64)(m_msSrvReady ? m_msSrvSlot : 0) * m_srvStride;
         list->SetGraphicsRootDescriptorTable(10, mh);
+
+        if (m_reflProbe.Ready() && !m_reflSrvReady)
+        {
+            ID3D12Device* d = nullptr;
+            list->GetDevice(IID_PPV_ARGS(&d));
+            if (d)
+            {
+                D3D12_CPU_DESCRIPTOR_HANDLE dest = m_srvHeap->GetCPUDescriptorHandleForHeapStart();
+                dest.ptr += (SIZE_T)m_reflSrvSlot * m_srvStride;
+                m_reflProbe.CreateSrv(d, dest);
+                d->Release();
+                m_reflSrvReady = true;
+            }
+        }
+        D3D12_GPU_DESCRIPTOR_HANDLE ph = m_srvHeap->GetGPUDescriptorHandleForHeapStart();
+        ph.ptr += (UINT64)(m_reflSrvReady ? m_reflSrvSlot : 0) * m_srvStride;
+        list->SetGraphicsRootDescriptorTable(12, ph);
     }
 
     if (m_objects.empty())
@@ -6177,8 +6256,9 @@ void Scene::RecordPass(ID3D12GraphicsCommandList* list, D3D12_CPU_DESCRIPTOR_HAN
         // dropped the history of a band round its outline every frame - its
         // edges and its wheels flickered on a car standing still.
         const bool moved = movedOf(o);
-        const uint32_t objConsts[3] = { o.layerId, o.matFlags, moved ? (glassMark ? 2u : 1u) : 0u };
-        list->SetGraphicsRoot32BitConstants(4, 3, objConsts, 0);
+        const uint32_t objConsts[4] = { o.layerId, o.matFlags, moved ? (glassMark ? 2u : 1u) : 0u,
+                                        o.probeFocus && cb.reflProbeOn > 0.5f ? 1u : 0u };
+        list->SetGraphicsRoot32BitConstants(4, 4, objConsts, 0);
         if (moved) list->SetGraphicsRoot32BitConstants(4, 16, o.prevXform, 32);
         {
             const MaterialSlot& m = m_materials[o.materialId];
@@ -6195,6 +6275,92 @@ void Scene::RecordPass(ID3D12GraphicsCommandList* list, D3D12_CPU_DESCRIPTOR_HAN
                      o.meshId ? m_dynVbv : m_vbv, o.meshId ? m_dynIbv : m_ibv);
         list->DrawIndexedInstanced(o.indexCount, 1, o.firstIndex, o.baseVertex, 0);
     };
+    // THE CUBE PROBE's faces this frame (probe.h): the world around the car, drawn with these pipelines and lit as this
+    // pass lights it, less what belongs to the main camera's pixels - the ray-traced sun visibility and AO, the local
+    // lights' clusters (it takes every light, unshadowed), the aerial table (the probe marches its air). The cascades where they are drawn this frame.
+    // Not drawn: the focus (the car), any model within kProbeSkip of the centre (its lamps, a passenger's helmet),
+    // the glass. Two faces a frame (NGG_PROBE_FACES, 1..6), all six at first; resolved at the next frame's start.
+    if (probing)
+    {
+        static const int perFrame = [] {
+            const char* e = std::getenv("NGG_PROBE_FACES");
+            const int n = e ? atoi(e) : 2;
+            return n < 1 ? 1 : n > 6 ? 6 : n;
+        }();
+        const float kProbeSkip = 3.0f;
+        CameraCB pcb = cb;
+        pcb.debugMode = 0.0f;
+        pcb.probeOn = 0.0f;
+        pcb.rtReady = 0.0f;
+        pcb.shadowSource = 0.0f;
+        if (m_shadowSource == 1) pcb.shadowParams[0] = 0.0f;   // ray traced: no cascades drawn this frame
+        pcb.aoReady = pcb.aoOn = 0.0f;
+        pcb.aerialLut = 0.0f;
+        pcb.lightsOn = cb.lightsOn > 0.5f ? 2.0f : 0.0f;   // every light, unclustered (LocalLights)
+        pcb.lightsVisOn = 0.0f;
+        pcb.clusterParams[0] = (float)m_lights.Count();
+        pcb.reflProbeOn = 0.0f;
+        pcb.invScreen[0] = pcb.invScreen[1] = 1.0f / (float)ReflectionProbe::kFace;
+        for (int k = 0; k < 3; ++k) pcb.camPos[k] = m_probeCentre[k];
+        float fproj[16];
+        ReflectionProbe::FaceProj(0.1f, 3000.0f, fproj);
+        ReverseZ(fproj, pcb.proj);
+        const D3D12_VIEWPORT pvp = { 0.0f, 0.0f, (float)ReflectionProbe::kFace, (float)ReflectionProbe::kFace, 0.0f, 1.0f };
+        const D3D12_RECT psc = { 0, 0, (LONG)ReflectionProbe::kFace, (LONG)ReflectionProbe::kFace };
+        list->RSSetViewports(1, &pvp);
+        list->RSSetScissorRects(1, &psc);
+        m_probeCBs.clear();
+        const int faces = m_probeFacesDrawn < 6 ? 6 : perFrame;
+        for (int n = 0; n < faces; ++n)
+        {
+            const int face = m_probeNextFace;
+            m_probeNextFace = (face + 1) % 6;
+            ReflectionProbe::FaceView(face, m_probeCentre, pcb.view);
+            for (int k = 0; k < 3; ++k) pcb.camFwd[k] = pcb.view[k * 4 + 2];
+            Mul4x4(pcb.view, pcb.proj, pcb.viewProjNoJitter);
+            memcpy(pcb.prevViewProj, pcb.viewProjNoJitter, sizeof(pcb.prevViewProj));
+            if (!Invert4x4(pcb.viewProjNoJitter, pcb.invViewProj)) memset(pcb.invViewProj, 0, sizeof(pcb.invViewProj));
+            ID3D12Device* d = nullptr;
+            list->GetDevice(IID_PPV_ARGS(&d));
+            ComPtr<ID3D12Resource> fcb = d ? MakeUploadBuffer(d, &pcb, sizeof(pcb)) : nullptr;
+            if (d) d->Release();
+            if (!fcb) break;
+            m_probeCBs.push_back(fcb);
+            float fvp[16], fplanes[6][4];
+            Mul4x4(pcb.view, fproj, fvp);
+            ExtractPlanes(fvp, fplanes);
+
+            D3D12_CPU_DESCRIPTOR_HANDLE prtv, pdsv;
+            m_reflProbe.BeginFace(list, face, prtv, pdsv);
+            list->OMSetRenderTargets(1, &prtv, FALSE, &pdsv);
+            list->SetGraphicsRootConstantBufferView(0, fcb->GetGPUVirtualAddress());
+            for (const DrawItem& o : m_objects)
+            {
+                if (!o.visible || o.probeFocus || o.materialId >= m_materials.size()) continue;
+                const uint32_t matFlags = m_materials[o.materialId].flags;
+                if (matFlags & kMaterialBlend) continue;
+                if (o.meshId != 0)
+                {
+                    float d2 = 0.0f;
+                    for (int k = 0; k < 3; ++k)
+                    {
+                        const float c = (std::max)((std::max)(o.bmin[k] - m_probeCentre[k], m_probeCentre[k] - o.bmax[k]), 0.0f);
+                        d2 += c * c;
+                    }
+                    if (d2 < kProbeSkip * kProbeSkip) continue;
+                }
+                if (AabbOutside(fplanes, o.bmin, o.bmax)) continue;
+                draw(o, (matFlags & kMaterialAlphaTest) ? m_psoAlphaTest.Get() : m_pso.Get());
+            }
+            m_reflProbe.EndFace(list, face);
+            ++m_probeFacesDrawn;
+        }
+        list->SetGraphicsRootConstantBufferView(0, cbRes->GetGPUVirtualAddress());
+        bindTargets();
+        list->RSSetViewports(1, &vp);
+        list->RSSetScissorRects(1, &sc);
+    }
+
     // THE OPAQUE WORLD FRONT TO BACK - the solid first, the alpha-tested (foliage) after, each nearest first, by the
     // distance to the nearest point of the box (0 inside it: the terrain the camera stands on). What is drawn first
     // fills the depth, and what lies behind it fails the test BEFORE its pixel shader runs: without a prepass (no ray
@@ -6574,7 +6740,7 @@ bool Scene::RebuildSrvHeap(ID3D12Device* dev)
     // cannot live in a heap of its own.
     // +2: the shadow cascade array and the label font both share this heap,
     // because only one CBV/SRV/UAV heap can be bound at a time.
-    hd.NumDescriptors = (UINT)(pairs * kMaterialSrvCount + 16);
+    hd.NumDescriptors = (UINT)(pairs * kMaterialSrvCount + 17);
     m_shadowSrvSlot = (UINT)(pairs * kMaterialSrvCount);
     m_fontSrvSlot = (UINT)(pairs * kMaterialSrvCount + 1);
     m_envSrvSlot  = (UINT)(pairs * kMaterialSrvCount + 2);
@@ -6584,6 +6750,7 @@ bool Scene::RebuildSrvHeap(ID3D12Device* dev)
     m_irrSrvSlot    = (UINT)(pairs * kMaterialSrvCount + 7);
     m_msSrvSlot     = (UINT)(pairs * kMaterialSrvCount + 8);
     m_lightSrvSlot  = (UINT)(pairs * kMaterialSrvCount + 9);    // and +10 .. +15 (lights.h, the deferred pass)
+    m_reflSrvSlot   = (UINT)(pairs * kMaterialSrvCount + 16);
     hd.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
     if (FAILED(dev->CreateDescriptorHeap(&hd, IID_PPV_ARGS(&m_srvHeap))))
     {
@@ -6602,6 +6769,7 @@ bool Scene::RebuildSrvHeap(ID3D12Device* dev)
     m_aerialSrvReady = false;
     m_irrSrvReady = false;
     m_msSrvReady = false;
+    m_reflSrvReady = false;
 
     D3D12_CPU_DESCRIPTOR_HANDLE h = m_srvHeap->GetCPUDescriptorHandleForHeapStart();
 

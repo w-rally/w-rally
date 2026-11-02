@@ -47,7 +47,8 @@ namespace wrally::iface {
 // 13: RenderStats::upscalersAvailable (what a settings menu may offer).
 // 14: RenderStats::aoSource (ray traced or XeGTAO); ambientOcclusion and aoMs whatever the shadow source.
 // 15: MaterialDesc::clearCoat (car paint's lacquer: a second, smooth specular layer).
-constexpr uint32_t kRendererInterfaceVer = 15;
+// 16: FrameDesc::reflectionFocus (the car the cube probe is centred on: the world in its paint).
+constexpr uint32_t kRendererInterfaceVer = 16;
 
 struct Renderer;                     // the module's instance, opaque
 typedef uint32_t SceneHandle;        // a loaded .ngg stage
@@ -289,6 +290,9 @@ struct FrameDesc {
     const LineVertex*        lines;
     uint32_t                 lineVertexCount;
     UiDrawList               ui;
+    // The instance whose paint and glass reflect the world around it (the player's car): a cube probe is drawn from
+    // its origin, its own meshes - and any model's within a few metres, its lamps' - left out. 0 none: the sky alone.
+    InstanceHandle           reflectionFocus;
 };
 
 // -------------------------------------------------------------- settings

@@ -117,6 +117,7 @@ struct Model {
 struct Instance {
     ModelHandle model = 0;
     std::vector<uint32_t> objects;   // the scene's object per mesh
+    float origin[3] = {};            // where Place last put it (its world's translation)
     bool visible = true;
     bool alive = false;
 };
@@ -571,6 +572,7 @@ void Place(Renderer& r, const InstanceUpdate& u)
     if (!u.instance || u.instance > r.instances.size() || !r.instances[u.instance - 1].alive) return;
     Instance& in = r.instances[u.instance - 1];
     const Model& m = r.models[in.model - 1];
+    for (int k = 0; k < 3; ++k) in.origin[k] = u.world[12 + k];
     const bool posed = u.nodes && u.nodeCount == m.nodes.size();
     std::vector<float> nodeWorld(16 * m.nodes.size());
     for (size_t n = 0; n < m.nodes.size(); ++n) {
@@ -607,6 +609,13 @@ Status WRALLY_CALL RenderFrame(Renderer* r, const FrameDesc* f)
     if (world) {
         for (uint32_t i = 0; f->stageObjects && i < f->stageObjectCount; ++i) MoveStageObject(*r, f->stageObjects[i]);
         for (uint32_t i = 0; f->instances && i < f->instanceCount; ++i) Place(*r, f->instances[i]);
+        // The car the cube probe is drawn around (core/probe.h).
+        if (f->reflectionFocus && f->reflectionFocus <= r->instances.size() && r->instances[f->reflectionFocus - 1].alive) {
+            const Instance& in = r->instances[f->reflectionFocus - 1];
+            r->scene.SetReflectionFocus(in.objects.data(), static_cast<uint32_t>(in.objects.size()), in.origin);
+        } else {
+            r->scene.SetReflectionFocus(nullptr, 0, nullptr);
+        }
         ApplyFrameWeather(*r, *f);
         r->scene.SetWetness(f->wetness);
         // The frame's local lights, as the core takes them (NGG design 5.4 N2).
