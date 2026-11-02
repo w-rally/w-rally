@@ -34,6 +34,25 @@ enum class MainChoice { None, QuickRally, Garage, Settings, Exit };
 // (MenuVideo; no texture: the window dark).
 MainChoice MainMenu(const ImGuiLayer& ui, int width, int height, const std::string& note, const VideoFrame& video);
 
+// The intro, first at the start while the content loads: the wordmark, the pre-alpha notice, the upscalers named,
+// `doing` with its bar at `progress` (0..1); `ready`: all loaded (Enter skips). `alpha`: its fade out (1 shown).
+// Returns whether a skip was pressed (Enter, Esc, Space, a click).
+bool DrawIntro(const ImGuiLayer& ui, int width, int height, float progress, const char* doing, bool ready, float alpha);
+// The menus' entrance from now (ui/menu_look.h StartEntrance): after the intro (the stripes falling in too), or as a
+// stage loads (`stripes` false: they hold).
+void StartMenuEntrance(bool stripes = true);
+
+// The stage's loading screen, as Quick rally's START STAGE leaves the menu: the stage, the run's facts, the
+// co-driver's calls' colours, the loading's steps. `step`: the one loading now (kLoadingSteps: all done). `leave`
+// 0..1: into the stage - the livery lifted up and out, the rest faded to black.
+struct LoadingInfo {
+    std::string stage, facts;              // its name; its country, surface, length ("" not known)
+    std::string car, weather, damage, setup;
+    VideoFrame splash;                     // the stage's splash in the video's stripe (texture 0: the stripe dark)
+};
+inline constexpr int kLoadingSteps = 5;
+void DrawLoading(const ImGuiLayer& ui, const LoadingInfo& info, int step, float leave, int width, int height);
+
 enum class QuickChoice { None, Start, Back };
 // `s`'s quick fields (stage, car, setup, damage, weather and the custom one's, the lamps) are the choice, kept between
 // runs. The screen and the pages it opens (ui/quick_rally.cpp): Stage, Garage, Car setup, Weather - Esc on one of them

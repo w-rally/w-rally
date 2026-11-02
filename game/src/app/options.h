@@ -56,6 +56,8 @@ struct Options {
     std::string stageWarning;            // shown on the screen ("" none)
     // The run as the menus name it, for the pause menu (Quick rally sets them; "" a command line's: from its files).
     std::string stageTitle, carName, weatherName;
+    std::string stageFacts, setupName;   // (the loading screen's: the stage's country, surface, length; the setup's name)
+    std::string splash;                  // the stage's splash, relative to the game dir ("" none: the stripe dark)
     session::Config session;
     std::string out = "drive.phr";
     std::string rendererId = "wrenderer";

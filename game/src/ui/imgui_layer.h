@@ -36,7 +36,8 @@ public:
     const iface::UiDrawList& Render();
 
     ImFont* HudSmall() const { return m_small; }
-    // The HUD's countdown: the wordmark's face loaded large, its digits and capitals only. Never null.
+    // The HUD's countdown and the intro's wordmark: the wordmark's face loaded large, its digits and letters only.
+    // Never null.
     ImFont* HudDisplay() const { return m_display; }
     // The menus' face (Segoe UI; null: ImGui's own).
     ImFont* MenuFont() const { return m_menu; }
