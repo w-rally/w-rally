@@ -180,11 +180,11 @@ float3 LocalLights(float3 p, float3 N, float3 V, float3 diffuseCol, float3 f0, f
                    float wrap, float trans, bool withSpec, float coat);
 
 // CLEAR COAT (MaterialDesc::clearCoat): car paint's lacquer - a smooth dielectric film over the base layer. Its own
-// GGX lobe (f0 0.04, this gloss: a factory finish, 0.03-0.05) reflects the light and the environment sharply, and
+// GGX lobe (f0 0.04, this gloss: a polished finish, 0.02) reflects the light and the environment sharply, and
 // what it reflects does not reach the base below: the base's diffuse and specular are scaled by 1 - coat x F. The
 // same normal for both layers (RBR's paint has no normal map). The deferred local lights know only coated or not
 // (GBUF kind 3).
-static const float kCoatRoughness = 0.04;
+static const float kCoatRoughness = 0.02;
 static const float kCoatF0 = 0.04;
 
 // Standard GGX: Trowbridge-Reitz distribution, height-correlated Smith
