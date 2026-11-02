@@ -56,6 +56,12 @@ bool Renderer::Create(Device& dev, DXGI_FORMAT outputFormat, UINT width, UINT he
         if (!m_buildDev.CreateSecondary(dev))
             Log("renderer: no secondary command context - the BVH cannot be rebuilt mid-frame");
     }
+
+    // Which upscalers can run here, for the settings menu: each backend made and let go once (it logs why not).
+    // DLSS asks the GPU's vendor first, so a non-NVIDIA adapter never loads NGX.
+    if (Upscaler* u = CreateFsrUpscaler(d)) m_fsrAvailable = true, delete u;
+    if (Upscaler* u = CreateDlssUpscaler(d)) m_dlssAvailable = true, delete u;
+    Log("renderer: upscalers available - FSR %s, DLSS %s", m_fsrAvailable ? "yes" : "no", m_dlssAvailable ? "yes" : "no");
     return true;
 }
 

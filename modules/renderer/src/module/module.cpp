@@ -756,6 +756,9 @@ Status WRALLY_CALL Stats(Renderer* r, RenderStats* out)
     out->renderWidth = r->core.RenderWidth();
     out->renderHeight = r->core.RenderHeight();
     strncpy_s(out->upscaler, sizeof out->upscaler, r->core.UpscalerName(), _TRUNCATE);
+    out->upscalersAvailable = 1u << kUpscalerNone;
+    if (r->core.UpscalerAvailable(ngg::core::UpscalerKind::Fsr))  out->upscalersAvailable |= 1u << kUpscalerFsr;
+    if (r->core.UpscalerAvailable(ngg::core::UpscalerKind::Dlss)) out->upscalersAvailable |= 1u << kUpscalerDlss;
     return Status::Ok;
 }
 

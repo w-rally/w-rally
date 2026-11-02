@@ -56,9 +56,10 @@ enum class SettingsChoice { None, Back, Graphics, Rescan };
 // editable. `log`: the last Rescan's report.
 // The screen has tabs: Content, Graphics, Sound, Controls (the keys). `keyDown`: the key pressed this frame
 // (Window::TakeKeyDown), which Controls binds while it waits for one. `video`: the main menu's loop, in the video's
-// stripe as it fades out (the screen's livery holds the main menu's place, without that stripe).
+// stripe as it fades out (the screen's livery holds the main menu's place, without that stripe). `upscalers`: the
+// renderer's RenderStats::upscalersAvailable - Upscaling skips the modes this machine cannot run (DLSS off an RTX GPU).
 SettingsChoice SettingsUi(const ImGuiLayer& ui, app::Settings& s, bool inStage, const std::string& log, UINT keyDown,
-                          int width, int height, const VideoFrame& video = {});
+                          int width, int height, const VideoFrame& video = {}, uint32_t upscalers = ~0u);
 // Esc on the screen is Back. Whether Controls is waiting for a key or a text field has the keyboard: Esc is then
 // theirs (no change), not the menu's.
 bool CapturingKey();
