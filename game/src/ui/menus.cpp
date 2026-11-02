@@ -205,7 +205,7 @@ MainChoice MainMenu(const ImGuiLayer& ui, int width, int height, const std::stri
         }
         g_mainPlate += (g_mainAt - g_mainPlate) * ease;
         if (std::fabs(g_mainAt - g_mainPlate) < 0.002f) g_mainPlate = float(g_mainAt);
-        Plate(d, ImVec2(x0, rowsY + g_mainPlate * pitch), kRowW * k, kRowH * k, kCut * k, kSurfaceRaised);
+        Plate(d, ImVec2(x0, rowsY + g_mainPlate * pitch), kRowW * k, kRowH * k, kCut * k, kSelect);
 
         for (int i = 0; i < kMainCount; ++i) {
             const MainItem& m = kMainItems[i];
@@ -524,7 +524,7 @@ SettingsChoice SettingsUi(const ImGuiLayer& ui, app::Settings& s, bool inStage, 
         const bool snap = g_setPlate[0] < 0;
         for (int i = 0; i < 4; ++i) g_setPlate[i] = snap ? target[i] : g_setPlate[i] + (target[i] - g_setPlate[i]) * ease;
         if (keys || rows[at].kind != SetRow::Heading)
-            Plate(d, P(g_setPlate[0], g_setPlate[1]), g_setPlate[2] * k, g_setPlate[3] * k, (keys ? 10 : 12) * k, kSurfaceRaised);
+            Plate(d, P(g_setPlate[0], g_setPlate[1]), g_setPlate[2] * k, g_setPlate[3] * k, (keys ? 10 : 12) * k, kSelect);
 
         if (!keys) {
             const float xr = (x0 + rowW - 24) * k;   // the values' right edge
@@ -834,7 +834,7 @@ PauseChoice PauseMenu(const ImGuiLayer& ui, const PauseInfo& info, int width, in
             for (int i = 0; i < kPauseCount; ++i) g_pauseOn[i] = i == g_pauseAt ? 1.0f : 0.0f;
         }
         g_pausePlate += (g_pauseAt - g_pausePlate) * ease;
-        Plate(d, P(x0, rowsY + g_pausePlate * pitch), rowW * k, rowH * k, 12 * k, kSurfaceRaised);
+        Plate(d, P(x0, rowsY + g_pausePlate * pitch), rowW * k, rowH * k, 12 * k, kSelect);
         for (int i = 0; i < kPauseCount; ++i) {
             const PauseItem& m = kPauseItems[i];
             float& on = g_pauseOn[i];
