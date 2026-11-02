@@ -133,6 +133,10 @@ cbuffer Camera : register(b0)
     // The deferred local lights' pass (PSDeferredLights): the jittered view-projection's inverse - the matrix the
     // depth was written with.
     row_major float4x4 gInvViewProj;
+    // The cube probe's faces only (probe.h): the car they leave out, as a box - its centre (w 1: on) and its three
+    // axes, each with its half extent in w - so the ground still gets its shadow and the sky it hides (CarBoxVis).
+    float4             gCarBoxC;
+    float4             gCarBoxX, gCarBoxY, gCarBoxZ;
 };
 
 // Cascaded shadow maps. A comparison sampler so the hardware does the depth
@@ -575,7 +579,37 @@ void PSShadow(VSOut i)
 // in the debug views that compare the two - the map's cost is in RENDERING
 // its cascades, which the caller skips entirely in RT mode.
 static float gDbgCsmVis = 1.0;
+// THE CAR in the cube probe's faces (gCarBoxC): left out of them, it would leave the ground round it sunlit and open to
+// the sky - and the paint's grazing edges, a mirror there, reflected the bright road where the car's shadow lies. A
+// ray from `p` along `dir` against the box: 0 where it meets it (or starts inside), 1 where it misses or no box.
+float CarBoxVis(float3 p, float3 dir)
+{
+    if (gCarBoxC.w < 0.5) return 1.0;
+    const float3 o = p - gCarBoxC.xyz;
+    float tNear = -1e9, tFar = 1e9;
+    const float4 axes[3] = { gCarBoxX, gCarBoxY, gCarBoxZ };
+    [unroll] for (int k = 0; k < 3; ++k)
+    {
+        const float po = dot(o, axes[k].xyz), d = dot(dir, axes[k].xyz);
+        if (abs(d) < 1e-6)
+        {
+            if (abs(po) > axes[k].w) return 1.0;
+            continue;
+        }
+        const float t0 = (-axes[k].w - po) / d, t1 = (axes[k].w - po) / d;
+        tNear = max(tNear, min(t0, t1));
+        tFar = min(tFar, max(t0, t1));
+    }
+    return (tFar >= max(tNear, 0.0)) ? 0.0 : 1.0;
+}
+
+float SunVisInner(float3 wpos, float2 pixel, float3 N);
 float SunVis(float3 wpos, float2 pixel, float3 N)
+{
+    return SunVisInner(wpos, pixel, N) * CarBoxVis(wpos + N * 0.02, gSunTowards);
+}
+
+float SunVisInner(float3 wpos, float2 pixel, float3 N)
 {
     if (gShadowParams.x < 0.5) return 1.0;      // shadows off: off for BOTH sources
     const bool useRt = gShadowSource > 0.5 && gRtReady > 0.5;
@@ -825,6 +859,8 @@ float4 Shade(VSOut i, bool frontFace, out GBufOut g)
     rtAo = 1.0;   // the AO buffer is the opaque surface's behind the glass, not the glass's
 #endif
     matAo *= rtAo;
+    // Under the car, in the probe's faces (CarBoxVis): the sky it hides, most of the ambient's light.
+    matAo *= lerp(0.25, 1.0, CarBoxVis(i.wpos + float3(0.0, 0.02, 0.0), float3(0.0, 1.0, 0.0)));
 #ifdef ALPHA_TEST
     // A plant's AO rays skip its own cards (rt.cpp Occluded) for the same
     // reason its sun rays do: per card, they made one card dark and the one
@@ -1545,6 +1581,7 @@ struct CameraCB
     float clusterParams[4];
     float lightsOn, lightsVisOn, reflProbeOn, reflProbeMips;
     float invViewProj[16];
+    float carBox[4][4];    // gCarBoxC, gCarBoxX/Y/Z: the probe's faces only
 };
 static_assert(sizeof(CameraCB) % 16 == 0,
               "CameraCB must be a whole number of float4 registers - see the note above");
@@ -6315,6 +6352,56 @@ void Scene::RecordPass(ID3D12GraphicsCommandList* list, D3D12_CPU_DESCRIPTOR_HAN
         pcb.clusterParams[0] = (float)m_lights.Count();
         pcb.reflProbeOn = 0.0f;
         pcb.invScreen[0] = pcb.invScreen[1] = 1.0f / (float)ReflectionProbe::kFace;
+        // The car as a box (CarBoxVis): the axes of its biggest mesh (the body), the extents over all of them.
+        {
+            const DrawItem* body = nullptr;
+            float bodyVol = -1.0f;
+            for (uint32_t id : m_probeObjects)
+            {
+                if (id >= m_objects.size()) continue;
+                const DrawItem& o = m_objects[id];
+                const float v = (o.bmax0[0] - o.bmin0[0]) * (o.bmax0[1] - o.bmin0[1]) * (o.bmax0[2] - o.bmin0[2]);
+                if (v > bodyVol) bodyVol = v, body = &o;
+            }
+            if (body)
+            {
+                float axis[3][3], lo[3] = { 1e30f, 1e30f, 1e30f }, hi[3] = { -1e30f, -1e30f, -1e30f };
+                for (int a = 0; a < 3; ++a)
+                {
+                    const float* r = body->xform + a * 4;
+                    const float len = sqrtf(r[0] * r[0] + r[1] * r[1] + r[2] * r[2]);
+                    for (int k = 0; k < 3; ++k) axis[a][k] = len > 1e-6f ? r[k] / len : (a == k ? 1.0f : 0.0f);
+                }
+                for (uint32_t id : m_probeObjects)
+                {
+                    if (id >= m_objects.size()) continue;
+                    const DrawItem& o = m_objects[id];
+                    for (int c = 0; c < 8; ++c)
+                    {
+                        const float p[3] = { (c & 1) ? o.bmax[0] : o.bmin[0], (c & 2) ? o.bmax[1] : o.bmin[1],
+                                             (c & 4) ? o.bmax[2] : o.bmin[2] };
+                        for (int a = 0; a < 3; ++a)
+                        {
+                            const float d = p[0] * axis[a][0] + p[1] * axis[a][1] + p[2] * axis[a][2];
+                            lo[a] = (std::min)(lo[a], d);
+                            hi[a] = (std::max)(hi[a], d);
+                        }
+                    }
+                }
+                for (int k = 0; k < 3; ++k)
+                {
+                    float c = 0.0f;
+                    for (int a = 0; a < 3; ++a) c += axis[a][k] * 0.5f * (lo[a] + hi[a]);
+                    pcb.carBox[0][k] = c;
+                }
+                pcb.carBox[0][3] = 1.0f;
+                for (int a = 0; a < 3; ++a)
+                {
+                    for (int k = 0; k < 3; ++k) pcb.carBox[1 + a][k] = axis[a][k];
+                    pcb.carBox[1 + a][3] = 0.5f * (hi[a] - lo[a]);
+                }
+            }
+        }
         for (int k = 0; k < 3; ++k) pcb.camPos[k] = m_probeCentre[k];
         float fproj[16];
         ReflectionProbe::FaceProj(0.1f, 3000.0f, fproj);
