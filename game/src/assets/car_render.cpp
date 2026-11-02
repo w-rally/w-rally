@@ -279,7 +279,7 @@ void CarRender::Create(render::Renderer& renderer, const CarModel* read, const s
             const auto [it, made] = finished.try_emplace({mi, f}, static_cast<uint32_t>(materials.size()));
             if (made) {
                 iface::MaterialDesc m = materials[mi + 1];
-                if (f == kPaint) m.clearCoat = 1.0f, m.roughness = 0.3f;   // (the colour under the lacquer: a smooth base)
+                if (f == kPaint) m.clearCoat = 1.0f, m.roughness = 0.2f;   // (the colour under the lacquer: a smooth base)
                 else m.roughness = 0.85f;
                 materials.push_back(m);
             }

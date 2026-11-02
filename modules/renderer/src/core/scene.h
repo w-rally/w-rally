@@ -926,6 +926,8 @@ private:
     UINT                     m_reflSrvSlot = 0;
     bool                     m_reflSrvReady = false;
     std::vector<Microsoft::WRL::ComPtr<ID3D12Resource>> m_probeCBs;
+    double                   m_probeMsSum = 0.0;   // its GPU time, summed for the log's mean
+    int                      m_probeMsFrames = 0;
     UINT                     m_irrSrvSlot = 0;
     bool                     m_irrSrvReady = false;
     bool                     m_physical = true;    // the default since 5.0j
