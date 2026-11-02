@@ -254,6 +254,7 @@ public:
         fd.skyTime = {1, 2026, 11, 9, 23.0f, 1.0f, 50.0f, 14.4f, 0.0f};   // a moonless late evening: the spots' light alone
         fd.lights = kLights, fd.lightCount = 3;
         fd.instances = m_instances.data(), fd.instanceCount = static_cast<uint32_t>(m_instances.size());
+        fd.reflectionFocus = drawn ? m_instances[0].instance : 0;   // the world in its paint
         fd.time = static_cast<float>(now);
         // A car taken off or put on: TAA's history of the turntable dropped, as at a camera's cut. What stood still
         // there (the glass, a part turning slower than the renderer calls moving) is the background's now, and that
@@ -1180,6 +1181,7 @@ StageEnd RunStage(Shell& sh, const Options& o, bool fromMenu, std::string& error
             fd.lightCount = static_cast<uint32_t>(testLights.size());
             fd.instances = instances.data();
             fd.instanceCount = static_cast<uint32_t>(instances.size());
+            fd.reflectionFocus = car.Ready() ? carUpdate.instance : 0;   // the world in its paint
             fd.stageObjects = moved.data();
             fd.stageObjectCount = static_cast<uint32_t>(moved.size());
             fd.ui = uiList;

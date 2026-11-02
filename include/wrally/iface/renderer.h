@@ -46,7 +46,9 @@ namespace wrally::iface {
 // 12: kUpscalerDlss (NVIDIA DLSS Super Resolution; where it cannot run, the renderer's TAA).
 // 13: RenderStats::upscalersAvailable (what a settings menu may offer).
 // 14: RenderStats::aoSource (ray traced or XeGTAO); ambientOcclusion and aoMs whatever the shadow source.
-constexpr uint32_t kRendererInterfaceVer = 14;
+// 15: MaterialDesc::clearCoat (car paint's lacquer: a second, smooth specular layer).
+// 16: FrameDesc::reflectionFocus (the car the cube probe is centred on: the world in its paint).
+constexpr uint32_t kRendererInterfaceVer = 16;
 
 struct Renderer;                     // the module's instance, opaque
 typedef uint32_t SceneHandle;        // a loaded .ngg stage
@@ -87,8 +89,10 @@ struct MaterialDesc {
     uint32_t      flags;
     float         baseColourFactor[4];
     float         roughness, metallic, normalScale, occlusionStrength, emissiveStrength, alphaCutoff;
+    float         clearCoat;   // 0..1: a clear lacquer over the surface (car paint) - a smooth dielectric layer (f0 0.04,
+                               // the renderer's fixed gloss) whose reflection lies over the base's, dimming it as much
 };
-static_assert(sizeof(MaterialDesc) == 64, "MaterialDesc layout");
+static_assert(sizeof(MaterialDesc) == 68, "MaterialDesc layout");
 
 // What a material is before anything is said about it: ngg::DefaultMaterial - a
 // dielectric, fairly rough, opaque white surface.
@@ -286,6 +290,9 @@ struct FrameDesc {
     const LineVertex*        lines;
     uint32_t                 lineVertexCount;
     UiDrawList               ui;
+    // The instance whose paint and glass reflect the world around it (the player's car): a cube probe is drawn from
+    // its origin, its own meshes - and any model's within a few metres, its lamps' - left out. 0 none: the sky alone.
+    InstanceHandle           reflectionFocus;
 };
 
 // -------------------------------------------------------------- settings

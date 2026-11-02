@@ -2,7 +2,10 @@
 // The car's render model (M5) from its .sgc - the renderer's scene file (HedgeHog3D), read as HedgeHog3D.dll's loader
 // reads it (0x1001f2a0: records {u32 0xc, u32 kind, u32 version, u32 1, u32 size}; kind 0 a mesh - versions 1 and 3,
 // the deformable parts carrying damage data after it -, kind 5 a material) - and its textures, through the car's
-// <car>_shaders.ini; a mesh group's material is <car>.ini's [<mesh>] FaceBlock<g>_Material where it names one.
+// <car>_shaders.ini; a mesh group's material is <car>.ini's [<mesh>] FaceBlock<g>_Material where it names one, its
+// finish that section's FaceBlock<g>_Shader (CarPaint, CarPlastic, CarTire, CarRim, ...: the game's shader classes,
+// <car>_shader_settings_*.ini). The textures carry no gloss or reflection mask (their alpha is opaque), so the class
+// is what tells paint from rubber and plastic.
 //
 // A mesh (0x1000acf0): cstr name, u32 id, u32 parent, f32[14] the local transform, f32[12] the world transform (rows
 // {r0 r1 r2 t}), f32[6] the bounds, u32 nv, u32 flags; with flags bit 0 nv x {position, normal} (f32[6]), bit 2 nv x uv
@@ -40,6 +43,7 @@ struct CarPart {
     int wheel = -1;        // 0 lf, 1 rf, 2 lb, 3 rb: in that hub's frame; -1 in the car's
     bool spins = false;    // turns with the wheel (the tyre, the brake disc)
     std::string material;          // the group's material name (the .sgc's)
+    std::string shader;            // the group's shader class (<car>.ini FaceBlock<g>_Shader), "" none given
     std::vector<std::string> parents;   // the node tree above its mesh, nearest first (the root left out)
     std::vector<CarVertex> vertices;
     std::vector<uint32_t> indices;  // into vertices
