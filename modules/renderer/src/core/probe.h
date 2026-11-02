@@ -3,7 +3,7 @@
 //
 // The environment map (env.h) is the sky alone, so a car's clear coat (MaterialDesc::clearCoat) reflected a blurred
 // gradient and nothing beside it. Screen-space reflections cannot do the car: its side reflects what stands beside it,
-// which is off screen. So the stage is drawn again around the car - six 90-degree faces at a low resolution (kFace),
+// which is off screen. So the stage is drawn again around the car - six 90-degree faces (kFace),
 // a few a frame (Scene::SetReflectionFocus, NGG_PROBE_FACES), with the scene's own pipelines and the same lighting
 // minus what belongs to the main camera's pixels (the ray-traced shadows and AO, the aerial table, the local lights).
 // The car itself is left out: a probe at its centre would see its inside.
@@ -29,7 +29,7 @@ namespace core {
 class ReflectionProbe
 {
 public:
-    enum { kFace = 128, kOct = 256, kOctMips = 9 };   // 256 .. 1
+    enum { kFace = 256, kOct = 512, kOctMips = 10 };   // 512 .. 1
     static constexpr DXGI_FORMAT kFormat = DXGI_FORMAT_R16G16B16A16_FLOAT;   // as the HDR target: the scene's PSOs
 
     bool Create(ID3D12Device* dev);

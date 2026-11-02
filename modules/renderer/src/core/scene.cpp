@@ -3501,14 +3501,14 @@ bool Scene::LoadFromMemory(ID3D12Device* dev, ID3D12CommandQueue* queue,
     {
         D3D12_QUERY_HEAP_DESC qh = {};
         qh.Type = D3D12_QUERY_HEAP_TYPE_TIMESTAMP;
-        qh.Count = 4;
+        qh.Count = 8;   // and [4] [5] round the probe's resolve, [6] [7] round its faces
         if (SUCCEEDED(dev->CreateQueryHeap(&qh, IID_PPV_ARGS(&m_timer))))
         {
             D3D12_HEAP_PROPERTIES hp = {};
             hp.Type = D3D12_HEAP_TYPE_READBACK;
             D3D12_RESOURCE_DESC rd = {};
             rd.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
-            rd.Width = 4 * sizeof(UINT64);
+            rd.Width = 8 * sizeof(UINT64);
             rd.Height = 1;
             rd.DepthOrArraySize = 1;
             rd.MipLevels = 1;
@@ -5809,7 +5809,7 @@ void Scene::RecordPass(ID3D12GraphicsCommandList* list, D3D12_CPU_DESCRIPTOR_HAN
     if (timed && m_timerPending)
     {
         UINT64* t = nullptr;
-        D3D12_RANGE r = { 0, 4 * sizeof(UINT64) };
+        D3D12_RANGE r = { 0, 8 * sizeof(UINT64) };
         if (SUCCEEDED(m_timerReadback->Map(0, &r, reinterpret_cast<void**>(&t))))
         {
             if (t[3] >= t[2] && t[2] >= t[1] && t[1] >= t[0])
@@ -5818,6 +5818,17 @@ void Scene::RecordPass(ID3D12GraphicsCommandList* list, D3D12_CPU_DESCRIPTOR_HAN
                 m_envMs    = double(t[1] - t[0]) * k;
                 m_aerialMs = double(t[2] - t[1]) * k;
                 m_passMs   = double(t[3] - t[0]) * k;
+            }
+            // The reflection probe's own (probe.h): its resolve and its faces, logged as a mean every 100 frames.
+            if (t[5] >= t[4] && t[7] >= t[6] && !m_probeObjects.empty())
+            {
+                m_probeMsSum += double(t[5] - t[4] + t[7] - t[6]) * 1000.0 / double(m_timerHz);
+                if (++m_probeMsFrames == 100)
+                {
+                    Log("scene: reflection probe %.2f ms a frame (faces and resolve, mean of 100)", m_probeMsSum / 100.0);
+                    m_probeMsSum = 0.0;
+                    m_probeMsFrames = 0;
+                }
             }
             D3D12_RANGE none = { 0, 0 };
             m_timerReadback->Unmap(0, &none);
@@ -5836,8 +5847,10 @@ void Scene::RecordPass(ID3D12GraphicsCommandList* list, D3D12_CPU_DESCRIPTOR_HAN
         m_env->Record(list, m_atmosphere, &m_ms);
     // The probe's faces drawn last frame, into its chain (probe.h) - its own heap, so before the scene binds its own.
     const bool probing = !prepass && !m_probeObjects.empty() && m_reflProbe.Ready() && m_env && m_env->Ready();
+    if (timed) list->EndQuery(m_timer.Get(), D3D12_QUERY_TYPE_TIMESTAMP, 4);
     if (probing && m_probeFacesDrawn > 0)
         m_reflProbe.Resolve(list, m_env->Texture());
+    if (timed) list->EndQuery(m_timer.Get(), D3D12_QUERY_TYPE_TIMESTAMP, 5);
     cb.reflProbeOn = probing && m_probeFacesDrawn >= 6 ? 1.0f : 0.0f;
     cb.reflProbeMips = (float)ReflectionProbe::kOctMips;
 
@@ -6280,6 +6293,7 @@ void Scene::RecordPass(ID3D12GraphicsCommandList* list, D3D12_CPU_DESCRIPTOR_HAN
     // lights' clusters (it takes every light, unshadowed), the aerial table (the probe marches its air). The cascades where they are drawn this frame.
     // Not drawn: the focus (the car), any model within kProbeSkip of the centre (its lamps, a passenger's helmet),
     // the glass. Two faces a frame (NGG_PROBE_FACES, 1..6), all six at first; resolved at the next frame's start.
+    if (timed) list->EndQuery(m_timer.Get(), D3D12_QUERY_TYPE_TIMESTAMP, 6);
     if (probing)
     {
         static const int perFrame = [] {
@@ -6360,6 +6374,7 @@ void Scene::RecordPass(ID3D12GraphicsCommandList* list, D3D12_CPU_DESCRIPTOR_HAN
         list->RSSetViewports(1, &vp);
         list->RSSetScissorRects(1, &sc);
     }
+    if (timed) list->EndQuery(m_timer.Get(), D3D12_QUERY_TYPE_TIMESTAMP, 7);
 
     // THE OPAQUE WORLD FRONT TO BACK - the solid first, the alpha-tested (foliage) after, each nearest first, by the
     // distance to the nearest point of the box (0 inside it: the terrain the camera stands on). What is drawn first
@@ -6525,7 +6540,7 @@ void Scene::RecordPass(ID3D12GraphicsCommandList* list, D3D12_CPU_DESCRIPTOR_HAN
     if (timed)
     {
         list->EndQuery(m_timer.Get(), D3D12_QUERY_TYPE_TIMESTAMP, 3);
-        list->ResolveQueryData(m_timer.Get(), D3D12_QUERY_TYPE_TIMESTAMP, 0, 4,
+        list->ResolveQueryData(m_timer.Get(), D3D12_QUERY_TYPE_TIMESTAMP, 0, 8,
                                m_timerReadback.Get(), 0);
         m_timerPending = true;
     }
