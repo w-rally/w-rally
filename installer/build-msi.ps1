@@ -16,7 +16,7 @@ $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent $PSScriptRoot
 if (-not [System.IO.Path]::IsPathRooted($Build)) { $Build = Join-Path $root $Build }
 
-$info = Get-Content -Raw (Join-Path $Build "generateduild_info.h")
+$info = Get-Content -Raw (Join-Path $Build "generated/build_info.h")
 if ($info -notmatch '#define WRALLY_VERSION "([^"]*)"') { throw "no WRALLY_VERSION in build_info.h - build W-Rally first" }
 $Version = $Matches[1]
 $Commit = if ($info -match '#define WRALLY_COMMIT "([^"]*)"') { $Matches[1] } else { "" }
