@@ -128,10 +128,15 @@ cbuffer Camera : register(b0)
     float4             gClusterParams;
     float              gLightsOn;
     float              gLightsVisOn;
-    float2             gLightPad;
+    float              gReflProbeOn;   // the cube probe (probe.h) is whole: the focus's objects read it
+    float              gReflProbeMips;
     // The deferred local lights' pass (PSDeferredLights): the jittered view-projection's inverse - the matrix the
     // depth was written with.
     row_major float4x4 gInvViewProj;
+    // The cube probe's faces only (probe.h): the car they leave out, as a box - its centre (w 1: on) and its three
+    // axes, each with its half extent in w - so the ground still gets its shadow and the sky it hides (CarBoxVis).
+    float4             gCarBoxC;
+    float4             gCarBoxX, gCarBoxY, gCarBoxZ;
 };
 
 // Cascaded shadow maps. A comparison sampler so the hardware does the depth
@@ -176,7 +181,15 @@ float WetNoise(float2 p)
 
 // Declared ahead of its use; defined after the BRDF helpers below.
 float3 LocalLights(float3 p, float3 N, float3 V, float3 diffuseCol, float3 f0, float a, float specScale, float2 px,
-                   float wrap, float trans, bool withSpec);
+                   float wrap, float trans, bool withSpec, float coat);
+
+// CLEAR COAT (MaterialDesc::clearCoat): car paint's lacquer - a smooth dielectric film over the base layer. Its own
+// GGX lobe (f0 0.04, this gloss: a polished finish, 0.02) reflects the light and the environment sharply, and
+// what it reflects does not reach the base below: the base's diffuse and specular are scaled by 1 - coat x F. The
+// same normal for both layers (RBR's paint has no normal map). The deferred local lights know only coated or not
+// (GBUF kind 3).
+static const float kCoatRoughness = 0.02;
+static const float kCoatF0 = 0.04;
 
 // Standard GGX: Trowbridge-Reitz distribution, height-correlated Smith
 // visibility, Schlick Fresnel. Nothing bespoke here on purpose - the value of a
@@ -225,7 +238,7 @@ float VisSmith(float ndv, float ndl, float a)
 // `trans`: a foliage card's transmission, as for the sun - a leaf with the lamp behind it is backlit, not black
 // (design 5.4 N3: grass tufts lit by the lamps had black lower halves, their volume normals turned away).
 void ShadeLocalLight(uint li, LightRec L, float3 p, float3 N, float3 V, float ndv, float3 diffuseCol, float3 f0,
-                     float a, float specScale, float wrap, float trans, bool withSpec, inout float3 shadowed,
+                     float a, float specScale, float wrap, float trans, bool withSpec, float coat, inout float3 shadowed,
                      inout float3 open)
 {
     float3 l;
@@ -251,30 +264,50 @@ void ShadeLocalLight(uint li, LightRec L, float3 p, float3 N, float3 V, float nd
         const float vden = lerp(2.0 * ndlTrue * ndv, ndlTrue + ndv, aw);
         const float dv = aw2 / max(1e-6, 3.14159265 * d * d * 2.0 * vden);
         c3 += F * (dv * specScale * ndlTrue) * E;
+        // The clear coat (kCoatRoughness): its own lobe over the base, widened by the emitter as the base's is.
+        if (coat > 0.0)
+        {
+            const float cw = saturate(kCoatRoughness * kCoatRoughness + L.radius / (2.0 * max(dist, 1e-3)));
+            const float cw2 = cw * cw;
+            const float dc = ndh * ndh * (cw2 - 1.0) + 1.0;
+            const float vdc = lerp(2.0 * ndlTrue * ndv, ndlTrue + ndv, cw);
+            const float Fc = (kCoatF0 + (1.0 - kCoatF0) * (x2 * x2 * x)) * coat;
+            c3 = c3 * (1.0 - Fc) + E * (Fc * cw2 / max(1e-6, 3.14159265 * dc * dc * 2.0 * vdc) * specScale * ndlTrue);
+        }
     }
     if (L.flags & kLightShadows) shadowed += c3;
     else open += c3;
 }
 
 void ShadeLightCluster(uint ci, float3 p, float3 N, float3 V, float ndv, float3 diffuseCol, float3 f0, float a,
-                       float specScale, float wrap, float trans, bool withSpec, inout float3 shadowed, inout float3 open)
+                       float specScale, float wrap, float trans, bool withSpec, float coat, inout float3 shadowed,
+                       inout float3 open)
 {
     const uint2 c = gClusters[ci];
     for (uint k = 0; k < c.y; ++k)
     {
         const uint li = gLightIndex[c.x + k];
-        ShadeLocalLight(li, LightLoad(li), p, N, V, ndv, diffuseCol, f0, a, specScale, wrap, trans, withSpec, shadowed,
-                        open);
+        ShadeLocalLight(li, LightLoad(li), p, N, V, ndv, diffuseCol, f0, a, specScale, wrap, trans, withSpec, coat,
+                        shadowed, open);
     }
 }
 
 float3 LocalLights(float3 p, float3 N, float3 V, float3 diffuseCol, float3 f0, float a, float specScale, float2 px,
-                   float wrap, float trans, bool withSpec)
+                   float wrap, float trans, bool withSpec, float coat)
 {
     if (gLightsOn < 0.5) return float3(0.0, 0.0, 0.0);
-    const uint ci = LightCluster(px, dot(p - gCamPos, gCamFwd), gClusterParams);
     const float ndv = saturate(dot(N, V)) + 1e-5;
     float3 shadowed = float3(0.0, 0.0, 0.0), open = float3(0.0, 0.0, 0.0);
+    if (gLightsOn > 1.5)
+    {
+        // The cube probe's faces (probe.h): no clusters of their own, so every light (gClusterParams.x of them), and
+        // no ray-traced fraction - unshadowed.
+        for (uint li = 0; li < (uint)gClusterParams.x; ++li)
+            ShadeLocalLight(li, LightLoad(li), p, N, V, ndv, diffuseCol, f0, a, specScale, wrap, trans, withSpec, coat,
+                            shadowed, open);
+        return shadowed + open;
+    }
+    const uint ci = LightCluster(px, dot(p - gCamPos, gCamFwd), gClusterParams);
     bool done = false;
 #if __SHADER_TARGET_MAJOR >= 6
     [loop] for (uint turn = 0; turn < 4u && !done; ++turn)
@@ -282,13 +315,14 @@ float3 LocalLights(float3 p, float3 N, float3 V, float3 diffuseCol, float3 f0, f
         const uint cu = WaveReadLaneFirst(ci);   // wave-uniform
         [branch] if (cu == ci)
         {
-            ShadeLightCluster(cu, p, N, V, ndv, diffuseCol, f0, a, specScale, wrap, trans, withSpec, shadowed, open);
+            ShadeLightCluster(cu, p, N, V, ndv, diffuseCol, f0, a, specScale, wrap, trans, withSpec, coat, shadowed,
+                              open);
             done = true;
         }
     }
 #endif
     [branch] if (!done)
-        ShadeLightCluster(ci, p, N, V, ndv, diffuseCol, f0, a, specScale, wrap, trans, withSpec, shadowed, open);
+        ShadeLightCluster(ci, p, N, V, ndv, diffuseCol, f0, a, specScale, wrap, trans, withSpec, coat, shadowed, open);
 #ifdef BLEND
     const float vis = 1.0;
 #else
@@ -315,7 +349,7 @@ cbuffer ObjectCB : register(b1)
     uint  gObjectLayer;
     uint  gMatFlags;
     uint  gObjectMoved;   // 1 = the transform differs from last frame's; 2 = and it is glass (the prepass's mark)
-    uint  gObjectPad;
+    uint  gObjectProbe;   // 1: this object reflects the cube probe, not the sky (Scene::SetReflectionFocus)
     row_major float4x4 gObjectXform;
     // The material, as root constants rather than a buffer. It changes every
     // draw exactly as the transform does, and the root signature has the room
@@ -323,7 +357,7 @@ cbuffer ObjectCB : register(b1)
     // is a reason to stop having one draw per object.
     float4 gBaseColourFactor;
     float4 gPbrA;    // roughness, metallic, normalScale, occlusionStrength
-    float4 gPbrB;    // emissiveStrength, alphaCutoff, -, -
+    float4 gPbrB;    // emissiveStrength, alphaCutoff, clearCoat, -
     // Last frame's transform, bound only when gObjectMoved says it differs:
     // where this object's surface WAS, for the motion target.
     row_major float4x4 gPrevObjectXform;
@@ -333,6 +367,8 @@ Texture2DArray          gShadow     : register(t5);
 // The prefiltered sky (env.h). Mip 0 is the mirror, the last mip is very nearly
 // the hemisphere average, and roughness picks a level.
 Texture2D               gEnv        : register(t6);
+// The world around the car (probe.h): the same octahedral mapping and roughness axis, for the reflection focus.
+Texture2D               gReflProbe  : register(t19);
 // THIS frame's ray-traced sun visibility (rt.h), from the depth+normal prepass.
 Texture2D<float>        gRtVis      : register(t7);
 // And this frame's ray-traced ambient occlusion, same source, denoised.
@@ -543,7 +579,37 @@ void PSShadow(VSOut i)
 // in the debug views that compare the two - the map's cost is in RENDERING
 // its cascades, which the caller skips entirely in RT mode.
 static float gDbgCsmVis = 1.0;
+// THE CAR in the cube probe's faces (gCarBoxC): left out of them, it would leave the ground round it sunlit and open to
+// the sky - and the paint's grazing edges, a mirror there, reflected the bright road where the car's shadow lies. A
+// ray from `p` along `dir` against the box: 0 where it meets it (or starts inside), 1 where it misses or no box.
+float CarBoxVis(float3 p, float3 dir)
+{
+    if (gCarBoxC.w < 0.5) return 1.0;
+    const float3 o = p - gCarBoxC.xyz;
+    float tNear = -1e9, tFar = 1e9;
+    const float4 axes[3] = { gCarBoxX, gCarBoxY, gCarBoxZ };
+    [unroll] for (int k = 0; k < 3; ++k)
+    {
+        const float po = dot(o, axes[k].xyz), d = dot(dir, axes[k].xyz);
+        if (abs(d) < 1e-6)
+        {
+            if (abs(po) > axes[k].w) return 1.0;
+            continue;
+        }
+        const float t0 = (-axes[k].w - po) / d, t1 = (axes[k].w - po) / d;
+        tNear = max(tNear, min(t0, t1));
+        tFar = min(tFar, max(t0, t1));
+    }
+    return (tFar >= max(tNear, 0.0)) ? 0.0 : 1.0;
+}
+
+float SunVisInner(float3 wpos, float2 pixel, float3 N);
 float SunVis(float3 wpos, float2 pixel, float3 N)
+{
+    return SunVisInner(wpos, pixel, N) * CarBoxVis(wpos + N * 0.02, gSunTowards);
+}
+
+float SunVisInner(float3 wpos, float2 pixel, float3 N)
 {
     if (gShadowParams.x < 0.5) return 1.0;      // shadows off: off for BOTH sources
     const bool useRt = gShadowSource > 0.5 && gRtReady > 0.5;
@@ -684,7 +750,7 @@ void AerialAt(float3 wpos, float2 px, out float3 tr, out float3 inscatter)
 }
 
 // What the deferred local lights' pass needs of a surface (GBUF; PSDeferredLights): its shading normal, its kind
-// (0 no surface, 1 opaque, 2 a foliage card) and roughness, albedo and metallic. Packed into two 32-bit targets
+// (0 no surface, 1 opaque, 2 a foliage card, 3 opaque under a clear coat) and roughness, albedo and metallic. Packed into two 32-bit targets
 // (kGbufFormats): every byte is written per FRAGMENT, foliage's overdraw included - a third target with the aerial
 // transmittance (and the normal in half floats) cost the opaque world +3.8 ms in PIX's replay; the transmittance is
 // computed again where it is used (AerialAt).
@@ -695,6 +761,15 @@ struct GBufOut
     float  rough;
     float4 albedoMetal;
 };
+
+// What a surface reflects towards the reflection vector (`euv`, octahedral) at `roughness`: the sky, or for the car the
+// world around it - the cube probe (gObjectProbe), which has the sky behind its world already.
+float3 EnvRadiance(float2 euv, float roughness)
+{
+    if (gObjectProbe != 0 && gReflProbeOn > 0.5)
+        return gReflProbe.SampleLevel(gSampLinear, euv, roughness * (gReflProbeMips - 1.0)).rgb;
+    return gEnv.SampleLevel(gSampLinear, euv, roughness * (gEnvMips - 1.0)).rgb;
+}
 
 float4 Shade(VSOut i, bool frontFace, out GBufOut g)
 {
@@ -784,6 +859,8 @@ float4 Shade(VSOut i, bool frontFace, out GBufOut g)
     rtAo = 1.0;   // the AO buffer is the opaque surface's behind the glass, not the glass's
 #endif
     matAo *= rtAo;
+    // Under the car, in the probe's faces (CarBoxVis): the sky it hides, most of the ambient's light.
+    matAo *= lerp(0.25, 1.0, CarBoxVis(i.wpos + float3(0.0, 0.02, 0.0), float3(0.0, 1.0, 0.0)));
 #ifdef ALPHA_TEST
     // A plant's AO rays skip its own cards (rt.cpp Occluded) for the same
     // reason its sun rays do: per card, they made one card dark and the one
@@ -950,7 +1027,7 @@ float4 Shade(VSOut i, bool frontFace, out GBufOut g)
 #if defined(ALPHA_TEST)
         g.kind = 2.0;
 #else
-        g.kind = 1.0;
+        g.kind = gPbrB.z > 0.5 ? 3.0 : 1.0;   // 3: under a clear coat
 #endif
         g.rough = saturate(roughness);
         g.albedoMetal = float4(saturate(albedo), saturate(metallic));
@@ -962,11 +1039,12 @@ float4 Shade(VSOut i, bool frontFace, out GBufOut g)
             const float3 lV    = normalize(gCamPos - i.wpos);
             const float  lspec = physical ? 1.0 : 3.14159265;
 #if defined(ALPHA_TEST)
-            localLight = LocalLights(i.wpos, N, lV, ldiff, lf0, la, lspec, i.pos.xy, kFoliageWrap, kFoliageTransmission, false);
+            localLight = LocalLights(i.wpos, N, lV, ldiff, lf0, la, lspec, i.pos.xy, kFoliageWrap, kFoliageTransmission, false,
+                                     0.0);
 #elif defined(BLEND)
-            localLight = LocalLights(i.wpos, N, lV, ldiff * coverage, lf0, la, lspec, i.pos.xy, 0.0, 0.0, true);
+            localLight = LocalLights(i.wpos, N, lV, ldiff * coverage, lf0, la, lspec, i.pos.xy, 0.0, 0.0, true, 0.0);
 #else
-            localLight = LocalLights(i.wpos, N, lV, ldiff, lf0, la, lspec, i.pos.xy, 0.0, 0.0, true);
+            localLight = LocalLights(i.wpos, N, lV, ldiff, lf0, la, lspec, i.pos.xy, 0.0, 0.0, true, saturate(gPbrB.z));
 #endif
         }
 #endif
@@ -1148,6 +1226,17 @@ float4 Shade(VSOut i, bool frontFace, out GBufOut g)
         float  vdh = saturate(dot(V, H));
         float3 spec = FresnelSchlick(f0, vdh) * DistributionGGX(ndh, a) * VisSmith(ndv, ndl, a);
 
+        // THE CLEAR COAT (kCoatRoughness): the sun's sharp highlight in the lacquer, and the share of the light it
+        // reflects (Fresnel at the view: it rises to a mirror at grazing angles) kept from the base below.
+        const float coat = saturate(gPbrB.z);
+        float coatSun = 0.0, coatKeep = 1.0;
+        if (coat > 0.0)
+        {
+            const float ca = max(0.002, kCoatRoughness * kCoatRoughness);
+            coatSun = coat * FresnelSchlick(kCoatF0.xxx, vdh).x * DistributionGGX(ndh, ca) * VisSmith(ndv, ndl, ca);
+            coatKeep = 1.0 - coat * FresnelSchlick(kCoatF0.xxx, ndv).x;
+        }
+
         // AMBIENT SPECULAR - the split sum. What the surface reflects of
         // everything that is not the sun, which until now was nothing at all:
         // a polished surface and a rough one differed only in the size of one
@@ -1161,12 +1250,17 @@ float4 Shade(VSOut i, bool frontFace, out GBufOut g)
         {
             float3 R = reflect(-V, N);
             float2 euv = AtmOctEncode(R);
-            float  lod = roughness * (gEnvMips - 1.0);
-            float3 envRad = gEnv.SampleLevel(gSampLinear, euv, lod).rgb;
+            float3 envRad = EnvRadiance(euv, roughness);
             // Same PI as the direct lobe, and for the same reason: our diffuse
             // is albedo*E rather than albedo/PI*E, so every specular term has
             // to carry the factor or the balance is off by PI.
             ambSpec = envRad * EnvBRDFApprox(f0, roughness, ndv) * kSpecScale * matAo;
+            if (coat > 0.0)
+            {
+                const float3 coatRad = EnvRadiance(euv, kCoatRoughness);
+                ambSpec = ambSpec * coatKeep
+                        + coatRad * (coat * EnvBRDFApprox(kCoatF0.xxx, kCoatRoughness, ndv).x * kSpecScale * matAo);
+            }
         }
         gProbeAmbSpec = ambSpec;
 
@@ -1176,8 +1270,10 @@ float4 Shade(VSOut i, bool frontFace, out GBufOut g)
             + spec * kSpecScale * sunColour * ndl * vis
             + ambSpec;
 #else
-        lit = diffuseCol * (sunColour * ndl * vis + ambient * matAo)
-            + spec * kSpecScale * sunColour * ndl * vis
+        // (ambSpec has the coat's share already; the coat's highlight is uncoloured, as the lacquer is)
+        lit = (diffuseCol * (sunColour * ndl * vis + ambient * matAo)
+               + spec * kSpecScale * sunColour * ndl * vis) * coatKeep
+            + coatSun * kSpecScale * sunColour * ndl * vis
             + ambSpec;
 #endif
         lit += localLight;   // (computed above, before the sun and the sky)
@@ -1417,9 +1513,9 @@ float4 PSDeferredLights(float4 pos : SV_Position) : SV_Target
     const float3 ldiff = am.rgb * (1.0 - am.a) * (physical ? 1.0 / 3.14159265 : 1.0);
     const float la = max(0.002, roughness * roughness);
     const float lspec = physical ? 1.0 : 3.14159265;
-    const bool foliage = kind > 1.5;
+    const bool foliage = kind > 1.5 && kind < 2.5;
     const float3 L = LocalLights(p, N, V, ldiff, lf0, la, lspec, pos.xy, foliage ? kFoliageWrap : 0.0,
-                                 foliage ? kFoliageTransmission : 0.0, !foliage);
+                                 foliage ? kFoliageTransmission : 0.0, !foliage, kind > 2.5 ? 1.0 : 0.0);
     float3 tr = float3(1.0, 1.0, 1.0), inscatter;
     if (gAerial > 0.5)
     {
@@ -1483,8 +1579,9 @@ struct CameraCB
     float viewProjNoJitter[16];
     float prevViewProj[16];
     float clusterParams[4];
-    float lightsOn, lightsVisOn, lightPad[2];
+    float lightsOn, lightsVisOn, reflProbeOn, reflProbeMips;
     float invViewProj[16];
+    float carBox[4][4];    // gCarBoxC, gCarBoxX/Y/Z: the probe's faces only
 };
 static_assert(sizeof(CameraCB) % 16 == 0,
               "CameraCB must be a whole number of float4 registers - see the note above");
@@ -3441,14 +3538,14 @@ bool Scene::LoadFromMemory(ID3D12Device* dev, ID3D12CommandQueue* queue,
     {
         D3D12_QUERY_HEAP_DESC qh = {};
         qh.Type = D3D12_QUERY_HEAP_TYPE_TIMESTAMP;
-        qh.Count = 4;
+        qh.Count = 8;   // and [4] [5] round the probe's resolve, [6] [7] round its faces
         if (SUCCEEDED(dev->CreateQueryHeap(&qh, IID_PPV_ARGS(&m_timer))))
         {
             D3D12_HEAP_PROPERTIES hp = {};
             hp.Type = D3D12_HEAP_TYPE_READBACK;
             D3D12_RESOURCE_DESC rd = {};
             rd.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
-            rd.Width = 4 * sizeof(UINT64);
+            rd.Width = 8 * sizeof(UINT64);
             rd.Height = 1;
             rd.DepthOrArraySize = 1;
             rd.MipLevels = 1;
@@ -3494,7 +3591,7 @@ bool Scene::LoadFromMemory(ID3D12Device* dev, ID3D12CommandQueue* queue,
     srvRange.NumDescriptors = kMaterialSrvCount;   // t0..t4, contiguous per material
     srvRange.BaseShaderRegister = 0;
 
-    D3D12_ROOT_PARAMETER params[12] = {};
+    D3D12_ROOT_PARAMETER params[13] = {};
     params[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;
     params[0].Descriptor.ShaderRegister = 0;
     params[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
@@ -3604,6 +3701,16 @@ bool Scene::LoadFromMemory(ID3D12Device* dev, ID3D12CommandQueue* queue,
     params[11].DescriptorTable.pDescriptorRanges = &lightRange;
     params[11].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
 
+    // The cube probe around the car (probe.h), t19.
+    static D3D12_DESCRIPTOR_RANGE reflRange = {};
+    reflRange.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+    reflRange.NumDescriptors = 1;
+    reflRange.BaseShaderRegister = 19;
+    params[12].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+    params[12].DescriptorTable.NumDescriptorRanges = 1;
+    params[12].DescriptorTable.pDescriptorRanges = &reflRange;
+    params[12].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+
     // THREE samplers so the atlas-bleed diagnosis can be A/B'd live in the
     // viewer instead of argued about.
     //
@@ -3663,7 +3770,7 @@ bool Scene::LoadFromMemory(ID3D12Device* dev, ID3D12CommandQueue* queue,
     samp[5] = AtmosphereMs::MsSampler(D3D12_SHADER_VISIBILITY_PIXEL);   // s0 space1
 
     D3D12_ROOT_SIGNATURE_DESC rs = {};
-    rs.NumParameters = 12;
+    rs.NumParameters = 13;
     rs.pParameters = params;
     rs.NumStaticSamplers = 6;
     rs.pStaticSamplers = samp;
@@ -4045,6 +4152,8 @@ bool Scene::LoadFromMemory(ID3D12Device* dev, ID3D12CommandQueue* queue,
         Log("scene: multiple-scattering table unavailable - single scattering");
     if (!m_ownEnv.Ready() && !m_ownEnv.Create(dev))
         Log("scene: environment unavailable - no ambient specular, sky ambient marches per pixel");
+    if (!m_reflProbe.Ready() && !m_reflProbe.Create(dev))
+        Log("scene: reflection probe unavailable - the car reflects the sky alone");
 
     // No path here on purpose: this loads from bytes, and the caller may have no
     // file at all. Load() logs the name before calling in.
@@ -4353,6 +4462,25 @@ bool Scene::UploadDynamic(ID3D12Device* dev)
     m_dynIbv.SizeInBytes = (UINT)iBytes;
     m_dynIbv.Format = DXGI_FORMAT_R32_UINT;
     return true;
+}
+
+void Scene::SetReflectionFocus(const uint32_t* objects, uint32_t count, const float centre[3])
+{
+    for (uint32_t o : m_probeObjects)
+        if (o < m_objects.size()) m_objects[o].probeFocus = false;
+    m_probeObjects.assign(objects, objects + count);
+    for (uint32_t o : m_probeObjects)
+        if (o < m_objects.size()) m_objects[o].probeFocus = true;
+    if (!count)
+    {
+        m_probeFacesDrawn = 0;
+        return;
+    }
+    // A jump (a reset onto the road, another car): the faces hold the old place - all six again before it is read.
+    float d2 = 0.0f;
+    for (int k = 0; k < 3; ++k) d2 += (centre[k] - m_probeCentre[k]) * (centre[k] - m_probeCentre[k]);
+    if (d2 > 25.0f * 25.0f) m_probeFacesDrawn = 0;
+    for (int k = 0; k < 3; ++k) m_probeCentre[k] = centre[k];
 }
 
 bool Scene::SetObjectVisible(uint32_t index, bool visible)
@@ -5718,7 +5846,7 @@ void Scene::RecordPass(ID3D12GraphicsCommandList* list, D3D12_CPU_DESCRIPTOR_HAN
     if (timed && m_timerPending)
     {
         UINT64* t = nullptr;
-        D3D12_RANGE r = { 0, 4 * sizeof(UINT64) };
+        D3D12_RANGE r = { 0, 8 * sizeof(UINT64) };
         if (SUCCEEDED(m_timerReadback->Map(0, &r, reinterpret_cast<void**>(&t))))
         {
             if (t[3] >= t[2] && t[2] >= t[1] && t[1] >= t[0])
@@ -5727,6 +5855,17 @@ void Scene::RecordPass(ID3D12GraphicsCommandList* list, D3D12_CPU_DESCRIPTOR_HAN
                 m_envMs    = double(t[1] - t[0]) * k;
                 m_aerialMs = double(t[2] - t[1]) * k;
                 m_passMs   = double(t[3] - t[0]) * k;
+            }
+            // The reflection probe's own (probe.h): its resolve and its faces, logged as a mean every 100 frames.
+            if (t[5] >= t[4] && t[7] >= t[6] && !m_probeObjects.empty())
+            {
+                m_probeMsSum += double(t[5] - t[4] + t[7] - t[6]) * 1000.0 / double(m_timerHz);
+                if (++m_probeMsFrames == 100)
+                {
+                    Log("scene: reflection probe %.2f ms a frame (faces and resolve, mean of 100)", m_probeMsSum / 100.0);
+                    m_probeMsSum = 0.0;
+                    m_probeMsFrames = 0;
+                }
             }
             D3D12_RANGE none = { 0, 0 };
             m_timerReadback->Unmap(0, &none);
@@ -5743,6 +5882,14 @@ void Scene::RecordPass(ID3D12GraphicsCommandList* list, D3D12_CPU_DESCRIPTOR_HAN
         m_ms.Update(list, m_atmosphere.turbidity, m_atmosphere.groundAlbedo, m_msOn);
     if (!prepass && m_env && m_env->Ready())
         m_env->Record(list, m_atmosphere, &m_ms);
+    // The probe's faces drawn last frame, into its chain (probe.h) - its own heap, so before the scene binds its own.
+    const bool probing = !prepass && !m_probeObjects.empty() && m_reflProbe.Ready() && m_env && m_env->Ready();
+    if (timed) list->EndQuery(m_timer.Get(), D3D12_QUERY_TYPE_TIMESTAMP, 4);
+    if (probing && m_probeFacesDrawn > 0)
+        m_reflProbe.Resolve(list, m_env->Texture());
+    if (timed) list->EndQuery(m_timer.Get(), D3D12_QUERY_TYPE_TIMESTAMP, 5);
+    cb.reflProbeOn = probing && m_probeFacesDrawn >= 6 ? 1.0f : 0.0f;
+    cb.reflProbeMips = (float)ReflectionProbe::kOctMips;
 
     if (timed) list->EndQuery(m_timer.Get(), D3D12_QUERY_TYPE_TIMESTAMP, 1);
 
@@ -5824,20 +5971,25 @@ void Scene::RecordPass(ID3D12GraphicsCommandList* list, D3D12_CPU_DESCRIPTOR_HAN
     const bool deferred = !prepass && m_deferredReady && cb.lightsOn > 0.5f && m_debugMode == 0 && !forwardLights;
     // The prepass writes three targets, normal, motion and plant, adjacent in
     // their heap - so `rtv` is the start of a three-descriptor range there.
+    D3D12_CPU_DESCRIPTOR_HANDLE targets[3] = { rtv };
     if (deferred)
-    {
-        D3D12_CPU_DESCRIPTOR_HANDLE targets[3] = { rtv };
         for (int k = 0; k < 2; ++k)
         {
             targets[1 + k] = m_gbufRtvHeap->GetCPUDescriptorHandleForHeapStart();
             targets[1 + k].ptr += (SIZE_T)k * m_prepassRtvStride;
         }
-        list->OMSetRenderTargets(3, targets, FALSE, &dsv);
+    auto bindTargets = [&]() {   // (again after the probe's faces)
+        if (deferred)
+            list->OMSetRenderTargets(3, targets, FALSE, &dsv);
+        else
+            list->OMSetRenderTargets(prepass ? 3 : 1, &rtv, prepass ? TRUE : FALSE, &dsv);
+    };
+    bindTargets();
+    if (deferred)
+    {
         const float none[4] = { 0.0f, 0.0f, 0.0f, 0.0f };   // kind 0: no surface (the sky)
         list->ClearRenderTargetView(targets[1], none, 0, nullptr);
     }
-    else
-        list->OMSetRenderTargets(prepass ? 3 : 1, &rtv, prepass ? TRUE : FALSE, &dsv);
     // Depth is cleared by whichever pass comes FIRST this frame. After a
     // prepass the main pass must keep it: that depth is what it tests EQUAL
     // against, and what the ray tracer already traced from.
@@ -6085,6 +6237,23 @@ void Scene::RecordPass(ID3D12GraphicsCommandList* list, D3D12_CPU_DESCRIPTOR_HAN
         D3D12_GPU_DESCRIPTOR_HANDLE mh = m_srvHeap->GetGPUDescriptorHandleForHeapStart();
         mh.ptr += (UINT64)(m_msSrvReady ? m_msSrvSlot : 0) * m_srvStride;
         list->SetGraphicsRootDescriptorTable(10, mh);
+
+        if (m_reflProbe.Ready() && !m_reflSrvReady)
+        {
+            ID3D12Device* d = nullptr;
+            list->GetDevice(IID_PPV_ARGS(&d));
+            if (d)
+            {
+                D3D12_CPU_DESCRIPTOR_HANDLE dest = m_srvHeap->GetCPUDescriptorHandleForHeapStart();
+                dest.ptr += (SIZE_T)m_reflSrvSlot * m_srvStride;
+                m_reflProbe.CreateSrv(d, dest);
+                d->Release();
+                m_reflSrvReady = true;
+            }
+        }
+        D3D12_GPU_DESCRIPTOR_HANDLE ph = m_srvHeap->GetGPUDescriptorHandleForHeapStart();
+        ph.ptr += (UINT64)(m_reflSrvReady ? m_reflSrvSlot : 0) * m_srvStride;
+        list->SetGraphicsRootDescriptorTable(12, ph);
     }
 
     if (m_objects.empty())
@@ -6137,8 +6306,9 @@ void Scene::RecordPass(ID3D12GraphicsCommandList* list, D3D12_CPU_DESCRIPTOR_HAN
         // dropped the history of a band round its outline every frame - its
         // edges and its wheels flickered on a car standing still.
         const bool moved = movedOf(o);
-        const uint32_t objConsts[3] = { o.layerId, o.matFlags, moved ? (glassMark ? 2u : 1u) : 0u };
-        list->SetGraphicsRoot32BitConstants(4, 3, objConsts, 0);
+        const uint32_t objConsts[4] = { o.layerId, o.matFlags, moved ? (glassMark ? 2u : 1u) : 0u,
+                                        o.probeFocus && cb.reflProbeOn > 0.5f ? 1u : 0u };
+        list->SetGraphicsRoot32BitConstants(4, 4, objConsts, 0);
         if (moved) list->SetGraphicsRoot32BitConstants(4, 16, o.prevXform, 32);
         {
             const MaterialSlot& m = m_materials[o.materialId];
@@ -6146,7 +6316,7 @@ void Scene::RecordPass(ID3D12GraphicsCommandList* list, D3D12_CPU_DESCRIPTOR_HAN
                 m.baseColourFactor[0], m.baseColourFactor[1],
                 m.baseColourFactor[2], m.baseColourFactor[3],
                 m.roughness, m.metallic, m.normalScale, m.occlusionStrength,
-                m.emissiveStrength, m.alphaCutoff, 0.0f, 0.0f,
+                m.emissiveStrength, m.alphaCutoff, m.clearCoat, 0.0f,
             };
             list->SetGraphicsRoot32BitConstants(4, 12, pbr, 20);
         }
@@ -6155,6 +6325,144 @@ void Scene::RecordPass(ID3D12GraphicsCommandList* list, D3D12_CPU_DESCRIPTOR_HAN
                      o.meshId ? m_dynVbv : m_vbv, o.meshId ? m_dynIbv : m_ibv);
         list->DrawIndexedInstanced(o.indexCount, 1, o.firstIndex, o.baseVertex, 0);
     };
+    // THE CUBE PROBE's faces this frame (probe.h): the world around the car, drawn with these pipelines and lit as this
+    // pass lights it, less what belongs to the main camera's pixels - the ray-traced sun visibility and AO, the local
+    // lights' clusters (it takes every light, unshadowed), the aerial table (the probe marches its air). The cascades where they are drawn this frame.
+    // Not drawn: the focus (the car), any model within kProbeSkip of the centre (its lamps, a passenger's helmet),
+    // the glass. Two faces a frame (NGG_PROBE_FACES, 1..6), all six at first; resolved at the next frame's start.
+    if (timed) list->EndQuery(m_timer.Get(), D3D12_QUERY_TYPE_TIMESTAMP, 6);
+    if (probing)
+    {
+        static const int perFrame = [] {
+            const char* e = std::getenv("NGG_PROBE_FACES");
+            const int n = e ? atoi(e) : 2;
+            return n < 1 ? 1 : n > 6 ? 6 : n;
+        }();
+        const float kProbeSkip = 3.0f;
+        CameraCB pcb = cb;
+        pcb.debugMode = 0.0f;
+        pcb.probeOn = 0.0f;
+        pcb.rtReady = 0.0f;
+        pcb.shadowSource = 0.0f;
+        if (m_shadowSource == 1) pcb.shadowParams[0] = 0.0f;   // ray traced: no cascades drawn this frame
+        pcb.aoReady = pcb.aoOn = 0.0f;
+        pcb.aerialLut = 0.0f;
+        pcb.lightsOn = cb.lightsOn > 0.5f ? 2.0f : 0.0f;   // every light, unclustered (LocalLights)
+        pcb.lightsVisOn = 0.0f;
+        pcb.clusterParams[0] = (float)m_lights.Count();
+        pcb.reflProbeOn = 0.0f;
+        pcb.invScreen[0] = pcb.invScreen[1] = 1.0f / (float)ReflectionProbe::kFace;
+        // The car as a box (CarBoxVis): the axes of its biggest mesh (the body), the extents over all of them.
+        {
+            const DrawItem* body = nullptr;
+            float bodyVol = -1.0f;
+            for (uint32_t id : m_probeObjects)
+            {
+                if (id >= m_objects.size()) continue;
+                const DrawItem& o = m_objects[id];
+                const float v = (o.bmax0[0] - o.bmin0[0]) * (o.bmax0[1] - o.bmin0[1]) * (o.bmax0[2] - o.bmin0[2]);
+                if (v > bodyVol) bodyVol = v, body = &o;
+            }
+            if (body)
+            {
+                float axis[3][3], lo[3] = { 1e30f, 1e30f, 1e30f }, hi[3] = { -1e30f, -1e30f, -1e30f };
+                for (int a = 0; a < 3; ++a)
+                {
+                    const float* r = body->xform + a * 4;
+                    const float len = sqrtf(r[0] * r[0] + r[1] * r[1] + r[2] * r[2]);
+                    for (int k = 0; k < 3; ++k) axis[a][k] = len > 1e-6f ? r[k] / len : (a == k ? 1.0f : 0.0f);
+                }
+                for (uint32_t id : m_probeObjects)
+                {
+                    if (id >= m_objects.size()) continue;
+                    const DrawItem& o = m_objects[id];
+                    for (int c = 0; c < 8; ++c)
+                    {
+                        const float p[3] = { (c & 1) ? o.bmax[0] : o.bmin[0], (c & 2) ? o.bmax[1] : o.bmin[1],
+                                             (c & 4) ? o.bmax[2] : o.bmin[2] };
+                        for (int a = 0; a < 3; ++a)
+                        {
+                            const float d = p[0] * axis[a][0] + p[1] * axis[a][1] + p[2] * axis[a][2];
+                            lo[a] = (std::min)(lo[a], d);
+                            hi[a] = (std::max)(hi[a], d);
+                        }
+                    }
+                }
+                for (int k = 0; k < 3; ++k)
+                {
+                    float c = 0.0f;
+                    for (int a = 0; a < 3; ++a) c += axis[a][k] * 0.5f * (lo[a] + hi[a]);
+                    pcb.carBox[0][k] = c;
+                }
+                pcb.carBox[0][3] = 1.0f;
+                for (int a = 0; a < 3; ++a)
+                {
+                    for (int k = 0; k < 3; ++k) pcb.carBox[1 + a][k] = axis[a][k];
+                    pcb.carBox[1 + a][3] = 0.5f * (hi[a] - lo[a]);
+                }
+            }
+        }
+        for (int k = 0; k < 3; ++k) pcb.camPos[k] = m_probeCentre[k];
+        float fproj[16];
+        ReflectionProbe::FaceProj(0.1f, 3000.0f, fproj);
+        ReverseZ(fproj, pcb.proj);
+        const D3D12_VIEWPORT pvp = { 0.0f, 0.0f, (float)ReflectionProbe::kFace, (float)ReflectionProbe::kFace, 0.0f, 1.0f };
+        const D3D12_RECT psc = { 0, 0, (LONG)ReflectionProbe::kFace, (LONG)ReflectionProbe::kFace };
+        list->RSSetViewports(1, &pvp);
+        list->RSSetScissorRects(1, &psc);
+        m_probeCBs.clear();
+        const int faces = m_probeFacesDrawn < 6 ? 6 : perFrame;
+        for (int n = 0; n < faces; ++n)
+        {
+            const int face = m_probeNextFace;
+            m_probeNextFace = (face + 1) % 6;
+            ReflectionProbe::FaceView(face, m_probeCentre, pcb.view);
+            for (int k = 0; k < 3; ++k) pcb.camFwd[k] = pcb.view[k * 4 + 2];
+            Mul4x4(pcb.view, pcb.proj, pcb.viewProjNoJitter);
+            memcpy(pcb.prevViewProj, pcb.viewProjNoJitter, sizeof(pcb.prevViewProj));
+            if (!Invert4x4(pcb.viewProjNoJitter, pcb.invViewProj)) memset(pcb.invViewProj, 0, sizeof(pcb.invViewProj));
+            ID3D12Device* d = nullptr;
+            list->GetDevice(IID_PPV_ARGS(&d));
+            ComPtr<ID3D12Resource> fcb = d ? MakeUploadBuffer(d, &pcb, sizeof(pcb)) : nullptr;
+            if (d) d->Release();
+            if (!fcb) break;
+            m_probeCBs.push_back(fcb);
+            float fvp[16], fplanes[6][4];
+            Mul4x4(pcb.view, fproj, fvp);
+            ExtractPlanes(fvp, fplanes);
+
+            D3D12_CPU_DESCRIPTOR_HANDLE prtv, pdsv;
+            m_reflProbe.BeginFace(list, face, prtv, pdsv);
+            list->OMSetRenderTargets(1, &prtv, FALSE, &pdsv);
+            list->SetGraphicsRootConstantBufferView(0, fcb->GetGPUVirtualAddress());
+            for (const DrawItem& o : m_objects)
+            {
+                if (!o.visible || o.probeFocus || o.materialId >= m_materials.size()) continue;
+                const uint32_t matFlags = m_materials[o.materialId].flags;
+                if (matFlags & kMaterialBlend) continue;
+                if (o.meshId != 0)
+                {
+                    float d2 = 0.0f;
+                    for (int k = 0; k < 3; ++k)
+                    {
+                        const float c = (std::max)((std::max)(o.bmin[k] - m_probeCentre[k], m_probeCentre[k] - o.bmax[k]), 0.0f);
+                        d2 += c * c;
+                    }
+                    if (d2 < kProbeSkip * kProbeSkip) continue;
+                }
+                if (AabbOutside(fplanes, o.bmin, o.bmax)) continue;
+                draw(o, (matFlags & kMaterialAlphaTest) ? m_psoAlphaTest.Get() : m_pso.Get());
+            }
+            m_reflProbe.EndFace(list, face);
+            ++m_probeFacesDrawn;
+        }
+        list->SetGraphicsRootConstantBufferView(0, cbRes->GetGPUVirtualAddress());
+        bindTargets();
+        list->RSSetViewports(1, &vp);
+        list->RSSetScissorRects(1, &sc);
+    }
+    if (timed) list->EndQuery(m_timer.Get(), D3D12_QUERY_TYPE_TIMESTAMP, 7);
+
     // THE OPAQUE WORLD FRONT TO BACK - the solid first, the alpha-tested (foliage) after, each nearest first, by the
     // distance to the nearest point of the box (0 inside it: the terrain the camera stands on). What is drawn first
     // fills the depth, and what lies behind it fails the test BEFORE its pixel shader runs: without a prepass (no ray
@@ -6319,7 +6627,7 @@ void Scene::RecordPass(ID3D12GraphicsCommandList* list, D3D12_CPU_DESCRIPTOR_HAN
     if (timed)
     {
         list->EndQuery(m_timer.Get(), D3D12_QUERY_TYPE_TIMESTAMP, 3);
-        list->ResolveQueryData(m_timer.Get(), D3D12_QUERY_TYPE_TIMESTAMP, 0, 4,
+        list->ResolveQueryData(m_timer.Get(), D3D12_QUERY_TYPE_TIMESTAMP, 0, 8,
                                m_timerReadback.Get(), 0);
         m_timerPending = true;
     }
@@ -6534,7 +6842,7 @@ bool Scene::RebuildSrvHeap(ID3D12Device* dev)
     // cannot live in a heap of its own.
     // +2: the shadow cascade array and the label font both share this heap,
     // because only one CBV/SRV/UAV heap can be bound at a time.
-    hd.NumDescriptors = (UINT)(pairs * kMaterialSrvCount + 16);
+    hd.NumDescriptors = (UINT)(pairs * kMaterialSrvCount + 17);
     m_shadowSrvSlot = (UINT)(pairs * kMaterialSrvCount);
     m_fontSrvSlot = (UINT)(pairs * kMaterialSrvCount + 1);
     m_envSrvSlot  = (UINT)(pairs * kMaterialSrvCount + 2);
@@ -6544,6 +6852,7 @@ bool Scene::RebuildSrvHeap(ID3D12Device* dev)
     m_irrSrvSlot    = (UINT)(pairs * kMaterialSrvCount + 7);
     m_msSrvSlot     = (UINT)(pairs * kMaterialSrvCount + 8);
     m_lightSrvSlot  = (UINT)(pairs * kMaterialSrvCount + 9);    // and +10 .. +15 (lights.h, the deferred pass)
+    m_reflSrvSlot   = (UINT)(pairs * kMaterialSrvCount + 16);
     hd.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
     if (FAILED(dev->CreateDescriptorHeap(&hd, IID_PPV_ARGS(&m_srvHeap))))
     {
@@ -6562,6 +6871,7 @@ bool Scene::RebuildSrvHeap(ID3D12Device* dev)
     m_aerialSrvReady = false;
     m_irrSrvReady = false;
     m_msSrvReady = false;
+    m_reflSrvReady = false;
 
     D3D12_CPU_DESCRIPTOR_HANDLE h = m_srvHeap->GetCPUDescriptorHandleForHeapStart();
 
