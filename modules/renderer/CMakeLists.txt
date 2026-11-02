@@ -7,7 +7,7 @@ add_library(ngg-core STATIC src/core/device.cpp src/core/aerial.cpp src/core/ren
             src/core/dxc.cpp src/core/env.cpp src/core/log.cpp src/core/mipgen.cpp src/core/post.cpp src/core/rt.cpp
             src/core/scene.cpp src/core/shadow.cpp src/core/sky.cpp src/core/weather.cpp
             src/core/astronomy.cpp src/core/lights.cpp src/core/fsr.cpp src/core/dlss.cpp src/core/gtao.cpp
-            src/core/visibility.cpp)
+            src/core/visibility.cpp src/core/probe.cpp)
 target_include_directories(ngg-core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src/core)
 # Intel XeGTAO (third_party/xegtao, MIT, unchanged): its HLSL is compiled at run time like every shader here
 # (core/gtao.cpp), so the two files are embedded as bytes - xegtao_src.h, written at configure; XeGTAO.h is also the

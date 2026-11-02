@@ -30,6 +30,7 @@
 #include "sky.h"                    // SkyParams, shared with the sky pass
 #include "shadow.h"
 #include "env.h"
+#include "probe.h"
 #include "aerial.h"
 #include "lights.h"
 #include "dxc.h"
@@ -206,6 +207,9 @@ public:
     // How wet the surfaces are, 0 dry .. 1 wet (design 5.0v): porous ones darker, all glossier, and above ~0.5
     // puddles on the ground layer. The road's state, set per frame by the client.
     void  SetWetness(float w) { m_wetness = w < 0.0f ? 0.0f : w > 1.0f ? 1.0f : w; }
+    // The car whose paint reflects the world (probe.h): its objects sample the cube probe instead of the sky, and the
+    // probe is drawn from `centre` around it. count 0: none (the sky alone). Per frame, by the client's focus.
+    void  SetReflectionFocus(const uint32_t* objects, uint32_t count, const float centre[3]);
     float Wetness() const { return m_wetness; }
     bool LegacyImport() const { return m_legacyImport; }
 
@@ -699,6 +703,7 @@ private:
         uint32_t meshId = 0;
         int32_t  baseVertex = 0;      // dynamic meshes index from their own base
         bool     removed = false;     // tombstone; see RemoveInstance
+        bool     probeFocus = false;  // the reflection focus's: reflects the cube probe (SetReflectionFocus)
     };
 
     // One entry per added mesh. The vertices themselves are suballocated from
@@ -910,6 +915,17 @@ private:
 
     Environment              m_ownEnv;
     Environment*             m_env = &m_ownEnv;
+    // The cube probe around the car (probe.h, SetReflectionFocus): its focus's objects, where it is drawn from, the
+    // face drawn next, the faces drawn since the focus came (all six before it is read), its SRV (t19) and the faces'
+    // constant buffers, alive until the frame has run.
+    ReflectionProbe          m_reflProbe;
+    std::vector<uint32_t>    m_probeObjects;
+    float                    m_probeCentre[3] = {};
+    int                      m_probeNextFace = 0;
+    int                      m_probeFacesDrawn = 0;
+    UINT                     m_reflSrvSlot = 0;
+    bool                     m_reflSrvReady = false;
+    std::vector<Microsoft::WRL::ComPtr<ID3D12Resource>> m_probeCBs;
     UINT                     m_irrSrvSlot = 0;
     bool                     m_irrSrvReady = false;
     bool                     m_physical = true;    // the default since 5.0j
