@@ -116,6 +116,14 @@ iface::TextureHandle Renderer::CreateTexture(const void* dds, uint64_t bytes)
     return Made(s, h, m_api, m_instance, m->error);
 }
 
+iface::TextureHandle Renderer::CreateTextureData(const void* dds, uint64_t bytes)
+{
+    if (!m_instance) return 0;
+    iface::TextureHandle h = 0;
+    const Status s = m_api->createTextureData(m_instance, dds, bytes, &h);
+    return Made(s, h, m_api, m_instance, m->error);
+}
+
 iface::TextureHandle Renderer::CreateTextureRgba(const void* rgba, uint32_t width, uint32_t height)
 {
     if (!m_instance) return 0;

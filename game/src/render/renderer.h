@@ -36,6 +36,7 @@ public:
 
     iface::SceneHandle LoadScene(const void* ngg, uint64_t bytes);   // 0 on failure (Error())
     iface::TextureHandle CreateTexture(const void* dds, uint64_t bytes);
+    iface::TextureHandle CreateTextureData(const void* dds, uint64_t bytes);   // a normal or ORM map: no sRGB decode
     iface::TextureHandle CreateTextureRgba(const void* rgba, uint32_t width, uint32_t height);
     bool UpdateTextureRgba(iface::TextureHandle t, const void* rgba);   // its own size; outside RenderFrame
     void ReleaseTexture(iface::TextureHandle t);

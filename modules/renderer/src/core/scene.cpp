@@ -845,7 +845,10 @@ float4 Shade(VSOut i, bool frontFace, out GBufOut g)
     // white fallback bound to an empty slot makes map*factor == factor. A
     // converter can therefore ship plausible PBR for all 6,515 RBR textures
     // before a single map has been authored.
-    float3 orm = gOrm.Sample(gSamp, i.uv0).rgb;
+    const float4 ormA = gOrm.Sample(gSamp, i.uv0);
+    float3 orm = ormA.rgb;
+    // The clear coat (kCoatRoughness): the material's, times the ORM map's alpha - where a car's maps say lacquer.
+    const float coat = saturate(gPbrB.z * ormA.a);
     float  roughness = saturate(orm.g * gPbrA.x);
     float  metallic  = saturate(orm.b * gPbrA.y);
     float  matAo     = lerp(1.0, orm.r, saturate(gPbrA.w));
@@ -973,6 +976,8 @@ float4 Shade(VSOut i, bool frontFace, out GBufOut g)
                 float3 B = normalize(cross(N, T));
                 T = cross(B, N);
                 float3 nm = gNormalMap.Sample(gSamp, i.uv0).xyz * 2.0 - 1.0;
+                // z from x and y: a two-channel map (BC5) stores none, and a three-channel one agrees.
+                nm.z = sqrt(saturate(1.0 - dot(nm.xy, nm.xy)));
                 nm.xy *= gPbrA.z;
                 float3 Nn = T * nm.x + B * nm.y + N * nm.z;
                 if (dot(Nn, Nn) > 1e-12) N = normalize(Nn);
@@ -1027,7 +1032,7 @@ float4 Shade(VSOut i, bool frontFace, out GBufOut g)
 #if defined(ALPHA_TEST)
         g.kind = 2.0;
 #else
-        g.kind = gPbrB.z > 0.5 ? 3.0 : 1.0;   // 3: under a clear coat
+        g.kind = coat > 0.5 ? 3.0 : 1.0;   // 3: under a clear coat
 #endif
         g.rough = saturate(roughness);
         g.albedoMetal = float4(saturate(albedo), saturate(metallic));
@@ -1044,7 +1049,7 @@ float4 Shade(VSOut i, bool frontFace, out GBufOut g)
 #elif defined(BLEND)
             localLight = LocalLights(i.wpos, N, lV, ldiff * coverage, lf0, la, lspec, i.pos.xy, 0.0, 0.0, true, 0.0);
 #else
-            localLight = LocalLights(i.wpos, N, lV, ldiff, lf0, la, lspec, i.pos.xy, 0.0, 0.0, true, saturate(gPbrB.z));
+            localLight = LocalLights(i.wpos, N, lV, ldiff, lf0, la, lspec, i.pos.xy, 0.0, 0.0, true, coat);
 #endif
         }
 #endif
@@ -1228,7 +1233,6 @@ float4 Shade(VSOut i, bool frontFace, out GBufOut g)
 
         // THE CLEAR COAT (kCoatRoughness): the sun's sharp highlight in the lacquer, and the share of the light it
         // reflects (Fresnel at the view: it rises to a mirror at grazing angles) kept from the base below.
-        const float coat = saturate(gPbrB.z);
         float coatSun = 0.0, coatKeep = 1.0;
         if (coat > 0.0)
         {
@@ -4215,7 +4219,7 @@ uint32_t Scene::AddMesh(ID3D12Device* dev, const ::ngg::Vertex* verts, uint32_t 
 }
 
 uint32_t Scene::AddTexture(ID3D12Device* dev, ID3D12CommandQueue* queue,
-                           const void* dds, size_t bytes)
+                           const void* dds, size_t bytes, bool linear)
 {
     if (!dev || !queue || !dds || !bytes) return 0;
 
@@ -4228,7 +4232,7 @@ uint32_t Scene::AddTexture(ID3D12Device* dev, ID3D12CommandQueue* queue,
 
     ComPtr<ID3D12Resource> upload;
     ComPtr<ID3D12Resource> tex = CreateTextureFromDDS(
-        dev, list.Get(), static_cast<const uint8_t*>(dds), (uint32_t)bytes, upload, "added", false);
+        dev, list.Get(), static_cast<const uint8_t*>(dds), (uint32_t)bytes, upload, "added", linear);
     if (!tex) return 0;
 
     list->Close();
