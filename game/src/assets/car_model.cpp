@@ -421,7 +421,19 @@ CarModel ReadCarModel(const std::string& sgcPath, const std::string& surface)
         CarTexture t;
         t.material = p.material;
         const std::string file = textureFile(p.material);
+        t.file = file;
         if (!file.empty()) t.dds = ReadFile(dir + "textures/" + file);
+        // Its PBR maps (CarMap): <texture>_basecolor / _normal / _orm.dds, where the folder has them.
+        if (!file.empty()) {
+            static const char* const kSuffix[kCarMaps] = {"_basecolor.dds", "_normal.dds", "_orm.dds"};
+            const std::string stem = Lower(file.substr(0, file.find_last_of('.')));
+            for (int k = 0; k < kCarMaps; ++k)
+                for (const std::string& f : files)
+                    if (Lower(f) == stem + kSuffix[k]) {
+                        t.maps[k].dds = ReadFile(dir + "textures/" + f);
+                        break;
+                    }
+        }
         if (const auto s = ini.find(p.material); s != ini.end()) {
             if (const auto df = s->second.find("Diffuse"); df != s->second.end())
                 std::sscanf(df->second.c_str(), "%f %f %f", &t.diffuse[0], &t.diffuse[1], &t.diffuse[2]);
