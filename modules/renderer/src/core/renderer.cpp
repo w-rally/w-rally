@@ -333,9 +333,10 @@ void Renderer::RecordFrame(Device& dev, D3D12_CPU_DESCRIPTOR_HANDLE outRtv,
     if (m_scene.Ready())
         m_scene.Record(list, hdrRtv, view, proj, width, height);
 
-    // TAA: where a moved object's shadow fell and its occlusion, this frame and last (the RT denoisers' only).
-    m_post.Resolve(list, outRtv, m_scene.Depth(), motion, m_vis.sun, m_vis.aoTaa, m_vis.aoTaaPrev, m_scene.LastViewProj(),
-                   width, height);
+    // TAA: where a moved object's shadow fell and its occlusion, this frame and last (the RT denoisers' only), and
+    // the moving glass's own motion.
+    m_post.Resolve(list, outRtv, m_scene.Depth(), motion, motion ? m_scene.GlassMotionBuffer() : nullptr, m_vis.sun,
+                   m_vis.aoTaa, m_vis.aoTaaPrev, m_vis.lightsTaa, m_scene.LastViewProj(), width, height);
 
     if (m_frameTimer)
     {

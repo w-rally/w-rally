@@ -50,6 +50,10 @@ static const DXGI_FORMAT kMotionFormat = DXGI_FORMAT_R16G16B16A16_FLOAT;
 // The prepass's third target: which PLANT a pixel is a card of (FindPlants),
 // + 1, or 0. The ray tracer compares it with the plant of what a ray hits.
 static const DXGI_FORMAT kPlantFormat = DXGI_FORMAT_R32_UINT;
+// The moving glass's own motion (Scene::GlassMotionBuffer): NDC offsets, 16-bit as the motion target's; cleared to
+// kNoGlass, which no offset on the screen reaches.
+static const DXGI_FORMAT kGlassMotionFormat = DXGI_FORMAT_R16G16_FLOAT;
+static const float kNoGlass[4] = { 8.0f, 8.0f, 0.0f, 0.0f };
 // The surface the deferred local lights read (Shade's GBufOut): the shading normal (octahedral), roughness and kind;
 // albedo and metallic. Only while there are local lights (the GBUF pipelines).
 static const DXGI_FORMAT kGbufFormats[2] = { DXGI_FORMAT_R10G10B10A2_UNORM, DXGI_FORMAT_R8G8B8A8_UNORM_SRGB };
@@ -348,7 +352,7 @@ cbuffer ObjectCB : register(b1)
 {
     uint  gObjectLayer;
     uint  gMatFlags;
-    uint  gObjectMoved;   // 1 = the transform differs from last frame's; 2 = and it is glass (the prepass's mark)
+    uint  gObjectMoved;   // 1 = a moving object (RecordPass's movedOf): gPrevObjectXform is bound
     uint  gObjectProbe;   // 1: this object reflects the cube probe, not the sky (Scene::SetReflectionFocus)
     row_major float4x4 gObjectXform;
     // The material, as root constants rather than a buffer. It changes every
@@ -358,7 +362,7 @@ cbuffer ObjectCB : register(b1)
     float4 gBaseColourFactor;
     float4 gPbrA;    // roughness, metallic, normalScale, occlusionStrength
     float4 gPbrB;    // emissiveStrength, alphaCutoff, clearCoat, -
-    // Last frame's transform, bound only when gObjectMoved says it differs:
+    // Last frame's transform, bound only for a moving object (gObjectMoved):
     // where this object's surface WAS, for the motion target.
     row_major float4x4 gPrevObjectXform;
 };
@@ -633,7 +637,7 @@ float SunVisInner(float3 wpos, float2 pixel, float3 N)
 // the same expression as PSMain, so the depth the main pass tests EQUAL
 // against was produced by the same coverage decision.
 //
-// And the MOTION of every pixel whose object moved since last frame:
+// And the MOTION of every pixel of a moving object (RecordPass's movedOf):
 // xy = last frame's NDC minus this frame's (both unjittered), z = last frame's
 // reverse-Z depth, w = 1. Everything else writes 0, and w = 0 tells TAA and
 // the RT denoiser to reproject by the camera alone, which for a static surface
@@ -686,13 +690,7 @@ PrepassOut PSPrepass(VSOut i, bool frontFace : SV_IsFrontFace)
     }
 #endif
     o.motion = float4(0.0, 0.0, 0.0, 0.0);
-    // MOVING GLASS: not in the depth, so where it lies over a still surface that surface's pixel would look still to
-    // TAA, which keeps a still pixel's history unclipped - a turning car's lamp lens left a smear on the dark beside it.
-    // w = 0.25 marks it, MAX-blended into alpha alone (m_psoPrepassGlass): over a moved object its 1 stays, and under
-    // 0.5 it is a still pixel to everything but TAA (rt.cpp reads w > 0.5).
-    if (gObjectMoved == 2)
-        o.motion = float4(0.0, 0.0, 0.0, 0.25);
-    else if (gObjectMoved != 0)
+    if (gObjectMoved != 0)
     {
         const float4 c = mul(float4(i.wpos, 1.0), gViewProjNoJitter);
         const float4 p = mul(float4(i.prevWpos, 1.0), gPrevViewProj);
@@ -704,6 +702,19 @@ PrepassOut PSPrepass(VSOut i, bool frontFace : SV_IsFrontFace)
                  : float4(4.0, 4.0, 0.0, 1.0);
     }
     return o;
+}
+
+// A MOVING OBJECT'S GLASS: not in the depth, so the motion target holds what is behind it - over a still surface a
+// still pixel to TAA, which keeps its history unclipped (a turning car's lamp lens left a smear on the dark beside
+// it), over the car's interior the interior's motion, which is not the pane's: the letters on a side window and the
+// banner on the windscreen came out twice, a frame's turn apart, when the car was spun fast in the Garage. So the
+// glass writes its own motion into a target of its own (m_psoPrepassGlass: depth tested, not written; the nearest
+// pane drawn last wins), which TAA and the upscalers' inputs read - the ray tracer keeps the surface behind it.
+float2 PSGlassMotion(VSOut i) : SV_Target
+{
+    const float4 c = mul(float4(i.wpos, 1.0), gViewProjNoJitter);
+    const float4 p = mul(float4(i.prevWpos, 1.0), gPrevViewProj);
+    return (p.w > 1e-6 && c.w > 1e-6) ? p.xy / p.w - c.xy / c.w : float2(4.0, 4.0);   // (4: off the screen)
 }
 
 // Aerial perspective - the SAME scattering integral the sky uses, over the
@@ -3140,11 +3151,24 @@ bool Scene::CreateDepth(ID3D12Device* dev, UINT width, UINT height)
         Log("scene: plant id buffer creation failed");
         return false;
     }
+    D3D12_RESOURCE_DESC gmd = nd;
+    gmd.Format = kGlassMotionFormat;
+    D3D12_CLEAR_VALUE gmclear = {};
+    gmclear.Format = kGlassMotionFormat;
+    memcpy(gmclear.Color, kNoGlass, sizeof(kNoGlass));
+    m_glassMotion.Reset();
+    if (FAILED(dev->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &gmd,
+                                            D3D12_RESOURCE_STATE_RENDER_TARGET,
+                                            &gmclear, IID_PPV_ARGS(&m_glassMotion))))
+    {
+        Log("scene: the glass's motion buffer creation failed");
+        return false;
+    }
     if (!m_normalRtvHeap)
     {
         D3D12_DESCRIPTOR_HEAP_DESC hd = {};
         hd.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
-        hd.NumDescriptors = 3;
+        hd.NumDescriptors = 4;
         if (FAILED(dev->CreateDescriptorHeap(&hd, IID_PPV_ARGS(&m_normalRtvHeap))))
             return false;
     }
@@ -3155,6 +3179,8 @@ bool Scene::CreateDepth(ID3D12Device* dev, UINT width, UINT height)
     dev->CreateRenderTargetView(m_motion.Get(), nullptr, rtvs);
     rtvs.ptr += m_prepassRtvStride;
     dev->CreateRenderTargetView(m_plantTarget.Get(), nullptr, rtvs);
+    rtvs.ptr += m_prepassRtvStride;
+    dev->CreateRenderTargetView(m_glassMotion.Get(), nullptr, rtvs);   // (bound alone, for the glass: RecordPass)
 
     // The deferred local lights' surface (kGbufFormats), and the depth's READ-ONLY view: in that pass and the glass
     // after it the depth is read (and tested) while bound, so no writes.
@@ -3834,6 +3860,7 @@ bool Scene::LoadFromMemory(ID3D12Device* dev, ID3D12CommandQueue* queue,
         return out;
     };
     ComPtr<ID3DBlob> vs, ps, psAlpha, psBlend, psPre, psPreAlpha, psShadowAlpha;   // (the opaque shadow pass: no PS)
+    ComPtr<ID3DBlob> psGlassMotion;
     ComPtr<ID3DBlob> psG, psAlphaG, vsFull, psDeferred;                              // the deferred local lights
     auto compileAll = [&]() {
         vs = compile("VSMain", true, kOpaque);
@@ -3842,6 +3869,7 @@ bool Scene::LoadFromMemory(ID3D12Device* dev, ID3D12CommandQueue* queue,
         psBlend = compile("PSMain", false, kBlend);
         psPre = compile("PSPrepass", false, kOpaque);
         psPreAlpha = compile("PSPrepass", false, kAlphaTest);
+        psGlassMotion = compile("PSGlassMotion", false, kOpaque);
         psShadowAlpha = compile("PSShadow", false, kAlphaTest);
         psG = compile("PSMain", false, kOpaque, true);
         psAlphaG = compile("PSMain", false, kAlphaTest, true);
@@ -3949,35 +3977,23 @@ bool Scene::LoadFromMemory(ID3D12Device* dev, ID3D12CommandQueue* queue,
             Log("scene: prepass shader failed to compile");
     }
 
-    // --- the moving glass's mark in the prepass (PSPrepass, gObjectMoved 2): the motion target's alpha alone, MAX -
-    // depth tested, not written, the normal and the plant untouched. [cull] none (two-sided), back, front.
-    if (psPre)
+    // --- a moving object's glass in the prepass (PSGlassMotion): its own motion into the glass target alone, depth
+    // tested, not written. [cull] none (two-sided), back, front.
+    if (psGlassMotion)
     {
         D3D12_GRAPHICS_PIPELINE_STATE_DESC gp = pso;
-        gp.NumRenderTargets = 3;
-        gp.RTVFormats[0] = kNormalFormat;
-        gp.RTVFormats[1] = kMotionFormat;
-        gp.RTVFormats[2] = kPlantFormat;
-        gp.PS = { psPre->GetBufferPointer(), psPre->GetBufferSize() };
+        gp.NumRenderTargets = 1;
+        gp.RTVFormats[0] = kGlassMotionFormat;
+        gp.PS = { psGlassMotion->GetBufferPointer(), psGlassMotion->GetBufferSize() };
         gp.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ZERO;
-        gp.BlendState.IndependentBlendEnable = TRUE;
-        gp.BlendState.RenderTarget[0].RenderTargetWriteMask = 0;
-        gp.BlendState.RenderTarget[2].RenderTargetWriteMask = 0;
-        D3D12_RENDER_TARGET_BLEND_DESC& b = gp.BlendState.RenderTarget[1];
-        b.BlendEnable = TRUE;
-        b.SrcBlend = D3D12_BLEND_ONE;
-        b.DestBlend = D3D12_BLEND_ZERO;
-        b.BlendOp = D3D12_BLEND_OP_ADD;
-        b.SrcBlendAlpha = D3D12_BLEND_ONE;
-        b.DestBlendAlpha = D3D12_BLEND_ONE;
-        b.BlendOpAlpha = D3D12_BLEND_OP_MAX;
-        b.RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALPHA;
+        gp.BlendState.RenderTarget[0].BlendEnable = FALSE;
+        gp.BlendState.RenderTarget[0].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_RED | D3D12_COLOR_WRITE_ENABLE_GREEN;
         const D3D12_CULL_MODE culls[3] = { D3D12_CULL_MODE_NONE, D3D12_CULL_MODE_BACK, D3D12_CULL_MODE_FRONT };
         for (int c = 0; c < 3; ++c)
         {
             gp.RasterizerState.CullMode = culls[c];
             if (FAILED(dev->CreateGraphicsPipelineState(&gp, IID_PPV_ARGS(&m_psoPrepassGlass[c]))))
-                Log("scene: the glass's prepass PSO creation failed - moving glass unmarked for TAA");
+                Log("scene: the glass's prepass PSO creation failed - moving glass reprojected as what is behind it");
         }
     }
 
@@ -6009,6 +6025,9 @@ void Scene::RecordPass(ID3D12GraphicsCommandList* list, D3D12_CPU_DESCRIPTOR_HAN
         D3D12_CPU_DESCRIPTOR_HANDLE plantRtv = motionRtv;
         plantRtv.ptr += m_prepassRtvStride;
         list->ClearRenderTargetView(plantRtv, zero, 0, nullptr);    // 0: not a plant
+        D3D12_CPU_DESCRIPTOR_HANDLE glassRtv = plantRtv;
+        glassRtv.ptr += m_prepassRtvStride;
+        list->ClearRenderTargetView(glassRtv, kNoGlass, 0, nullptr);
     }
 
     D3D12_VIEWPORT vp = { 0.0f, 0.0f, (float)width, (float)height, 0.0f, 1.0f };
@@ -6286,12 +6305,20 @@ void Scene::RecordPass(ID3D12GraphicsCommandList* list, D3D12_CPU_DESCRIPTOR_HAN
     uint32_t drawn = 0, culled = 0;
     // The glass (kMaterialBlend) waits for everything opaque: it is drawn over it, after this loop. It has no part in
     // the prepass - no depth, no normal: what the ray tracer and TAA see through a window is what is behind it.
-    // In the prepass it holds the glass that moved, for its mark in the motion target (PSPrepass).
+    // In the prepass it holds the moving objects' glass, for its own motion (PSGlassMotion).
     std::vector<std::pair<float, const DrawItem*>> blended;
+    // A MOVING OBJECT, for the motion target: one that has moved since it was placed (DrawItem::dynamic), or moves
+    // now - however little, and standing still too. Its pixels then keep one identity frame after frame for TAA and
+    // the denoisers, whose histories never pass between a moving object's pixels and the still world's. Cut at
+    // kRtMovedMin instead, as it was, the car became the world's the frame it slowed under 2 mm (and again the
+    // other way round as it started): its whole history dropped at once - the edges changed, visibly, as the mouse
+    // stopped the Garage's turntable - and a car turning slower than that was a still pixel, its history kept
+    // unclipped. How far it moved is the motion's to say (TAA's `still`, the denoisers' likewise), and what stands
+    // beside it TAA's (PSTaa: whether it is still there).
     auto movedOf = [](const DrawItem& o) {
-        return (!o.identity || !o.prevIdentity) && Travel(o.bmin0, o.bmax0, o.xform, o.prevXform) > kRtMovedMin;
+        return (!o.identity || !o.prevIdentity) && (o.dynamic || memcmp(o.prevXform, o.xform, sizeof(o.xform)) != 0);
     };
-    auto draw = [&](const DrawItem& o, ID3D12PipelineState* want, bool glassMark = false) {
+    auto draw = [&](const DrawItem& o, ID3D12PipelineState* want) {
         if (want != bound)
         {
             list->SetPipelineState(want);
@@ -6302,15 +6329,11 @@ void Scene::RecordPass(ID3D12GraphicsCommandList* list, D3D12_CPU_DESCRIPTOR_HAN
         D3D12_GPU_DESCRIPTOR_HANDLE h = m_srvHeap->GetGPUDescriptorHandleForHeapStart();
         h.ptr += (UINT64)o.materialId * kMaterialSrvCount * m_srvStride;
         list->SetGraphicsRootDescriptorTable(1, h);
-        // Moved since last frame: compared, not flagged by SetObjectTransform,
+        // Moving (movedOf): compared, not flagged by SetObjectTransform,
         // because a transform set to the value it already had is not motion,
-        // and a client may well set every keyed object every tick. And not
-        // below kRtMovedMin either, for the same reason as the ray tracing's:
-        // the idling car "moved" a hundredth of a millimetre a tick, and TAA
-        // dropped the history of a band round its outline every frame - its
-        // edges and its wheels flickered on a car standing still.
+        // and a client may well set every keyed object every tick.
         const bool moved = movedOf(o);
-        const uint32_t objConsts[4] = { o.layerId, o.matFlags, moved ? (glassMark ? 2u : 1u) : 0u,
+        const uint32_t objConsts[4] = { o.layerId, o.matFlags, moved ? 1u : 0u,
                                         o.probeFocus && cb.reflProbeOn > 0.5f ? 1u : 0u };
         list->SetGraphicsRoot32BitConstants(4, 4, objConsts, 0);
         if (moved) list->SetGraphicsRoot32BitConstants(4, 16, o.prevXform, 32);
@@ -6561,13 +6584,19 @@ void Scene::RecordPass(ID3D12GraphicsCommandList* list, D3D12_CPU_DESCRIPTOR_HAN
     // The glass, over the opaque world (and the sky, drawn before this pass), far to near.
     std::sort(blended.begin(), blended.end(),
               [](const std::pair<float, const DrawItem*>& a, const std::pair<float, const DrawItem*>& b) { return a.first > b.first; });
+    if (prepass && !blended.empty())
+    {
+        D3D12_CPU_DESCRIPTOR_HANDLE glassRtv = rtv;
+        glassRtv.ptr += (SIZE_T)3 * m_prepassRtvStride;
+        list->OMSetRenderTargets(1, &glassRtv, FALSE, &dsv);
+    }
     for (const auto& [d2, o] : blended)
     {
         (void)d2;
         const uint32_t matFlags = m_materials[o->materialId].flags;
         const int cull = (matFlags & kMaterialTwoSided) ? 0 : Mirrors(o->xform) ? 2 : 1;
         if (prepass)
-            draw(*o, m_psoPrepassGlass[cull] ? m_psoPrepassGlass[cull].Get() : m_psoPrepassGlass[0].Get(), true);
+            draw(*o, m_psoPrepassGlass[cull] ? m_psoPrepassGlass[cull].Get() : m_psoPrepassGlass[0].Get());
         else
             draw(*o, m_psoBlend[cull] ? m_psoBlend[cull].Get() : m_psoBlend[0].Get());
     }
@@ -6604,6 +6633,7 @@ void Scene::RecordPass(ID3D12GraphicsCommandList* list, D3D12_CPU_DESCRIPTOR_HAN
         if (o.identity && o.prevIdentity) continue;
         if (memcmp(o.prevXform, o.xform, sizeof(o.xform)) == 0) continue;
         memcpy(o.prevXform, o.xform, sizeof(o.xform));
+        o.dynamic = true;
         o.prevIdentity = o.identity;
         ++m_geomRevision;
     }

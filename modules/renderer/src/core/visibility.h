@@ -64,6 +64,7 @@ struct Visibility
     DXGI_FORMAT     aoView = DXGI_FORMAT_UNKNOWN;   // the view `ao` is read through (UNKNOWN: its own format)
     ID3D12Resource* aoTaa = nullptr;        // the RT AO's denoise, this frame and last, for TAA's moved-object test
     ID3D12Resource* aoTaaPrev = nullptr;
+    ID3D12Resource* lightsTaa = nullptr;    // and the local lights' (Rt::LightsDenoised), for their shadows
     ID3D12Resource* lights = nullptr;       // the local lights' shadowed fraction; null: unshadowed
     const char*     aoSource = "off";       // for the readout
     double          aoMs = 0.0;             // its GPU time, last frame's

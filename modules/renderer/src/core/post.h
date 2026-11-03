@@ -116,15 +116,19 @@ public:
     // and on return. `rtShadow` is Rt::Filtered when the ray-traced shadow ran
     // this frame, else null: its z says where a moved object's shadow was
     // (PSTaa); `rtAo` likewise Rt::AoDenoised, for its occlusion, and
-    // `rtAoPrev` Rt::AoPrevDenoised, last frame's.
-    // PIXEL_SHADER_RESOURCE, and left so.
+    // `rtAoPrev` Rt::AoPrevDenoised, last frame's, and `rtLights`
+    // Rt::LightsDenoised, for the local lights' shadows.
+    // PIXEL_SHADER_RESOURCE, and left so. `glassMotion` is
+    // Scene::GlassMotionBuffer with `motion` (null without), in its state.
     void Resolve(ID3D12GraphicsCommandList* list,
                  D3D12_CPU_DESCRIPTOR_HANDLE outRtv,
                  ID3D12Resource* depth,
                  ID3D12Resource* motion,
+                 ID3D12Resource* glassMotion,
                  ID3D12Resource* rtShadow,
                  ID3D12Resource* rtAo,
                  ID3D12Resource* rtAoPrev,
+                 ID3D12Resource* rtLights,
                  const float* sceneViewProj,
                  UINT width, UINT height);
 
@@ -191,7 +195,9 @@ private:
 
     Microsoft::WRL::ComPtr<ID3D12Resource>       m_hdr;
     Microsoft::WRL::ComPtr<ID3D12Resource>       m_history[2];
-    Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> m_rtvHeap;   // hdr, history0, history1
+    // Beside each history, how long each of its pixels has stood still on the screen (PSTaa's `settled`; R8).
+    Microsoft::WRL::ComPtr<ID3D12Resource>       m_settled[2];
+    Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> m_rtvHeap;   // hdr, history0, history1, the upscaler's two, settled0, 1
     Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> m_srvHeap;   // five groups of four
     UINT m_rtvStride = 0;
     UINT m_srvStride = 0;
@@ -212,7 +218,7 @@ private:
     // The upscaler, when there is one: its inputs (render size: the motion,
     // the reactive mask; the 1x1 exposure) and its output (output size), all
     // PIXEL|NON_PIXEL_SHADER_RESOURCE between frames.
-    void Upscale(ID3D12GraphicsCommandList* list, ID3D12Resource* depth, ID3D12Resource* motion,
+    void Upscale(ID3D12GraphicsCommandList* list, ID3D12Resource* depth, ID3D12Resource* motion, ID3D12Resource* glassMotion,
                  const float* consts, D3D12_GPU_DESCRIPTOR_HANDLE taaGroup, bool autoExposure);
     Upscaler* m_upscaler = nullptr;
     bool  m_upReady = false;
