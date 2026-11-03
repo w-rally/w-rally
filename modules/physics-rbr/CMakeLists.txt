@@ -25,6 +25,7 @@ target_compile_options(phys-num PUBLIC /fp:precise PRIVATE /W4)
 add_library(phys-data STATIC src/data/rpl.cpp src/data/trk.cpp src/data/trkworld.cpp src/data/lsp.cpp src/data/inflate.cpp
             src/data/rec.cpp src/data/lbs.cpp src/data/sgc.cpp src/data/dls.cpp src/data/files.cpp)
 target_include_directories(phys-data PUBLIC ${SRC})
+target_link_libraries(phys-data PUBLIC phys-num)   # (the .sgc nodes' rotations: fsin / fcos)
 
 # The physics as native classes, in the libraries a physics module links or replaces (docs/design.md 4.3a). They
 # depend downwards only, each on the ones above it in this list:

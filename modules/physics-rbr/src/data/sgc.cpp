@@ -1,5 +1,7 @@
 #include "sgc.h"
 #include "files.h"
+#include "num/trig.h"
+#include "num/x87.h"
 
 #include <xmmintrin.h>
 
@@ -250,21 +252,47 @@ M4 Identity()
     return {{_mm_setr_ps(1, 0, 0, 0), _mm_setr_ps(0, 1, 0, 0), _mm_setr_ps(0, 0, 1, 0), _mm_setr_ps(0, 0, 0, 1)}};
 }
 
+// A rotation (angle, axis) as the scene loader reads it (0x1000c7a0): the quaternion (axis * sin(angle * 0.5),
+// cos(angle * 0.5)) - the half angle by mulss, fsin / fcos, each axis product an x87 fmul stored -, made a matrix by
+// D3DXMatrixRotationQuaternion. That is the generic x87 one (0x100a65f5): HedgeHog3D's SSE2 dispatch leaves its
+// slot (0x101c3158) alone. Transcribed in its order and roundings, under the 24-bit precision control; a zero angle
+// gives the identity exactly. (The stock cars' c_e_door_l turn by 1.7e-7 rad about x.)
+M4 Rotation(float angle, const float axis[3])
+{
+    using num::X87;
+    const float half = _mm_cvtss_f32(_mm_mul_ss(_mm_set_ss(angle), _mm_set_ss(0.5f)));
+    const X87 s = X87::Raw(num::SinOfFloat(half));
+    const float q[4] = {(X87(axis[0]) * s).Store(), (X87(axis[1]) * s).Store(), (X87(axis[2]) * s).Store(),
+                        X87::Raw(num::CosOfFloat(half)).Store()};
+    const X87 two(2.0f);
+    const float x2 = (X87(q[0]) * two).Store(), y2 = (X87(q[1]) * two).Store();
+    const X87 z2 = two * X87(q[2]);
+    const X87 wx = X87(x2) * X87(q[3]), wy = X87(y2) * X87(q[3]), wz = z2 * X87(q[3]);
+    const float xx = (X87(x2) * X87(q[0])).Store(), xy = (X87(y2) * X87(q[0])).Store(), xz = (z2 * X87(q[0])).Store();
+    const float yy = (X87(y2) * X87(q[1])).Store(), yz = (z2 * X87(q[1])).Store();
+    const X87 zz = z2 * X87(q[2]);
+    const X87 oneXx = X87(1.0f) - X87(xx);
+    M4 m;
+    m.r[0] = _mm_setr_ps((X87(1.0f) - X87(yy) - zz).Store(), (X87(xy) + wz).Store(), (X87(xz) - wy).Store(), 0);
+    m.r[1] = _mm_setr_ps((X87(xy) - wz).Store(), (oneXx - zz).Store(), (X87(yz) + wx).Store(), 0);
+    m.r[2] = _mm_setr_ps((X87(xz) + wy).Store(), (X87(yz) - wx).Store(), (X87(oneXx.Store()) - X87(yy)).Store(), 0);
+    m.r[3] = _mm_setr_ps(0, 0, 0, 1);
+    return m;
+}
+
 // A collision node's matrix, as the scene loader makes it (0x1000a3f0): its local transform (0x1000c7a0: translation,
 // a rotation (angle, axis), the scale, a scaling rotation (angle, axis); 0x1008d420: inverse(Rs) * S * Rs * R * T)
-// times its world transform (0x1000c6c0: the file's rows {r0 r1 r2 t} as the D3D matrix's columns). Only the zero
-// angles every model here has are taken (their rotations the identity); another throws.
+// times its world transform (0x1000c6c0: the file's rows {r0 r1 r2 t} as the D3D matrix's columns).
 M4 NodeMatrix(const SgcCollisionNode& n)
 {
     const float* l = n.local;
-    if (l[3] != 0.0f || l[10] != 0.0f) throw std::runtime_error("collision node " + n.name + ": a rotated local transform (not supported)");
-    const M4 rot = Identity();
+    const M4 rot = Rotation(l[3], l + 4), scaleRot = Rotation(l[10], l + 11);
     M4 scale = Identity(), trans = Identity();
     scale.r[0] = _mm_setr_ps(l[7], 0, 0, 0);
     scale.r[1] = _mm_setr_ps(0, l[8], 0, 0);
     scale.r[2] = _mm_setr_ps(0, 0, l[9], 0);
     trans.r[3] = _mm_setr_ps(l[0], l[1], l[2], 1);
-    const M4 local = Mul(Mul(Mul(Mul(Inverse(rot), scale), rot), rot), trans);
+    const M4 local = Mul(Mul(Mul(Mul(Inverse(scaleRot), scale), scaleRot), rot), trans);
     const float* w = n.world;
     M4 world;
     world.r[0] = _mm_setr_ps(w[0], w[4], w[8], 0);
