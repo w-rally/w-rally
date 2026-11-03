@@ -1568,6 +1568,13 @@ int RunGame(const std::vector<std::string>& args)
         std::string then;
         if (const auto t = std::find(args.begin(), args.end(), std::string("--then")); t != args.end() && t + 1 != args.end())
             then = *(t + 1);
+        // --stop <shot>: the spin stopped at that shot, as a mouse letting go (the edges as the car settles); --jerk <k>:
+        // the spin given every k-th frame, k frames' worth at once, as a mouse's moves come in bursts.
+        int stop = -1, jerk = 1;
+        if (const auto t = std::find(args.begin(), args.end(), std::string("--stop")); t != args.end() && t + 1 != args.end())
+            stop = std::atoi((t + 1)->c_str());
+        if (const auto t = std::find(args.begin(), args.end(), std::string("--jerk")); t != args.end() && t + 1 != args.end())
+            jerk = std::max(1, std::atoi((t + 1)->c_str()));
         Showroom showroom;
         int settle = 0;
         for (int frame = 0; frame < 400 + shots && sh.window.Pump(); ++frame) {
@@ -1579,7 +1586,7 @@ int RunGame(const std::vector<std::string>& args)
             fd.ui = sh.ui.Render();
             if (drawn && (showroom.Ready() || settle >= 40)) {
                 if (!then.empty() && settle == 40 + shots / 4) view.car = then;
-                view.turn += spin;
+                if (stop < 0 || settle < 40 + stop) view.turn += settle % jerk == 0 ? spin * jerk : 0.0f;
                 if (++settle >= 40 && settle < 40 + shots) {
                     char name[32];
                     std::snprintf(name, sizeof name, "showroom-%02d.bmp", settle - 40);
