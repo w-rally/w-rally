@@ -198,16 +198,25 @@ public:
             auto spent = [&] { return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count(); };
             bool all = true;
             for (assets::CarTexture& t : m_pending->model.materials) {
-                if (t.uploaded || t.dds.empty()) continue;
-                if (spent() > 4.0) {   // (this frame's share spent: the rest next frame)
-                    all = false;
-                    break;
+                // The texture, then its PBR maps (a normal or ORM map as data, assets::CarMap).
+                for (int k = -1; k < assets::kCarMaps && all; ++k) {
+                    std::vector<uint8_t>& dds = k < 0 ? t.dds : t.maps[k].dds;
+                    uint32_t& uploaded = k < 0 ? t.uploaded : t.maps[k].uploaded;
+                    if (uploaded || dds.empty()) continue;
+                    if (spent() > 4.0) {   // (this frame's share spent: the rest next frame)
+                        all = false;
+                        break;
+                    }
+                    const double before = spent();
+                    uploaded = k > assets::kMapBaseColour ? renderer.CreateTextureData(dds.data(), dds.size())
+                                                          : renderer.CreateTexture(dds.data(), dds.size());
+                    if (!uploaded && k < 0) dds.clear();   // (refused: the material's colour instead; a map is tried again,
+                                                           // and named rejected, as the model is made)
+                    if (std::getenv("WRALLY_SHOWROOM_TIMES"))
+                        std::printf("the showroom: texture %s%s (%zu KB) in %.0f ms\n", t.material.c_str(), k < 0 ? "" : " (a map)",
+                                    dds.size() / 1024, spent() - before);
                 }
-                const double before = spent();
-                t.uploaded = renderer.CreateTexture(t.dds.data(), t.dds.size());
-                if (!t.uploaded) t.dds.clear();   // (refused: the material's colour instead)
-                if (std::getenv("WRALLY_SHOWROOM_TIMES"))
-                    std::printf("the showroom: texture %s (%zu KB) in %.0f ms\n", t.material.c_str(), t.dds.size() / 1024, spent() - before);
+                if (!all) break;
             }
             if (all && spent() <= 4.0) {
                 m_car = std::make_unique<assets::CarRender>();

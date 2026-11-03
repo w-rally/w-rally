@@ -438,6 +438,17 @@ Status WRALLY_CALL CreateTexture(Renderer* r, const void* dds, uint64_t bytes, T
     return Status::Ok;
 }
 
+Status WRALLY_CALL CreateTextureData(Renderer* r, const void* dds, uint64_t bytes, TextureHandle* out)
+{
+    if (out) *out = 0;
+    if (!r || !out || !dds || !bytes) return Status::ErrInvalidArg;
+    if (!r->sceneLoaded) return r->Fail(Status::ErrInvalidArg, "createTextureData: load a scene first (textures are its)");
+    const uint32_t h = r->scene.AddTexture(r->dev.device.Get(), r->dev.queue.Get(), dds, static_cast<size_t>(bytes), true);
+    if (!h) return r->Fail(Status::ErrFormat, "createTextureData: the DDS could not be decoded or uploaded");
+    *out = h;
+    return Status::Ok;
+}
+
 Status WRALLY_CALL CreateTextureRgba(Renderer* r, const void* rgba, uint32_t width, uint32_t height, TextureHandle* out)
 {
     if (out) *out = 0;
@@ -802,7 +813,7 @@ const RendererApi kApi = {&Destroy,       &LastError,         &ApplySettings,  &
                           &WeatherPresetAt, &FindWeatherPreset, &CreateTexture, &CreateTextureRgba,
                           &ReleaseTexture, &CreateModel,      &ReleaseModel,   &CreateInstance, &DestroyInstance,
                           &RenderFrame,   &Present,           &Stats,          &CaptureFrame,   &SetDebugView,
-                          &DebugViewName, &SetLegacyProfile, &UpdateTextureRgba};
+                          &DebugViewName, &SetLegacyProfile, &UpdateTextureRgba, &CreateTextureData};
 
 } // namespace
 
