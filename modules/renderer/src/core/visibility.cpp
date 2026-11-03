@@ -45,6 +45,7 @@ void RtVisibility::Record(Device& dev, ID3D12GraphicsCommandList* list, const Vi
     out.shadowSource = 1;
     out.sun = m_rt.Filtered();
     out.lights = m_rt.FilteredLights();
+    out.lightsTaa = m_rt.LightsDenoised();
     if (traced && m_rt.FilteredAo())
     {
         out.ao = m_rt.FilteredAo();

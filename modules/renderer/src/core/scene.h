@@ -85,11 +85,16 @@ public:
                        const float* view, const float* proj, UINT width, UINT height);
     ID3D12Resource* NormalBuffer() const { return m_normal.Get(); }
     // The prepass's motion target, RGBA16F, in RENDER_TARGET between frames
-    // like the normal buffer: per pixel of an object that moved since last
-    // frame, xy = last frame's NDC minus this frame's, z = last frame's
-    // reverse-Z depth, w = 1; w = 0 everywhere else (reproject by the camera).
+    // like the normal buffer: per pixel of a moving object (one that has moved
+    // since it was placed, standing still or not), xy = last frame's NDC minus
+    // this frame's, z = last frame's reverse-Z depth, w = 1; w = 0 everywhere
+    // else (reproject by the camera).
     // Only meaningful in a frame that ran RecordPrepass.
     ID3D12Resource* MotionBuffer() const { return m_motion.Get(); }
+    // And the moving objects' GLASS, which the motion target sees through (its pixels are what is behind it): RG16F,
+    // its own NDC offset to last frame where a moving object's glass is in front, kNoGlass (8, 8) elsewhere. In
+    // RENDER_TARGET between frames, as the motion target.
+    ID3D12Resource* GlassMotionBuffer() const { return m_glassMotion.Get(); }
     ID3D12Resource* PlantBuffer() const { return m_plantTarget.Get(); }
 
     // Where the sun visibility comes from: 0 = the cascaded shadow map,
@@ -698,6 +703,9 @@ private:
         // the end of RecordPass, which advances it.
         bool     prevIdentity = true;
         float    prevXform[16] = { 1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1 };
+        // It has moved since it was placed (the car, its wheels and glass): its pixels are a moving object's in the
+        // motion target from then on, still or not - see RecordPass's movedOf.
+        bool     dynamic = false;
         // 0 = the static scene's shared buffers, otherwise a 1-based index into
         // m_dynMeshes. The draw loop binds whichever pair this names, and static
         // content stays exactly as fast as it was.
@@ -782,12 +790,13 @@ private:
     // The blended materials' (kMaterialBlend, glass), drawn after the opaque: [cull] none (two-sided), back, front
     // (a mirroring transform). Premultiplied (ONE, INV_SRC_ALPHA), depth tested, not written.
     Microsoft::WRL::ComPtr<ID3D12PipelineState>  m_psoBlend[3];
-    // The glass that moved, in the prepass: its mark in the motion target's alpha alone (PSPrepass). [cull] as above.
+    // A moving object's glass, in the prepass: its own motion into the glass target (PSGlassMotion). [cull] as above.
     Microsoft::WRL::ComPtr<ID3D12PipelineState>  m_psoPrepassGlass[3];
     Microsoft::WRL::ComPtr<ID3D12Resource>       m_normal;
     Microsoft::WRL::ComPtr<ID3D12Resource>       m_motion;
     Microsoft::WRL::ComPtr<ID3D12Resource>       m_plantTarget;      // R32_UINT, plant + 1
-    Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> m_normalRtvHeap;   // normal, motion, plant
+    Microsoft::WRL::ComPtr<ID3D12Resource>       m_glassMotion;      // GlassMotionBuffer
+    Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> m_normalRtvHeap;   // normal, motion, plant, the glass's motion
     // The deferred local lights (PSDeferredLights): the surface's targets (normal, roughness and kind; albedo and
     // metallic) and their RTVs; the opaque world's pipelines that write them ([alpha test][mirroring transform] the
     // culled ones); the full-screen pass. Used while there are local lights.
