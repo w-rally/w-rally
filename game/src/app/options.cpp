@@ -147,7 +147,13 @@ int Parse(const std::vector<std::string>& args, Options& o)
     c.fnc = maps + ".fnc";
     c.lbs = maps + ".lbs";
     c.sgc = game + "/" + Arg(args, "--sgc", "Cars/i20_R5/i20_R5.sgc");
-    c.car = Arg(args, "--car", "s_i2003");
+    // The car's physics: --car, else the .sgc's folder's own (Cars/<folder>/physics/), else physics.rbz's s_i2003.
+    {
+        std::error_code ec;
+        const std::filesystem::path own = std::filesystem::path(c.sgc).parent_path() / "physics";
+        const std::string ownCar = own.generic_string() + "/";
+        c.car = Arg(args, "--car", std::filesystem::exists(own / "common.lsp", ec) ? ownCar.c_str() : "s_i2003");
+    }
     // W-Rally's values on top of RBR's car: --overrides, else content/cars/<car>.ini (WRallyFile) if there is one
     // ("none": RBR's car as it is).
     c.overrides = Arg(args, "--overrides", "");

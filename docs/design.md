@@ -704,7 +704,9 @@ Each phase ends with a game you can drive. phys-drive works on day one, and ever
      same as a CLI run. Custom weather (sun, rain, clouds...) comes later.
    - **All cars:** the catalog (`assets/catalog.*`) lists every `Cars/<folder>` that has an `.sgc`, not only the eight
      `Cars.ini` slots. A car's physics comes from its own `Cars/<folder>/physics/` if it has one, else its slot's
-     `physics.rbz` folder, else its `car.json`'s. There is no stand-in: a car without physics of its own is not usable.
+     `physics.rbz` folder, else its `car.json`'s (a `car.json` never overrides a car's own folder). On the command line
+     `--car` defaults the same way: the `--sgc`'s folder's `physics/` if it has a `common.lsp`, else `s_i2003`. There
+     is no stand-in: a car without physics of its own is not usable.
      `--extract-slot-physics` (development) copies the slot cars' physics out of `physics.rbz` into their folders, so
      each car's physics is a set of loose files.
    - **Esc in a stage:** the stage holds and a menu comes up: Resume, Restart stage, Settings, Debug (what the keys

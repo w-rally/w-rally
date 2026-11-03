@@ -269,7 +269,9 @@ std::string Catalog::Scan(const app::Settings& s)
         const CarInfo* info = carRegister.Find(car.folder);
         if (!info) continue;
         car.name = info->name;
-        if (!info->physics.empty() && info->physics != car.physics) car.physics = info->physics, car.physicsFrom = "car.json (" + info->physics + ")";
+        // (its own folder first: car.json's physics only stands in for a car without one)
+        if (!info->physics.empty() && info->physics != car.physics && car.physicsFrom != "its own")
+            car.physics = info->physics, car.physicsFrom = "car.json (" + info->physics + ")";
     }
     trackRegister.Build(s.rbrPath, stages);
     for (Stage& st : stages)
