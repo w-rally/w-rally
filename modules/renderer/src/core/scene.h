@@ -470,7 +470,8 @@ public:
 
     uint32_t AddMesh(ID3D12Device*, const ::ngg::Vertex* verts, uint32_t vertexCount,
                      const uint32_t* indices, uint32_t indexCount);
-    uint32_t AddTexture(ID3D12Device*, ID3D12CommandQueue*, const void* dds, size_t bytes);
+    // `linear`: data (a normal or ORM map), read as stored; else colour, decoded from sRGB.
+    uint32_t AddTexture(ID3D12Device*, ID3D12CommandQueue*, const void* dds, size_t bytes, bool linear = false);
     uint32_t AddMaterial(ID3D12Device*, uint32_t tex0, uint32_t tex1, uint32_t flags);
     uint32_t AddInstance(uint32_t mesh, uint32_t material, uint32_t layer,
                          const float xform[16]);

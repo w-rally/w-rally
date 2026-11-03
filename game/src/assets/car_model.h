@@ -49,12 +49,25 @@ struct CarPart {
     std::vector<uint32_t> indices;  // into vertices
 };
 
+// W-Rally's PBR maps for a car texture (none of them RBR's): files beside it in the car's textures folder, named after
+// it - i20_R5_external.dds has i20_R5_external_basecolor.dds, _normal.dds, _orm.dds -, each optional, each found by its
+// name alone. glTF's meaning: the base colour (sRGB) in place of the texture; the normal map tangent-space, two
+// channels enough (BC5: z is rebuilt); ORM linear, r occlusion, g roughness, b metallic - and a the clear coat (0 matte,
+// 1 lacquer: BC3 or BC7 to have one). Where a texture has an ORM map, it says the finish; without one the shader class
+// does (assets/car_render.cpp). DDS: BC1-3, or BC4, BC5, BC7 behind a DX10 header (DirectXTex's texconv), with mips.
+enum CarMapKind : int { kMapBaseColour, kMapNormal, kMapOrm, kCarMaps };
+struct CarMap {
+    std::vector<uint8_t> dds;   // empty: none
+    uint32_t uploaded = 0;      // as CarTexture::uploaded
+};
+
 struct CarTexture {
     std::string material;
     std::vector<uint8_t> dds;   // empty: none
     uint32_t uploaded = 0;      // the renderer's texture made of it already (a frame at a time: the showroom's); 0 not yet
     float diffuse[3] = {0.5f, 0.5f, 0.5f};
     bool transparent = false;
+    CarMap maps[kCarMaps];      // its PBR maps (CarMapKind)
 };
 
 struct CarModel {

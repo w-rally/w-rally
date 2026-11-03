@@ -243,12 +243,26 @@ void CarRender::Create(render::Renderer& renderer, const CarModel* read, const s
         std::memcpy(m_hubs, drawn ? model.wheelAt : model.hubs, sizeof m_hubs);
         m_wheelRadius = model.wheelRadius;
         size_t textured = 0;
+        std::vector<bool> hasOrm;   // per material: its ORM map says the finish (materialOf)
         for (const CarTexture& t : model.materials) {
             const iface::TextureHandle tex = t.uploaded ? t.uploaded : t.dds.empty() ? 0 : renderer.CreateTexture(t.dds.data(), t.dds.size());
             textured += tex != 0;
-            if (std::getenv("PHYS_DRIVE_MATERIALS"))
-                std::printf("material %s: %zu bytes dds%s, diffuse %.2f %.2f %.2f\n", t.material.c_str(), t.dds.size(),
-                            tex == 0 && !t.dds.empty() ? " (rejected)" : "", t.diffuse[0], t.diffuse[1], t.diffuse[2]);
+            iface::TextureHandle maps[kCarMaps] = {};
+            for (int k = 0; k < kCarMaps; ++k) {
+                const CarMap& cm = t.maps[k];
+                maps[k] = cm.uploaded ? cm.uploaded
+                        : cm.dds.empty() ? 0
+                        : k == kMapBaseColour ? renderer.CreateTexture(cm.dds.data(), cm.dds.size())
+                                              : renderer.CreateTextureData(cm.dds.data(), cm.dds.size());
+            }
+            if (std::getenv("PHYS_DRIVE_MATERIALS")) {
+                std::string found;
+                static const char* const kName[kCarMaps] = {"base colour", "normal", "ORM"};
+                for (int k = 0; k < kCarMaps; ++k)
+                    if (!t.maps[k].dds.empty()) found += std::string(", ") + kName[k] + " map" + (maps[k] ? "" : " (rejected)");
+                std::printf("material %s: %zu bytes dds%s, diffuse %.2f %.2f %.2f%s\n", t.material.c_str(), t.dds.size(),
+                            tex == 0 && !t.dds.empty() ? " (rejected)" : "", t.diffuse[0], t.diffuse[1], t.diffuse[2], found.c_str());
+            }
             // One-sided, as the game draws them: the body is a shell whose inner faces (the texture's black) lie close
             // behind its paint, and drawn they show through it. The glass both ways, seen from inside too, and
             // BLENDED: its texture's alpha is how much tint covers the cabin, and it reflects the sky as smooth glass
@@ -259,6 +273,13 @@ void CarRender::Create(render::Renderer& renderer, const CarModel* read, const s
             if (!tex)
                 for (int k = 0; k < 3; ++k) m.baseColourFactor[k] = t.diffuse[k];
             m.roughness = t.transparent ? 0.05f : 0.45f;
+            // Its PBR maps (assets/car_model.h CarMap): the base colour in the texture's place; with an ORM map the map
+            // is the finish - the factors 1, the coat its alpha's.
+            if (maps[kMapBaseColour]) m.baseColour = maps[kMapBaseColour];
+            m.normal = maps[kMapNormal];
+            m.orm = maps[kMapOrm];
+            if (m.orm) m.roughness = m.metallic = m.clearCoat = 1.0f;
+            hasOrm.push_back(m.orm != 0);
             materials.push_back(m);
         }
         // The finish, by the group's shader class (CarPart::shader): CarPaint (and CarPaintInt) is lacquered
@@ -268,7 +289,8 @@ void CarRender::Create(render::Renderer& renderer, const CarModel* read, const s
         // (e_lightglass_*, e_window_*: most cars draw their lamp lenses as CarPlastic). Elsewhere - bumper and bonnet
         // vents, door logos, a wing's cut-outs - its alpha is holes: alpha-tested, matte, or lacquered on CarPaint (as
         // glass, a grille shone like a pane). Over the 42 cars at hand that takes vents, logos and a few odd parts off
-        // the glass, and no lens or pane. A material drawn with two finishes is two materials.
+        // the glass, and no lens or pane. A material drawn with two finishes is two materials. Where the texture has an
+        // ORM map, the map is the finish: the class decides glass or holes only.
         enum Finish { kAsIs, kPaint, kRubber, kHoles, kPaintHoles };
         auto lower = [](std::string s) {
             for (char& ch : s) ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
@@ -297,6 +319,7 @@ void CarRender::Create(render::Renderer& renderer, const CarModel* read, const s
                     m.flags = iface::kMaterialAlphaTest | iface::kMaterialTwoSided, m.roughness = 0.6f, m.alphaCutoff = 0.25f;
                 if (f == kPaint || f == kPaintHoles) m.clearCoat = 1.0f, m.roughness = 0.2f;   // (the colour under the lacquer: a smooth base)
                 else if (f == kRubber) m.roughness = 0.85f;
+                if (hasOrm[mi]) m.roughness = m.metallic = m.clearCoat = 1.0f;
                 materials.push_back(m);
             }
             return it->second;

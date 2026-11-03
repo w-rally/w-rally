@@ -48,7 +48,9 @@ namespace wrally::iface {
 // 14: RenderStats::aoSource (ray traced or XeGTAO); ambientOcclusion and aoMs whatever the shadow source.
 // 15: MaterialDesc::clearCoat (car paint's lacquer: a second, smooth specular layer).
 // 16: FrameDesc::reflectionFocus (the car the cube probe is centred on: the world in its paint).
-constexpr uint32_t kRendererInterfaceVer = 16;
+// 17: createTextureData (a DDS read as data, not colour: normal and ORM maps); MaterialDesc::orm's alpha is the
+//     clear coat's mask.
+constexpr uint32_t kRendererInterfaceVer = 17;
 
 struct Renderer;                     // the module's instance, opaque
 typedef uint32_t SceneHandle;        // a loaded .ngg stage
@@ -90,7 +92,8 @@ struct MaterialDesc {
     float         baseColourFactor[4];
     float         roughness, metallic, normalScale, occlusionStrength, emissiveStrength, alphaCutoff;
     float         clearCoat;   // 0..1: a clear lacquer over the surface (car paint) - a smooth dielectric layer (f0 0.04,
-                               // the renderer's fixed gloss) whose reflection lies over the base's, dimming it as much
+                               // the renderer's fixed gloss) whose reflection lies over the base's, dimming it as much;
+                               // times the orm map's alpha (glTF's ORM in rgb: occlusion, roughness, metallic)
 };
 static_assert(sizeof(MaterialDesc) == 68, "MaterialDesc layout");
 
@@ -402,6 +405,10 @@ struct RendererApi {
     // A createTextureRgba texture's pixels replaced, the same size (RGBA8, width * 4 bytes a row): a video's frames.
     // Uploaded now - call outside renderFrame.
     Status (WRALLY_CALL* updateTextureRgba)(Renderer*, TextureHandle, const void* rgba);
+
+    // As createTexture, for a texture that holds DATA (a normal map, an ORM map): read as stored, no sRGB decode.
+    // Also takes the DX10 header's BC4, BC5 and BC7.
+    Status (WRALLY_CALL* createTextureData)(Renderer*, const void* dds, uint64_t bytes, TextureHandle* out);
 };
 
 struct RendererInput {
