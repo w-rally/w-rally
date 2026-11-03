@@ -263,24 +263,40 @@ void CarRender::Create(render::Renderer& renderer, const CarModel* read, const s
         }
         // The finish, by the group's shader class (CarPart::shader): CarPaint (and CarPaintInt) is lacquered
         // (MaterialDesc::clearCoat) - the colour and the livery's decals on it under one clear coat, as a rally car's
-        // are -, CarTire rough rubber; the rest (plastic, rims, the textured and coloured parts, the glass) as above. A
-        // material drawn with two finishes is two materials.
-        enum Finish { kAsIs, kPaint, kRubber };
-        auto finishOf = [](std::string c) {
-            for (char& ch : c) ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
-            if (c.rfind("carpaint", 0) == 0) return kPaint;
+        // are -, CarTire rough rubber; the rest (plastic, rims, the textured and coloured parts) as above. A TRANSPARENT
+        // texture is glass only on glass: its class CarGlass, CarIntGlass or CarLight, or a mesh named for it
+        // (e_lightglass_*, e_window_*: most cars draw their lamp lenses as CarPlastic). Elsewhere - bumper and bonnet
+        // vents, door logos, a wing's cut-outs - its alpha is holes: alpha-tested, matte, or lacquered on CarPaint (as
+        // glass, a grille shone like a pane). Over the 42 cars at hand that takes vents, logos and a few odd parts off
+        // the glass, and no lens or pane. A material drawn with two finishes is two materials.
+        enum Finish { kAsIs, kPaint, kRubber, kHoles, kPaintHoles };
+        auto lower = [](std::string s) {
+            for (char& ch : s) ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+            return s;
+        };
+        auto finishOf = [&](const CarPart& part, bool transparent) {
+            const std::string c = lower(part.shader), n = lower(part.name);
+            const bool paint = c.rfind("carpaint", 0) == 0;
+            if (transparent) {
+                const bool glass = c.rfind("carglass", 0) == 0 || c.rfind("carintglass", 0) == 0 || c.rfind("carlight", 0) == 0 ||
+                                   n.find("glass") != std::string::npos || n.find("window") != std::string::npos;
+                return glass ? kAsIs : paint ? kPaintHoles : kHoles;
+            }
+            if (paint) return kPaint;
             if (c == "cartire") return kRubber;
             return kAsIs;
         };
         std::map<std::pair<size_t, int>, uint32_t> finished;
-        auto materialOf = [&](size_t mi, const std::string& shader) -> uint32_t {
-            const Finish f = model.materials[mi].transparent ? kAsIs : finishOf(shader);
+        auto materialOf = [&](size_t mi, const CarPart& part) -> uint32_t {
+            const Finish f = finishOf(part, model.materials[mi].transparent);
             if (f == kAsIs) return static_cast<uint32_t>(mi + 1);
             const auto [it, made] = finished.try_emplace({mi, f}, static_cast<uint32_t>(materials.size()));
             if (made) {
                 iface::MaterialDesc m = materials[mi + 1];
-                if (f == kPaint) m.clearCoat = 1.0f, m.roughness = 0.2f;   // (the colour under the lacquer: a smooth base)
-                else m.roughness = 0.85f;
+                if (f == kHoles || f == kPaintHoles)   // (a thin mesh: the game's 170/255 cut most of it away)
+                    m.flags = iface::kMaterialAlphaTest | iface::kMaterialTwoSided, m.roughness = 0.6f, m.alphaCutoff = 0.25f;
+                if (f == kPaint || f == kPaintHoles) m.clearCoat = 1.0f, m.roughness = 0.2f;   // (the colour under the lacquer: a smooth base)
+                else if (f == kRubber) m.roughness = 0.85f;
                 materials.push_back(m);
             }
             return it->second;
@@ -307,11 +323,11 @@ void CarRender::Create(render::Renderer& renderer, const CarModel* read, const s
             if (part.lampGroup >= 0) {   // a lamp's: its own instance, on its part's node (assets::CarRender::PlaceLamps)
                 const int sd = sideOf(part.name);
                 lampMeshes[part.lampGroup][sd][part.lit ? 1 : 0].push_back({std::move(v), part.indices,
-                                                                            materialOf(mi, part.shader), node});
+                                                                            materialOf(mi, part), node});
                 if (m_lampPart[part.lampGroup][sd] == -2) m_lampPart[part.lampGroup][sd] = node >= kParts ? static_cast<int>(node - kParts) : -1;
                 continue;
             }
-            add(std::move(v), part.indices, materialOf(mi, part.shader), node);
+            add(std::move(v), part.indices, materialOf(mi, part), node);
         }
         std::printf("the car: %zu parts, %zu materials (%zu textured)\n", meshes.size(), model.materials.size(), textured);
     }
