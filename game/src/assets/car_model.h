@@ -63,6 +63,7 @@ struct CarMap {
 
 struct CarTexture {
     std::string material;
+    std::string file;           // its texture's file name in the car's textures folder ("" none)
     std::vector<uint8_t> dds;   // empty: none
     uint32_t uploaded = 0;      // the renderer's texture made of it already (a frame at a time: the showroom's); 0 not yet
     float diffuse[3] = {0.5f, 0.5f, 0.5f};
