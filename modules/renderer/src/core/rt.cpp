@@ -611,9 +611,13 @@ float Slope(float c, float m, float p)
 
 // The group's 12x12 window of depth (negative: a moved object's pixel; 0: sky
 // or off the screen) and raw result, loaded once: 25 taps of three textures
-// per pixel were most of this pass's cost.
+// per pixel were most of this pass's cost. And whether each moved pixel moves
+// AGAINST THE WORLD there - over half a pixel from where the camera alone
+// takes it (a car standing on the turntable, or parked as the camera passes,
+// does not).
 groupshared float sDepth[144];
 groupshared float sRaw[144];
+groupshared uint  sAgainst[144];
 
 [numthreads(8, 8, 1)]
 void CSMain(uint3 tid : SV_DispatchThreadID, uint3 gid : SV_GroupID, uint gi : SV_GroupIndex)
@@ -623,14 +627,24 @@ void CSMain(uint3 tid : SV_DispatchThreadID, uint3 gid : SV_GroupID, uint gi : S
     {
         const int2 q = origin + int2(k % 12u, k / 12u);
         float d = 0.0, r = 1.0;
+        uint against = 0u;
         if (all(q >= 0) && all(q < int2(gSize)))
         {
             d = max(gDepth.Load(int3(q, 0)), 0.0);
             r = gRaw.Load(int3(q, 0));
-            if (gMotionOn > 0.5 && gMotion.Load(int3(q, 0)).w > 0.5) d = -d;
+            const float4 m = (gMotionOn > 0.5) ? gMotion.Load(int3(q, 0)) : float4(0.0, 0.0, 0.0, 0.0);
+            if (m.w > 0.5)
+            {
+                const float2 n = float2((q.x + 0.5) / gSize.x * 2.0 - 1.0, 1.0 - (q.y + 0.5) / gSize.y * 2.0);
+                const float4 c = mul(float4(n, d, 1.0), gReproj);
+                const float2 off = abs(c.w) > 1e-7 ? (n + m.xy - c.xy / c.w) * 0.5 * float2(gSize) : float2(1e3, 1e3);
+                against = dot(off, off) > 0.25 ? 1u : 0u;
+                d = -d;
+            }
         }
-        sDepth[k] = d;
-        sRaw[k]   = r;
+        sDepth[k]   = d;
+        sRaw[k]     = r;
+        sAgainst[k] = against;
     }
     GroupMemoryBarrierWithGroupSync();
 
@@ -656,6 +670,12 @@ void CSMain(uint3 tid : SV_DispatchThreadID, uint3 gid : SV_GroupID, uint gi : S
     // ring weighs a half, so each axis spans exactly one period: every cell
     // of the grid counts once, and the tile leaves no pattern of its own.
     const bool movedPixel = sDepth[lp.y * 12 + lp.x] < 0.0;
+    // A moving object here that moves against the world (sAgainst, the 3x3): only then is there anything its pixels
+    // and the world's could pass each other - at a standing car's outline the jitter swaps them, frame by frame.
+    bool against = false;
+    [unroll] for (int ay = -1; ay <= 1; ++ay)
+    [unroll] for (int ax = -1; ax <= 1; ++ax)
+        against = against || sAgainst[(lp.y + ay) * 12 + lp.x + ax] != 0u;
     float sum = 0.0, sum2 = 0.0, wsum = 0.0;
     bool  touched = false;      // a ray in the window hit a moved object
     float allow = 1.0;          // the least history weight those rays allow
@@ -675,7 +695,7 @@ void CSMain(uint3 tid : SV_DispatchThreadID, uint3 gid : SV_GroupID, uint gi : S
         const float e = max(depth + dot(slope, float2(x, y)), 1e-7);
         float rel = abs(1.0 / d - 1.0 / e) * e;
         const bool qMoved = ds < 0.0;
-        float w = (rel < 0.03 && qMoved == movedPixel) ? 1.0 : 0.0;
+        float w = (rel < 0.03 && (qMoved == movedPixel || !against)) ? 1.0 : 0.0;
         if (gPeriod4 > 0.5) w *= (abs(x) == 2 ? 0.5 : 1.0) * (abs(y) == 2 ? 0.5 : 1.0);
         float r = sRaw[k];
         if (r < 0.0)
@@ -731,9 +751,10 @@ void CSMain(uint3 tid : SV_DispatchThreadID, uint3 gid : SV_GroupID, uint gi : S
             // shadows blotchy under a camera that never moves, the car
             // standing or turning; three dozen halve that. The neighbourhood
             // clamp below still pulls a stale value in at once where every
-            // sample disagrees with it.
-            const float still = movedPixel ? 0.0
-                              : saturate(1.0 - length(puv * float2(gSize) - (float2(px) + 0.5)) * 4.0);
+            // sample disagrees with it. A moving object's pixel too, by its own
+            // motion: the Garage's car stopped is still, as it was before it
+            // counted as moving at all (scene.cpp movedOf).
+            const float still = saturate(1.0 - length(puv * float2(gSize) - (float2(px) + 0.5)) * 4.0);
             const float top = lerp(gBlend, gBlendStill, still);
             // Ground the car uncovered: last frame this spot was the moved
             // object, so its history is cut below - and that, too, is "a moved
@@ -741,7 +762,7 @@ void CSMain(uint3 tid : SV_DispatchThreadID, uint3 gid : SV_GroupID, uint gi : S
             // such strip: they started over as merely fresh, and TAA, which
             // reads the distrust (post.cpp), kept the shadow each strip was
             // first seen in - a band behind the car per frame.
-            if (h.y > 0.0 && h.w > 0.5 && !movedPixel) { touched = true; allow = 0.0; }
+            if (h.y > 0.0 && h.w > 0.5 && !movedPixel && against) { touched = true; allow = 0.0; }
             const bool histTouched = h.z > 0.5;
             // IDENTITY first, as TAA's (post.cpp): a moved object's history
             // never passes to a static pixel, nor the reverse. Depth cannot
@@ -749,7 +770,7 @@ void CSMain(uint3 tid : SV_DispatchThreadID, uint3 gid : SV_GroupID, uint gi : S
             // bumper is within 3% of the bumper - and the back of a car, in
             // its own shadow, then printed a dark band of itself on the sunlit
             // road behind it every frame.
-            if (h.y > 0.0 && (h.w > 0.5) == movedPixel)
+            if (h.y > 0.0 && ((h.w > 0.5) == movedPixel || !against))
             {
                 float rel = abs(1.0 / h.y - 1.0 / pn.z) * pn.z;
                 // The history is read at the nearest pixel, up to half a pixel
@@ -783,11 +804,12 @@ void CSMain(uint3 tid : SV_DispatchThreadID, uint3 gid : SV_GroupID, uint gi : S
                     // behind a panel, which cut it - holds only the frames
                     // since: a running mean of them, not 0.85 of the first
                     // one's raw 5x5, which kept the car blotchy for a dozen.
+                    // (A grown one is left to `top`: a standing car's still.)
                     if (movedPixel)
                     {
                         histYouth = round((1.0 - h.w) * 32.0);
                         const float frames = 9.0 - histYouth;
-                        blend = min(blend, frames / (frames + 1.0));
+                        if (histYouth > 0.0) blend = min(blend, frames / (frames + 1.0));
                     }
                 }
             }

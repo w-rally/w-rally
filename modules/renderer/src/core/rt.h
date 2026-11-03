@@ -124,6 +124,8 @@ public:
     ID3D12Resource* AoDenoised() const { return m_filteredAo ? m_aoHist[(m_frame - 1) & 1].Get() : nullptr; }
     // And last frame's, the same layout - what AoDenoised was a frame ago.
     ID3D12Resource* AoPrevDenoised() const { return m_filteredAo ? m_aoHist[m_frame & 1].Get() : nullptr; }
+    // The local lights' denoise before the wide pass, the layout AoDenoised has (z: the distrust); null unless traced.
+    ID3D12Resource* LightsDenoised() const { return m_filteredLights ? m_lightHist[(m_frame - 1) & 1].Get() : nullptr; }
     bool AoAvailable() const { return m_psoAo != nullptr; }
 
     // The denoiser's constants; public only so a file-scope static_assert can

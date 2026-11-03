@@ -42,9 +42,9 @@ float FrameExposure()
 Texture2D    gColour  : register(t0);   // TAA: this frame. Tonemap: the resolved image.
 Texture2D    gHistory : register(t1);
 Texture2D    gDepth   : register(t2);
-// The scene prepass's motion (Scene::MotionBuffer): w = 1 where an object
-// moved, with xy its NDC offset to last frame and z its depth there. t4, as
-// t3 is the exposure state's root SRV.
+// The scene prepass's motion (Scene::MotionBuffer): w = 1 on a moving object,
+// with xy its NDC offset to last frame and z its depth there. t4, as t3 is
+// the exposure state's root SRV.
 Texture2D    gMotion  : register(t4);
 // The ray-traced shadow's denoised result (Rt::Filtered): z > 0.5 where a ray
 // hit a moved object this frame or in the last four (rt.cpp's distrust). A
@@ -52,6 +52,11 @@ Texture2D    gMotion  : register(t4);
 Texture2D    gShadow  : register(t5);
 Texture2D    gAo      : register(t6);   // the RT AO's denoise (Rt::AoDenoised), likewise
 Texture2D    gAoPrev  : register(t7);   // and last frame's (Rt::AoPrevDenoised)
+// A moving object's glass, its own motion (Scene::GlassMotionBuffer): x < 6 where it is in front. Read only with
+// gMotionOn (a NULL descriptor reads 0, which would be glass everywhere).
+Texture2D    gGlass   : register(t8);
+Texture2D    gLights  : register(t9);   // the RT local lights' denoise (Rt::LightsDenoised): z as gShadow's
+Texture2D    gSettled : register(t10);  // the history's companion: how long each pixel has stood still (PSTaa)
 SamplerState sPoint   : register(s0);
 SamplerState sLinear  : register(s1);
 
@@ -117,7 +122,41 @@ float3 HistoryCatmullRom(float2 uv)
 // ---------------------------------------------------------------------------
 // TAA
 // ---------------------------------------------------------------------------
-float4 PSTaa(VSOut i) : SV_Target
+// Where the camera alone takes a pixel (NDC and its reverse-Z depth) to last frame, in NDC; far off the screen where
+// it was behind the camera.
+float2 CameraPrev(float2 ndc, float depth)
+{
+    const float4 c = mul(float4(ndc, depth, 1.0), gReproj);
+    return abs(c.w) > 1e-7 ? c.xy / c.w : float2(4.0, 4.0);
+}
+
+// How far the MOVING OBJECTS about a static pixel went this frame AGAINST THE WORLD there, in pixels: the most any of
+// this frame's pixels of one (or of its glass) in the 4x4 from `q` moves other than the camera alone would take it -
+// nothing for a car standing on the turntable, or parked on a stage under a camera passing it; a frame's turn for one
+// spun past - or 1e3 where there is none there now: it has gone. Its pixels, not the history's texels one by one: at
+// a standing car's outline the jitter takes a pixel from the car one frame and gives it back the next.
+float Gone(int2 q)
+{
+    float most = -1.0;
+    [unroll] for (int y = 0; y < 4; ++y)
+    [unroll] for (int x = 0; x < 4; ++x)
+    {
+        const int3 at = int3(q + int2(x, y), 0);
+        const float2 g = gGlass.Load(at).xy;
+        const float4 m = gMotion.Load(at);
+        if (g.x < 6.0 || m.w > 0.5)
+        {
+            const float2 n = float2((at.x + 0.5) * gTexel.x * 2.0 - 1.0, 1.0 - (at.y + 0.5) * gTexel.y * 2.0);
+            const float2 off = n + ((g.x < 6.0) ? g : m.xy) - CameraPrev(n, gDepth.Load(at).r);
+            most = max(most, length(off * 0.5 / gTexel));
+        }
+    }
+    return most < 0.0 ? 1e3 : most;
+}
+
+struct TaaOut { float4 colour : SV_Target0; float settled : SV_Target1; };
+
+TaaOut PSTaa(VSOut i)
 {
     const float2 uv = i.uv;
     float3 curr = gColour.SampleLevel(sPoint, uv, 0).rgb;
@@ -133,19 +172,30 @@ float4 PSTaa(VSOut i) : SV_Target
     // A MOVED object's pixel cannot be reprojected by the camera: the surface
     // was somewhere else last frame. The prepass says where.
     const float4 motion = (gMotionOn > 0.5) ? gMotion.SampleLevel(sPoint, uv, 0) : float4(0, 0, 0, 0);
-    const bool   moved  = motion.w > 0.5;
-    // MOVING GLASS over a still surface (Scene's PSPrepass, w = 0.25): not in the depth, so reprojected as what is
-    // behind it, but its own light is moving - never "still" (below), and marked in the history as a moved object's,
-    // so the pixels it leaves drop what it laid there. Without it a turning car's headlamp lens, the brightest thing
-    // on the showroom's dark, smeared across it at 0.97 a frame.
-    const bool   glass  = !moved && motion.w > 0.125;
+    // A MOVING OBJECT'S GLASS (Scene's PSGlassMotion): not in the depth, so the motion target holds what is behind
+    // it - the dark beside a turning car's headlamp lens (a still pixel: the lens smeared across it at 0.97 a frame),
+    // or the car's interior behind a side window (its letters came out twice at a fast spin). It reprojects by its
+    // own motion onto the glass it was - so it is "still" (below) by that motion, as anything else, standing - and
+    // is marked in the history as glass, so the pixels it leaves drop what it laid there.
+    const float2 glassMv = (gMotionOn > 0.5) ? gGlass.SampleLevel(sPoint, uv, 0).xy : float2(8.0, 8.0);
+    bool         glass  = glassMv.x < 6.0;
+    // A moving object STANDING with the world here: within a tenth of a pixel of where the camera alone takes this
+    // pixel - a car stopped on the turntable, or parked as the camera passes. Nothing it covers or uncovers then, and
+    // it is reprojected and judged as the world is (`moved` and `glass` are for an object on the move): its outline,
+    // which the jitter gives to the car one frame and to what is behind it the next, keeps its history as the world's
+    // does. It stays marked a moving object's in the history (below), for the frame it moves again.
+    const bool   moving = glass || motion.w > 0.5;
+    const float2 motionNdc = ndc + (glass ? glassMv : motion.xy);
+    const bool   standing = moving && length((motionNdc - CameraPrev(ndc, depth)) * 0.5 / gTexel) < 0.1;
+    const bool   pane   = glass;
+    const bool   moved  = !glass && moving && !standing;
+    glass = glass && !standing;
     float2 prevUv = float2(0.0, 0.0);
     float  prevDepth = 0.0;               // reverse-Z depth this surface had then
     bool   usable;
-    if (moved)
+    if (moved || glass)
     {
-        const float2 prevNdc = ndc + motion.xy;
-        prevUv    = float2(prevNdc.x * 0.5 + 0.5, 0.5 - prevNdc.y * 0.5);
+        prevUv    = float2(motionNdc.x * 0.5 + 0.5, 0.5 - motionNdc.y * 0.5);
         prevDepth = motion.z;
         usable    = all(prevUv >= 0.0) && all(prevUv <= 1.0);
     }
@@ -163,7 +213,7 @@ float4 PSTaa(VSOut i) : SV_Target
     }
 
     // DISOCCLUSION. The history's alpha is the depth each pixel had, negated
-    // where it belonged to a moved object (see the return below). The road a
+    // where it belonged to a moving object (see the return below). The road a
     // car has just uncovered reprojects correctly by the camera, but last
     // frame that spot was the car - and the colour clip below cannot tell a
     // dark tyre from a dark patch of road, so it lets part of it through,
@@ -172,15 +222,19 @@ float4 PSTaa(VSOut i) : SV_Target
     // Decided by IDENTITY, not by depth. A depth test cannot see this case:
     // where a tyre meets the road the two ARE at the same depth, and the road
     // just behind a bumper is within a few percent of it. So a static pixel
-    // whose history fetch touches any texel of a moved object drops its
-    // history outright - the cost is one unaccumulated frame along the car's
-    // outline, which the next frame accumulates again. A moved pixel keeps it
-    // if one texel of the 2x2 it straddles is of a moved object at the depth
-    // it had, so the car's own edges still accumulate. Static against static
-    // is left exactly as it was - the camera reprojection is exact there.
+    // whose history fetch touches a texel of a moving object that has gone
+    // from there (Gone) drops its history outright - the cost is one
+    // unaccumulated frame along the car's outline, which the next frame
+    // accumulates again. A moving object standing still has not gone: the
+    // world beside it keeps its history, as beside anything else. A moved
+    // pixel keeps it if one texel of the 2x2 it straddles is of a moving
+    // object at the depth it had, so the car's own edges still accumulate; a
+    // glass pixel if one is glass. Static against static is left exactly as
+    // it was - the camera reprojection is exact there.
     bool fresh = false;     // the history there had none itself: one raw frame (alpha + 2, below)
     bool masked = false;    // a moved pixel behind a still occluder: its own texels only (below)
     float4 own = 0.0;       // and their bilinear weights, in GatherAlpha's order
+    float gone = 0.0;       // the furthest a moving object beside a static pixel went (Gone), in pixels
     if (usable && gMotionOn > 0.5)
     {
         const float4 hd = gHistory.GatherAlpha(sPoint, prevUv);
@@ -191,10 +245,14 @@ float4 PSTaa(VSOut i) : SV_Target
         const float4 b = gHistory.GatherAlpha(sPoint, prevUv + float2( gTexel.x, -gTexel.y));
         const float4 c = gHistory.GatherAlpha(sPoint, prevUv + float2(-gTexel.x,  gTexel.y));
         const float4 d = gHistory.GatherAlpha(sPoint, prevUv + float2( gTexel.x,  gTexel.y));
-        if (!moved)
+        if (glass)
+            usable = any(hd < -3.0);
+        else if (!moved)
         {
-            // (The glass's own pixels keep theirs: it was there last frame too, and the clip judges it.)
-            usable = glass || !any(min(min(a, b), min(c, d)) < 0.0);
+            // The 4x4 the history is read from, where it is on the screen now (the camera's shift).
+            if (any(min(min(a, b), min(c, d)) < 0.0))
+                gone = Gone(int2(floor(prevUv / gTexel - 0.5)) - 1 + int2(round((uv - prevUv) / gTexel)));
+            usable = gone < 1.0;
             fresh  = any(hd > 1.5);
         }
         else
@@ -202,7 +260,7 @@ float4 PSTaa(VSOut i) : SV_Target
             float4 same = 0.0;
             [unroll] for (int k = 0; k < 4; ++k)
             {
-                const float h = -hd[k];             // > 0 only for a moved texel
+                const float h = -hd[k];             // > 0 only for a moving object's texel
                 same[k] = (h > 0.0 && abs(prevDepth / h - 1.0) < 0.05) ? 1.0 : 0.0;
             }
             usable = any(same > 0.0);
@@ -269,10 +327,27 @@ float4 PSTaa(VSOut i) : SV_Target
     // at 0.9 each frame's leftover laid a faint copy of the shadow behind the
     // car: the trails seen only with TAA on (the debug views turn it off).
     // The AO likewise, around the wheels.
+    // The RT local lights' shadows (the Garage's three spots) as the sun's.
+    //
+    // And beside a MOVING OBJECT that moved, however little (`gone`): what
+    // the static pixel keeps is that object's edge where it was, and kept
+    // unclipped at 0.97 a car turning a fraction of a pixel a frame laid a
+    // soft copy of its outline behind it. Still only as far as it stood.
     const int3   px = int3(i.pos.xy, 0);
-    const bool   shadowMoved = !moved && usable && gShadow.Load(px).z > 0.5;
-    const bool   aoMoved     = !moved && usable && gAo.Load(px).z > 0.5;
-    const float  still  = (usable && !shadowMoved && !aoMoved && !glass) ? saturate(1.0 - travel * 4.0) : 0.0;
+    // (The world's: on a moving object, standing or not, its rays hit mostly itself.)
+    const bool   shadowMoved = !moving && usable && (gShadow.Load(px).z > 0.5 || gLights.Load(px).z > 0.5);
+    const bool   aoMoved     = !moving && usable && gAo.Load(px).z > 0.5;
+    // And only as far as the pixel has STOOD (`settled`, kept beside the
+    // history): from none to all over 16 frames still, back down by a
+    // quarter of what it moved over the quarter pixel. A history that moved holds the softening
+    // of every frame it was resampled at, and kept at once at 0.97 when it
+    // stopped, that took a second to go - the car stopped by the mouse on the
+    // Garage's turntable came sharp slowly, a settle seen; before, its whole
+    // history was dropped there, and the edges jumped.
+    const float  settledWas = (gValid > 0.5 && usable) ? gSettled.SampleLevel(sPoint, prevUv, 0).r : 0.0;
+    const float  settled = (travel < 0.25) ? min(settledWas + 1.0 / 16.0, 1.0) : max(settledWas - (travel - 0.25) * 0.25, 0.0);
+    const float  still  = (usable && !shadowMoved && !aoMoved)
+                        ? saturate(1.0 - travel * 4.0) * saturate(1.0 - gone * 4.0) * settled : 0.0;
     const float3 clipLo = max(lo, mean - 1.25 * sigma);
     const float3 clipHi = min(hi, mean + 1.25 * sigma);
 
@@ -321,6 +396,15 @@ float4 PSTaa(VSOut i) : SV_Target
     hist = lerp(clamp(hist, clipLo, clipHi), hist, still);
 
     float blend = (gValid < 0.5 || !usable) ? 0.0 : lerp(gBlend, 0.97, still);
+    // A MOVING OBJECT AT SPEED keeps less: its history is resampled every
+    // frame, and of a turning surface seen anew each frame, and at 0.9 the
+    // softening compounded - the car spun fast in the Garage came out blurred
+    // (and stopped, took that blur into the long still history). From 0.9 at
+    // eight pixels a frame to 0.6 at forty: under that the car the camera
+    // follows on a stage, whose RT grain a shorter history shows (at two
+    // pixels, +20% behind the panel on track 42). Spun at 10 degrees a frame,
+    // the car's difference from its standing picture 23.1 -> 19.8 (x1e-3).
+    if ((moved || glass) && travel > 8.0) blend = min(blend, gBlend - 0.3 * saturate((travel - 8.0) / 32.0));
     // ONE RAW FRAME. Where the history is a pixel that had none itself - the
     // road the car uncovered last frame - it is a single jittered frame, and
     // the one right under the car carries the contact shadow's dark edge, a
@@ -347,11 +431,15 @@ float4 PSTaa(VSOut i) : SV_Target
     const float wc = (1.0 - blend) / (1.0 + Luma(curr) * e);
     const float wh = blend         / (1.0 + Luma(hist) * e);
     const float3 outc = (curr * wc + hist * wh) / max(1e-5, wc + wh);
-    // Alpha: this pixel's depth, negative if it belongs to a moved object (or moving glass) -
-    // what next frame's disocclusion test reads - and plus 2 for a static one
-    // that took no history (`fresh` above); static depth is read for its sign
-    // only. Nothing displays it: the tonemap and the meter read rgb.
-    return float4(outc, (moved || glass) ? -max(depth, 1e-7) : (usable ? depth : depth + 2.0));
+    // Alpha: this pixel's depth, negative if it belongs to a moving object, less
+    // 4 more for its glass - what next frame's disocclusion test reads - and
+    // plus 2 for a static one that took no history (`fresh` above); static
+    // depth is read for its sign only. Nothing displays it: the tonemap and
+    // the meter read rgb.
+    TaaOut o;
+    o.colour  = float4(outc, pane ? -depth - 4.0 : moving ? -max(depth, 1e-7) : (usable ? depth : depth + 2.0));
+    o.settled = settled;
+    return o;
 }
 
 // ---------------------------------------------------------------------------
@@ -430,8 +518,8 @@ float3 ToneDisplay(float3 c)
 
 // THE UPSCALER'S INPUTS (upscaler.h), at render size: every pixel's motion, which our TAA works out per pixel from
 // the depth and the prepass and an upscaler needs as a texture - the same reprojection PSTaa makes, as (previous uv -
-// current uv) of the pixel's unjittered centre - and the reactive mask: MOVING GLASS (the prepass's w = 0.25, see
-// PSTaa) is reprojected as what is behind it while its own light moves, so it keeps little history.
+// current uv) of the pixel's unjittered centre, a moving object's glass by its own (PSTaa) - and the reactive mask:
+// that glass is a blend over what is behind it, which moves otherwise, so it keeps a little less history.
 struct UpscaleIn { float2 motion : SV_Target0; float reactive : SV_Target1; };
 
 UpscaleIn PSUpscaleIn(VSOut i)
@@ -440,8 +528,12 @@ UpscaleIn PSUpscaleIn(VSOut i)
     const float depth = gDepth.SampleLevel(sPoint, uv, 0).r;
     const float2 ndc  = float2(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0);
     const float4 motion = (gMotionOn > 0.5) ? gMotion.SampleLevel(sPoint, uv, 0) : float4(0, 0, 0, 0);
+    const float2 glassMv = (gMotionOn > 0.5) ? gGlass.SampleLevel(sPoint, uv, 0).xy : float2(8.0, 8.0);
+    const bool   glass = glassMv.x < 6.0;
     float2 prevNdc = ndc;
-    if (motion.w > 0.5)
+    if (glass)
+        prevNdc = ndc + glassMv;
+    else if (motion.w > 0.5)
         prevNdc = ndc + motion.xy;
     else
     {
@@ -450,7 +542,7 @@ UpscaleIn PSUpscaleIn(VSOut i)
     }
     UpscaleIn o;
     o.motion   = float2(prevNdc.x - ndc.x, ndc.y - prevNdc.y) * 0.5;    // uv: y down
-    o.reactive = (motion.w <= 0.5 && motion.w > 0.125) ? 0.75 : 0.0;
+    o.reactive = glass ? 0.25 : 0.0;
     return o;
 }
 
@@ -730,12 +822,13 @@ D3D12_RESOURCE_BARRIER Transition(ID3D12Resource* r,
     return b;
 }
 
-// Descriptor groups, eight wide so one root signature serves both passes.
+// Descriptor groups, ten wide so one root signature serves both passes.
 // t0 is "the colour input", which differs per pass; t1/t2 are only read by TAA.
 enum { kGroupTaa0 = 0, kGroupTaa1 = 1, kGroupTone0 = 2, kGroupTone1 = 3, kGroupToneHdr = 4, kGroupToneUp = 5 };
-enum { kGroupSize = 8, kGroupCount = 6 };
+enum { kGroupSize = 10, kGroupCount = 6 };
 const UINT kExposureCopyOffset = 512;   // gState[128]: D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT
 const DXGI_FORMAT kUpMotionFormat   = DXGI_FORMAT_R16G16_FLOAT;
+const DXGI_FORMAT kSettledFormat    = DXGI_FORMAT_R8_UNORM;   // PSTaa's `settled`, beside the history
 const DXGI_FORMAT kUpReactiveFormat = DXGI_FORMAT_R8_UNORM;   // colour, history, depth, motion, RT shadow, RT AO, its last
 
 } // namespace
@@ -762,15 +855,16 @@ bool PostFx::Create(ID3D12Device* dev, DXGI_FORMAT outputFormat)
 bool PostFx::CreatePasses(ID3D12Device* dev, DXGI_FORMAT outputFormat)
 {
     // t0..t2 colour, history, depth; then the motion, the RT shadow, the RT AO
-    // and last frame's at t4..t7 - t3 is the exposure state's root SRV - from
-    // the group's fourth to eighth slots.
+    // and last frame's, the glass's motion, the RT lights and the history's
+    // `settled` at t4..t10 - t3 is the exposure state's root SRV - from the
+    // group's fourth to tenth slots.
     D3D12_DESCRIPTOR_RANGE range[2] = {};
     range[0].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
     range[0].NumDescriptors = 3;
     range[0].BaseShaderRegister = 0;
     range[0].OffsetInDescriptorsFromTableStart = 0;
     range[1].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
-    range[1].NumDescriptors = 4;
+    range[1].NumDescriptors = 7;
     range[1].BaseShaderRegister = 4;
     range[1].OffsetInDescriptorsFromTableStart = 3;
 
@@ -862,7 +956,15 @@ bool PostFx::CreatePasses(ID3D12Device* dev, DXGI_FORMAT outputFormat)
 
     pd.PS = { psTaa->GetBufferPointer(), psTaa->GetBufferSize() };
     pd.RTVFormats[0] = kHdrFormat;
-    if (FAILED(dev->CreateGraphicsPipelineState(&pd, IID_PPV_ARGS(&m_psoTaa))))
+    pd.NumRenderTargets = 2;
+    pd.RTVFormats[1] = kSettledFormat;
+    pd.BlendState.RenderTarget[1].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+    pd.BlendState.IndependentBlendEnable = TRUE;
+    const bool taaPso = SUCCEEDED(dev->CreateGraphicsPipelineState(&pd, IID_PPV_ARGS(&m_psoTaa)));
+    pd.NumRenderTargets = 1;
+    pd.RTVFormats[1] = DXGI_FORMAT_UNKNOWN;
+    pd.BlendState.IndependentBlendEnable = FALSE;
+    if (!taaPso)
     {
         Log("post: TAA pipeline creation failed");
         return false;
@@ -1118,13 +1220,25 @@ bool PostFx::OnResize(ID3D12Device* dev, UINT width, UINT height, UINT outputWid
             Log("post: history buffer %d creation failed", i);
             return false;
         }
+        D3D12_RESOURCE_DESC sdesc = desc;
+        sdesc.Format = kSettledFormat;
+        D3D12_CLEAR_VALUE sclear = {};
+        sclear.Format = kSettledFormat;
+        m_settled[i].Reset();
+        if (FAILED(dev->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &sdesc,
+                                                D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
+                                                &sclear, IID_PPV_ARGS(&m_settled[i]))))
+        {
+            Log("post: the history's companion %d creation failed", i);
+            return false;
+        }
     }
 
     if (!m_rtvHeap)
     {
         D3D12_DESCRIPTOR_HEAP_DESC hd = {};
         hd.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
-        hd.NumDescriptors = 5;   // + the upscaler's motion and reactive mask
+        hd.NumDescriptors = 7;   // + the upscaler's motion and reactive mask, + the two `settled`
         if (FAILED(dev->CreateDescriptorHeap(&hd, IID_PPV_ARGS(&m_rtvHeap)))) return false;
         m_rtvStride = dev->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
     }
@@ -1171,6 +1285,18 @@ bool PostFx::OnResize(ID3D12Device* dev, UINT width, UINT height, UINT outputWid
     dev->CreateShaderResourceView(m_history[1].Get(), &sd, slot(kGroupTone1, 1));
     dev->CreateShaderResourceView(m_hdr.Get(),        &sd, slot(kGroupToneHdr, 0));
     dev->CreateShaderResourceView(m_hdr.Get(),        &sd, slot(kGroupToneHdr, 1));
+    // The history's `settled`, at t10 (every group has one: the tonemap's read history 0's).
+    {
+        D3D12_SHADER_RESOURCE_VIEW_DESC ss = sd;
+        ss.Format = kSettledFormat;
+        for (int g = 0; g < kGroupCount; ++g)
+            dev->CreateShaderResourceView(m_settled[g == kGroupTaa1 ? 1 : 0].Get(), &ss, slot(g, 9));
+        D3D12_CPU_DESCRIPTOR_HANDLE srtv = m_rtvHeap->GetCPUDescriptorHandleForHeapStart();
+        srtv.ptr += (SIZE_T)5 * m_rtvStride;
+        dev->CreateRenderTargetView(m_settled[0].Get(), nullptr, srtv);
+        srtv.ptr += m_rtvStride;
+        dev->CreateRenderTargetView(m_settled[1].Get(), nullptr, srtv);
+    }
 
     // The upscaler's targets, and the upscaler sized to them.
     m_upReady = false;
@@ -1253,13 +1379,16 @@ D3D12_CPU_DESCRIPTOR_HANDLE PostFx::Begin(ID3D12GraphicsCommandList* list)
 // The upscaler in place of PSTaa: its inputs at the render size (PSUpscaleIn), last frame's exposure into its 1x1
 // texture, then the upscaler, into m_upOutput. The viewport is the render size on entry.
 void PostFx::Upscale(ID3D12GraphicsCommandList* list, ID3D12Resource* depth, ID3D12Resource* motion,
-                     const float* consts, D3D12_GPU_DESCRIPTOR_HANDLE taaGroup, bool autoExposure)
+                     ID3D12Resource* glassMotion, const float* consts, D3D12_GPU_DESCRIPTOR_HANDLE taaGroup,
+                     bool autoExposure)
 {
     const D3D12_RESOURCE_STATES read = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE |
                                        D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
     {
-        D3D12_RESOURCE_BARRIER pre[4];
+        D3D12_RESOURCE_BARRIER pre[5];
         UINT n = 0;
+        if (glassMotion)
+            pre[n++] = Transition(glassMotion, D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
         pre[n++] = Transition(m_upMotion.Get(), read, D3D12_RESOURCE_STATE_RENDER_TARGET);
         pre[n++] = Transition(m_upReactive.Get(), read, D3D12_RESOURCE_STATE_RENDER_TARGET);
         pre[n++] = Transition(depth, D3D12_RESOURCE_STATE_DEPTH_WRITE, read);
@@ -1283,8 +1412,10 @@ void PostFx::Upscale(ID3D12GraphicsCommandList* list, ID3D12Resource* depth, ID3
     }
     list->DrawInstanced(3, 1, 0, 0);
     {
-        D3D12_RESOURCE_BARRIER mid[5];
+        D3D12_RESOURCE_BARRIER mid[6];
         UINT n = 0;
+        if (glassMotion)
+            mid[n++] = Transition(glassMotion, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET);
         mid[n++] = Transition(m_upMotion.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, read);
         mid[n++] = Transition(m_upReactive.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, read);
         mid[n++] = Transition(m_hdr.Get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, read);
@@ -1356,9 +1487,11 @@ void PostFx::Resolve(ID3D12GraphicsCommandList* list,
                      D3D12_CPU_DESCRIPTOR_HANDLE outRtv,
                      ID3D12Resource* depth,
                      ID3D12Resource* motion,
+                     ID3D12Resource* glassMotion,
                      ID3D12Resource* rtShadow,
                      ID3D12Resource* rtAo,
                      ID3D12Resource* rtAoPrev,
+                     ID3D12Resource* rtLights,
                      const float* sceneViewProj,
                      UINT width, UINT height)
 {
@@ -1409,6 +1542,12 @@ void PostFx::Resolve(ID3D12GraphicsCommandList* list,
             dev->CreateShaderResourceView(rtAo, &md, h);
             h.ptr += m_srvStride;
             dev->CreateShaderResourceView(rtAoPrev, &md, h);
+            h.ptr += m_srvStride;
+            D3D12_SHADER_RESOURCE_VIEW_DESC gd = md;
+            gd.Format = DXGI_FORMAT_R16G16_FLOAT;   // (Scene's kGlassMotionFormat)
+            dev->CreateShaderResourceView(glassMotion, &gd, h);
+            h.ptr += m_srvStride;
+            dev->CreateShaderResourceView(rtLights, &md, h);
         }
     }
     dev->Release();
@@ -1490,7 +1629,7 @@ void PostFx::Resolve(ID3D12GraphicsCommandList* list,
     UINT toneWidth = width, toneHeight = height;   // the image the tonemap reads
     if (taa && Upscaling())
     {
-        Upscale(list, depth, motion, consts, gpuGroup(kGroupTaa0), autoExposure);
+        Upscale(list, depth, motion, glassMotion, consts, gpuGroup(kGroupTaa0), autoExposure);
         // The upscaler bound its own heaps and root signature: ours again.
         list->SetGraphicsRootSignature(m_rootSig.Get());
         list->SetDescriptorHeaps(1, heaps);
@@ -1501,19 +1640,27 @@ void PostFx::Resolve(ID3D12GraphicsCommandList* list,
     }
     else if (taa)
     {
-        D3D12_RESOURCE_BARRIER pre[3];
-        pre[0] = Transition(m_history[writeIndex].Get(),
+        D3D12_RESOURCE_BARRIER pre[5];
+        UINT np = 0;
+        pre[np++] = Transition(m_history[writeIndex].Get(),
             D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET);
-        pre[1] = Transition(depth,
+        pre[np++] = Transition(m_settled[writeIndex].Get(),
+            D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET);
+        pre[np++] = Transition(depth,
             D3D12_RESOURCE_STATE_DEPTH_WRITE, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
         if (motion)
-            pre[2] = Transition(motion,
+            pre[np++] = Transition(motion,
                 D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
-        list->ResourceBarrier(motion ? 3 : 2, pre);
+        if (glassMotion)
+            pre[np++] = Transition(glassMotion,
+                D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+        list->ResourceBarrier(np, pre);
 
-        D3D12_CPU_DESCRIPTOR_HANDLE hrtv = m_rtvHeap->GetCPUDescriptorHandleForHeapStart();
-        hrtv.ptr += (SIZE_T)(1 + writeIndex) * m_rtvStride;
-        list->OMSetRenderTargets(1, &hrtv, FALSE, nullptr);
+        D3D12_CPU_DESCRIPTOR_HANDLE hrtv[2] = { m_rtvHeap->GetCPUDescriptorHandleForHeapStart(),
+                                                m_rtvHeap->GetCPUDescriptorHandleForHeapStart() };
+        hrtv[0].ptr += (SIZE_T)(1 + writeIndex) * m_rtvStride;
+        hrtv[1].ptr += (SIZE_T)(5 + writeIndex) * m_rtvStride;
+        list->OMSetRenderTargets(2, hrtv, FALSE, nullptr);
         list->SetPipelineState(m_psoTaa.Get());
         list->SetGraphicsRootDescriptorTable(0, gpuGroup(readIndex == 0 ? kGroupTaa0 : kGroupTaa1));
         list->SetGraphicsRoot32BitConstants(1, 28, consts, 0);
@@ -1524,15 +1671,21 @@ void PostFx::Resolve(ID3D12GraphicsCommandList* list,
         }
         list->DrawInstanced(3, 1, 0, 0);
 
-        D3D12_RESOURCE_BARRIER post[3];
-        post[0] = Transition(m_history[writeIndex].Get(),
+        D3D12_RESOURCE_BARRIER post[5];
+        UINT nq = 0;
+        post[nq++] = Transition(m_history[writeIndex].Get(),
             D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
-        post[1] = Transition(depth,
+        post[nq++] = Transition(m_settled[writeIndex].Get(),
+            D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+        post[nq++] = Transition(depth,
             D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_DEPTH_WRITE);
         if (motion)
-            post[2] = Transition(motion,
+            post[nq++] = Transition(motion,
                 D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET);
-        list->ResourceBarrier(motion ? 3 : 2, post);
+        if (glassMotion)
+            post[nq++] = Transition(glassMotion,
+                D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET);
+        list->ResourceBarrier(nq, post);
 
         toneGroup = (writeIndex == 0) ? kGroupTone0 : kGroupTone1;
         m_historyValid = true;
