@@ -421,6 +421,7 @@ CarModel ReadCarModel(const std::string& sgcPath, const std::string& surface)
         CarTexture t;
         t.material = p.material;
         const std::string file = textureFile(p.material);
+        t.file = file;
         if (!file.empty()) t.dds = ReadFile(dir + "textures/" + file);
         // Its PBR maps (CarMap): <texture>_basecolor / _normal / _orm.dds, where the folder has them.
         if (!file.empty()) {
