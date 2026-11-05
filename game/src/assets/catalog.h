@@ -9,11 +9,14 @@
 //            and so not offered (protectedStages). Its weathers: the TrackSettings.ini sections for its map and time of
 //            day (41M_crisp_clear, 41O_M_heavyrain_heavycloud, ...), or the .ngg's own presets when it has some (rbrtm
 //            --import-weather writes them under those names); an imported stage's are drawn.
-//   cars     every car (its newest version: one with an .sgc), not only the eight Cars.ini slots. Its physics: its
-//            variant "rbr" (its own loose physics/, else its slot's folder in physics.rbz, as the VFS maps them),
-//            else its car.json's (CarRegister). None: not usable (no stand-in: a car drives only as itself). Its engine
-//            sound: an .eng in its folder, else its slot's (audio/Cars/Cars.ini), else the default.
-//   setups   per car: its physics' setups/*.lsp, and a slot car's saved ones (rbr/SavedGames/<slot>slot<n>_<name>.lsp)
+//   cars     every car (its newest version: one with an .sgc), not only the eight Cars.ini slots. Its physics: every
+//            variant it has (cars/<id>/physics/<variant>/, the newest version of each: "rbr" its own loose physics/,
+//            else its slot's folder in physics.rbz, as the VFS maps them; others downloaded or W-Rally's), each with
+//            the modules that read its format (physicsModules); the default car.json's `physics` (a variant's id).
+//            None a module drives: not usable (no stand-in: a car drives only as itself). Its engine sound: an .eng in
+//            its folder, else its slot's (audio/Cars/Cars.ini), else the default.
+//   setups   per car and physics: the physics' setups/*.lsp, and a slot car's saved ones
+//            (rbr/SavedGames/<slot>slot<n>_<name>.lsp)
 //
 // The files the game reads itself (a stage's .ngg or .lbs, a car's .sgc and .eng) are disk paths, resolved through
 // the item's versions; what the physics reads (a car's physics, a setup) are VFS paths.
@@ -45,13 +48,40 @@ struct Stage {
     bool imported = false;              // no .ngg: the .lbs is imported when the stage loads
 };
 
+// A physics module as the catalog needs it (physics::ListModules): what it is and the car physics formats it reads.
+struct PhysicsModule {
+    std::string id, name;               // "rbr", "RBR original"
+    uint32_t simVersion = 0;
+    struct Format {
+        std::string name;               // "rbr-lsp"
+        uint32_t minVersion = 0, maxVersion = 0;
+    };
+    std::vector<Format> formats;
+    bool Reads(const std::string& format, uint32_t version) const;
+};
+
+// One of a car's physics (docs/content-layers.md 4): cars/<car>/physics/<id>/<version>/ and its physics.json.
+struct PhysicsVariant {
+    std::string id, version;            // "rbr", "rbr"
+    std::string name;                   // physics.json's ("RBR original"), else the id
+    std::string folder;                 // the VFS folder ("cars/s_i2003/physics/rbr/rbr/")
+    std::string base;                   // its physics base's VFS folder ("physics/rbr/rbr/"), "" none found
+    std::string format;                 // "rbr-lsp"
+    uint32_t formatVersion = 0;
+    std::string source;                 // where its files are: "downloaded", "w-rally", "rbr"
+    std::vector<std::string> modules;   // the installed physics modules that can drive it (ids, best first)
+};
+
 struct Car {
     std::string id, version;            // its item: s_i2003, 1.1.0
     std::string folder;                 // an RBR car's folder (Cars/<folder>), else its id: what Settings keeps
     std::string source;                 // where its model is: "downloaded", "w-rally", "rbr"
     std::string name;                   // Cars.ini's CarName, else the folder's name
     std::string sgc;                    // the model (a full path)
-    std::string physics;                // its physics: a VFS folder ("cars/s_i2003/physics/rbr/rbr/"), "" none
+    // Its physics: every variant, the default's first (car.json's `physics`, else "rbr", else the first one a module
+    // drives); `physics` the default's folder ("" none), `physicsFrom` where it comes from - for the menu.
+    std::vector<PhysicsVariant> variants;
+    std::string physics;
     std::string physicsFrom;            // "its own", "slot N", "car.json (...)" - for the menu
     int slot = -1;                      // its Cars.ini slot (0..7), -1 none
     std::string engine;                 // its engine sound: an .eng path or an RBR name ("" the default)
@@ -74,7 +104,15 @@ public:
     // its car.json's physics are the catalog's car's too, a track's name its stages' titles.
     CarRegister carRegister;
     TrackRegister trackRegister;
-    std::vector<Setup> SetupsFor(const Car& car) const;
+    // The physics modules installed (set before Scan: the variants' modules come from them).
+    std::vector<PhysicsModule> physicsModules;
+    // The car's physics as chosen: Settings' physics_<car id> when a module drives it, else the car's default when one
+    // does; null: none any module drives - the car is not usable.
+    const PhysicsVariant* PhysicsFor(const Car& car, const app::Settings& s) const;
+    // A module drives one of its physics at least.
+    static bool Drivable(const Car& car);
+    // A physics's setups (default: the car's default physics').
+    std::vector<Setup> SetupsFor(const Car& car, const PhysicsVariant* physics = nullptr) const;
     const Stage* FindStage(const std::string& key) const;
     const Car* FindCar(const std::string& folder) const;   // by its folder or its id
     // The layers it was scanned from (null before a Scan).

@@ -297,7 +297,7 @@ private:
         m_shown = m_wanted;
         const assets::Car* car = catalog.FindCar(m_wanted);
         const assets::CarInfo* info = car ? catalog.carRegister.Find(car->folder) : nullptr;
-        if (!car || !info || !info->known || car->physics.empty()) return;
+        if (!car || !info || !info->known || !assets::Catalog::Drivable(*car)) return;
         m_reading = std::async(std::launch::async, [folder = car->folder, sgc = car->sgc] {
             Read r;
             r.folder = folder;
@@ -1239,17 +1239,32 @@ StageEnd RunStage(Shell& sh, const Options& given, bool fromMenu, std::string& e
     return end;
 }
 
+// The physics modules installed, as the catalog takes them (the cars' physics variants: which ones can drive them).
+std::vector<assets::PhysicsModule> CatalogModules()
+{
+    std::vector<assets::PhysicsModule> out;
+    for (const physics::ModuleInfo& m : physics::ListModules(ExeDir() / "modules" / "physics")) {
+        assets::PhysicsModule c;
+        c.id = m.id, c.name = m.name, c.simVersion = m.simVersion;
+        for (const physics::ModuleInfo::Format& f : m.formats) c.formats.push_back({f.name, f.minVersion, f.maxVersion});
+        out.push_back(std::move(c));
+    }
+    return out;
+}
+
 // Quick rally's choice as a command line - a run from the menu is one too. Empty, and `error`, when it cannot be.
 std::vector<std::string> QuickArgs(const Settings& s, const assets::Catalog& catalog, std::string& error)
 {
     const assets::Stage* st = catalog.FindStage(s.stage);
     const assets::Car* car = catalog.FindCar(s.car);
     if (!st || !car) return error = "choose a stage and a car", std::vector<std::string>{};
-    if (car->physics.empty()) return error = car->name + " has no physics", std::vector<std::string>{};
-    // The stage from its track item, the car's model on disk (resolved through its versions), its physics and the setup
-    // as VFS paths (docs/content-layers.md).
+    const assets::PhysicsVariant* physics = catalog.PhysicsFor(*car, s);
+    if (!physics) return error = car->name + " has no physics a physics module drives", std::vector<std::string>{};
+    // The stage from its track item, the car's model on disk (resolved through its versions), its physics (the variant
+    // chosen, its base, the first module that drives it) and the setup as VFS paths (docs/content-layers.md).
     std::vector<std::string> a = {"W-Rally", s.rbrPath, st->ngg, "--stage", st->stage, "--track", st->track + "@" + st->version,
-                                  "--sgc", car->sgc, "--car", car->physics, "--damage", std::to_string(std::min(s.damage, 3u)),
+                                  "--sgc", car->sgc, "--car", physics->folder, "--physics-base", physics->base,
+                                  "--physics", physics->modules.front(), "--damage", std::to_string(std::min(s.damage, 3u)),
                                   "--out", (UserDir() / "drive.phr").string()};
     if (!s.setup.empty()) a.insert(a.end(), {"--setup", s.setup});
     if (!s.weather.empty()) a.insert(a.end(), {"--weather", s.weather});
@@ -1293,6 +1308,7 @@ int Menus(Shell& sh, std::string note, bool intro)
     auto scan = [&] {
         std::shared_ptr<const vfs::Vfs> content = MakeVfs(sh.settings);
         std::printf("%s", DescribeVfs(*content).c_str());
+        catalog.physicsModules = CatalogModules();
         const std::string e = catalog.Scan(sh.settings, std::move(content));
         std::printf("content: %zu stages, %zu cars%s%s\n", catalog.stages.size(), catalog.cars.size(), e.empty() ? "" : " - ", e.c_str());
         return e;
@@ -1430,7 +1446,8 @@ int Menus(Shell& sh, std::string note, bool intro)
             }
             o.stageFacts = facts;
             o.setupName = "default";
-            for (const assets::Setup& su : catalog.SetupsFor(*catalog.FindCar(sh.settings.car)))
+            const assets::Car& car = *catalog.FindCar(sh.settings.car);
+            for (const assets::Setup& su : catalog.SetupsFor(car, catalog.PhysicsFor(car, sh.settings)))
                 if (su.path == sh.settings.setup) o.setupName = su.name;
         }
         std::string line;
@@ -1550,6 +1567,7 @@ int RunGame(const std::vector<std::string>& args)
         }
         if (const std::string e = OpenShell(sh, "wrenderer"); !e.empty()) return std::fprintf(stderr, "%s\n", e.c_str()), 3;
         assets::Catalog catalog;
+        catalog.physicsModules = CatalogModules();
         catalog.Scan(sh.settings);
         ui::ShowroomView view;
         view.car = *(it + 1);

@@ -30,6 +30,7 @@ struct Config {
     std::string trk, col, mat, fnc, lbs;                   // the stage's files (Maps/track-<n>_<M|O>.*)
     std::string sgc;                                       // the car's model: its collision meshes
     std::string car = "s_i2003";                           // the car's physics: a physics.rbz folder's name, or a folder
+    std::string base = "physics/rbr/rbr/";                 // its physics base: a VFS folder (the shared files)
     std::string surface = "tarmac";                        // tarmac, gravel or snow
     std::string tyres = "michelin";                        // the tyre brand
     std::string setup;                                     // a setup file, or a physics.rbz member Physics/... ("" the surface's default)
@@ -89,6 +90,20 @@ struct Dashboard {
 struct Box {
     float lo[3], hi[3];
 };
+
+// A physics module as the menus need it: its id and name, its simulation version and the car physics formats it reads.
+struct ModuleInfo {
+    std::string id, name;
+    uint32_t simVersion = 0;
+    struct Format {
+        std::string name;
+        uint32_t minVersion = 0, maxVersion = 0;
+    };
+    std::vector<Format> formats;
+};
+// The compatible physics modules in `modulesDir`, each initialised once to ask it and destroyed again (the answer
+// kept for the run: the DLLs do not change under a running game).
+const std::vector<ModuleInfo>& ListModules(const std::filesystem::path& modulesDir);
 
 class Physics {
 public:
