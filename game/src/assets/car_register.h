@@ -4,7 +4,9 @@
 //
 //   1. RBR's files     Cars.ini's CarName, the physics the catalog picked (its own, its slot's, the base)
 //   2. the server      W-Rally's car list (hardcoded until there is a server: car_register.cpp kServerCars)
-//   3. car.json        in the car's folder (Cars/<folder>/car.json): the car's own manifest, for a mod or a fix
+//   3. car.json        the car's own manifest, for a mod or a fix: the old place in the RBR folder
+//                      (rbr/Cars/<folder>/car.json), then its newest version's in the content layers
+//                      (cars/<id>/<version>/car.json, a downloaded or W-Rally's - docs/content-layers.md)
 //
 // A car neither the server nor a car.json knows is shown, but not usable by W-Rally (CarInfo::known): nothing says
 // what it is or how it drives.
@@ -16,28 +18,30 @@
 #include <string>
 #include <vector>
 
+#include "wrally/vfs/vfs.h"
+
 namespace wrally::assets {
 
 struct Car;
 
 struct CarInfo {
-    std::string id;                 // the car's folder (Cars/<id>)
+    std::string id;                 // the catalog's Car::folder (an RBR car's folder, else its id)
     std::string name;               // friendly: "Hyundai i20 R5"
     std::string maker;
     int year = 0;                   // 0 unknown
     std::string carClass;           // "WRC", "Group N", "Super 1600", "R5", "S2000", "Group A", "Kit car" ("" none)
     std::string drive;              // "4WD", "FWD", "RWD" ("" unknown)
     float powerHp = 0, weightKg = 0;   // 0 unknown
-    std::string physics;            // a physics.rbz folder, or Cars/<folder>/physics/ ("" the catalog's pick)
+    std::string physics;            // car.json's: a physics.rbz folder, or Cars/<folder>/physics/ ("" the catalog's pick)
     bool known = false;             // the server or a car.json knows it: usable by W-Rally
-    std::string from;               // the layers that said something: "RBR", "RBR + server", "RBR + server + car.json"
+    std::string from;               // the layers that said something: "RBR", "RBR + server", "RBR + server + car.json (downloaded)"
     std::string error;              // its car.json's, if it could not be read ("" none)
 };
 
 class CarRegister {
 public:
-    // The register for the catalog's cars (RBR's layer) under `rbrPath`.
-    void Build(const std::string& rbrPath, const std::vector<Car>& cars);
+    // The register for the catalog's cars, their manifests from `content`.
+    void Build(const vfs::Vfs& content, const std::vector<Car>& cars);
     const CarInfo* Find(const std::string& id) const;
     // The classes the known cars have, in the register's order (WRC first).
     std::vector<std::string> Classes() const;

@@ -111,6 +111,7 @@ void MadeUp(const fs::path& root)
     Write(rbr / "Maps/track-41_M.trk", "trk 41 rbr");
     Write(rbr / "Maps/track-41_M.lbs", "lbs 41 rbr");
     Write(rbr / "Maps/track-41_M_textures.rbz", "tex 41");
+    Write(rbr / "Maps/track-12_O.trk", "trk 12, in no Tracks.ini");
     Write(rbr / "Cars/Cars.ini", "[Car05]\nFileName = \"Cars\\Impreza03\\imp.sgc\"\nCarName = \"Subaru Impreza 2003\"\n");
     Write(rbr / "Cars/Impreza03/imp.sgc", "sgc rbr");
     Write(rbr / "Cars/Impreza03/textures/body.dds", "body rbr");
@@ -153,7 +154,7 @@ void MadeUp(const fs::path& root)
     // versions, newest first, RBR's the oldest
     Check(Joined(vfs.Versions(Kind::Car, "impreza03")) == "1.1.0,1.0.0,rbr", "car versions: " + Joined(vfs.Versions(Kind::Car, "impreza03")));
     Check(Joined(vfs.Versions(Kind::Track, "fr_own")) == "1.1.0,1.0.0", "track versions");
-    Check(Joined(vfs.Ids(Kind::Track)) == "cz_test,fr_own,lost,rbr_4,round", "track ids: " + Joined(vfs.Ids(Kind::Track)));
+    Check(Joined(vfs.Ids(Kind::Track)) == "cz_test,fr_own,lost,rbr_12,rbr_4,round", "track ids: " + Joined(vfs.Ids(Kind::Track)));
     Check(Joined(vfs.Ids(Kind::Car)) == "impreza03,own_car", "car ids: " + Joined(vfs.Ids(Kind::Car)));
 
     // a patch over RBR's car: its own files, then RBR's

@@ -378,13 +378,18 @@ enum class StageMenu { None, Pause, Settings, Debug };
 
 // A stage run, with the in-stage menu on Esc. `fromMenu`: started from Quick rally (a fault goes back to the menu, not
 // out). `error`: why it failed.
-StageEnd RunStage(Shell& sh, const Options& o, bool fromMenu, std::string& error)
+StageEnd RunStage(Shell& sh, const Options& given, bool fromMenu, std::string& error)
 {
     auto fail = [&](const std::string& e) {
         std::fprintf(stderr, "%s\n", e.c_str());
         error = e;
         return StageEnd::Failed;
     };
+    // The content layers the run reads through (docs/content-layers.md): the settings' downloads folder and W-Rally's
+    // content, the run's RBR folder - the stage's files from its track item (--track), the modules' through them.
+    const std::shared_ptr<const vfs::Vfs> content = MakeVfs(sh.settings, given.game);
+    Options o = given;
+    if (const std::string e = ApplyTrack(o, *content); !e.empty()) return fail(e);
     Window& window = sh.window;
     render::Renderer& renderer = sh.renderer;
     ui::ImGuiLayer& ui = sh.ui;
@@ -446,9 +451,6 @@ StageEnd RunStage(Shell& sh, const Options& o, bool fromMenu, std::string& error
     if (!loadingFor(0, 0.36f, 0, 0)) return StageEnd::Quit;
     // The modules hear the physics on the bus (before what it connects, which goes first).
     signals::Bus bus;
-    // The content layers the modules read through (docs/content-layers.md): the settings' downloads folder and W-Rally's
-    // content, the run's RBR folder.
-    const std::shared_ptr<const vfs::Vfs> content = MakeVfs(sh.settings, o.game);
     // The physics, through the session (a module DLL in modules/physics: --physics, "rbr" by default).
     session::Session sim;
     session::Config simConfig = o.session;
@@ -1243,18 +1245,13 @@ std::vector<std::string> QuickArgs(const Settings& s, const assets::Catalog& cat
     const assets::Stage* st = catalog.FindStage(s.stage);
     const assets::Car* car = catalog.FindCar(s.car);
     if (!st || !car) return error = "choose a stage and a car", std::vector<std::string>{};
-    std::error_code ec;
-    const std::string sgc = std::filesystem::relative(car->sgc, s.rbrPath, ec).string();
-    // The car's physics: a physics.rbz folder, or its own folder (a full path, as the physics wrapper takes one).
-    std::string physics = car->physics;
-    if (physics.find('/') != std::string::npos) {
-        physics = s.rbrPath + "\\" + physics;
-        std::replace(physics.begin(), physics.end(), '/', '\\');
-        while (physics.back() == '\\') physics.pop_back();
-    }
-    std::vector<std::string> a = {"W-Rally", s.rbrPath, st->ngg, "--stage", st->stage, "--sgc", ec ? car->sgc : sgc, "--car", physics,
-                                  "--damage", std::to_string(std::min(s.damage, 3u)), "--out", (UserDir() / "drive.phr").string()};
-    if (!s.setup.empty()) a.insert(a.end(), {"--setup", s.rbrPath + "\\" + s.setup});
+    if (car->physics.empty()) return error = car->name + " has no physics", std::vector<std::string>{};
+    // The stage from its track item, the car's model on disk (resolved through its versions), its physics and the setup
+    // as VFS paths (docs/content-layers.md).
+    std::vector<std::string> a = {"W-Rally", s.rbrPath, st->ngg, "--stage", st->stage, "--track", st->track + "@" + st->version,
+                                  "--sgc", car->sgc, "--car", car->physics, "--damage", std::to_string(std::min(s.damage, 3u)),
+                                  "--out", (UserDir() / "drive.phr").string()};
+    if (!s.setup.empty()) a.insert(a.end(), {"--setup", s.setup});
     if (!s.weather.empty()) a.insert(a.end(), {"--weather", s.weather});
     // The road, the time of day and the sky: a preset's own, or the custom weather's over it.
     static const char* const kRoad[3] = {"dry", "damp", "wet"};
@@ -1292,13 +1289,11 @@ enum class Screen { Main, Quick, Settings };
 int Menus(Shell& sh, std::string note, bool intro)
 {
     assets::Catalog catalog;
-    // The content layers (docs/content-layers.md), made again with every scan. The catalog does not read through them
-    // yet (step 5): for now they are made and logged.
-    std::unique_ptr<vfs::Vfs> content;
+    // The content layers (docs/content-layers.md), made again with every scan; the catalog is read through them.
     auto scan = [&] {
-        content = MakeVfs(sh.settings);
+        std::shared_ptr<const vfs::Vfs> content = MakeVfs(sh.settings);
         std::printf("%s", DescribeVfs(*content).c_str());
-        const std::string e = catalog.Scan(sh.settings);
+        const std::string e = catalog.Scan(sh.settings, std::move(content));
         std::printf("content: %zu stages, %zu cars%s%s\n", catalog.stages.size(), catalog.cars.size(), e.empty() ? "" : " - ", e.c_str());
         return e;
     };
@@ -1543,14 +1538,6 @@ int RunGame(const std::vector<std::string>& args)
     if (std::find(args.begin(), args.end(), std::string("--lab")) != args.end()) {
         if (const std::string e = OpenShell(sh, "wrenderer"); !e.empty()) return std::fprintf(stderr, "%s\n", e.c_str()), 3;
         return RunLab(sh, args);
-    }
-    // --extract-slot-physics: each slot car's physics out of physics.rbz into its own folder (Cars/<folder>/physics/),
-    // then out - for development, not the player's.
-    if (std::find(args.begin(), args.end(), std::string("--extract-slot-physics")) != args.end()) {
-        assets::Catalog catalog;
-        catalog.Scan(sh.settings);
-        std::printf("%s", assets::ExtractSlotPhysics(sh.settings.rbrPath, catalog).c_str());
-        return 0;
     }
     // --showroom <car folder> [--turn <degrees>]: the Garage's showroom with that car, one capture (showroom.bmp, in the
     // working folder) once it is loaded, then out - a look at a car's model without the menus.

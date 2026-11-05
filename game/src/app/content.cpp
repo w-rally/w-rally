@@ -23,6 +23,25 @@ std::unique_ptr<vfs::Vfs> MakeVfs(const Settings& s, const std::string& rbr)
                                       std::filesystem::path(rbr));
 }
 
+std::string ApplyTrack(Options& o, const vfs::Vfs& content)
+{
+    if (o.track.empty()) return "";
+    const size_t at = o.track.find('@');
+    vfs::ItemRef ref{vfs::Kind::Track, o.track.substr(0, at), "", at == std::string::npos ? "" : o.track.substr(at + 1)};
+    std::string error;
+    const auto item = content.Open(ref, &error);
+    if (!item) return "--track " + o.track + ": " + error;
+    o.track = item->Ref().id + "@" + item->Ref().version;
+    physics::Config& c = o.session.physics;
+    for (auto [ext, field] : {std::pair{".trk", &c.trk}, std::pair{".col", &c.col}, std::pair{".mat", &c.mat},
+                              std::pair{".fnc", &c.fnc}, std::pair{".lbs", &c.lbs}, std::pair{".dls", &o.session.dls}}) {
+        const auto r = item->Find(o.stage + ext);
+        if (r && !r->file.empty()) *field = r->file.string();
+        else if (std::string(ext) == ".trk") return "--track " + o.track + ": no " + o.stage + ".trk in it";
+    }
+    return "";
+}
+
 std::string DescribeVfs(const vfs::Vfs& v)
 {
     std::error_code e;

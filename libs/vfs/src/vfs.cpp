@@ -475,15 +475,33 @@ void Vfs::ReadRbr()
             m_log += std::string("rbr-tracks.json: ") + e.what() + "\n";
         }
     }
-    for (const auto& [section, keys] : ReadIni(m_rbr / "Maps" / "Tracks.ini")) {
-        if (!StartsWith(section, "map")) continue;
-        const auto name = keys.find("trackname");
-        if (name == keys.end()) continue;
-        const std::string base = NormalPath(name->second);              // Maps/track-41
+    // Tracks.ini's maps (where they are: TrackName), then those with files in Maps that Tracks.ini does not list
+    // (track-<n>_<M|E|N|O>.trk: RBR does not offer them, W-Rally does).
+    std::vector<std::string> bases;
+    for (const auto& [section, keys] : ReadIni(m_rbr / "Maps" / "Tracks.ini"))
+        if (const auto name = keys.find("trackname"); StartsWith(section, "map") && name != keys.end())
+            bases.push_back(NormalPath(name->second));                  // Maps/track-41
+    {
+        std::set<int> listed;
+        for (const std::string& b : bases)
+            if (const size_t at = Lower(b).rfind("track-"); at != std::string::npos) listed.insert(std::atoi(b.c_str() + at + 6));
+        std::set<int> found;
+        std::error_code ec;
+        for (const auto& e : fs::directory_iterator(m_rbr / "Maps", ec)) {
+            const std::string n = Lower(U8(e.path().filename()));
+            if (!e.is_regular_file() || !StartsWith(n, "track-") || n.size() < 5 || n.substr(n.size() - 4) != ".trk") continue;
+            const size_t us = n.find('_');
+            if (us == std::string::npos) continue;
+            const int map = std::atoi(n.c_str() + 6);
+            if (!listed.count(map) && found.insert(map).second) bases.push_back("Maps/track-" + std::to_string(map));
+        }
+    }
+    for (const std::string& base : bases) {
         const size_t slash = base.find_last_of('/');
         const std::string file = Lower(slash == std::string::npos ? base : base.substr(slash + 1));
         if (!StartsWith(file, "track-")) continue;
         const int map = std::atoi(file.c_str() + 6);
+        if (ix.mapTrack.count(map)) continue;   // (listed twice)
         auto v = std::make_unique<Version>();
         v->type = Version::Maps;
         v->dir = m_rbr / P(slash == std::string::npos ? "" : base.substr(0, slash));

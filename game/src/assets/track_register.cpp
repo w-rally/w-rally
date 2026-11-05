@@ -53,9 +53,10 @@ std::string CountryOfParticles(std::string particles)
 
 } // namespace
 
-void TrackRegister::Build(const std::string& rbrPath, const std::vector<Stage>& stages)
+void TrackRegister::Build(const vfs::Vfs& content, const std::vector<Stage>& stages)
 {
     m_tracks.clear();
+    const std::string rbrPath = content.RbrRoot().string();
     const std::string tracksIni = rbrPath + "\\Maps\\Tracks.ini";
     for (const Stage& st : stages) {
         if (st.map < 0 || Find(st.map)) continue;
@@ -78,23 +79,21 @@ void TrackRegister::Build(const std::string& rbrPath, const std::vector<Stage>& 
                 if (*s.splash) t.splash = s.splash;
                 t.from += " + server";
             }
-        // 3. track-<n>.json: beside the stage's .ngg, else in Maps
-        const std::string file = "track-" + std::to_string(st.map) + ".json";
-        const std::string beside = (std::filesystem::path(st.ngg).parent_path() / file).string();
-        std::error_code ec;
-        const std::string path = std::filesystem::exists(beside, ec) ? beside : rbrPath + "\\Maps\\" + file;
-        std::string error;
-        const formats::Json j = formats::ReadJsonFile(path, error);
-        if (error.empty() && j.type == formats::Json::Object) {
-            t.name = j.Str("name", t.name);
-            t.country = j.Str("country", t.country);
-            t.surface = j.Str("surface", t.surface);
-            t.lengthKm = static_cast<float>(j.Num("length_km", t.lengthKm));
-            t.splash = j.Str("splash", t.splash);
-            t.from += " + " + file;
-        } else if (error != "no file") {
-            t.error = file + ": " + error;
-        }
+        // 3. track.json: the track's newest version's (one the VFS made of RBR's files is no manifest of its own)
+        if (const auto item = content.Open({vfs::Kind::Track, st.track, "", st.version}))
+            if (const std::string source = item->Source("track.json"); !source.empty() && source != "rbr") {
+                const formats::Json& j = item->Manifest();
+                if (j.type == formats::Json::Object) {
+                    t.name = j.Str("name", t.name);
+                    t.country = j.Str("country", t.country);
+                    t.surface = j.Str("surface", t.surface);
+                    t.lengthKm = static_cast<float>(j.Num("length_km", t.lengthKm));
+                    t.splash = j.Str("splash", t.splash);
+                    t.from += " + track.json (" + source + " " + item->Ref().version + ")";
+                } else {
+                    t.error = "track.json (" + source + " " + item->Ref().version + "): not an object";
+                }
+            }
         m_tracks.push_back(std::move(t));
     }
 }

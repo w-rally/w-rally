@@ -115,7 +115,13 @@ std::string Physics::Open(const std::filesystem::path& modulesDir, const std::st
         if (!f) return m_error = "cannot open " + c.overrides;
         overrides.assign(std::istreambuf_iterator<char>(f), std::istreambuf_iterator<char>());
     }
-    auto vfsPath = [&](const std::string& p) { return content->VfsPath(p); };
+    // A file or folder on disk as its VFS path; anything else is one already (Quick rally's "cars/.../physics/...").
+    auto vfsPath = [&](const std::string& p) {
+        std::error_code ec;
+        const std::filesystem::path f(p);
+        if (p.empty() || f.is_absolute() || std::filesystem::exists(f, ec)) return content->VfsPath(f);
+        return vfs::NormalPath(p);
+    };
     const std::string trk = vfsPath(c.trk), col = vfsPath(c.col), mat = vfsPath(c.mat), fnc = vfsPath(c.fnc),
                       lbs = vfsPath(c.lbs), sgc = vfsPath(c.sgc);
     const std::string setup = c.setup.empty() ? "" : !RbzMember(c.setup).empty() ? RbzMember(c.setup) : vfsPath(c.setup);

@@ -66,7 +66,7 @@ const char* const kClassOrder[] = {"WRC", "S2000", "R5", "Group A", "Group N", "
 
 } // namespace
 
-void CarRegister::Build(const std::string& rbrPath, const std::vector<Car>& cars)
+void CarRegister::Build(const vfs::Vfs& content, const std::vector<Car>& cars)
 {
     m_cars.clear();
     for (const Car& car : cars) {
@@ -81,10 +81,10 @@ void CarRegister::Build(const std::string& rbrPath, const std::vector<Car>& cars
                 info.name = s.name, info.maker = s.maker, info.year = s.year, info.carClass = s.carClass, info.drive = s.drive;
                 info.known = true, info.from += " + server";
             }
-        // 3. car.json
-        std::string error;
-        const formats::Json j = formats::ReadJsonFile(rbrPath + "\\Cars\\" + car.folder + "\\car.json", error);
-        if (error.empty() && j.type == formats::Json::Object) {
+        // 3. car.json: the RBR folder's old one, then the car's newest version's (one the VFS made of RBR's files is no
+        // manifest of the car's own)
+        auto apply = [&](const formats::Json& j, const std::string& where) {
+            if (j.type != formats::Json::Object) return;
             info.name = j.Str("name", info.name);
             info.maker = j.Str("maker", info.maker);
             info.year = static_cast<int>(j.Num("year", info.year));
@@ -93,10 +93,18 @@ void CarRegister::Build(const std::string& rbrPath, const std::vector<Car>& cars
             info.powerHp = static_cast<float>(j.Num("power_hp", info.powerHp));
             info.weightKg = static_cast<float>(j.Num("weight_kg", info.weightKg));
             info.physics = j.Str("physics", info.physics);
-            info.known = true, info.from += " + car.json";
-        } else if (error != "no file") {
-            info.error = "car.json: " + error;
+            info.known = true, info.from += " + car.json (" + where + ")";
+        };
+        if (std::vector<uint8_t> bytes; content.Read("rbr/Cars/" + car.folder + "/car.json", bytes)) {
+            try {
+                apply(formats::ParseJson(std::string(bytes.begin(), bytes.end())), "RBR folder");
+            } catch (const std::exception& e) {
+                info.error = "car.json: " + std::string(e.what());
+            }
         }
+        if (const auto item = content.Open({vfs::Kind::Car, car.id, "", car.version}))
+            if (const std::string source = item->Source("car.json"); !source.empty() && source != "rbr")
+                apply(item->Manifest(), source + " " + item->Ref().version);
         m_cars.push_back(std::move(info));
     }
 }

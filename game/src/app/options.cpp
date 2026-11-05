@@ -122,6 +122,7 @@ int Parse(const std::vector<std::string>& args, Options& o)
     o.ngg = args[2];
     const std::string& game = o.game;
     o.stage = Arg(args, "--stage", "");
+    o.track = Arg(args, "--track", "");
     {
         std::string why;
         const std::string fromNgg = NggStage(game, o.ngg, why);
@@ -145,19 +146,22 @@ int Parse(const std::vector<std::string>& args, Options& o)
     c.mat = maps + ".mat";
     c.fnc = maps + ".fnc";
     c.lbs = maps + ".lbs";
-    c.sgc = game + "/" + Arg(args, "--sgc", "Cars/i20_R5/i20_R5.sgc");
-    // The car's physics: --car, else the .sgc's folder's own (Cars/<folder>/physics/), else physics.rbz's s_i2003.
+    // --sgc: under the game folder, or a full path (Quick rally's: the car's model resolved through its versions)
+    if (const std::string sgc = Arg(args, "--sgc", "Cars/i20_R5/i20_R5.sgc"); std::filesystem::path(sgc).is_absolute())
+        c.sgc = sgc;
+    else
+        c.sgc = game + "/" + sgc;
+    // The car's physics: --car (a physics.rbz folder's name, a VFS folder - Quick rally's: cars/<id>/physics/<p>/<v>/ -
+    // or a folder on disk), else the .sgc's folder's own (Cars/<folder>/physics/), else physics.rbz's s_i2003.
     {
         std::error_code ec;
         const std::filesystem::path own = std::filesystem::path(c.sgc).parent_path() / "physics";
         const std::string ownCar = own.generic_string() + "/";
         c.car = Arg(args, "--car", std::filesystem::exists(own / "common.lsp", ec) ? ownCar.c_str() : "s_i2003");
     }
-    // W-Rally's values on top of RBR's car: --overrides, else content/cars/<car>.ini (WRallyFile) if there is one
-    // ("none": RBR's car as it is).
+    // W-Rally's values on top of RBR's car: --overrides <file> ("none", or none given: RBR's car as it is).
     c.overrides = Arg(args, "--overrides", "");
-    if (c.overrides.empty()) c.overrides = WRallyFile("content/cars/" + c.car + ".ini");
-    else if (c.overrides == "none") c.overrides.clear();
+    if (c.overrides == "none") c.overrides.clear();
     // --road dry | damp | wet: the surface maps' weather (the .mat's: new road), as the tyres' default follows it.
     if (const std::string road = Arg(args, "--road", ""); !road.empty()) {
         if (road == "dry") c.weather = 0;
@@ -171,8 +175,8 @@ int Parse(const std::vector<std::string>& args, Options& o)
         if (level > 3) return std::fprintf(stderr, "--damage %s: 0 off, 1 safe, 2 reduced, 3 realistic\n", d.c_str()), 2;
         c.settings = (c.settings & ~0xff00u) | 0x10u | static_cast<uint32_t>(level) << 8;
     }
-    // --setup <file>: a saved setup (SavedGames/..., the car's setups/...) or a physics.rbz member (Physics/...);
-    // default the car's own for the surface.
+    // --setup <file>: a saved setup - a VFS path (rbr/SavedGames/..., the car physics' setups/...), a file on disk - or
+    // a physics.rbz member (Physics/...); default the car's own for the surface.
     c.setup = Arg(args, "--setup", "");
     o.weather = Arg(args, "--weather", "");
     // --sky <clouds>,<fog>,<rain>: over the weather preset, 0..1 each (Quick rally's custom weather).

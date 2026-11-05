@@ -222,13 +222,18 @@ public:
    `formats`, `simVersion`); WPhysicsRBR, audio and renderer hosts moved over. The game still names a stage's and a
    car's files by their place on disk, handed over as VFS paths (`rbr/Maps/...`, a slot car's physics.rbz folder as
    `physics/rbr/rbr/<folder>/`); item paths come with the catalog (step 5). Audio interface 3: RBR's sounds under `rbr/`.
-5. Catalog and registers over the VFS: cars and tracks by id (newest version) with `source`; manifests from the
-   layers; `rbr-tracks.json` written for the stages at hand with `<country>_<stagename>` ids.
-6. Physics variants: `physics.json`, `Car::physics` as a list, Quick rally choice, `physics_<car-id>`;
-   `--extract-slot-physics` removed.
+5. **Done 2026-11-05, but `rbr-tracks.json`.** Catalog and registers over the VFS: tracks and cars by id (newest
+   version) with `source`, their files resolved through the versions; `car.json`/`track.json` from the layers (and
+   an RBR car folder's old `car.json` under `rbr/`); a stage run takes `--track <id>[@<version>]` for its files, a
+   car's physics and a setup as VFS paths. The RBR mapping also takes the maps with files in Maps that Tracks.ini
+   does not list (40, 599, 771 here), as the catalog did. `--extract-slot-physics` and the `content/cars/<car>.ini`
+   lookup are gone. **Open:** `rbr-tracks.json` - Tracks.ini names none of the original stages and the particle
+   sets are no country, so the ids cannot be made from RBR's files; until the table is written the maps are
+   `rbr_<n>`.
+6. Physics variants: `physics.json`, `Car::physics` as a list, Quick rally choice, `physics_<car-id>`.
 7. Versions: fingerprints with their cache; replays record and resolve exact versions; `versions.json` last use.
 8. Cleaning: the keep rules, Settings → Storage, `download_keep_days`, `download_max_gb`.
-9. Writers to layer 1 (`car-pbr`); `s_i2003.ini` and its lookup removed.
+9. Writers to layer 1 (`car-pbr`); `content/cars/s_i2003.ini` removed from the content repository.
 10. Installer: `DOWNLOADDIR`, its page, `install.ini` `download_path`, registry value.
 11. design.md §6.1 updated and this file folded in.
 
