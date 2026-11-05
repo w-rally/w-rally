@@ -606,6 +606,9 @@ public:
         // that hits it sees an occluder that was elsewhere, so the denoiser
         // must not trust the past.
         bool     moved = false;
+        // One of the reflection focus's objects (SetReflectionFocus): its own bit in the instance mask
+        // (kRtMaskFocus), so the focus's reflection rays (Shade's ReflOpen) see the car and nothing else.
+        bool     focus = false;
         // Its transform last frame, so the denoiser can tell how far what a
         // ray hit moved (rt.cpp Allow).
         float    prevXform[16] = { 1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1 };
@@ -637,6 +640,11 @@ public:
     // remove, hide, move, compact). The Renderer re-describes the scene to the
     // ray tracer when it moves (Renderer::KeepRtCurrent).
     uint32_t GeometryRevision() const { return m_geomRevision; }
+    // The ray tracer's TLAS this frame (0: none - no ray tracing, or not active): the reflection focus's pixels
+    // trace their reflection against the car's own instances in it (Shade's ReflOpen).
+    void SetReflectionTlas(D3D12_GPU_VIRTUAL_ADDRESS tlas) { m_reflTlas = tlas; }
+    // TLAS instance masks: every instance has kRtMaskAll's bits; the reflection focus's also kRtMaskFocus.
+    static constexpr uint32_t kRtMaskAll = 0x01, kRtMaskFocus = 0x02;
 
     // The weather presets the FILE carries (NGGW, design 5.0q) - the only ones
     // a competition should use. Empty for a file converted before the chunk
@@ -803,6 +811,10 @@ private:
     Microsoft::WRL::ComPtr<ID3D12Resource>       m_gbuf[2];
     Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> m_gbufRtvHeap;
     Microsoft::WRL::ComPtr<ID3D12PipelineState>  m_psoG, m_psoAlphaTestG, m_psoCulledG[2][2], m_psoDeferred;
+    // The reflection focus's opaque draws with their own reflection rays (ReflOpen, shader model 6.5): [forward,
+    // deferred][cull none, back, front]. Only these carry the ray query - in every pipeline, its state cost the whole
+    // main pass ~1 ms on the development GPU.
+    Microsoft::WRL::ComPtr<ID3D12PipelineState>  m_psoRefl[2][3];
     bool                     m_deferredReady = false;
     UINT                     m_dsvStride = 0;                   // the read-only depth view is the DSV heap's second
     // A pass's opaque draws in the order they are drawn (RecordPass: the solid, then the alpha-tested, each near to
@@ -904,6 +916,8 @@ private:
     void DrawOverlays(ID3D12GraphicsCommandList*, const float* viewProj);
 
     ID3D12Resource*          m_rtVis = nullptr;
+    D3D12_GPU_VIRTUAL_ADDRESS m_reflTlas = 0;      // SetReflectionTlas
+    bool                     m_rayQuery = false;  // m_psoRefl built (the adapter has inline ray queries)
     ID3D12Resource*          m_rtAo = nullptr;
     DXGI_FORMAT              m_rtAoView = DXGI_FORMAT_UNKNOWN;
     UINT                     m_aoSrvSlot = 0;

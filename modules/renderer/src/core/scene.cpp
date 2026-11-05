@@ -185,7 +185,7 @@ float WetNoise(float2 p)
 
 // Declared ahead of its use; defined after the BRDF helpers below.
 float3 LocalLights(float3 p, float3 N, float3 V, float3 diffuseCol, float3 f0, float a, float specScale, float2 px,
-                   float wrap, float trans, bool withSpec, float coat);
+                   float wrap, float trans, bool withSpec, float2 coat);
 
 // CLEAR COAT (MaterialDesc::clearCoat): car paint's lacquer - a smooth dielectric film over the base layer. Its own
 // GGX lobe (f0 0.04, this gloss: a polished finish, 0.02) reflects the light and the environment sharply, and
@@ -216,6 +216,43 @@ float VisSmith(float ndv, float ndl, float a)
     return 0.5 / max(1e-6, lv + ll);
 }
 
+// SPECULAR ANTI-ALIASING (Kaplanyan et al. 2016, Tokuyoshi and Kaplanyan 2019/2021, "Stable geometric specular
+// antialiasing with projected-space NDF filtering"): where the shading normal turns within a pixel - a curved tube, a
+// wheel's rim, a crease, a body panel going edge-on - a lobe narrower than that turn is a highlight smaller than the
+// pixel, hit by one sample and missed by the next: a sparkle that jumps as the car or the camera moves - the clear
+// coat's lobe (alpha 0.002 at its floor) most of all, worst at night, when the exposure lifts every highlight. In the
+// Garage at night it took a quarter of the car's isolated bright pixels off (the turntable turning). The
+// pixel's spread of normals, from their screen derivatives, widens the lobe (alpha^2 + kernel): flat panels keep the
+// mirror (no spread, no change - the day's reflections stay as sharp), the curved ones get the highlight's true
+// footprint. kSpecAAVariance is the pixel filter's variance in screen space, kSpecAAKappa caps the widening (an
+// alpha^2: alpha <= 0.42).
+static const float kSpecAAVariance = 0.25;
+static const float kSpecAAKappa = 0.18;
+float SpecAAKernel(float3 N)
+{
+    const float3 dx = ddx(N), dy = ddy(N);
+    return min(2.0 * kSpecAAVariance * (dot(dx, dx) + dot(dy, dy)), kSpecAAKappa);
+}
+// An alpha (roughness^2) widened by the kernel.
+float SpecAAAlpha(float a, float kernel) { return sqrt(a * a + kernel); }
+// A coated surface's G-buffer roughness (the R10G10B10A2_UNORM target's 10 bits, GBUF kind 3): the base's widened
+// roughness in the upper 5 bits, the kernel in the lower 5 as sqrt(kernel / kappa) - no spread is exactly 0, so a
+// flat panel's coat stays the mirror it was. Integers up to 1023 survive UNORM's round trip exactly.
+float GbufRoughPack(float rough, float kernel)
+{
+    const float hi = round(saturate(rough) * 31.0), lo = round(sqrt(saturate(kernel / kSpecAAKappa)) * 31.0);
+    return (hi * 32.0 + lo) / 1023.0;
+}
+void GbufRoughUnpack(float packed, out float rough, out float kernel)
+{
+    const float v = round(packed * 1023.0), hi = floor(v / 32.0), lo = v - hi * 32.0;
+    rough = hi / 31.0;
+    kernel = (lo / 31.0) * (lo / 31.0) * kSpecAAKappa;
+}
+// The sun's and the moon's discs, ~0.27 degrees of radius: their highlight is widened by it as a lamp's is by its
+// emitter (ShadeLocalLight - Karis 2013), sin(r) / 2.
+static const float kSunDiscWiden = 0.0024;
+
 // THE LOCAL LIGHTS at this pixel (lights.h, design 5.4 N2): every light of its cluster, unshadowed - Lambert and GGX
 // as the sun's - then the shadowed ones times the ray tracer's denoised shadowed fraction (the ratio estimator: one
 // ray per pixel to one light chosen by what it gives here, lights.h). `wrap` softens the cosine (a foliage card's),
@@ -242,7 +279,7 @@ float VisSmith(float ndv, float ndl, float a)
 // `trans`: a foliage card's transmission, as for the sun - a leaf with the lamp behind it is backlit, not black
 // (design 5.4 N3: grass tufts lit by the lamps had black lower halves, their volume normals turned away).
 void ShadeLocalLight(uint li, LightRec L, float3 p, float3 N, float3 V, float ndv, float3 diffuseCol, float3 f0,
-                     float a, float specScale, float wrap, float trans, bool withSpec, float coat, inout float3 shadowed,
+                     float a, float specScale, float wrap, float trans, bool withSpec, float2 coat, inout float3 shadowed,
                      inout float3 open)
 {
     float3 l;
@@ -268,14 +305,15 @@ void ShadeLocalLight(uint li, LightRec L, float3 p, float3 N, float3 V, float nd
         const float vden = lerp(2.0 * ndlTrue * ndv, ndlTrue + ndv, aw);
         const float dv = aw2 / max(1e-6, 3.14159265 * d * d * 2.0 * vden);
         c3 += F * (dv * specScale * ndlTrue) * E;
-        // The clear coat (kCoatRoughness): its own lobe over the base, widened by the emitter as the base's is.
-        if (coat > 0.0)
+        // The clear coat (kCoatRoughness): its own lobe over the base, widened by the emitter as the base's is - from
+        // coat.y, the coat's alpha after the pixel's spread of normals (SpecAAKernel).
+        if (coat.x > 0.0)
         {
-            const float cw = saturate(kCoatRoughness * kCoatRoughness + L.radius / (2.0 * max(dist, 1e-3)));
+            const float cw = saturate(coat.y + L.radius / (2.0 * max(dist, 1e-3)));
             const float cw2 = cw * cw;
             const float dc = ndh * ndh * (cw2 - 1.0) + 1.0;
             const float vdc = lerp(2.0 * ndlTrue * ndv, ndlTrue + ndv, cw);
-            const float Fc = (kCoatF0 + (1.0 - kCoatF0) * (x2 * x2 * x)) * coat;
+            const float Fc = (kCoatF0 + (1.0 - kCoatF0) * (x2 * x2 * x)) * coat.x;
             c3 = c3 * (1.0 - Fc) + E * (Fc * cw2 / max(1e-6, 3.14159265 * dc * dc * 2.0 * vdc) * specScale * ndlTrue);
         }
     }
@@ -284,7 +322,7 @@ void ShadeLocalLight(uint li, LightRec L, float3 p, float3 N, float3 V, float nd
 }
 
 void ShadeLightCluster(uint ci, float3 p, float3 N, float3 V, float ndv, float3 diffuseCol, float3 f0, float a,
-                       float specScale, float wrap, float trans, bool withSpec, float coat, inout float3 shadowed,
+                       float specScale, float wrap, float trans, bool withSpec, float2 coat, inout float3 shadowed,
                        inout float3 open)
 {
     const uint2 c = gClusters[ci];
@@ -297,7 +335,7 @@ void ShadeLightCluster(uint ci, float3 p, float3 N, float3 V, float ndv, float3 
 }
 
 float3 LocalLights(float3 p, float3 N, float3 V, float3 diffuseCol, float3 f0, float a, float specScale, float2 px,
-                   float wrap, float trans, bool withSpec, float coat)
+                   float wrap, float trans, bool withSpec, float2 coat)
 {
     if (gLightsOn < 0.5) return float3(0.0, 0.0, 0.0);
     const float ndv = saturate(dot(N, V)) + 1e-5;
@@ -782,6 +820,40 @@ float3 EnvRadiance(float2 euv, float roughness)
     return gEnv.SampleLevel(gSampLinear, euv, roughness * (gEnvMips - 1.0)).rgb;
 }
 
+// THE CAR'S OWN REFLECTIONS (gObjectProbe 2). The probe sees the world from the car's middle with the car left out, so
+// a part of the car read it as if nothing of the car stood between: the roll cage in the cabin mirrored the stage
+// straight through the roof, a sill or a wheel's inside through the arch. At night that is the lamp-lit road and
+// barrier beside the car - the brightest thing in the frame - and every tube of the cage, every arch's lip and every
+// crease drew a white line of it (the night glints). One ray along the reflection against the car's own instances
+// (kRtMaskFocus: nothing else - the world beyond is the probe's own), up to the car's size: blocked, the reflection
+// is the car's inside, not the stage. Glass is not in the ray tracer's scene: through a window the stage is seen.
+// The ray leaves from above the TRIANGLE (its plane from the position's derivatives, faced towards the viewer) and
+// is kept above it: a smooth normal at a silhouette reflects into its own triangle, which is not an occluder.
+#if defined(NGG_REFL_RAY)
+RaytracingAccelerationStructure gReflTlas : register(t20);
+#endif
+static const float kReflReach = 5.0;   // metres: past the car's length from anywhere on it
+float ReflOpen(float3 p, float3 V, float3 R, float3 Ng)
+{
+#if defined(NGG_REFL_RAY)
+    if (gObjectProbe != 2u) return 1.0;
+    if (dot(Ng, V) < 0.0) Ng = -Ng;
+    const float lift = dot(R, Ng);
+    const float3 dir = normalize(R + Ng * max(0.0, 0.02 - lift));
+    RayQuery<RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH | RAY_FLAG_FORCE_OPAQUE | RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES> q;
+    RayDesc ray;
+    ray.Origin = p + Ng * (0.01 + length(p - gCamPos) * 0.0005);
+    ray.Direction = dir;
+    ray.TMin = 0.0;
+    ray.TMax = kReflReach;
+    q.TraceRayInline(gReflTlas, RAY_FLAG_NONE, 0x02, ray);   // Scene::kRtMaskFocus
+    q.Proceed();
+    return q.CommittedStatus() == COMMITTED_TRIANGLE_HIT ? 0.0 : 1.0;
+#else
+    return 1.0;
+#endif
+}
+
 float4 Shade(VSOut i, bool frontFace, out GBufOut g)
 {
     g = (GBufOut)0;
@@ -1027,6 +1099,15 @@ float4 Shade(VSOut i, bool frontFace, out GBufOut g)
         }
 #endif
 
+        // The pixel's spread of normals (SpecAAKernel) and what it makes of every specular lobe here: the base's alpha
+        // (floored as before), the base's roughness for the environment's mip (no floor: a flat mirror stays one),
+        // and the clear coat's two (coatA for the analytic lobes, coatRough for the environment).
+        const float specK     = SpecAAKernel(N);
+        const float specA     = max(0.002, SpecAAAlpha(roughness * roughness, specK));
+        const float envRough  = sqrt(SpecAAAlpha(roughness * roughness, specK));
+        const float coatA     = SpecAAAlpha(max(0.002, kCoatRoughness * kCoatRoughness), specK);
+        const float coatRough = sqrt(SpecAAAlpha(kCoatRoughness * kCoatRoughness, specK));
+
         // PHYSICAL balance needs the irradiance map, which comes with the
         // environment; without one it falls back to the established balance
         // rather than to a guess.
@@ -1045,22 +1126,26 @@ float4 Shade(VSOut i, bool frontFace, out GBufOut g)
 #else
         g.kind = coat > 0.5 ? 3.0 : 1.0;   // 3: under a clear coat
 #endif
-        g.rough = saturate(roughness);
+        // The roughness the lights will see: widened by the pixel's spread of normals (specK), so the deferred lobes
+        // are this pass's. Under a clear coat the coat needs the spread too, and the target has 10 bits for both:
+        // GbufRoughPack - the base's widened roughness in the upper 5, the spread in the lower 5.
+        g.rough = g.kind > 2.5 ? GbufRoughPack(saturate(envRough), specK) : saturate(envRough);
         g.albedoMetal = float4(saturate(albedo), saturate(metallic));
 #else
         {
             const float3 lf0   = lerp(float3(0.04, 0.04, 0.04), albedo, metallic);
             const float3 ldiff = albedo * (1.0 - metallic) * (physical ? 1.0 / 3.14159265 : 1.0);
-            const float  la    = max(0.002, roughness * roughness);
+            const float  la    = specA;
             const float3 lV    = normalize(gCamPos - i.wpos);
             const float  lspec = physical ? 1.0 : 3.14159265;
 #if defined(ALPHA_TEST)
             localLight = LocalLights(i.wpos, N, lV, ldiff, lf0, la, lspec, i.pos.xy, kFoliageWrap, kFoliageTransmission, false,
-                                     0.0);
+                                     float2(0.0, 0.0));
 #elif defined(BLEND)
-            localLight = LocalLights(i.wpos, N, lV, ldiff * coverage, lf0, la, lspec, i.pos.xy, 0.0, 0.0, true, 0.0);
+            localLight = LocalLights(i.wpos, N, lV, ldiff * coverage, lf0, la, lspec, i.pos.xy, 0.0, 0.0, true,
+                                     float2(0.0, 0.0));
 #else
-            localLight = LocalLights(i.wpos, N, lV, ldiff, lf0, la, lspec, i.pos.xy, 0.0, 0.0, true, coat);
+            localLight = LocalLights(i.wpos, N, lV, ldiff, lf0, la, lspec, i.pos.xy, 0.0, 0.0, true, float2(coat, coatA));
 #endif
         }
 #endif
@@ -1167,7 +1252,7 @@ float4 Shade(VSOut i, bool frontFace, out GBufOut g)
         // keeps its albedo for the diffuse. One lerp expresses both.
         float3 f0        = lerp(float3(0.04, 0.04, 0.04), albedo, metallic);
         float3 diffuseCol = albedo * (1.0 - metallic);
-        float  a          = max(0.002, roughness * roughness);   // Disney remap
+        float  a          = specA;   // Disney remap, widened by the pixel's spread of normals (SpecAAKernel)
         float3 V          = normalize(gCamPos - i.wpos);
         float  ndv        = saturate(dot(N, V)) + 1e-5;
 
@@ -1240,14 +1325,16 @@ float4 Shade(VSOut i, bool frontFace, out GBufOut g)
         float3 H   = normalize(V + gSunTowards);
         float  ndh = saturate(dot(N, H));
         float  vdh = saturate(dot(V, H));
-        float3 spec = FresnelSchlick(f0, vdh) * DistributionGGX(ndh, a) * VisSmith(ndv, ndl, a);
+        // The sun's (or the moon's) disc widens its highlight, as an emitter's does (kSunDiscWiden).
+        const float as = saturate(a + kSunDiscWiden);
+        float3 spec = FresnelSchlick(f0, vdh) * DistributionGGX(ndh, as) * VisSmith(ndv, ndl, as);
 
         // THE CLEAR COAT (kCoatRoughness): the sun's sharp highlight in the lacquer, and the share of the light it
         // reflects (Fresnel at the view: it rises to a mirror at grazing angles) kept from the base below.
         float coatSun = 0.0, coatKeep = 1.0;
         if (coat > 0.0)
         {
-            const float ca = max(0.002, kCoatRoughness * kCoatRoughness);
+            const float ca = saturate(coatA + kSunDiscWiden);
             coatSun = coat * FresnelSchlick(kCoatF0.xxx, vdh).x * DistributionGGX(ndh, ca) * VisSmith(ndv, ndl, ca);
             coatKeep = 1.0 - coat * FresnelSchlick(kCoatF0.xxx, ndv).x;
         }
@@ -1261,20 +1348,27 @@ float4 Shade(VSOut i, bool frontFace, out GBufOut g)
         // The reflection vector can point below the horizon, and the map has
         // the ground blend there for exactly that reason.
         float3 ambSpec = float3(0.0, 0.0, 0.0);
+        // (derivatives before the branch, in the whole quad's flow)
+        const float3 R = reflect(-V, N);
+        const float3 Ng = cross(ddy(i.wpos), ddx(i.wpos));
         if (gEnvOn > 0.5)
         {
-            float3 R = reflect(-V, N);
             float2 euv = AtmOctEncode(R);
-            float3 envRad = EnvRadiance(euv, roughness);
+            // Where the car itself stands in the reflection's way (ReflOpen): its inside, dark against the stage -
+            // for both layers (a rough lobe in the cabin sees the cabin too; and a thin tube's lobe is wide only from
+            // SpecAAKernel, whose widening must not let the stage back in).
+            const float open = ReflOpen(i.wpos, V, R, normalize(Ng + 1e-12));
+            // (the roughnesses widened by the pixel's spread of normals, SpecAAKernel)
+            float3 envRad = EnvRadiance(euv, envRough);
             // Same PI as the direct lobe, and for the same reason: our diffuse
             // is albedo*E rather than albedo/PI*E, so every specular term has
             // to carry the factor or the balance is off by PI.
-            ambSpec = envRad * EnvBRDFApprox(f0, roughness, ndv) * kSpecScale * matAo;
+            ambSpec = envRad * EnvBRDFApprox(f0, envRough, ndv) * kSpecScale * matAo * open;
             if (coat > 0.0)
             {
-                const float3 coatRad = EnvRadiance(euv, kCoatRoughness);
+                const float3 coatRad = EnvRadiance(euv, coatRough);
                 ambSpec = ambSpec * coatKeep
-                        + coatRad * (coat * EnvBRDFApprox(kCoatF0.xxx, kCoatRoughness, ndv).x * kSpecScale * matAo);
+                        + coatRad * (coat * EnvBRDFApprox(kCoatF0.xxx, coatRough, ndv).x * kSpecScale * matAo * open);
             }
         }
         gProbeAmbSpec = ambSpec;
@@ -1516,7 +1610,11 @@ float4 PSDeferredLights(float4 pos : SV_Position) : SV_Target
     const float4 n = gGbufN.Load(px);
     const float kind = round(n.w * 3.0);
     if (kind < 0.5) return float4(0.0, 0.0, 0.0, 0.0);   // no surface: the sky, glass, a debug view
-    const float roughness = n.z;
+    // The roughness Shade left: widened by its pixel's spread of normals already; under a coat, packed with that
+    // spread for the coat's own lobe (GbufRoughPack).
+    float roughness = n.z, specK = 0.0;
+    if (kind > 2.5) GbufRoughUnpack(n.z, roughness, specK);
+    const float coatA = SpecAAAlpha(max(0.002, kCoatRoughness * kCoatRoughness), specK);
     const float4 am = gGbufAlbedo.Load(px);
     const float2 ndc = float2(pos.x * gInvScreen.x * 2.0 - 1.0, 1.0 - pos.y * gInvScreen.y * 2.0);
     const float4 hp = mul(float4(ndc, gDepthTex.Load(px), 1.0), gInvViewProj);
@@ -1530,7 +1628,7 @@ float4 PSDeferredLights(float4 pos : SV_Position) : SV_Target
     const float lspec = physical ? 1.0 : 3.14159265;
     const bool foliage = kind > 1.5 && kind < 2.5;
     const float3 L = LocalLights(p, N, V, ldiff, lf0, la, lspec, pos.xy, foliage ? kFoliageWrap : 0.0,
-                                 foliage ? kFoliageTransmission : 0.0, !foliage, kind > 2.5 ? 1.0 : 0.0);
+                                 foliage ? kFoliageTransmission : 0.0, !foliage, float2(kind > 2.5 ? 1.0 : 0.0, coatA));
     float3 tr = float3(1.0, 1.0, 1.0), inscatter;
     if (gAerial > 0.5)
     {
@@ -2075,6 +2173,7 @@ void Scene::DescribeRt(std::vector<uint64_t>& meshes, std::vector<RtInstanceDesc
             if (InRtWorld(i)) continue;                     // in the world
             RtInstanceDesc d;
             d.mesh = kRtMoved | (uint64_t)i;
+            d.focus = o.probeFocus;
             memcpy(d.xform, o.xform, sizeof(d.xform));
             d.moved = Travel(o.bmin0, o.bmax0, o.xform, o.prevXform) > kRtMovedMin;
             memcpy(d.prevXform, o.prevXform, sizeof(d.prevXform));
@@ -2087,6 +2186,7 @@ void Scene::DescribeRt(std::vector<uint64_t>& meshes, std::vector<RtInstanceDesc
             d.mesh = kRtDynamic | ((uint64_t)m_rtGeneration << 32) | o.meshId;
             memcpy(d.xform, o.xform, sizeof(d.xform));
             d.material = o.materialId;
+            d.focus = o.probeFocus;
             d.forceOpaque = (o.matFlags & kMaterialAlphaTest) == 0;
             d.moved = Travel(o.bmin0, o.bmax0, o.xform, o.prevXform) > kRtMovedMin;
             memcpy(d.prevXform, o.prevXform, sizeof(d.prevXform));
@@ -2934,6 +3034,7 @@ void Scene::RenderShadows(ID3D12GraphicsCommandList* list,
         list->SetGraphicsRootSignature(m_rootSig.Get());
         list->SetGraphicsRootConstantBufferView(0, cbRes->GetGPUVirtualAddress());
         if (m_probe) list->SetGraphicsRootUnorderedAccessView(2, m_probe->GetGPUVirtualAddress());
+        if (m_rayQuery && m_reflTlas) list->SetGraphicsRootShaderResourceView(13, m_reflTlas);
         list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
         list->IASetVertexBuffers(0, 1, &m_vbv);
         list->IASetIndexBuffer(&m_ibv);
@@ -3621,7 +3722,7 @@ bool Scene::LoadFromMemory(ID3D12Device* dev, ID3D12CommandQueue* queue,
     srvRange.NumDescriptors = kMaterialSrvCount;   // t0..t4, contiguous per material
     srvRange.BaseShaderRegister = 0;
 
-    D3D12_ROOT_PARAMETER params[13] = {};
+    D3D12_ROOT_PARAMETER params[14] = {};
     params[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;
     params[0].Descriptor.ShaderRegister = 0;
     params[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
@@ -3741,6 +3842,11 @@ bool Scene::LoadFromMemory(ID3D12Device* dev, ID3D12CommandQueue* queue,
     params[12].DescriptorTable.pDescriptorRanges = &reflRange;
     params[12].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
 
+    // The ray tracer's TLAS, t20 (a root SRV): the reflection focus's own reflection rays (ReflOpen).
+    params[13].ParameterType = D3D12_ROOT_PARAMETER_TYPE_SRV;
+    params[13].Descriptor.ShaderRegister = 20;
+    params[13].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+
     // THREE samplers so the atlas-bleed diagnosis can be A/B'd live in the
     // viewer instead of argued about.
     //
@@ -3800,7 +3906,7 @@ bool Scene::LoadFromMemory(ID3D12Device* dev, ID3D12CommandQueue* queue,
     samp[5] = AtmosphereMs::MsSampler(D3D12_SHADER_VISIBILITY_PIXEL);   // s0 space1
 
     D3D12_ROOT_SIGNATURE_DESC rs = {};
-    rs.NumParameters = 13;
+    rs.NumParameters = 14;
     rs.pParameters = params;
     rs.NumStaticSamplers = 6;
     rs.pStaticSamplers = samp;
@@ -3833,8 +3939,19 @@ bool Scene::LoadFromMemory(ID3D12Device* dev, ID3D12CommandQueue* queue,
 
     enum Variant { kOpaque, kAlphaTest, kBlend };
     bool dxil = m_dxc.Load();
-    // `gbuf`: the variant that leaves the surface for the deferred local lights (Shade, PSDeferredLights).
-    auto compile = [&](const char* entry, bool vertex, Variant v, bool gbuf = false) -> ComPtr<ID3DBlob> {
+    // Inline ray queries (DXR 1.1) for the reflection focus's own reflection rays (ReflOpen): two more variants of
+    // the opaque pixel shader at shader model 6.5 (m_psoRefl), where the adapter has them; without, the probe's
+    // reflection is unoccluded as before. NGG_NO_REFL_RAY=1: without, for comparison.
+    bool rayQuery = false;
+    {
+        D3D12_FEATURE_DATA_D3D12_OPTIONS5 o5 = {};
+        rayQuery = dxil && SUCCEEDED(dev->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS5, &o5, sizeof(o5))) &&
+                   o5.RaytracingTier >= D3D12_RAYTRACING_TIER_1_1 && !std::getenv("NGG_NO_REFL_RAY");
+    }
+    // `gbuf`: the variant that leaves the surface for the deferred local lights (Shade, PSDeferredLights). `refl`:
+    // the reflection focus's, with its reflection rays (shader model 6.5).
+    auto compile = [&](const char* entry, bool vertex, Variant v, bool gbuf = false,
+                       bool refl = false) -> ComPtr<ID3DBlob> {
         if (dxil)
         {
             const std::wstring we(entry, entry + strlen(entry));
@@ -3842,7 +3959,8 @@ bool Scene::LoadFromMemory(ID3D12Device* dev, ID3D12CommandQueue* queue,
             if (v == kAlphaTest) args.push_back(L"-DALPHA_TEST=1");
             if (v == kBlend) args.push_back(L"-DBLEND=1");
             if (gbuf) args.push_back(L"-DGBUF=1");
-            return m_dxc.Compile(src, we.c_str(), vertex ? L"vs_6_0" : L"ps_6_0", "ngg_scene", args);
+            if (refl) args.push_back(L"-DNGG_REFL_RAY=1");
+            return m_dxc.Compile(src, we.c_str(), vertex ? L"vs_6_0" : refl ? L"ps_6_5" : L"ps_6_0", "ngg_scene", args);
         }
         std::vector<D3D_SHADER_MACRO> defs;
         if (v == kAlphaTest) defs.push_back({ "ALPHA_TEST", "1" });
@@ -4104,6 +4222,36 @@ bool Scene::LoadFromMemory(ID3D12Device* dev, ID3D12CommandQueue* queue,
         b.BlendOpAlpha = D3D12_BLEND_OP_ADD;
         ok = ok && SUCCEEDED(dev->CreateGraphicsPipelineState(&dp, IID_PPV_ARGS(&m_psoDeferred)));
         m_deferredReady = ok;
+    }
+
+    // The reflection focus's opaque pipelines with its reflection rays (m_psoRefl, ReflOpen): forward and deferred,
+    // two-sided, back- and front-culled - as m_pso / m_psoCulled and m_psoG / m_psoCulledG are.
+    m_rayQuery = false;
+    if (rayQuery && dxil)
+    {
+        ComPtr<ID3DBlob> psR = compile("PSMain", false, kOpaque, false, true);
+        ComPtr<ID3DBlob> psRG = m_deferredReady ? compile("PSMain", false, kOpaque, true, true) : nullptr;
+        bool ok = psR != nullptr && (psRG != nullptr || !m_deferredReady);
+        const D3D12_CULL_MODE culls[3] = { D3D12_CULL_MODE_NONE, D3D12_CULL_MODE_BACK, D3D12_CULL_MODE_FRONT };
+        for (int kind = 0; kind < 2 && ok; ++kind)
+        {
+            ID3DBlob* b = kind ? psRG.Get() : psR.Get();
+            if (!b) break;
+            D3D12_GRAPHICS_PIPELINE_STATE_DESC rp = pso;
+            if (kind)
+            {
+                rp.NumRenderTargets = 3;
+                for (int k = 0; k < 2; ++k) rp.RTVFormats[1 + k] = kGbufFormats[k];
+            }
+            rp.PS = { b->GetBufferPointer(), b->GetBufferSize() };
+            for (int c = 0; c < 3 && ok; ++c)
+            {
+                rp.RasterizerState.CullMode = culls[c];
+                ok = SUCCEEDED(dev->CreateGraphicsPipelineState(&rp, IID_PPV_ARGS(&m_psoRefl[kind][c])));
+            }
+        }
+        m_rayQuery = ok;
+        Log("scene: the car's reflection rays (pixel shader 6.5) %s", ok ? "ready" : "failed - its reflections unoccluded");
     }
 
     // Foliage after a prepass: the depth is final, so the main pass tests it and does NOT write it - which lets the
@@ -4491,6 +4639,7 @@ void Scene::SetReflectionFocus(const uint32_t* objects, uint32_t count, const fl
     m_probeObjects.assign(objects, objects + count);
     for (uint32_t o : m_probeObjects)
         if (o < m_objects.size()) m_objects[o].probeFocus = true;
+    ++m_geomRevision;   // the TLAS's instance masks (RtInstanceDesc::focus)
     if (!count)
     {
         m_probeFacesDrawn = 0;
@@ -6039,6 +6188,7 @@ void Scene::RecordPass(ID3D12GraphicsCommandList* list, D3D12_CPU_DESCRIPTOR_HAN
     list->SetPipelineState(prepass ? m_psoPrepass.Get() : m_pso.Get());
     list->SetGraphicsRootConstantBufferView(0, cbRes->GetGPUVirtualAddress());
     if (m_probe) list->SetGraphicsRootUnorderedAccessView(2, m_probe->GetGPUVirtualAddress());
+    if (m_rayQuery && m_reflTlas) list->SetGraphicsRootShaderResourceView(13, m_reflTlas);
     list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     list->IASetVertexBuffers(0, 1, &m_vbv);
     list->IASetIndexBuffer(&m_ibv);
@@ -6318,7 +6468,7 @@ void Scene::RecordPass(ID3D12GraphicsCommandList* list, D3D12_CPU_DESCRIPTOR_HAN
     auto movedOf = [](const DrawItem& o) {
         return (!o.identity || !o.prevIdentity) && (o.dynamic || memcmp(o.prevXform, o.xform, sizeof(o.xform)) != 0);
     };
-    auto draw = [&](const DrawItem& o, ID3D12PipelineState* want) {
+    auto draw = [&](const DrawItem& o, ID3D12PipelineState* want, bool refl = false) {
         if (want != bound)
         {
             list->SetPipelineState(want);
@@ -6334,7 +6484,8 @@ void Scene::RecordPass(ID3D12GraphicsCommandList* list, D3D12_CPU_DESCRIPTOR_HAN
         // and a client may well set every keyed object every tick.
         const bool moved = movedOf(o);
         const uint32_t objConsts[4] = { o.layerId, o.matFlags, moved ? 1u : 0u,
-                                        o.probeFocus && cb.reflProbeOn > 0.5f ? 1u : 0u };
+                                        // 2: and its reflection traced against the car itself (m_psoRefl, ReflOpen)
+                                        o.probeFocus && cb.reflProbeOn > 0.5f ? (refl ? 2u : 1u) : 0u };
         list->SetGraphicsRoot32BitConstants(4, 4, objConsts, 0);
         if (moved) list->SetGraphicsRoot32BitConstants(4, 16, o.prevXform, 32);
         {
@@ -6554,7 +6705,15 @@ void Scene::RecordPass(ID3D12GraphicsCommandList* list, D3D12_CPU_DESCRIPTOR_HAN
             if (ID3D12PipelineState* k = m_psoAlphaKept[deferred ? 1 : 0][cull].Get())
                 want = k;
         }
-        draw(o, want);
+        // The reflection focus's opaque parts: with their reflection rays (ReflOpen), where there is a TLAS.
+        bool refl = false;
+        if (!prepass && !wantAlphaTest && o.probeFocus && m_rayQuery && m_reflTlas && cb.reflProbeOn > 0.5f)
+        {
+            const int cull = (matFlags & kMaterialTwoSided) ? 0 : Mirrors(o.xform) ? 2 : 1;
+            if (ID3D12PipelineState* r = m_psoRefl[deferred ? 1 : 0][cull].Get())
+                want = r, refl = true;
+        }
+        draw(o, want, refl);
     }
 
     // The deferred local lights, over the opaque world and under the glass: the surface's targets and the depth to

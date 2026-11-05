@@ -273,6 +273,7 @@ void Renderer::RecordFrame(Device& dev, D3D12_CPU_DESCRIPTOR_HANDLE outRtv,
 
     m_rtActive = false;
     m_vis = Visibility();
+    m_scene.SetReflectionTlas(0);
     ID3D12Resource* motion = nullptr;
     if (m_scene.Ready())
     {
@@ -288,6 +289,8 @@ void Renderer::RecordFrame(Device& dev, D3D12_CPU_DESCRIPTOR_HANDLE outRtv,
         if (prepass) motion = m_scene.MotionBuffer();
 
         m_rtActive = m_preferRt && prepass && m_rt.HasScene() && m_rtValid && m_scene.ShadowsOn();
+        // The car's own reflection rays (Scene::SetReflectionTlas) trace this TLAS, as the visibility below does.
+        m_scene.SetReflectionTlas(m_rtActive ? m_rt.TlasVa() : 0);
 
         // The sun's visibility and the AO (visibility.h): the ray tracer's, or the cascades' and XeGTAO's.
         VisibilityFrame f;
