@@ -343,7 +343,9 @@ void Renderer::RecordFrame(Device& dev, D3D12_CPU_DESCRIPTOR_HANDLE outRtv,
     // TAA: where a moved object's shadow fell and its occlusion, this frame and last (the RT denoisers' only), and
     // the moving glass's own motion.
     m_post.Resolve(list, outRtv, m_scene.Depth(), motion, motion ? m_scene.GlassMotionBuffer() : nullptr, m_vis.sun,
-                   m_vis.aoTaa, m_vis.aoTaaPrev, m_vis.lightsTaa, m_scene.LastViewProj(), width, height);
+                   m_vis.aoTaa, m_vis.aoTaaPrev,
+                   // without the ray tracer, the local lights' moved-shadow mask in its place (Scene::LocalShadowMask)
+                   m_vis.lightsTaa ? m_vis.lightsTaa : m_scene.LocalShadowMask(), m_scene.LastViewProj(), width, height);
 
     if (m_frameTimer)
     {
