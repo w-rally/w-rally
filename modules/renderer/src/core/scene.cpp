@@ -811,13 +811,44 @@ struct GBufOut
     float4 albedoMetal;
 };
 
-// What a surface reflects towards the reflection vector (`euv`, octahedral) at `roughness`: the sky, or for the car the
+// What a surface (normal N) reflects towards the reflection vector R at `roughness`: the sky, or for the car the
 // world around it - the cube probe (gObjectProbe), which has the sky behind its world already.
-float3 EnvRadiance(float2 euv, float roughness)
+//
+// THE PROBE'S ROUGH END. Its chain is a 2x2 box all the way down (probe.h), and from level ~6 an octahedral texel
+// spans a quarter of the sphere and more - both hemispheres of a quadrant, folded at the map's edges. A tyre (0.85:
+// level 7.6) read the average of the world on every side of it, the stage behind the tyre too: at night the lamp-lit
+// road and barrier made the tyres glow grey. So a lobe much wider than a texel of the level it would read is read at
+// the level whose texels are half its half-width (`tapLevel`; the GGX lobe's half-width ~ atan(alpha)), in taps over
+// the lobe, each only where it is above the surface - what the box chain mixed in from behind it does not reach it.
+// The sky (gEnv) is smooth: its chain as before.
+static const float kProbeTexel0 = 3.5449 / 512.0;   // radians a texel at the probe's level 0 (ReflectionProbe::kOct)
+float3 EnvRadiance(float3 R, float3 N, float roughness)
 {
-    if (gObjectProbe != 0 && gReflProbeOn > 0.5)
-        return gReflProbe.SampleLevel(gSampLinear, euv, roughness * (gReflProbeMips - 1.0)).rgb;
-    return gEnv.SampleLevel(gSampLinear, euv, roughness * (gEnvMips - 1.0)).rgb;
+    const float2 euv = AtmOctEncode(R);
+    if (gObjectProbe == 0 || gReflProbeOn < 0.5)
+        return gEnv.SampleLevel(gSampLinear, euv, roughness * (gEnvMips - 1.0)).rgb;
+    const float level = roughness * (gReflProbeMips - 1.0);
+    const float alpha = roughness * roughness;
+    const float cone = atan(alpha);                                   // the lobe's half-width
+    const float tapLevel = clamp(log2(max(0.5 * cone, 1e-6) / kProbeTexel0), 0.0, gReflProbeMips - 1.0);
+    if (level <= tapLevel + 0.5)
+        return gReflProbe.SampleLevel(gSampLinear, euv, level).rgb;
+    // Six around the reflection at the lobe's half-width, and the reflection itself (twice the weight).
+    float3 T = abs(R.y) < 0.99 ? cross(float3(0.0, 1.0, 0.0), R) : cross(float3(1.0, 0.0, 0.0), R);
+    T = normalize(T);
+    const float3 B = cross(R, T);
+    const float sc = sin(cone), cc = cos(cone);
+    float3 sum = 2.0 * gReflProbe.SampleLevel(gSampLinear, euv, tapLevel).rgb;
+    float w = 2.0;
+    [unroll] for (int k = 0; k < 6; ++k)
+    {
+        const float ang = k * 1.0471976;
+        const float3 d = R * cc + (T * cos(ang) + B * sin(ang)) * sc;
+        if (dot(d, N) <= 0.0) continue;                               // below the surface: not in its reflection
+        sum += gReflProbe.SampleLevel(gSampLinear, AtmOctEncode(d), tapLevel).rgb;
+        w += 1.0;
+    }
+    return sum / w;
 }
 
 // THE CAR'S OWN REFLECTIONS (gObjectProbe 2). The probe sees the world from the car's middle with the car left out, so
@@ -1353,20 +1384,19 @@ float4 Shade(VSOut i, bool frontFace, out GBufOut g)
         const float3 Ng = cross(ddy(i.wpos), ddx(i.wpos));
         if (gEnvOn > 0.5)
         {
-            float2 euv = AtmOctEncode(R);
             // Where the car itself stands in the reflection's way (ReflOpen): its inside, dark against the stage -
             // for both layers (a rough lobe in the cabin sees the cabin too; and a thin tube's lobe is wide only from
             // SpecAAKernel, whose widening must not let the stage back in).
             const float open = ReflOpen(i.wpos, V, R, normalize(Ng + 1e-12));
             // (the roughnesses widened by the pixel's spread of normals, SpecAAKernel)
-            float3 envRad = EnvRadiance(euv, envRough);
+            float3 envRad = EnvRadiance(R, N, envRough);
             // Same PI as the direct lobe, and for the same reason: our diffuse
             // is albedo*E rather than albedo/PI*E, so every specular term has
             // to carry the factor or the balance is off by PI.
             ambSpec = envRad * EnvBRDFApprox(f0, envRough, ndv) * kSpecScale * matAo * open;
             if (coat > 0.0)
             {
-                const float3 coatRad = EnvRadiance(euv, coatRough);
+                const float3 coatRad = EnvRadiance(R, N, coatRough);
                 ambSpec = ambSpec * coatKeep
                         + coatRad * (coat * EnvBRDFApprox(kCoatF0.xxx, coatRough, ndv).x * kSpecScale * matAo * open);
             }
