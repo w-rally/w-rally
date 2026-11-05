@@ -290,7 +290,7 @@ QuickChoice QuickPage(const ImGuiLayer& ui, const assets::Catalog& catalog, app:
     const assets::Car* car = catalog.FindCar(s.car);
     auto usableCar = [&](const assets::Car& c) {
         const assets::CarInfo* info = catalog.carRegister.Find(c.folder);
-        return info && info->known && !c.physics.empty();
+        return info && info->known && assets::Catalog::Drivable(c);
     };
     if (!car)   // none chosen yet: the first W-Rally can use
         for (const assets::Car& each : catalog.cars)
@@ -300,7 +300,7 @@ QuickChoice QuickPage(const ImGuiLayer& ui, const assets::Catalog& catalog, app:
             }
     const bool carOk = car && usableCar(*car);
 
-    std::vector<Row> rows(6);
+    std::vector<Row> rows(7);
     Row& stage = rows[0];
     stage.kind = Row::Open, stage.label = "STAGE";
     stage.shown = st ? Upper(st->title) : "NO STAGES";
@@ -313,9 +313,33 @@ QuickChoice QuickPage(const ImGuiLayer& ui, const assets::Catalog& catalog, app:
     carRow.subSignal = car && !carOk;
     carRow.help = "The car from the garage. Enter opens the garage: every car, to choose one.";
 
-    const std::vector<assets::Setup> setups = car ? catalog.SetupsFor(*car) : std::vector<assets::Setup>{};
+    // The car's physics: the variants a module drives (docs/content-layers.md 4), the chosen one's setups.
+    std::vector<const assets::PhysicsVariant*> drivable;
+    if (car)
+        for (const assets::PhysicsVariant& p : car->variants)
+            if (!p.modules.empty()) drivable.push_back(&p);
+    const assets::PhysicsVariant* chosen = car ? catalog.PhysicsFor(*car, s) : nullptr;
+    int physics = 0;
+    Row& physicsRow = rows[2];
+    physicsRow.kind = Row::Choice, physicsRow.label = "PHYSICS";
+    for (size_t i = 0; i < drivable.size(); ++i) {
+        physicsRow.options.push_back(Upper(drivable[i]->name));
+        if (drivable[i] == chosen) physics = static_cast<int>(i);
+    }
+    if (drivable.empty()) physicsRow.options = {"NONE"};
+    physicsRow.at = &physics;
+    if (chosen) {
+        physicsRow.sub = (chosen->version == "rbr" ? std::string("RBR'S") : "VERSION " + Upper(chosen->version)) + " \xC2\xB7 " +
+                         Upper(chosen->source) + (car->variants.size() > 1 && chosen == &car->variants.front() ? " \xC2\xB7 THE CAR'S OWN" : "");
+    } else {
+        physicsRow.sub = "NONE A PHYSICS MODULE DRIVES", physicsRow.subSignal = true;
+    }
+    physicsRow.help = "How the car drives: the physics it has that a physics module installed can drive - RBR's own, or "
+                      "others downloaded. The setups are the physics'.";
+
+    const std::vector<assets::Setup> setups = car ? catalog.SetupsFor(*car, chosen) : std::vector<assets::Setup>{};
     int setup = 0;
-    Row& setupRow = rows[2];
+    Row& setupRow = rows[3];
     setupRow.kind = Row::Choice, setupRow.label = "CAR SETUP", setupRow.options = {"DEFAULT"};
     for (size_t i = 0; i < setups.size(); ++i) {
         setupRow.options.push_back(Upper(setups[i].name));
@@ -325,12 +349,12 @@ QuickChoice QuickPage(const ImGuiLayer& ui, const assets::Catalog& catalog, app:
     setupRow.help = "The default setup for the stage's surface, or a saved one. Enter shows its values and sets the car's lamps.";
 
     int damage = static_cast<int>(std::min(s.damage, 3u));
-    Row& damageRow = rows[3];
+    Row& damageRow = rows[4];
     damageRow.kind = Row::Choice, damageRow.label = "DAMAGE", damageRow.at = &damage;
     damageRow.options.assign(std::begin(kDamage), std::end(kDamage));
     damageRow.help = "How much the car takes: off, safe, reduced or realistic.";
 
-    Row& weatherRow = rows[4];
+    Row& weatherRow = rows[5];
     weatherRow.kind = Row::Choice, weatherRow.label = "WEATHER", weatherRow.options = {"STAGE DEFAULT"};
     int weather = 0;
     if (st)
@@ -346,7 +370,7 @@ QuickChoice QuickPage(const ImGuiLayer& ui, const assets::Catalog& catalog, app:
     weatherRow.help = "A preset weather, or Custom: Enter opens the weather - the clouds, the fog, the rain, the time of day, the season "
                       "and the road.";
 
-    Row& start = rows[5];
+    Row& start = rows[6];
     start.kind = Row::Open, start.label = "START STAGE", start.shown = "", start.sub = "";
     start.off = !st || !carOk;
     start.help = "To the start line.";
@@ -360,21 +384,28 @@ QuickChoice QuickPage(const ImGuiLayer& ui, const assets::Catalog& catalog, app:
         const int done = keyRow >= 0 ? keyRow : clicked;
         if (done == 0) g_page = Page::Stage;
         else if (done == 1) g_page = Page::Garage;
-        else if (done == 2 && car) g_page = Page::Setup;
-        else if (done == 4 && weather == custom) g_page = Page::Weather;
-        else if (done == 4) Change(weatherRow, +1);
-        else if (done == 3) Change(damageRow, +1);
-        else if (done == 5 && !start.off) c = QuickChoice::Start;
+        else if (done == 2) Change(physicsRow, +1);
+        else if (done == 3 && car) g_page = Page::Setup;
+        else if (done == 5 && weather == custom) g_page = Page::Weather;
+        else if (done == 5) Change(weatherRow, +1);
+        else if (done == 4) Change(damageRow, +1);
+        else if (done == 6 && !start.off) c = QuickChoice::Start;
         const Row& sel = rows[g_quick.at];
         Help(l, g_quick.at == 1 && car && !carOk ? "W-Rally does not know this car: choose another in the garage." : sel.help);
-        const char* enter = g_quick.at == 0 ? "CHOOSE" : g_quick.at == 1 ? "GARAGE" : g_quick.at == 2 ? "DETAILS"
-                            : g_quick.at == 4 && weather == custom ? "EDIT" : g_quick.at == 5 ? "START" : "SELECT";
+        const char* enter = g_quick.at == 0 ? "CHOOSE" : g_quick.at == 1 ? "GARAGE" : g_quick.at == 3 ? "DETAILS"
+                            : g_quick.at == 5 && weather == custom ? "EDIT" : g_quick.at == 6 ? "START" : "SELECT";
         if (Footer(l, {{"W S", "MOVE"}, {"A D", "CHANGE"}, {"ENTER", enter}, {"ESC", "BACK"}})) c = QuickChoice::Back;
     });
     if (KeyEsc()) c = QuickChoice::Back;
 
-    // The rows' choices back into the settings.
-    if (setupRow.at) s.setup = setup ? setups[setup - 1].path : "";
+    // The rows' choices back into the settings: the physics kept per car (none kept for its default).
+    if (car && physics < static_cast<int>(drivable.size()) && drivable[physics] != chosen) {
+        if (drivable[physics] == &car->variants.front()) s.physics.erase(car->id);
+        else s.physics[car->id] = drivable[physics]->id;
+        s.setup.clear();   // (another physics: another car's setups)
+    } else if (setupRow.at) {
+        s.setup = setup ? setups[setup - 1].path : "";
+    }
     s.damage = static_cast<uint32_t>(damage);
     s.weatherCustom = weather == custom;
     if (!s.weatherCustom) s.weather = weather && st ? st->weathers[weather - 1] : "";
@@ -579,7 +610,7 @@ void GaragePage(const ImGuiLayer& ui, const assets::Catalog& catalog, app::Setti
     auto infoOf = [&](int i) { return catalog.carRegister.Find(catalog.cars[shown[i]].folder); };
     auto usable = [&](int i) {   // known to W-Rally, and with physics of its own
         const assets::CarInfo* info = infoOf(i);
-        return info && info->known && !catalog.cars[shown[i]].physics.empty();
+        return info && info->known && assets::Catalog::Drivable(catalog.cars[shown[i]]);
     };
     // A car chosen: back to Quick rally - taken after the page is drawn (the selection holds until then). Only a usable
     // one.
@@ -789,7 +820,7 @@ void SetupPage(const ImGuiLayer& ui, const assets::Catalog& catalog, app::Settin
     if (ImGui::IsKeyPressed(ImGuiKey_E, false)) g_setupTab = (g_setupTab + 1) % 7;
 
     std::string setupName = "DEFAULT";
-    for (const assets::Setup& su : catalog.SetupsFor(*car))
+    for (const assets::Setup& su : catalog.SetupsFor(*car, catalog.PhysicsFor(*car, s)))
         if (su.path == s.setup) setupName = Upper(su.name);
     const SetupValues* v = s.setup.empty() ? nullptr : &ReadSetup(catalog, s.setup);
     constexpr float kRad = 57.2957795f;

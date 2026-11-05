@@ -6,6 +6,8 @@
 #include <cstring>
 #include <fstream>
 #include <iterator>
+#include <map>
+#include <mutex>
 
 #include "wrally/modules/file_host.h"
 #include "signals/bus.h"
@@ -65,6 +67,34 @@ std::string RbzMember(const std::string& path)
 }
 
 } // namespace
+
+const std::vector<ModuleInfo>& ListModules(const std::filesystem::path& modulesDir)
+{
+    static std::map<std::filesystem::path, std::vector<ModuleInfo>> known;
+    static std::mutex lock;
+    std::lock_guard<std::mutex> guard(lock);
+    if (const auto it = known.find(modulesDir); it != known.end()) return it->second;
+    std::vector<ModuleInfo>& out = known[modulesDir];
+    modules::ModuleHost host;
+    host.Scan(modulesDir);
+    modules::FileHost files(nullptr, app::UserDir() / "cache", [](iface::LogLevel, const char*) {});
+    for (const modules::ModuleEntry* e : host.Available(iface::ModuleKind::Physics)) {
+        iface::PhysicsInput in{};
+        iface::PhysicsOutput o{};
+        iface::InitHeader(in, iface::ModuleKind::Physics, iface::kPhysicsInterfaceVer);
+        iface::InitHeader(o, iface::ModuleKind::Physics, iface::kPhysicsInterfaceVer);
+        in.host = files.Services(e->path.stem().string());
+        in.config = "";
+        if (host.Init(*e, &in.header, &o.header) != Status::Ok || !o.instance) continue;
+        ModuleInfo m;
+        m.id = o.info.id, m.name = o.info.name, m.simVersion = o.simVersion;
+        for (uint32_t i = 0; i < o.formatCount && o.formats; ++i)
+            m.formats.push_back({o.formats[i].name, o.formats[i].minVersion, o.formats[i].maxVersion});
+        o.api->destroy(o.instance);
+        if (std::none_of(out.begin(), out.end(), [&](const ModuleInfo& x) { return x.id == m.id; })) out.push_back(std::move(m));
+    }
+    return out;
+}
 
 Physics::Physics() = default;
 Physics::~Physics() = default;
@@ -134,6 +164,8 @@ std::string Physics::Open(const std::filesystem::path& modulesDir, const std::st
         carPhysics = vfsPath(carPhysics);
         if (carPhysics.back() != '/') carPhysics += '/';
     }
+    std::string base = vfsPath(c.base);
+    if (!base.empty() && base.back() != '/') base += '/';
     iface::CarDesc car{};
     car.physicsCar = carPhysics.c_str();
     car.carData = "";
@@ -150,7 +182,7 @@ std::string Physics::Open(const std::filesystem::path& modulesDir, const std::st
 
     iface::WorldDesc d{};
     d.stage.trk = trk.c_str(), d.stage.col = col.c_str(), d.stage.mat = mat.c_str();
-    d.stage.fnc = fnc.c_str(), d.stage.lbs = lbs.c_str(), d.stage.dls = "", d.stage.physicsBase = kRbrBase;
+    d.stage.fnc = fnc.c_str(), d.stage.lbs = lbs.c_str(), d.stage.dls = "", d.stage.physicsBase = base.c_str();
     d.stage.weather = c.weather, d.stage.wetness = c.wetness, d.stage.settings = c.settings, d.stage.flags = 0;
     d.cars = &car;
     d.carCount = 1;

@@ -101,6 +101,7 @@ Settings LoadSettings()
             for (int a = 0; a < input::kActions; ++a)
                 if (key == std::string("key_") + input::Info(static_cast<input::Action>(a)).id)
                     s.keys.scan[a] = static_cast<UINT>(std::strtoul(value.c_str(), nullptr, 0));
+            if (key.rfind("physics_", 0) == 0 && !value.empty()) s.physics[key.substr(8)] = value;   // physics_<car id>
             if (key.rfind("lamps_", 0) == 0) {   // lamps_<folder> = <ramp>|<spread>|<pitch>
                 Settings::Lamps& l = s.lamps[key.substr(6)];
                 const size_t a = value.find('|'), b = a == std::string::npos ? a : value.find('|', a + 1);
@@ -126,6 +127,7 @@ std::string SaveSettings(const Settings& in)
             << input::KeyName(s.keys.scan[a]) << "\n";
     }
     for (const auto& [car, l] : s.lamps) out << "lamps_" << car << " = " << l.layout << "|" << Text(l.spread) << "|" << Text(l.pitch) << "\n";
+    for (const auto& [car, variant] : s.physics) out << "physics_" << car << " = " << variant << "\n";
     std::ofstream f(SettingsPath(), std::ios::binary);
     if (!f) return "cannot write " + SettingsPath().string();
     f << out.str();

@@ -232,7 +232,12 @@ public:
    for a track with no real country (Montekland, Rally school, Neverwhere); the name a slug, a release number at its
    end dropped. Where an RBR folder's map number is another track than the table's (114, 119, 121 in this one), the
    table wins. A map the table does not know stays `rbr_<n>` (31 in this folder).
-6. Physics variants: `physics.json`, `Car::physics` as a list, Quick rally choice, `physics_<car-id>`.
+6. **Done 2026-11-05.** Physics variants: the catalog lists every car's (`Car::variants`: id, version, name, folder,
+   base from `physicsBase`, format, the modules that read it - `physics::ListModules` asks each installed module once);
+   the default car.json's `physics` (a variant id; a physics.rbz name or a folder as before becomes `car_json`), else
+   `rbr`. Quick rally's PHYSICS row offers those a module drives, kept as `physics_<car-id>`; the setups are the
+   chosen physics'. The command line: `--car <variant folder> --physics-base <its base> --physics <module>`. A car is
+   usable when a module drives one of its physics.
 7. Versions: fingerprints with their cache; replays record and resolve exact versions; `versions.json` last use.
 8. Cleaning: the keep rules, Settings → Storage, `download_keep_days`, `download_max_gb`.
 9. Writers to layer 1 (`car-pbr`); `content/cars/s_i2003.ini` removed from the content repository.

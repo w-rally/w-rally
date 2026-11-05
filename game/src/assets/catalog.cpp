@@ -103,6 +103,81 @@ int RoadOfWeather(const std::string& preset)
     return 0;
 }
 
+namespace {
+
+// The modules of `modules` that read `format` at `version`, and a variant's physics base (physics.json's physicsBase:
+// "<id>@<version>", or "<id>" for its newest) as a VFS folder ("" none here).
+std::vector<std::string> Drivers(const std::vector<PhysicsModule>& modules, const std::string& format, uint32_t version)
+{
+    std::vector<std::string> out;
+    for (const PhysicsModule& m : modules)
+        if (m.Reads(format, version)) out.push_back(m.id);
+    return out;
+}
+
+std::string BaseFolder(const vfs::Vfs& v, const std::string& base)
+{
+    const size_t at = base.find('@');
+    const auto b = v.Open({vfs::Kind::PhysicsBase, base.substr(0, at), "", at == std::string::npos ? "" : base.substr(at + 1)});
+    return b ? vfs::ItemDir(b->Ref()) + "/" : "";
+}
+
+// A physics variant as the catalog lists it, from its physics.json (made in memory for RBR's own).
+PhysicsVariant Variant(const vfs::Vfs& v, const vfs::Item& item, const std::vector<PhysicsModule>& modules)
+{
+    const formats::Json& j = item.Manifest();
+    PhysicsVariant p;
+    p.id = item.Ref().id, p.version = item.Ref().version;
+    p.name = j.Str("name", p.id);
+    p.folder = vfs::ItemDir(item.Ref()) + "/";
+    p.format = j.Str("format");
+    p.formatVersion = static_cast<uint32_t>(j.Num("formatVersion", 0));
+    p.source = item.Source("common.lsp");
+    if (p.source.empty()) p.source = item.Source("physics.json");
+    if (const std::string base = j.Str("physicsBase"); !base.empty()) p.base = BaseFolder(v, base);
+    if (!p.base.empty()) p.modules = Drivers(modules, p.format, p.formatVersion);
+    return p;
+}
+
+// The car's default physics first: car.json's `physics` (a variant's id - or, as before, a physics.rbz folder's name or
+// a folder under the RBR folder, made a variant "car_json"), else "rbr", else the first a module drives.
+void ChooseDefault(Car& car, const CarInfo* info, const vfs::Vfs& v, const std::vector<PhysicsModule>& modules)
+{
+    std::string wanted = info ? info->physics : "";
+    std::string from;
+    const auto has = [&](const std::string& id) {
+        return std::find_if(car.variants.begin(), car.variants.end(), [&](const PhysicsVariant& p) { return p.id == id; });
+    };
+    if (!wanted.empty() && has(wanted) == car.variants.end()) {
+        PhysicsVariant p;
+        p.id = "car_json", p.version = "rbr", p.name = "car.json (" + wanted + ")";
+        p.folder = wanted.find_first_of("/\\") == std::string::npos ? "physics/rbr/rbr/" + wanted + "/"
+                                                                    : "rbr/" + vfs::NormalPath(wanted) + "/";
+        p.format = "rbr-lsp", p.formatVersion = 1, p.source = "rbr";
+        p.base = BaseFolder(v, "rbr");
+        if (!p.base.empty()) p.modules = Drivers(modules, p.format, p.formatVersion);
+        from = p.name;
+        car.variants.push_back(std::move(p));
+        wanted = "car_json";
+    }
+    auto first = wanted.empty() ? car.variants.end() : has(wanted);
+    if (first == car.variants.end()) first = has("rbr");
+    if (first == car.variants.end())
+        first = std::find_if(car.variants.begin(), car.variants.end(), [](const PhysicsVariant& p) { return !p.modules.empty(); });
+    if (first != car.variants.end()) std::rotate(car.variants.begin(), first, first + 1);
+    if (car.variants.empty()) return;
+    const PhysicsVariant& d = car.variants.front();
+    car.physics = d.folder;
+    if (!from.empty()) car.physicsFrom = from;
+    else if (d.id == "rbr" && d.source == "rbr")
+        car.physicsFrom = car.slot >= 0 && !v.Find("rbr/Cars/" + car.folder + "/physics/common.lsp")
+                              ? "slot " + std::to_string(car.slot) + " (" + SlotPhysics(car.slot) + ")"
+                              : "its own";
+    else car.physicsFrom = d.name + " " + d.version;
+}
+
+} // namespace
+
 std::string Catalog::Scan(const app::Settings& s) { return Scan(s, app::MakeVfs(s)); }
 
 std::string Catalog::Scan(const app::Settings& s, std::shared_ptr<const vfs::Vfs> content)
@@ -248,13 +323,9 @@ std::string Catalog::Scan(const app::Settings& s, std::shared_ptr<const vfs::Vfs
             car.name = rbr->Manifest().Str("name", car.name);
             if (const formats::Json* r = rbr->Manifest().Get("rbr")) car.slot = static_cast<int>(r->Num("slot", -1));
         }
-        // its physics: the variant "rbr", newest version
-        if (const auto p = v.Open({vfs::Kind::Physics, "rbr", id})) {
-            car.physics = vfs::ItemDir(p->Ref()) + "/";
-            const auto common = p->Find("common.lsp");
-            car.physicsFrom = common && common->bytes && car.slot >= 0 ? "slot " + std::to_string(car.slot) + " (" + SlotPhysics(car.slot) + ")"
-                                                                        : "its own";
-        }
+        // its physics: every variant, the newest version of each
+        for (const std::string& pid : v.Ids(vfs::Kind::Physics, id))
+            if (const auto p = v.Open({vfs::Kind::Physics, pid, id})) car.variants.push_back(Variant(v, *p, physicsModules));
         if (!eng.empty()) car.engine = eng;
         else if (car.slot >= 0 && audioIni) car.engine = IniString(audioIni->file.string(), "CARS", ("Car" + std::to_string(car.slot)).c_str());
         cars.push_back(std::move(car));
@@ -266,15 +337,8 @@ std::string Catalog::Scan(const app::Settings& s, std::shared_ptr<const vfs::Vfs
         const CarInfo* info = carRegister.Find(car.folder);
         if (!info) continue;
         car.name = info->name;
-        // (its own physics first: car.json's only stands in for a car without one)
-        if (!info->physics.empty() && car.physics.empty()) {
-            // a physics.rbz folder's name ("s_i2003"), or a folder under the RBR folder ("Cars/i20_R5/physics/")
-            const std::string p = info->physics.find_first_of("/\\") == std::string::npos
-                                      ? "physics/rbr/rbr/" + info->physics + "/"
-                                      : "rbr/" + vfs::NormalPath(info->physics) + "/";
-            car.physics = p, car.physicsFrom = "car.json (" + info->physics + ")";
-        }
     }
+    for (Car& car : cars) ChooseDefault(car, carRegister.Find(car.folder), v, physicsModules);
     trackRegister.Build(v, stages);
     for (Stage& st : stages)
         if (const TrackInfo* t = trackRegister.Find(st.map); t && !t->name.empty()) {
@@ -288,15 +352,36 @@ std::string Catalog::Scan(const app::Settings& s, std::shared_ptr<const vfs::Vfs
     return "";
 }
 
-std::vector<Setup> Catalog::SetupsFor(const Car& car) const
+bool PhysicsModule::Reads(const std::string& format, uint32_t version) const
+{
+    for (const Format& f : formats)
+        if (f.name == format && version >= f.minVersion && version <= f.maxVersion) return true;
+    return false;
+}
+
+const PhysicsVariant* Catalog::PhysicsFor(const Car& car, const app::Settings& s) const
+{
+    if (const auto it = s.physics.find(car.id); it != s.physics.end())
+        for (const PhysicsVariant& p : car.variants)
+            if (p.id == it->second && !p.modules.empty()) return &p;
+    return !car.variants.empty() && !car.variants.front().modules.empty() ? &car.variants.front() : nullptr;
+}
+
+bool Catalog::Drivable(const Car& car)
+{
+    return std::any_of(car.variants.begin(), car.variants.end(), [](const PhysicsVariant& p) { return !p.modules.empty(); });
+}
+
+std::vector<Setup> Catalog::SetupsFor(const Car& car, const PhysicsVariant* physics) const
 {
     std::vector<Setup> out;
     if (!m_content) return out;
     // Its physics' setups (not the defaults, d_<surface>.lsp: those are what "default" means).
-    if (!car.physics.empty())
-        for (const std::string& n : m_content->List(car.physics + "setups")) {
+    const std::string folder = physics ? physics->folder : car.physics;
+    if (!folder.empty())
+        for (const std::string& n : m_content->List(folder + "setups")) {
             if (Lower(fs::path(n).extension().string()) != ".lsp" || !_strnicmp(n.c_str(), "d_", 2)) continue;
-            out.push_back({fs::path(n).stem().string(), car.physics + "setups/" + n});
+            out.push_back({fs::path(n).stem().string(), folder + "setups/" + n});
         }
     // A slot car's saved ones: rbr/SavedGames/<slot>slot<n>_<name>.lsp.
     if (car.slot >= 0)

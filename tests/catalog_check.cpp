@@ -1,6 +1,8 @@
 // catalog-check: what the Quick rally menu offers (assets::Catalog) from an RBR folder, checked against what it must
 // hold - every RBR stage, the ones no .ngg draws imported from their .lbs with their weathers drawn, but no protected
-// (encrypted) one, and the TrackSettings.ini weathers of a map under 10 found under their two-digit names ("04E_...").
+// (encrypted) one, and the TrackSettings.ini weathers of a map under 10 found under their two-digit names ("04E_...");
+// every slot car with RBR's physics (its variant "rbr") a module reading rbr-lsp 1 drives, as the default. A car with
+// more physics than RBR's (a download's) is listed with them.
 //
 //   catalog-check <RBR folder> [<.ngg folders>]
 //
@@ -38,7 +40,22 @@ int main(int argc, char** argv)
     s.rbrPath = argv[1];
     if (argc > 2) s.nggFolders = argv[2];
     wrally::assets::Catalog c;
+    c.physicsModules = {{"rbr", "RBR original", 1, {{"rbr-lsp", 1, 1}}}};   // (WPhysicsRBR's answer, without loading it)
     if (const std::string e = c.Scan(s); !e.empty()) return Fail(e);
+    for (const wrally::assets::Car& car : c.cars) {
+        if (car.slot >= 0) {
+            const wrally::assets::PhysicsVariant* p = c.PhysicsFor(car, s);
+            if (!p || p->id != "rbr" || p->modules.empty() || p->base != "physics/rbr/rbr/")
+                return Fail(car.name + ": a slot car without RBR's physics as its default");
+        }
+        if (car.variants.size() > 1) {
+            std::printf("%s's physics:", car.name.c_str());
+            for (const wrally::assets::PhysicsVariant& p : car.variants)
+                std::printf(" %s %s (%s, %s%s)", p.id.c_str(), p.version.c_str(), p.source.c_str(), p.folder.c_str(),
+                            p.modules.empty() ? ", no module" : "");
+            std::printf("\n");
+        }
+    }
 
     size_t imported = 0, drawn = 0;
     for (const wrally::assets::Stage& st : c.stages) {
