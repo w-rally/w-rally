@@ -1064,14 +1064,16 @@ PauseChoice PauseMenu(const ImGuiLayer& ui, const PauseInfo& info, int width, in
             else if (no || enter) g_pauseAsk = -1;
         }
 
-        // What the selected row does; the keys.
+        // What the selected row does; the keys. The question may have opened or been answered above this frame, so
+        // the footer reads g_pauseAsk afresh - the stale `asking` would index kPauseItems[-1] once it is answered.
+        const bool asked = g_pauseAsk >= 0;
         const float footY = 1080 - 80 - 34;
-        if (!asking) d->AddText(text, 23 * k, P(x0 + 46, footY - 24 - 64), kInkSecondary, kPauseItems[g_pauseAt].help, nullptr, 600 * k);
+        if (!asked) d->AddText(text, 23 * k, P(x0 + 46, footY - 24 - 64), kInkSecondary, kPauseItems[g_pauseAt].help, nullptr, 600 * k);
         float x = x0 * k;
-        x += KeyHint(d, text, k, ImVec2(x, footY * k), asking ? "A D" : "W S", "MOVE") + 24 * k;
-        const char* enterDoes = !asking ? kPauseItems[g_pauseAt].enter : g_pauseYes ? kPauseItems[g_pauseAsk].verb : "CANCEL";
+        x += KeyHint(d, text, k, ImVec2(x, footY * k), asked ? "A D" : "W S", "MOVE") + 24 * k;
+        const char* enterDoes = !asked ? kPauseItems[g_pauseAt].enter : g_pauseYes ? kPauseItems[g_pauseAsk].verb : "CANCEL";
         x += KeyHint(d, text, k, ImVec2(x, footY * k), "ENTER", enterDoes) + 24 * k;
-        KeyHint(d, text, k, ImVec2(x, footY * k), "ESC", asking ? "CANCEL" : "RESUME");
+        KeyHint(d, text, k, ImVec2(x, footY * k), "ESC", asked ? "CANCEL" : "RESUME");
 
         // The run so far, beside the rows on the HUD's scrim.
         {
