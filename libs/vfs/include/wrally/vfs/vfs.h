@@ -113,6 +113,9 @@ public:
     std::vector<std::string> List(std::string_view dir) const;
     // Where a write of `path` goes: in the first layer, never in the RBR folder ("" then, or with no layer).
     std::filesystem::path WritePath(std::string_view path) const;
+    // A file on disk as a VFS path: under the RBR folder rbr/<path>, under a layer its path there; anywhere else its
+    // absolute path as it is (the command line's, for development - FileHost reads those directly). "" stays "".
+    std::string VfsPath(const std::filesystem::path& file) const;
 
     // The RBR mapping: an RBR map's track id ("" none), and a track's map number (-1 none).
     std::string TrackOfMap(int map) const;

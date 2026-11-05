@@ -1,7 +1,7 @@
 #pragma once
-// FileHost - iface::HostServices over plain folders: a data root the VFS paths resolve against and a cache root with
-// one folder per module. The stand-in until wrally::vfs exists (design 6.1): no archives (an "a.rbz:member" path is
-// ErrIo, said in the log), no layers.
+// FileHost - iface::HostServices over the game's content layers (wrally::vfs, docs/content-layers.md) and a cache root
+// with one folder per module. A module's paths are the VFS's: an item's file (cars/<id>/<version>/...), a raw RBR file
+// (rbr/...) or a plain one; an absolute path is read from the disk as it is (the command line's, for development).
 
 #include <filesystem>
 #include <functional>
@@ -10,6 +10,7 @@
 #include <vector>
 
 #include "wrally/iface/common.h"
+#include "wrally/vfs/vfs.h"
 
 namespace wrally::modules {
 
@@ -17,10 +18,12 @@ class FileHost {
 public:
     using LogFn = std::function<void(iface::LogLevel, const char*)>;
 
-    FileHost(std::filesystem::path dataRoot, std::filesystem::path cacheRoot, LogFn log = {});
+    FileHost(std::shared_ptr<const vfs::Vfs> content, std::filesystem::path cacheRoot, LogFn log = {});
 
     // The services for one module (`moduleId` names its cache folder). Valid while this FileHost lives.
     iface::HostServices Services(const std::string& moduleId);
+
+    const vfs::Vfs& Content() const { return *m_content; }
 
 private:
     struct Ctx {
@@ -36,9 +39,11 @@ private:
     static const char* WRALLY_CALL CacheDir(void* ctx);
     static double WRALLY_CALL Now(void* ctx);
 
-    std::filesystem::path Resolve(const char* path) const;
+    // Where `path` is: through the VFS, or the disk's for an absolute one.
+    std::optional<vfs::Resolved> Resolve(const char* path) const;
 
-    std::filesystem::path m_data, m_cache;
+    std::shared_ptr<const vfs::Vfs> m_content;
+    std::filesystem::path m_cache;
     LogFn m_log;
     std::vector<std::unique_ptr<Ctx>> m_ctx;
 };

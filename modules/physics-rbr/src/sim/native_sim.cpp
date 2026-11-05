@@ -95,7 +95,7 @@ std::string NativeSim::Open(const Config& c)
     if (m_world) return m_error = "phys-sim: already open";
     if (!c.anims.empty()) return m_error = "the native physics: no animation objects (spectators) yet";
     native::WorldFiles f;
-    f.rbz = c.rbz, f.trk = c.trk, f.col = c.col, f.mat = c.mat, f.fnc = c.fnc, f.lbs = c.lbs, f.sgc = c.sgc;
+    f.base = c.base, f.trk = c.trk, f.col = c.col, f.mat = c.mat, f.fnc = c.fnc, f.lbs = c.lbs, f.sgc = c.sgc;
     f.car = c.car, f.surface = c.surface, f.tyres = c.tyres, f.setup = c.setup;
     f.tyreIndex = c.tyreIndex, f.settings = c.settings | 1, f.weather = c.weather, f.wetness = c.wetness;
     std::memcpy(f.aids, c.aids, sizeof f.aids);

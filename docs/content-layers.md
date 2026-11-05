@@ -218,8 +218,10 @@ public:
 2. **Done 2026-11-05.** `libs/vfs`: layers, items and versions, base chains, `rbr/` raw, `RbrMap` (cars, tracks table, `physics.rbz`
    mapping), union listing; unit tests.
 3. **Done 2026-11-05.** `download_path` in Settings (+ expansion, UI field); `app::MakeVfs` (`app/content.*`), made and logged with every content scan.
-4. `FileHost` over the `Vfs`; physics interface v3 (`physicsCar` a folder, base folder, `formats`, `simVersion`);
-   WPhysicsRBR, audio and renderer hosts moved over.
+4. **Done 2026-11-05.** `FileHost` over the `Vfs`; physics interface v3 (`physicsCar` a folder, `physicsBase`,
+   `formats`, `simVersion`); WPhysicsRBR, audio and renderer hosts moved over. The game still names a stage's and a
+   car's files by their place on disk, handed over as VFS paths (`rbr/Maps/...`, a slot car's physics.rbz folder as
+   `physics/rbr/rbr/<folder>/`); item paths come with the catalog (step 5). Audio interface 3: RBR's sounds under `rbr/`.
 5. Catalog and registers over the VFS: cars and tracks by id (newest version) with `source`; manifests from the
    layers; `rbr-tracks.json` written for the stages at hand with `<country>_<stagename>` ids.
 6. Physics variants: `physics.json`, `Car::physics` as a list, Quick rally choice, `physics_<car-id>`;

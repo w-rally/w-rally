@@ -12,6 +12,7 @@
 #include <cstdio>
 #include <cstring>
 #include <exception>
+#include <iterator>
 #include <memory>
 #include <string>
 #include <vector>
@@ -47,6 +48,11 @@ struct World {
 namespace {
 
 constexpr uint32_t kModuleVersion = MakeVersion(0, 1, 0);
+
+// What it drives: RBR's car physics (.lsp files), the one version there is. Its simulation version: bumped only when
+// the same files and controls give another result (RBR's own recordings replay bit-exact with 1).
+constexpr PhysicsFormat kFormats[] = {{"rbr-lsp", 1, 1}};
+constexpr uint32_t kSimVersion = 1;
 
 void Log(PhysicsModule& m, LogLevel level, const std::string& text)
 {
@@ -96,14 +102,18 @@ Status WRALLY_CALL CreateWorld(PhysicsModule* m, const WorldDesc* d, World** out
     if (d->carCount != 1 || !d->cars) return m->error = "exactly one car (no kPhysicsCapMultiCar)", Status::ErrNotSupported;
     if (d->stage.flags & kStageSpectators) return m->error = "no animation objects (spectators) yet", Status::ErrNotSupported;
     const CarDesc& car = d->cars[0];
-    if (Str(car.physicsCar).empty()) return m->error = "an RBR car only (CarDesc::physicsCar)", Status::ErrNotSupported;
+    const std::string carPhysics = Str(car.physicsCar), base = Str(d->stage.physicsBase);
+    if (carPhysics.empty()) return m->error = "an RBR car only (CarDesc::physicsCar)", Status::ErrNotSupported;
+    if (carPhysics.back() != '/' || base.empty() || base.back() != '/')
+        return m->error = "the car's physics and the physics base are folders (ending in /): \"" + carPhysics + "\", \"" +
+                          base + "\"", Status::ErrInvalidArg;
 
     phys::sim::Config c;
-    c.rbz = Str(d->stage.rbz);
+    c.base = base;
     c.trk = Str(d->stage.trk), c.col = Str(d->stage.col), c.mat = Str(d->stage.mat);
     c.fnc = Str(d->stage.fnc), c.lbs = Str(d->stage.lbs);
     c.weather = d->stage.weather, c.wetness = d->stage.wetness, c.settings = d->stage.settings;
-    c.car = Str(car.physicsCar);
+    c.car = carPhysics;
     c.sgc = Str(car.model);
     c.setup = Str(car.setup);
     if (!Str(car.tyres).empty()) c.tyres = car.tyres;
@@ -310,6 +320,9 @@ WRALLY_EXPORT Status WRALLY_CALL InitWInterface(uint32_t gameVersion, const Stru
         output.info.caps = kPhysicsCapRbrCars | kPhysicsCapRbrStages | kPhysicsCapCarOverrides;
         output.api = &kApi;
         output.instance = m.release();
+        output.formats = kFormats;
+        output.formatCount = static_cast<uint32_t>(std::size(kFormats));
+        output.simVersion = kSimVersion;
         return Status::Ok;
     } catch (...) {
         return Status::ErrInternal;

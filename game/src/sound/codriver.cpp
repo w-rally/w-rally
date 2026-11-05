@@ -135,7 +135,7 @@ std::string CoDriver::Load(Sound* sound, const std::string& rbrRoot, const std::
             const std::string snd = Ini(ini, section, "Snd" + std::to_string(k));
             if (snd.empty()) continue;
             std::string e;
-            if (const uint32_t h = sound->LoadSound("audio/Speech/PaceNote/" + snd + ".ogg", &e)) variants.push_back(h), ++loaded;
+            if (const uint32_t h = sound->LoadSound("rbr/audio/Speech/PaceNote/" + snd + ".ogg", &e)) variants.push_back(h), ++loaded;
             else missing += snd + " ";
         }
         m_words.emplace_back(section.substr(10), std::move(variants));
@@ -143,7 +143,7 @@ std::string CoDriver::Load(Sound* sound, const std::string& rbrRoot, const std::
     for (int d : kNumbers) {
         if (!voice) break;
         std::vector<uint32_t> v;
-        if (const uint32_t h = sound->LoadSound("audio/Speech/PaceNote/" + std::to_string(d) + ".ogg")) v.push_back(h), ++loaded;
+        if (const uint32_t h = sound->LoadSound("rbr/audio/Speech/PaceNote/" + std::to_string(d) + ".ogg")) v.push_back(h), ++loaded;
         m_words.emplace_back("#" + std::to_string(d), std::move(v));
     }
 

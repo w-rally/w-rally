@@ -140,7 +140,6 @@ int Parse(const std::vector<std::string>& args, Options& o)
     physics::Config& c = s.physics;
     const std::string maps = game + "/Maps/" + o.stage;
     c.root = game;
-    c.rbz = game + "/physics.rbz";
     c.trk = maps + ".trk";
     c.col = maps + ".col";
     c.mat = maps + ".mat";

@@ -23,21 +23,15 @@ std::vector<uint8_t> ReadBytes(const std::string& path)
     return d;
 }
 
-// One of the car's physics files (common.lsp, <surface>.lsp, r_<surface>.lsp, setups/...): from its folder when
-// WorldFiles::car is a folder path (ends in a slash: a car's own physics, loose files), else from physics.rbz's
-// Physics/<car>/.
-std::string CarFile(const WorldFiles& f, const std::string& name)
-{
-    const bool folder = !f.car.empty() && (f.car.back() == '/' || f.car.back() == '\\');
-    return folder ? data::ReadFileText(f.car + name) : data::ReadZipMember(f.rbz, "Physics/" + f.car + "/" + name);
-}
+// One of the car's physics files (common.lsp, <surface>.lsp, r_<surface>.lsp, setups/...), from its folder.
+std::string CarFile(const WorldFiles& f, const std::string& name) { return data::ReadFileText(f.car + name); }
 
 } // namespace
 
 std::string LoadToCar(const WorldFiles& f, LoadedWorld& w)
 {
     DefsReport r;
-    std::string e = LoadPhysicsLsp(data::ReadZipMember(f.rbz, "Physics/physics.lsp"), w.defs, r);
+    std::string e = LoadPhysicsLsp(data::ReadFileText(f.base + "physics.lsp"), w.defs, r);
     for (const std::string& name : {std::string("common.lsp"), f.surface + ".lsp"})
         if (e.empty()) e = LoadDefsLsp(CarFile(f, name), w.defs, r);
     if (!e.empty()) return e;
@@ -105,14 +99,10 @@ std::string FinishLoad(const WorldFiles& f, LoadedWorld& w)
     WorldLoader& L = *w.loader;
     Defaults(w.setup), Defaults(w.options);
     DefsReport r;
-    // The setup: the car's default for the surface, a member of physics.rbz (Physics/...), or a file (a saved one:
-    // SavedGames/<slot>slot<n>_<name>.lsp).
-    const bool member = f.setup.size() >= 8 && _strnicmp(f.setup.c_str(), "Physics/", 8) == 0;
-    LoadSetup(f.setup.empty() ? CarFile(f, "setups/d_" + f.surface + ".lsp")
-                              : member ? data::ReadZipMember(f.rbz, f.setup) : data::ReadFileText(f.setup),
-              w.setup, r);
+    // The setup: the car's default for the surface, or a file (a saved one: SavedGames/<slot>slot<n>_<name>.lsp).
+    LoadSetup(f.setup.empty() ? CarFile(f, "setups/d_" + f.surface + ".lsp") : data::ReadFileText(f.setup), w.setup, r);
     LoadSetupOptions(CarFile(f, "r_" + f.surface + ".lsp"), w.options, r);
-    LoadSetupOptions(data::ReadZipMember(f.rbz, "Physics/" + f.tyres + "/tyres.lsp"), w.options, r);
+    LoadSetupOptions(data::ReadFileText(f.base + f.tyres + "/tyres.lsp"), w.options, r);
     SetupFromOptions(w.setup, w.options);
     SetupAids(w.setup, f.aids);
     SetupTyres(w.setup, w.options, f.tyreIndex);
