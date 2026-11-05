@@ -24,7 +24,7 @@
 //     renderer; nothing in the game assumes a particular rate.
 //
 // CONFIGURATION is the module's own business. At InitWInterface it reads
-// PhysicsInput::config (a VFS path, typically config/physics/<id>.json; ""
+// PhysicsInput::config (a VFS path, typically config/physics/<id>.yaml; ""
 // means none, run on defaults) in whatever format it likes - JSON for
 // WPhysics. Per car, CarDesc::carData names the module's own car file; the
 // game passes it through without reading it.
@@ -85,7 +85,7 @@ constexpr uint32_t kStageSpectators = 1u << 0;   // load the animation objects (
 
 // One car. Strings are VFS paths or names, "" for the default or "not this kind".
 // An RBR car fills physicsCar (kPhysicsCapRbrCars); a W-Rally car fills carData
-// (the module's own file, e.g. cars/<car>/wphysics.json). A module refuses a car
+// (the module's own file, e.g. cars/<car>/wphysics.yaml). A module refuses a car
 // it has no data for with ErrNotSupported.
 struct CarDesc {
     const char* physicsCar;   // RBR car physics: a VFS folder ending in '/' of loose files
@@ -242,7 +242,7 @@ struct PhysicsInput {
     const char*  config;      // the module's configuration file (VFS path), "" none
 };
 
-// A car physics format the module reads, and the range of its versions (physics.json's format, formatVersion).
+// A car physics format the module reads, and the range of its versions (physics.yaml's format, formatVersion).
 struct PhysicsFormat {
     char     name[32];        // "rbr-lsp"
     uint32_t minVersion, maxVersion;

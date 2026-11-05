@@ -38,24 +38,47 @@ A version is `major.minor.patch`, set by the item's author; RBR's own items have
 ```
 cars/<car-id>/
     <version>/                         the car at that version
-        car.json                       id, version, base, name, maker, year, class, drive, power, weight, default physics
+        car.yaml                       id, version, base, name, maker, year, class, drive, power, weight, default physics
         <model>.sgc, textures, <texture>_orm.dds, lamps, engine sound ...
     physics/<physics-id>/<version>/    a physics variant at that version (§4), always loose files
-        physics.json
+        physics.yaml
         common.lsp, <surface>.lsp, ..., setups/*.lsp
 tracks/<track-id>/<version>/
-    track.json                         id, version, base, name, country, surface, length, conditions, rbr map number
+    track.yaml                         id, version, base, name, country, surface, length, conditions, rbr map number
     <track-id>.ngg, ...
 physics/<base-id>/<version>/           a physics base: tyres, global defs
 video/menu.mp4                         W-Rally's own files that are no item, as today
-rbr-tracks.json                        the translation table: RBR map number <-> track id (§3)
+rbr-tracks.yaml                        the translation table: RBR map number <-> track id (§3)
 ```
 
 Layer 2 has the same layout, with the one version of each item that the installed W-Rally ships.
 
+**Manifests are YAML** (decided 2026-11-05, for modders: comments, no quotes or braces):
+
+```yaml
+# cars/i20_r5/1.0.0/car.yaml
+id: i20_r5
+version: 1.0.0
+name: Hyundai i20 R5
+maker: Hyundai
+year: 2016
+class: R5
+drive: 4WD
+power_hp: 280
+weight_kg: 1230
+```
+
+The reader (`libs/json`, `formats::ParseYaml`) takes the subset a manifest needs: mappings and lists by indentation
+(spaces, not tabs), `[a, b]` and `{a: 1}`, plain, `'...'` and `"..."` values, `|` and `>` blocks, `#` comments - no
+anchors, aliases, tags or several documents. **Every value is text** until the key that reads it says otherwise, so
+`version: 1.10` stays `1.10` and a country `no` stays `no` (YAML's usual traps). A value with `: ` or a leading `#`,
+`[`, `{`, `&`, `*`, `!`, `|`, `>`, `%`, `@` or a backquote is quoted. A version's manifest is the first of
+`<kind>.yaml`, `<kind>.yml` and `<kind>.json` it has (the older JSON is still read, the others are left out with a
+note in the log); `rbr-tracks.yaml` likewise falls back to `rbr-tracks.json`.
+
 **Patching:** a version may name a `base` in its manifest — an earlier version of the same item, or `rbr`. Its
 files are its own folder's first, then its base's (and so on down the chain), file by file. So a download of a few
-files (a texture's `_orm.dds`, a new `car.json`, a corrected `.lsp`) is a new version over RBR's item or over an
+files (a texture's `_orm.dds`, a new `car.yaml`, a corrected `.lsp`) is a new version over RBR's item or over an
 earlier one. Files read as a set (an `.lbs` with its textures) come from one version, the one that has the set's
 main file. A version without `base` is complete.
 
@@ -66,21 +89,21 @@ removed; `--overrides` stays for development.
 
 **Mapped** — the RBR layer answers W-Rally paths for RBR's items, all at version `rbr`:
 
-- **Tracks:** `rbr-tracks.json` (shipped in layer 2, a newer one downloadable into layer 1) is written by hand and
-  maps each RBR map number to a track id: `{ "41": "cz_ploskovice", ... }`. Then `tracks/<id>/rbr/track-41_M.trk` ↔
+- **Tracks:** `rbr-tracks.yaml` (shipped in layer 2, a newer one downloadable into layer 1) is written by hand and
+  maps each RBR map number to a track id: `41: cz_ploskovice`, one a line. Then `tracks/<id>/rbr/track-41_M.trk` ↔
   `Maps/track-41_M.trk`, and so on for the map's files (`.lbs`, `.trk`, `.col`, `.dls`, `.ini`, textures), keeping
   RBR's file names inside the track's folder. A map the table does not know is offered as `rbr_<n>` until it is
-  added. The map number lives on only in this table and in `track.json`'s `rbr` field, for compatibility (old
+  added. The map number lives on only in this table and in `track.yaml`'s `rbr` field, for compatibility (old
   replays, `TrackSettings.ini`'s sections, RBR's own track files).
 - **Cars:** `cars/<id>/rbr/<file>` ↔ `Cars/<folder>/<file>`. `Cars.ini`'s name and the slot table fill an in-memory
-  `car.json`.
+  `car.yaml`.
 - **`physics.rbz` is RBR's alone, kept for compatibility, and only the mapping opens it.** Nothing else in the game
   or in a module asks for `physics.rbz` or a member of it; car physics is always looked for **unpacked under the
   car's physics folder**:
   - a slot car's folder in it (`Physics/s_i2003/...`) appears as `cars/<id>/physics/rbr/rbr/...`, loose to the
     reader — unless the car has a loose `Cars/<folder>/physics/`, which then is its `rbr` variant;
   - its shared files (`Physics/<brand>/tyres.lsp` and the global defs) appear as the base `physics/rbr/rbr/...`;
-  - the `physics.json` of these is made in memory (§4).
+  - the `physics.yaml` of these is made in memory (§4).
   The physics interface changes with it (v3): `CarDesc::physicsCar` is always a VFS folder, the `physics.rbz`
   folder-name form and member paths in `setup` go, and `StageDesc::rbz` becomes the base folder.
   `--extract-slot-physics` is removed: nothing needs copying.
@@ -93,11 +116,17 @@ module's RBR sounds (the game passes it the base `rbr/`). Step 1 checks every mo
 
 A car has any number of physics variants, `cars/<id>/physics/<physics-id>/<version>/`, from any layer (an RBR car's
 original is `rbr`; a download can add others). A variant is versioned on its own, apart from the car's model. Each
-has a `physics.json`:
+has a `physics.yaml`:
 
-```json
-{ "id": "rbr", "version": "1.0.0", "base": "rbr", "name": "RBR original", "author": "...",
-  "format": "rbr-lsp", "formatVersion": 1, "physicsBase": "rbr@rbr" }
+```yaml
+id: rbr
+version: 1.0.0
+base: rbr
+name: RBR original
+author: ...
+format: rbr-lsp
+formatVersion: 1
+physicsBase: rbr@rbr
 ```
 
 - **The module says what it can drive, not the variant.** Each physics module reports the formats it reads, each
@@ -106,7 +135,7 @@ has a `physics.json`:
   build, already in `ModuleInfo`) that separates "the physics changed" from "the module was rebuilt". New in the
   physics interface (v3): a `formats` list and `simVersion`.
 - A variant is drivable by a module that reads its `format` at its `formatVersion`. The catalog lists `Car::physics`
-  as a list of variants; Quick rally offers those the chosen physics module can drive, `car.json`'s `physics` the
+  as a list of variants; Quick rally offers those the chosen physics module can drive, `car.yaml`'s `physics` the
   default, the last choice per car kept in `W-Rally.ini` (`physics_<car-id>`).
 - A car with no variant any installed module can drive is listed but not usable, as today.
 
@@ -223,18 +252,18 @@ public:
    car's files by their place on disk, handed over as VFS paths (`rbr/Maps/...`, a slot car's physics.rbz folder as
    `physics/rbr/rbr/<folder>/`); item paths come with the catalog (step 5). Audio interface 3: RBR's sounds under `rbr/`.
 5. **Done 2026-11-05.** Catalog and registers over the VFS: tracks and cars by id (newest
-   version) with `source`, their files resolved through the versions; `car.json`/`track.json` from the layers (and
-   an RBR car folder's old `car.json` under `rbr/`); a stage run takes `--track <id>[@<version>]` for its files, a
+   version) with `source`, their files resolved through the versions; `car.yaml`/`track.yaml` from the layers (and
+   an RBR car folder's old `car.yaml` under `rbr/`); a stage run takes `--track <id>[@<version>]` for its files, a
    car's physics and a setup as VFS paths. The RBR mapping also takes the maps with files in Maps that Tracks.ini
    does not list (40, 599, 771 here), as the catalog did. `--extract-slot-physics` and the `content/cars/<car>.ini`
-   lookup are gone. `content/rbr-tracks.json` comes from the onlineracing.cz tracks table (`tools/rbr-tracks/
+   lookup are gone. `content/rbr-tracks.yaml` comes from the onlineracing.cz tracks table (`tools/rbr-tracks/
    make_table.py` over its CSV export: 344 tracks): the country its English name's ISO code, `xx` (ISO's private use)
    for a track with no real country (Montekland, Rally school, Neverwhere); the name a slug, a release number at its
    end dropped. Where an RBR folder's map number is another track than the table's (114, 119, 121 in this one), the
    table wins. A map the table does not know stays `rbr_<n>` (31 in this folder).
 6. **Done 2026-11-05.** Physics variants: the catalog lists every car's (`Car::variants`: id, version, name, folder,
    base from `physicsBase`, format, the modules that read it - `physics::ListModules` asks each installed module once);
-   the default car.json's `physics` (a variant id; a physics.rbz name or a folder as before becomes `car_json`), else
+   the default car.yaml's `physics` (a variant id; a physics.rbz name or a folder as before becomes `car_json`), else
    `rbr`. Quick rally's PHYSICS row offers those a module drives, kept as `physics_<car-id>`; the setups are the
    chosen physics'. The command line: `--car <variant folder> --physics-base <its base> --physics <module>`. A car is
    usable when a module drives one of its physics.
@@ -242,10 +271,10 @@ public:
    resolve exact versions; `versions.json` last use.
 8. **Deferred 2026-11-05** (a TODO in design.md §6.1). Cleaning: the keep rules, Settings → Storage, `download_keep_days`, `download_max_gb`.
 9. **Done 2026-11-05.** Writers to layer 1: `car-pbr` writes its maps as a new version of the car over RBR's in the
-   downloads folder (`cars/<id>/<version>/textures/`, a `car.json` with `"base": "rbr"`; `--downloads`, `--version`;
+   downloads folder (`cars/<id>/<version>/textures/`, a `car.yaml` with `base: rbr`; `--downloads`, `--version`;
    it refuses the car's own folder), and the game reads a car model's other files (its `.ini` files, textures, PBR
    maps) through the car's item (`assets::CarFiles`; a stage run's `--car-item <id>@<version>`), so the maps lie over
-   RBR's textures. A layer's `car.json` makes a car known only when it names it (a patch's does not).
+   RBR's textures. A layer's `car.yaml` makes a car known only when it names it (a patch's does not).
    `content/cars/s_i2003.ini` removed from the content repository. The maps made earlier beside RBR's textures (in
    `Cars/IMPREZA05/textures/`) are to be moved out by hand.
 10. **Done 2026-11-05.** Installer: a "Downloads folder" page after the RBR folder (`DOWNLOADDIR`, pre-filled with this
@@ -273,12 +302,12 @@ Every content path today, and what it becomes. `<t>` is the track id, `<c>` the 
 | where | reads today | becomes |
 |---|---|---|
 | `app/options.cpp` `Parse` | `args[1]` (the RBR folder) as the root of everything; `Maps/<stage>.trk/.col/.mat/.fnc/.lbs/.dls`; `physics.rbz`; `--sgc` under the root | the run's resolved items: `tracks/<t>/<v>/<stage>.*`, `cars/<c>/<v>/<model>.sgc`; no `rbz` (§3). `args[1]` stays for development as the RBR layer's folder |
-| `app/options.cpp` `NggStage` | `Maps/track-<n>_*.trk` to name the `.ngg`'s stage | the track's `track.json` (its stages); the `.trk` listing only for an RBR track |
+| `app/options.cpp` `NggStage` | `Maps/track-<n>_*.trk` to name the `.ngg`'s stage | the track's `track.yaml` (its stages); the `.trk` listing only for an RBR track |
 | `app/options.cpp` | `--car`: `<sgc folder>/physics/` or `s_i2003` (a `physics.rbz` folder) | the chosen variant `cars/<c>/physics/<p>/<v>/` |
 | `app/options.cpp` | `WRallyFile("content/cars/<car>.ini")` | removed (§2) |
-| `app/options.cpp`, `rules/stage.cpp` | `Maps/Tracks.ini` `Surface` | `track.json`'s `surface` (for an RBR track filled from `rbr/Maps/Tracks.ini`) |
+| `app/options.cpp`, `rules/stage.cpp` | `Maps/Tracks.ini` `Surface` | `track.yaml`'s `surface` (for an RBR track filled from `rbr/Maps/Tracks.ini`) |
 | `app/game.cpp` quick-rally command line | `relative(car.sgc, rbrPath)`, `rbrPath\<physics>`, `rbrPath\<setup>` | item refs (id + version) instead of paths |
-| `app/game.cpp` splash | `Maps/Tracks.ini` `SplashScreen`; `assets/splash.cpp` the loose `.dds` or `Textures/splash.dat` | `track.json`'s splash, a file of the track; RBR's from `rbr/Maps/Tracks.ini` and `rbr/Textures/splash.dat` |
+| `app/game.cpp` splash | `Maps/Tracks.ini` `SplashScreen`; `assets/splash.cpp` the loose `.dds` or `Textures/splash.dat` | `track.yaml`'s splash, a file of the track; RBR's from `rbr/Maps/Tracks.ini` and `rbr/Textures/splash.dat` |
 | `app/game.cpp` | the `.ngg`, `fopen(o.ngg)`, its bytes to the renderer | `tracks/<t>/<v>/<t>.ngg` through the VFS (still bytes to the renderer) |
 | `app/game.cpp` | `WRallyFile("content/video/menu.mp4")` | `video/menu.mp4` through the layers |
 | `session` / `ReadDls` | `Maps/<stage>.dls` | `tracks/<t>/<v>/<stage>.dls` |
@@ -287,8 +316,8 @@ Every content path today, and what it becomes. `<t>` is the track id, `<c>` the 
 | `assets/catalog.cpp` `Scan` | `Maps/Tracks.ini`, `Maps/TrackSettings.ini`, `physics.rbz` (as the RBR check), `Cars/Cars.ini`, `audio/Cars/Cars.ini`, `Cars/*` | `RbrMap` from `rbr/...` (the check: `Tracks.ini`, `Cars.ini`); the lists by `Vfs::List("cars")`, `List("tracks")` |
 | `assets/catalog.cpp` `SetupsFor` | `<car physics>/setups/*`, `SavedGames/*` | the variant's `setups/`; `rbr/SavedGames/` for an RBR slot car's saved ones |
 | `assets/catalog.cpp` `ExtractSlotPhysics` | **writes** `Cars/<folder>/physics/` into the RBR folder | removed (§3) |
-| `assets/car_register.cpp` | `Cars/<folder>/car.json` | `cars/<c>/<v>/car.json` |
-| `assets/track_register.cpp` | `Maps/Tracks.ini`; `track-<n>.json` beside the `.ngg` or in `Maps` | `tracks/<t>/<v>/track.json`; `rbr/Maps/Tracks.ini` for RBR's |
+| `assets/car_register.cpp` | `Cars/<folder>/car.json` | `cars/<c>/<v>/car.yaml` |
+| `assets/track_register.cpp` | `Maps/Tracks.ini`; `track-<n>.json` beside the `.ngg` or in `Maps` | `tracks/<t>/<v>/track.yaml`; `rbr/Maps/Tracks.ini` for RBR's |
 | `assets/car_model.cpp`, `car_render.cpp` | the `.sgc`, `<dir>/textures/<file>` and its `_basecolor/_normal/_orm` maps beside | `cars/<c>/<v>/...` through the base chain (a map in a patch version over RBR's texture) |
 | `assets/car_lights.cpp` | the car's lamps `.ini` | `cars/<c>/<v>/...` |
 | `camera/scenery.cpp` | `Maps/<stage>.col` | `tracks/<t>/<v>/<stage>.col` |

@@ -37,7 +37,7 @@ enum class LampKind : uint32_t {
 };
 
 struct LampBeam {
-    const char*     name;            // as car.json names it
+    const char*     name;            // as car.yaml names it
     float           kelvin;          // colour temperature; 0: `rgb` (a coloured lamp)
     float           radius;          // the emitter's size, metres (its shadows' and its highlight's softness)
     uint32_t        lobeCount;
@@ -46,7 +46,7 @@ struct LampBeam {
 };
 
 const LampBeam& Beam(LampKind kind);
-// The kind car.json names ("halogen-low", "halogen-pencil", ...); false if none is.
+// The kind car.yaml names ("halogen-low", "halogen-pencil", ...); false if none is.
 bool LampKindByName(const char* name, LampKind* kind);
 
 struct Lamp {

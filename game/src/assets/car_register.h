@@ -4,16 +4,23 @@
 //
 //   1. RBR's files     Cars.ini's CarName, the physics the catalog picked (its own, its slot's, the base)
 //   2. the server      W-Rally's car list (hardcoded until there is a server: car_register.cpp kServerCars)
-//   3. car.json        the car's own manifest, for a mod or a fix: the old place in the RBR folder
-//                      (rbr/Cars/<folder>/car.json), then its newest version's in the content layers
-//                      (cars/<id>/<version>/car.json, a downloaded or W-Rally's - docs/content-layers.md)
+//   3. car.yaml        the car's own manifest, for a mod or a fix: the old place in the RBR folder
+//                      (rbr/Cars/<folder>/car.yaml), then its newest version's in the content layers
+//                      (cars/<id>/<version>/car.yaml, a downloaded or W-Rally's - docs/content-layers.md);
+//                      car.yml or an older car.json where there is no car.yaml
 //
-// A car neither the server nor a car.json knows is shown, but not usable by W-Rally (CarInfo::known): nothing says
+// A car neither the server nor a car.yaml knows is shown, but not usable by W-Rally (CarInfo::known): nothing says
 // what it is or how it drives.
 //
-// car.json (every key optional):
-//   { "name": "Hyundai i20 R5", "maker": "Hyundai", "year": 2016, "class": "R5", "drive": "4WD",
-//     "power_hp": 280, "weight_kg": 1230, "physics": "s_i2003" | "Cars/i20_R5/physics/" }
+// car.yaml (every key optional):
+//   name: Hyundai i20 R5
+//   maker: Hyundai
+//   year: 2016
+//   class: R5
+//   drive: 4WD
+//   power_hp: 280
+//   weight_kg: 1230
+//   physics: s_i2003            # a physics variant's id, or a folder: Cars/i20_R5/physics/
 
 #include <string>
 #include <vector>
@@ -32,10 +39,10 @@ struct CarInfo {
     std::string carClass;           // "WRC", "Group N", "Super 1600", "R5", "S2000", "Group A", "Kit car" ("" none)
     std::string drive;              // "4WD", "FWD", "RWD" ("" unknown)
     float powerHp = 0, weightKg = 0;   // 0 unknown
-    std::string physics;            // car.json's: a physics.rbz folder, or Cars/<folder>/physics/ ("" the catalog's pick)
-    bool known = false;             // the server or a car.json knows it: usable by W-Rally
-    std::string from;               // the layers that said something: "RBR", "RBR + server", "RBR + server + car.json (downloaded)"
-    std::string error;              // its car.json's, if it could not be read ("" none)
+    std::string physics;            // car.yaml's: a physics.rbz folder, or Cars/<folder>/physics/ ("" the catalog's pick)
+    bool known = false;             // the server or a car.yaml knows it: usable by W-Rally
+    std::string from;               // the layers that said something: "RBR", "RBR + server", "RBR + server + car.yaml (downloaded)"
+    std::string error;              // its car.yaml's, if it could not be read ("" none)
 };
 
 class CarRegister {

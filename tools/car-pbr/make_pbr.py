@@ -12,7 +12,7 @@ lacquer, an area of grille stays dark. Empty texels take their neighbours' finis
 
 Written as <texture>_orm.dds (DXT5 with mips; r occlusion 1, g roughness, b metallic, a the clear coat) into a new
 version of the car in W-Rally's downloaded layer (docs/content-layers.md: the RBR folder is never written):
-<downloads>/cars/<car id>/<version>/textures/, with a car.json saying it is a patch over RBR's car ("base": "rbr") -
+<downloads>/cars/<car id>/<version>/textures/, with a car.yaml saying it is a patch over RBR's car (base: rbr) -
 the game then finds the maps over RBR's textures. --downloads: the game's downloads folder (default
 %LOCALAPPDATA%\W-Rally\Downloads, an installed game's; a build's is <bin>\Downloads); --version: the version made
 (default 0.1.0); --out: a folder of your own instead, the maps alone. A map already there is kept unless --force.
@@ -22,7 +22,6 @@ colour alone they emboss every decal. --preview writes the class map and the ORM
 """
 import argparse
 import io
-import json
 import os
 import re
 import struct
@@ -133,13 +132,12 @@ def main():
             sys.exit('--version %s: numbers joined by dots (1, 1.2, 1.2.3)' % a.version)
         version_dir = os.path.join(a.downloads, 'cars', car_id, a.version)
         out_dir = os.path.join(version_dir, 'textures')
-        manifest = os.path.join(version_dir, 'car.json')
-        if not os.path.exists(manifest):
+        # the manifest, unless the version has one (car.yaml, car.yml or an older car.json)
+        if not any(os.path.exists(os.path.join(version_dir, n)) for n in ('car.yaml', 'car.yml', 'car.json')):
             os.makedirs(version_dir, exist_ok=True)
-            with open(manifest, 'w', encoding='utf-8', newline='\n') as f:
-                json.dump({'id': car_id, 'version': a.version, 'base': 'rbr',
-                           'note': 'PBR maps drafted by tools/car-pbr over RBR\'s textures'}, f, indent=2)
-                f.write('\n')
+            with open(os.path.join(version_dir, 'car.yaml'), 'w', encoding='utf-8', newline='\n') as f:
+                f.write('# PBR maps drafted by tools/car-pbr over RBR\'s textures\n'
+                        'id: %s\nversion: %s\nbase: rbr\n' % (car_id, a.version))
         print('maps to %s (car %s version %s, over RBR\'s)' % (out_dir, car_id, a.version))
     if os.path.commonpath([os.path.abspath(out_dir), os.path.abspath(a.car)]) == os.path.abspath(a.car):
         sys.exit('%s: in the car\'s own folder - W-Rally never writes the RBR folder (--downloads or --out elsewhere)' % out_dir)

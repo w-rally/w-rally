@@ -12,7 +12,7 @@
 //   cars     every car (its newest version: one with an .sgc), not only the eight Cars.ini slots. Its physics: every
 //            variant it has (cars/<id>/physics/<variant>/, the newest version of each: "rbr" its own loose physics/,
 //            else its slot's folder in physics.rbz, as the VFS maps them; others downloaded or W-Rally's), each with
-//            the modules that read its format (physicsModules); the default car.json's `physics` (a variant's id).
+//            the modules that read its format (physicsModules); the default car.yaml's `physics` (a variant's id).
 //            None a module drives: not usable (no stand-in: a car drives only as itself). Its engine sound: an .eng in
 //            its folder, else its slot's (audio/Cars/Cars.ini), else the default.
 //   setups   per car and physics: the physics' setups/*.lsp, and a slot car's saved ones
@@ -61,10 +61,10 @@ struct PhysicsModule {
     bool Reads(const std::string& format, uint32_t version) const;
 };
 
-// One of a car's physics (docs/content-layers.md 4): cars/<car>/physics/<id>/<version>/ and its physics.json.
+// One of a car's physics (docs/content-layers.md 4): cars/<car>/physics/<id>/<version>/ and its physics.yaml.
 struct PhysicsVariant {
     std::string id, version;            // "rbr", "rbr"
-    std::string name;                   // physics.json's ("RBR original"), else the id
+    std::string name;                   // physics.yaml's ("RBR original"), else the id
     std::string folder;                 // the VFS folder ("cars/s_i2003/physics/rbr/rbr/")
     std::string base;                   // its physics base's VFS folder ("physics/rbr/rbr/"), "" none found
     std::string format;                 // "rbr-lsp"
@@ -79,11 +79,11 @@ struct Car {
     std::string source;                 // where its model is: "downloaded", "w-rally", "rbr"
     std::string name;                   // Cars.ini's CarName, else the folder's name
     std::string sgc;                    // the model (a full path)
-    // Its physics: every variant, the default's first (car.json's `physics`, else "rbr", else the first one a module
+    // Its physics: every variant, the default's first (car.yaml's `physics`, else "rbr", else the first one a module
     // drives); `physics` the default's folder ("" none), `physicsFrom` where it comes from - for the menu.
     std::vector<PhysicsVariant> variants;
     std::string physics;
-    std::string physicsFrom;            // "its own", "slot N", "car.json (...)" - for the menu
+    std::string physicsFrom;            // "its own", "slot N", "car.yaml (...)" - for the menu
     int slot = -1;                      // its Cars.ini slot (0..7), -1 none
     std::string engine;                 // its engine sound: an .eng path or an RBR name ("" the default)
 };
@@ -102,7 +102,7 @@ public:
     std::vector<std::string> protectedStages;   // encrypted, so not offered (no .ngg draws them, none is imported)
     std::vector<Car> cars;
     // What W-Rally knows of them (assets/car_register.h, track_register.h), built with them: a car's friendly name and
-    // its car.json's physics are the catalog's car's too, a track's name its stages' titles.
+    // its car.yaml's physics are the catalog's car's too, a track's name its stages' titles.
     CarRegister carRegister;
     TrackRegister trackRegister;
     // The physics modules installed (set before Scan: the variants' modules come from them).

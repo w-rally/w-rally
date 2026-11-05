@@ -236,7 +236,7 @@ environment → prepass → sun visibility (RT or cascades) → AO → sky → s
 - Later, each as an interface bump: particles (dust, gravel, spray), skid marks, decals, damage deformation (vertex
   offsets on model meshes), rain on glass.
 - **Night** (decided 2026-10-30, NGG design 5.4): any stage at any hour from date + time + place (sun, moon,
-  stars astronomically); every light ray traced through many-light sampling; car lights the car's own (`car.json`,
+  stars astronomically); every light ray traced through many-light sampling; car lights the car's own (`car.yaml`,
   else derived from RBR's car `.ini` light points, else a default), with brake, reverse, indicators and hazard;
   stage lights in the `.ngg`. Phases N1 sky and time, N2 light system, N3 car lights, N4 stage lights.
 
@@ -281,7 +281,7 @@ Things that are deliberately the game's, not the physics': the **stage clock** (
 (launch control, anti-lag: `phys/drive`), the camera, and recovery decisions. The physics only executes `resetCar`.
 
 **Own configuration.** Each module reads its own config file, named by `PhysicsInput::config`. By convention that is
-`config/physics/<id>.json` through the VFS, in whatever format the module likes. Per car, `CarDesc::carData` names
+`config/physics/<id>.yaml` through the VFS, in whatever format the module likes. Per car, `CarDesc::carData` names
 the module's own car file. The game passes both through without parsing them, so a physics module can change what it
 configures without an interface bump.
 
@@ -308,9 +308,9 @@ configures without an interface bump.
 ### 4.3 WPhysics.dll — id `"wphysics"`
 
 - Starts as a source fork of the rbr module, so it is identical on day one, with the same tests passing.
-- **Own configuration in JSON**: `config/physics/wphysics.json` for the module (tick rate, e.g. 1 kHz, solver
-  iterations, tyre model choice, debug) and `cars/<car>/wphysics.json` per car (`kPhysicsCapExtendedCars`). An RBR
-  car still loads from `physics.rbz`, with the JSON able to override any value on top. That generalises today's
+- **Own configuration in YAML**: `config/physics/wphysics.yaml` for the module (tick rate, e.g. 1 kHz, solver
+  iterations, tyre model choice, debug) and `cars/<car>/wphysics.yaml` per car (`kPhysicsCapExtendedCars`). An RBR
+  car still loads from `physics.rbz`, with the YAML able to override any value on top. That generalises today's
   `cars/<car>.ini` overrides.
 - Then it diverges where RBR is known to be limited: higher tick rate, tyre model, multi-car worlds, `saveState`
   (restart/rewind), extended car data (more than 4 cylinders, modern drivetrains, aero).
@@ -384,7 +384,7 @@ Adding them is an interface version bump when the first caller needs them, not b
 - The config has a default physics. An event or online championship may *require* one (id + minimum module
   version, or an exact `buildHash` for competitive events).
 - A car declares which physics it can run on. An RBR car runs on any module with `RbrCars`. A W-Rally car has only a
-  `wphysics.json` and needs WPhysics (decision 8). The car menu hides combinations that cannot run.
+  `wphysics.yaml` and needs WPhysics (decision 8). The car menu hides combinations that cannot run.
 - One physics module per session. Several can be *loaded* (for menu listing), but only one has a `World`.
 
 ---
@@ -482,7 +482,7 @@ module.
 **Content catalog** (`wrally::assets::Catalog`). This is what the menus list: one list of stages and one of cars,
 with a source tag on each.
 
-- **W-Rally content** is listed by manifests: `content/stages/<id>/stage.json` and `content/cars/<id>/car.json`.
+- **W-Rally content** is listed by manifests: `content/stages/<id>/stage.yaml` and `content/cars/<id>/car.yaml`.
 - **RBR content**, when the RBR layer is present, is listed from `Maps/Tracks.ini` and `Cars/Cars.ini`, and wrapped
   in the same catalog entries in memory. RBR's files are never rewritten.
 - Without RBR, the RBR entries do not exist and nothing in the game refers to them. The game never assumes
@@ -491,8 +491,8 @@ with a source tag on each.
 **Registers** (`assets::CarRegister`, `assets::TrackRegister`): what W-Rally knows of each car and track in the
 catalog, in layers, a later one winning field by field - RBR's files (`Cars.ini`'s names, `Tracks.ini`'s stage names
 and particle sets, the surface rule), then the server's list (hardcoded until there is a server), then the item's own
-manifest: `Cars/<folder>/car.json` (name, maker, year, class, drive, power, weight, physics) and `track-<n>.json`
-beside the stage's `.ngg` or in `Maps` (name, country, surface, length). A car neither the server nor a `car.json`
+manifest: `car.yaml` (name, maker, year, class, drive, power, weight, physics) and `track.yaml` (name, country,
+surface, length), the newest version's in the content layers (content-layers.md). A car neither the server nor a `car.yaml`
 knows is listed but not usable by W-Rally: nothing says what it is or how it drives.
 
 - **TODO** (content layers step 7, [content-layers.md](content-layers.md) §5, deferred 2026-11-05): versions and
@@ -516,7 +516,7 @@ legacy importer uses (decision 2), which sits next to the renderer's reader. Oth
 
 | format | what | source today | used by |
 |---|---|---|---|
-| `stage.json`, `car.json` | **W-Rally manifests**: what a stage/car consists of, per-physics/per-audio data files | new | game catalog |
+| `stage.yaml`, `car.yaml` | **W-Rally manifests**: what a stage/car consists of, per-physics/per-audio data files | new | game catalog |
 | `.lsp`, `.rbz` | physics defs, car/setup/tyre files | `phys/data/lsp`, `inflate` | rbr physics |
 | `.trk` | collision objects, drive line | `phys/data/trk`, `trkworld` | physics, game (drive line) |
 | `.col` `.mat` `.fnc` | static collision, surfaces, fences | `phys/data/col`, `phys/native` | physics |
@@ -548,7 +548,7 @@ gameplay: .trk .col .mat .fnc .lbs (physics) + .dls (cameras, pacenotes, splits)
 
 - **RBR stages** use RBR's own gameplay files. Their graphics come from a Wallaby-converted `.ngg` if there is one,
   otherwise from the on-the-fly import.
-- **W-Rally stages** (`stage.json`) ship an `.ngg` and gameplay files *in RBR's formats*, written by our tools.
+- **W-Rally stages** (`stage.yaml`) ship an `.ngg` and gameplay files *in RBR's formats*, written by our tools.
   That is what NGG design §7 already specifies for native tracks (".ngg + LBS/COL/DLS gameplay stub"). Reusing the
   formats does not need any RBR content, and it lets both physics modules run W-Rally stages from day one. Later the
   gameplay data moves into `.ngg` chunks (decision 10), so a W-Rally stage becomes one file; the manifest is what
@@ -571,8 +571,8 @@ moves every scene object whose NGGK key is *k*. The importer writes those keys f
 
 - **RBR cars** (RBR layer present): `Cars/Cars.ini` lists them. Render model from `.sgc` (`ReadCarModel`) →
   `iface::ModelDesc`. Physics from `physics.rbz` `Physics/<car>/`. Sound from `.eng`.
-- **W-Rally cars** (`car.json`): the render model (`.sgc` written by our tools at first, a car `.ngg` later),
-  `wphysics.json` for the physics (WPhysics-only, decision 8: no `.lsp`), and a sound set for the audio.
+- **W-Rally cars** (`car.yaml`): the render model (`.sgc` written by our tools at first, a car `.ngg` later),
+  `wphysics.yaml` for the physics (WPhysics-only, decision 8: no `.lsp`), and a sound set for the audio.
 - The game animates the model from `CarState`: body pose → instance `world`, `wheels[k]` position/rotation/spin →
   hub and spinning nodes, `damaged` bits → hide detached parts. This is phys-drive's car-part code, moved to node
   transforms.
@@ -718,7 +718,7 @@ Each phase ends with a game you can drive. phys-drive works on day one, and ever
      same as a CLI run. Custom weather (sun, rain, clouds...) comes later.
    - **All cars:** the catalog (`assets/catalog.*`) lists every `Cars/<folder>` that has an `.sgc`, not only the eight
      `Cars.ini` slots. A car's physics comes from its own `Cars/<folder>/physics/` if it has one, else its slot's
-     `physics.rbz` folder, else its `car.json`'s (a `car.json` never overrides a car's own folder). On the command line
+     `physics.rbz` folder, else its `car.yaml`'s (a `car.yaml` never overrides a car's own folder). On the command line
      `--car` defaults the same way: the `--sgc`'s folder's `physics/` if it has a `common.lsp`, else `s_i2003`. There
      is no stand-in: a car without physics of its own is not usable.
      `--extract-slot-physics` (development) copies the slot cars' physics out of `physics.rbz` into their folders, so
@@ -741,7 +741,7 @@ Each phase ends with a game you can drive. phys-drive works on day one, and ever
      place (scan code), named as the layout prints it. Click an action and press a key: Esc keeps the old one, Delete
      unbinds, and an action whose key was taken becomes unbound. The keys are saved as `key_<action>` in
      `W-Rally.ini`.
-7. **Content.** VFS layers, catalog, `stage.json`/`car.json` with their schemas, and standalone mode without RBR
+7. **Content.** VFS layers, catalog, `stage.yaml`/`car.yaml` with their schemas, and standalone mode without RBR
    (tested with the RBR layer switched off; RBR content remains the development data, decision 7).
 8. **Legacy stages.** W-Rally's own automatic importer (decision 2), so every RBR stage draws without Wallaby:
    1. a C++ NGG writer next to the renderer's reader, with a round-trip test; the `.lbs` geometry reader; a minimal
@@ -829,8 +829,8 @@ Each phase ends with a game you can drive. phys-drive works on day one, and ever
    from drifting apart, W-Rally's writer sits next to the renderer's reader (one format header), a round-trip test
    writes, loads and compares, and a test loads Wallaby-made `.ngg` files as another producer of the format.
 3. **Audio is a module** (`ModuleKind::Audio`, WAudio.dll), fed by the physics' record stream (§5).
-4. **WPhysics** may run at a higher tick rate and has its own configuration, in JSON (`config/physics/wphysics.json`,
-   `cars/<car>/wphysics.json`). The interface leaves config format and `dt` to each module.
+4. **WPhysics** may run at a higher tick rate and has its own configuration, in YAML (`config/physics/wphysics.yaml`,
+   `cars/<car>/wphysics.yaml`). The interface leaves config format and `dt` to each module.
 5. **Standalone + RBR.** W-Rally works without RBR on its own content. Placed in an RBR folder (or pointed at one), it
    also uses RBR's content, read in place and never shipped.
 6. **Starting point: `phys/drive`** (phys-drive), which already combines the physics, the NGG renderer DLL, the
@@ -838,11 +838,14 @@ Each phase ends with a game you can drive. phys-drive works on day one, and ever
 7. **Development content: RBR's own stages and cars.** Until the game runs end to end, all development and testing
    uses an RBR install. Standalone mode is built and tested with the layer switched off, but W-Rally's own first
    stage and car are not needed before phase 9 (§11).
-8. **W-Rally cars are WPhysics-only.** They carry `wphysics.json`, never `.lsp`. The rbr physics module runs RBR cars
+8. **W-Rally cars are WPhysics-only.** They carry `wphysics.yaml`, never `.lsp`. The rbr physics module runs RBR cars
    only, so standalone play (no RBR install) runs on WPhysics.
-9. **JSON: nlohmann/json, with published schemas.** Every manifest and module config has a JSON Schema in
-   `docs/schemas/` (`stage.schema.json`, `car.schema.json`, `wphysics.schema.json`, `wphysics-car.schema.json`). The
-   game validates manifests against them at load and in `tools/`, and modders get the same files.
+9. **YAML for what people write, with published schemas** (YAML decided 2026-11-05, for modders; it was JSON).
+   Manifests and module configs are YAML, read by W-Rally's own small reader (`libs/json`: a subset, every value
+   text until its key reads it - content-layers.md 2); the older `.json` files are still read. Each has a JSON
+   Schema in `docs/schemas/` (`stage.schema.json`, `car.schema.json`, `wphysics.schema.json`,
+   `wphysics-car.schema.json`) - editors check YAML against JSON Schemas too. The game validates manifests against
+   them at load and in `tools/`, and modders get the same files.
 10. **Native gameplay format: later, inside the `.ngg`.** W-Rally stages use RBR's `.trk/.col/.mat/.fnc/.dls`
     formats until the game runs end to end. Then collision, surfaces, fences, the drive line, splits and pacenotes
     become `.ngg` chunks, so a W-Rally stage is one file. Physics modules read them through the same VFS. Readers

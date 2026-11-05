@@ -123,38 +123,40 @@ void MadeUp(const fs::path& root)
                                    {"Physics/s_i2003/common.lsp", "i2003 common"},
                                    {"Physics/s_i2003/setups/d_gravel.lsp", "i2003 gravel setup"}});
 
-    // W-Rally: the track table (map 41 named, 4 not), a track of its own, a car version.
-    Write(wr / "rbr-tracks.json", R"({"41": "cz_test", "77": "BadId"})");
-    Write(wr / "tracks/fr_own/1.0.0/track.json", R"({"id": "fr_own", "version": "1.0.0"})");
+    // W-Rally: the track table (map 41 named, 4 not), a track of its own, a car version (an older car.json).
+    Write(wr / "rbr-tracks.yaml", "# map: track id\n41: cz_test\n77: BadId\n");
+    Write(wr / "tracks/fr_own/1.0.0/track.yaml", "id: fr_own\nversion: 1.0.0\n");
     Write(wr / "tracks/fr_own/1.0.0/a.trk", "a 1.0.0");
     Write(wr / "tracks/fr_own/1.0.0/b.trk", "b 1.0.0");
     Write(wr / "cars/impreza03/1.0.0/car.json", R"({"id": "impreza03", "version": "1.0.0"})");
     Write(wr / "cars/impreza03/1.0.0/imp.sgc", "sgc w-rally 1.0.0");
     Write(wr / "video/menu.mp4", "video");
-    Write(wr / "tracks/Bad-Name/1.0.0/track.json", "{}");
+    Write(wr / "tracks/Bad-Name/1.0.0/track.yaml", "{}");
 
     // Downloaded: patches over RBR's car and over the track, a newer track version, the same version as W-Rally's
     // (the downloaded one wins whole), a physics variant, broken chains.
-    Write(dl / "cars/impreza03/1.1.0/car.json", R"({"id": "impreza03", "version": "1.1.0", "base": "rbr"})");
+    Write(dl / "cars/impreza03/1.1.0/car.yaml", "# a patch\nid: impreza03\nversion: 1.1.0\nbase: rbr\n");
+    Write(dl / "cars/impreza03/1.1.0/car.json", R"({"id": "impreza03", "version": "9.9.9"})");   // left out: car.yaml is
     Write(dl / "cars/impreza03/1.1.0/textures/body_orm.dds", "orm 1.1.0");
-    Write(dl / "cars/impreza03/physics/gravel_pro/2.0.0/physics.json", R"({"id": "gravel_pro", "version": "2.0.0"})");
+    Write(dl / "cars/impreza03/physics/gravel_pro/2.0.0/physics.yml", "id: gravel_pro\nversion: 2.0.0\nname: Gravel pro\n");
     Write(dl / "cars/impreza03/physics/gravel_pro/2.0.0/common.lsp", "pro common");
-    Write(dl / "tracks/fr_own/1.1.0/track.json", R"({"id": "fr_own", "version": "1.1.0", "base": "1.0.0"})");
+    Write(dl / "tracks/fr_own/1.1.0/track.yaml", "id: fr_own\nversion: 1.1.0\nbase: 1.0.0\n");
     Write(dl / "tracks/fr_own/1.1.0/b.trk", "b 1.1.0");
     Write(dl / "tracks/fr_own/1.0.0/track.json", R"({"id": "fr_own", "version": "1.0.0"})");   // shadows W-Rally's 1.0.0
     Write(dl / "tracks/fr_own/1.0.0/a.trk", "a 1.0.0 downloaded");
-    Write(dl / "tracks/cz_test/1.2.0/track.json", R"({"id": "cz_test", "version": "1.2.0", "base": "rbr"})");
+    Write(dl / "tracks/cz_test/1.2.0/track.yaml", "id: cz_test\nversion: 1.2.0\nbase: rbr\n");
     Write(dl / "tracks/cz_test/1.2.0/cz_test.ngg", "ngg");
-    Write(dl / "tracks/lost/1.0.0/track.json", R"({"version": "1.0.0", "base": "0.9"})");
-    Write(dl / "tracks/round/1.0.0/track.json", R"({"base": "2.0.0"})");
-    Write(dl / "tracks/round/2.0.0/track.json", R"({"base": "1.0.0"})");
+    Write(dl / "tracks/lost/1.0.0/track.yaml", "version: 1.0.0\nbase: 0.9\n");
+    Write(dl / "tracks/round/1.0.0/track.yaml", "base: 2.0.0\n");
+    Write(dl / "tracks/round/2.0.0/track.yaml", "base: 1.0.0\n");
+    Write(dl / "tracks/broken/1.0.0/track.yaml", "name: a\n  bad: indent\n");
 
     const Vfs vfs({{dl, "downloaded"}, {wr, "w-rally"}}, rbr);
 
     // versions, newest first, RBR's the oldest
     Check(Joined(vfs.Versions(Kind::Car, "impreza03")) == "1.1.0,1.0.0,rbr", "car versions: " + Joined(vfs.Versions(Kind::Car, "impreza03")));
     Check(Joined(vfs.Versions(Kind::Track, "fr_own")) == "1.1.0,1.0.0", "track versions");
-    Check(Joined(vfs.Ids(Kind::Track)) == "cz_test,fr_own,lost,rbr_12,rbr_4,round", "track ids: " + Joined(vfs.Ids(Kind::Track)));
+    Check(Joined(vfs.Ids(Kind::Track)) == "broken,cz_test,fr_own,lost,rbr_12,rbr_4,round", "track ids: " + Joined(vfs.Ids(Kind::Track)));
     Check(Joined(vfs.Ids(Kind::Car)) == "impreza03,own_car", "car ids: " + Joined(vfs.Ids(Kind::Car)));
 
     // a patch over RBR's car: its own files, then RBR's
@@ -165,13 +167,22 @@ void MadeUp(const fs::path& root)
         Check(car->Ref().version == "1.1.0" && Joined(car->Chain()) == "1.1.0,rbr", "car chain " + Joined(car->Chain()));
         Check(Text(*car, "textures/body_orm.dds") == "orm 1.1.0" && car->Source("textures/body_orm.dds") == "downloaded", "patch's own file");
         Check(Text(*car, "imp.sgc") == "sgc rbr" && car->Source("IMP.SGC") == "rbr", "RBR's file under the patch");
-        Check(car->Manifest().Str("version") == "1.1.0", "the version's own manifest");
-        Check(Joined(car->Files()) == "car.json,imp.sgc,textures/body.dds,textures/body_orm.dds", "car files: " + Joined(car->Files()));
+        Check(car->Manifest().Str("version") == "1.1.0" && car->ManifestFile() == "car.yaml", "the version's own manifest, car.yaml first");
+        Check(Text(*car, "car.json").find("base: rbr") != std::string::npos, "any manifest name finds the manifest");
+        Check(Joined(car->Files()) == "car.yaml,imp.sgc,textures/body.dds,textures/body_orm.dds", "car files: " + Joined(car->Files()));
+    }
+    const auto car100 = vfs.Open({Kind::Car, "impreza03", "", "1.0.0"});
+    Check(car100 && car100->ManifestFile() == "car.json" && car100->Manifest().Str("version") == "1.0.0", "an older car.json still read");
+    Check(vfs.Log().find("car.json: left out, car.yaml is the manifest") != std::string::npos, "a second manifest logged");
+    Check(vfs.Log().find("broken/1.0.0/track.yaml: bad indentation (line 2)") != std::string::npos, "a bad manifest logged with its line");
+    const auto pro = vfs.Open({Kind::Physics, "gravel_pro", "impreza03"});
+    Check(pro && pro->ManifestFile() == "physics.yml" && pro->Manifest().Str("name") == "Gravel pro", "a .yml manifest");
+    {
     }
     const auto rbrCar = vfs.Open({Kind::Car, "impreza03", "", "rbr"});
     Check(rbrCar && rbrCar->Manifest().Str("name") == "Subaru Impreza 2003" && rbrCar->Manifest().Str("version") == "rbr",
           "RBR car's manifest, made in memory");
-    Check(rbrCar && Text(*rbrCar, "car.json").find("\"slot\": 5") != std::string::npos, "the made manifest read as a file");
+    Check(rbrCar && Text(*rbrCar, "car.yaml").find("\"slot\": 5") != std::string::npos, "the made manifest read as a file");
     Check(vfs.RbrCarFolder("impreza03") == "Impreza03", "RBR car folder");
 
     // a track's chain within the layers; the same version in two layers is the higher one's, whole
@@ -191,12 +202,12 @@ void MadeUp(const fs::path& root)
     Check(vfs.TrackOfMap(41) == "cz_test" && vfs.MapOfTrack("cz_test") == 41 && vfs.TrackOfMap(4) == "rbr_4", "map table");
     Check(Text(vfs, "tracks/cz_test/rbr/track-41_M.trk") == "trk 41 rbr", "RBR track file by its item path");
     const auto t4 = vfs.Open({Kind::Track, "rbr_4"});
-    Check(t4 && Joined(t4->Files()) == "track-4_E.trk,track.json", "map 4's files: " + (t4 ? Joined(t4->Files()) : ""));
+    Check(t4 && Joined(t4->Files()) == "track-4_E.trk,track.yaml", "map 4's files: " + (t4 ? Joined(t4->Files()) : ""));
     const auto t41 = vfs.Open({Kind::Track, "cz_test"});
     Check(t41 && Text(*t41, "cz_test.ngg") == "ngg" && Text(*t41, "track-41_M.lbs") == "lbs 41 rbr", "a patch over an RBR track");
     Check(t41 && t41->Manifest().Num("rbr", -1) == -1 && vfs.Open({Kind::Track, "cz_test", "", "rbr"})->Manifest().Num("rbr") == 41,
           "RBR track manifest: its map");
-    Check(vfs.Log().find("map 4 is in no rbr-tracks.json") != std::string::npos, "unknown map logged");
+    Check(vfs.Log().find("map 4 is in no rbr-tracks.yaml") != std::string::npos, "unknown map logged");
     Check(vfs.Log().find("\"BadId\" is not an id") != std::string::npos, "bad table id logged");
     Check(vfs.Log().find("Bad-Name: not an id") != std::string::npos, "bad id folder logged");
 
@@ -208,7 +219,7 @@ void MadeUp(const fs::path& root)
     Check(Text(vfs, "cars/own_car/physics/rbr/rbr/common.lsp") == "own common", "a car's own loose physics");
     Check(Text(vfs, "cars/impreza03/physics/gravel_pro/2.0.0/common.lsp") == "pro common", "a downloaded variant");
     const auto rbrPhysics = vfs.Open({Kind::Physics, "rbr", "impreza03"});
-    Check(rbrPhysics && Joined(rbrPhysics->Files()) == "common.lsp,physics.json,setups/d_gravel.lsp" &&
+    Check(rbrPhysics && Joined(rbrPhysics->Files()) == "common.lsp,physics.yaml,setups/d_gravel.lsp" &&
               rbrPhysics->Manifest().Str("format") == "rbr-lsp", "RBR variant's files");
 
     // raw, plain, listing, writing
@@ -217,8 +228,8 @@ void MadeUp(const fs::path& root)
     Check(!vfs.Find("rbr/physics.rbz:Physics/physics.lsp"), "no archive member paths");
     Check(Joined(vfs.List("cars/impreza03")) == "1.0.0/,1.1.0/,physics/,rbr/", "List of a car: " + Joined(vfs.List("cars/impreza03")));
     Check(Joined(vfs.List("cars/impreza03/1.1.0/textures")) == "body.dds,body_orm.dds", "List in a version");
-    Check(Joined(vfs.List("")) == "cars/,rbr-tracks.json,rbr/,tracks/,video/", "List of the root: " + Joined(vfs.List("")));
-    Check(vfs.WritePath("cars/impreza03/2.0.0/car.json") == dl / "cars/impreza03/2.0.0/car.json", "writes go to layer 1");
+    Check(Joined(vfs.List("")) == "cars/,rbr-tracks.yaml,rbr/,tracks/,video/", "List of the root: " + Joined(vfs.List("")));
+    Check(vfs.WritePath("cars/impreza03/2.0.0/car.yaml") == dl / "cars/impreza03/2.0.0/car.yaml", "writes go to layer 1");
     Check(vfs.WritePath("rbr/Maps/x").empty() && vfs.WritePath("../x").empty(), "never into RBR, never out");
 
     // no RBR: standalone

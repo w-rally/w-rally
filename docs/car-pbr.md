@@ -91,7 +91,7 @@ python tools/car-pbr/make_pbr.py C:/Brb/Cars/IMPREZA05 uv.txt --preview <dir>
   judged on the texture **blurred** (4 texels), so a decal's black lettering keeps its lacquer.
   It writes `<texture>_orm.dds` (DXT5, mips) into a **new version of the car in the downloaded layer**
   ([content-layers.md](content-layers.md): the RBR folder is never written) — `<downloads>/cars/<car id>/<version>/
-  textures/`, with a `car.json` saying it is a patch over RBR's car (`"base": "rbr"`), so the game finds the maps over
+  textures/`, with a `car.yaml` saying it is a patch over RBR's car (`base: rbr`), so the game finds the maps over
   RBR's textures (the model's files are read through the car's item). `--downloads <dir>`: the game's downloads
   folder (default `%LOCALAPPDATA%\W-Rally\Downloads`, an installed game's; a build run from its tree reads
   `<bin>\Downloads`); `--version` the version made (default 0.1.0). An ORM map already there is kept unless `--force`

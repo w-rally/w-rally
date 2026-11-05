@@ -15,7 +15,7 @@ namespace wrally::assets {
 namespace {
 
 // The server's track list, until there is a server (its API): by the map's number. Empty for now - what is not sure is
-// not written (a name, a country, a length and the splash the server will give; RBR's files and track-<n>.json
+// not written (a name, a country, a length and the splash the server will give; RBR's files and track.yaml
 // meanwhile). The original stages' splashes come this way: RBR picks them (Textures\splash.dat's load_NN.dds) by a
 // table in its code, so a list says which is which - `splash` a path in the RBR folder
 // ("Textures\\Splash\\load_23.dds") or a URL the server serves it at.
@@ -79,9 +79,10 @@ void TrackRegister::Build(const vfs::Vfs& content, const std::vector<Stage>& sta
                 if (*s.splash) t.splash = s.splash;
                 t.from += " + server";
             }
-        // 3. track.json: the track's newest version's (one the VFS made of RBR's files is no manifest of its own)
+        // 3. track.yaml: the track's newest version's (one the VFS made of RBR's files is no manifest of its own)
         if (const auto item = content.Open({vfs::Kind::Track, st.track, "", st.version}))
-            if (const std::string source = item->Source("track.json"); !source.empty() && source != "rbr") {
+            if (const std::string source = item->Source(vfs::ManifestName(vfs::Kind::Track)); !source.empty() && source != "rbr") {
+                const std::string file = item->ManifestFile();
                 const formats::Json& j = item->Manifest();
                 if (j.type == formats::Json::Object) {
                     t.name = j.Str("name", t.name);
@@ -89,9 +90,9 @@ void TrackRegister::Build(const vfs::Vfs& content, const std::vector<Stage>& sta
                     t.surface = j.Str("surface", t.surface);
                     t.lengthKm = static_cast<float>(j.Num("length_km", t.lengthKm));
                     t.splash = j.Str("splash", t.splash);
-                    t.from += " + track.json (" + source + " " + item->Ref().version + ")";
+                    t.from += " + " + file + " (" + source + " " + item->Ref().version + ")";
                 } else {
-                    t.error = "track.json (" + source + " " + item->Ref().version + "): not an object";
+                    t.error = file + " (" + source + " " + item->Ref().version + "): not an object";
                 }
             }
         m_tracks.push_back(std::move(t));
