@@ -9,7 +9,7 @@
 #include <fstream>
 #include <map>
 
-#include "data/lsp.h"
+#include "app/content.h"
 #include "formats/lbs_geometry.h"
 #include "formats/track_settings.h"
 #include "rules/stage.h"
@@ -103,19 +103,25 @@ int RoadOfWeather(const std::string& preset)
     return 0;
 }
 
-std::string Catalog::Scan(const app::Settings& s)
+std::string Catalog::Scan(const app::Settings& s) { return Scan(s, app::MakeVfs(s)); }
+
+std::string Catalog::Scan(const app::Settings& s, std::shared_ptr<const vfs::Vfs> content)
 {
     stages.clear();
     cars.clear();
-    m_root = s.rbrPath;
+    protectedStages.clear();
+    m_content = std::move(content);
+    const vfs::Vfs& v = *m_content;
     std::error_code ec;
-    if (s.rbrPath.empty()) return "no RBR folder set (Settings)";
-    if (!fs::exists(fs::path(s.rbrPath) / "Maps" / "Tracks.ini", ec) || !fs::exists(fs::path(s.rbrPath) / "physics.rbz", ec))
-        return s.rbrPath + " is not an RBR folder (no Maps/Tracks.ini or physics.rbz)";
-    const std::string maps = s.rbrPath + "\\Maps\\";
+    // A file of an item as the disk has it ("" none, or one only the VFS holds: a physics.rbz member).
+    auto disk = [](const vfs::Item& item, const std::string& rel) {
+        const auto r = item.Find(rel);
+        return r && !r->file.empty() ? r->file.string() : std::string();
+    };
 
-    // The weathers: TrackSettings.ini's sections, by their stage prefix.
-    const std::vector<std::string> sections = IniSections(maps + "TrackSettings.ini");
+    // The weathers: RBR's TrackSettings.ini's sections, by their stage prefix.
+    const auto trackSettings = v.Find("rbr/Maps/TrackSettings.ini");
+    const std::vector<std::string> sections = trackSettings ? IniSections(trackSettings->file.string()) : std::vector<std::string>{};
     // A stage's: its map's sections of its time of day, and the overcast ones of it ("41M_...", "41O_M_..."; the map
     // in two digits at least, as TrackSettings.ini writes it: "04M_...", not "4M_...").
     auto stageWeathers = [&](int map, char tod) {
@@ -133,45 +139,67 @@ std::string Catalog::Scan(const app::Settings& s)
         return stage + (tod[0] ? std::string(" (") + tod + ")" : "") + "  -  " + from;
     };
 
-    // Stages: every .ngg in the folders, each for the stages of its map it draws.
-    std::string folders = s.NggFolders();
+    // The .ngg folders' (development): by lower-case stem.
+    std::map<std::string, fs::path> folderNggs;
+    const std::string folders = s.NggFolders();
     for (size_t at = 0; at <= folders.size();) {
         const size_t semi = std::min(folders.find(';', at), folders.size());
         const std::string dir = folders.substr(at, semi - at);
         at = semi + 1;
         if (dir.empty() || !fs::is_directory(dir, ec)) continue;
-        std::vector<fs::path> nggs;
         for (const auto& e : fs::directory_iterator(dir, ec))
-            if (e.is_regular_file() && Lower(e.path().extension().string()) == ".ngg") nggs.push_back(e.path());
-        std::sort(nggs.begin(), nggs.end());
-        for (const fs::path& ngg : nggs) {
-            const std::string stem = ngg.stem().string();
-            const int map = rules::StageMap(stem);
-            if (map < 0) continue;
-            const std::vector<std::string> drawn = NggWeathers(ngg);
-            std::vector<std::string> variants;
-            if (stem.find('_') != std::string::npos) {
-                if (fs::exists(maps + stem + ".trk", ec)) variants.push_back(stem);
-            } else {
-                for (const auto& e : fs::directory_iterator(maps, ec)) {
-                    const std::string n = e.path().filename().string();
-                    if (Lower(e.path().extension().string()) == ".trk" && rules::StageMap(e.path().stem().string()) == map &&
-                        e.path().stem().string().find('_') != std::string::npos)
-                        variants.push_back(e.path().stem().string());
+            if (e.is_regular_file() && Lower(e.path().extension().string()) == ".ngg")
+                folderNggs.emplace(Lower(e.path().stem().string()), e.path());
+    }
+
+    // Stages: every track's, its newest version, in the order of their maps.
+    struct TrackAt {
+        int map;
+        std::string id;
+    };
+    std::vector<TrackAt> tracks;
+    for (const std::string& id : v.Ids(vfs::Kind::Track)) tracks.push_back({v.MapOfTrack(id), id});
+    std::sort(tracks.begin(), tracks.end(), [](const TrackAt& a, const TrackAt& b) {
+        return a.map != b.map ? (a.map < 0 ? false : b.map < 0 ? true : a.map < b.map) : a.id < b.id;
+    });
+    for (const TrackAt& t : tracks) {
+        const auto item = v.Open({vfs::Kind::Track, t.id});
+        if (!item) continue;
+        // its stages: its .trk files of RBR's names (track-41_M.trk)
+        std::vector<std::string> variants;
+        for (const std::string& f : item->List()) {
+            const fs::path p(f);
+            const std::string stem = p.stem().string();
+            if (Lower(p.extension().string()) == ".trk" && stem.find('_') != std::string::npos && rules::StageMap(stem) >= 0)
+                variants.push_back(stem);
+        }
+        std::sort(variants.begin(), variants.end());
+        for (const std::string& variant : variants) {
+            Stage st;
+            st.stage = variant;
+            st.map = rules::StageMap(variant);
+            st.track = item->Ref().id, st.version = item->Ref().version;
+            st.weathers = stageWeathers(st.map, variant.back());
+            // Drawn by: the track's own .ngg, an .ngg folder's, else its .lbs imported.
+            const std::string mapNgg = "track-" + std::to_string(st.map);
+            fs::path ngg;
+            for (const std::string& name : {variant, t.id, mapNgg})
+                if (const std::string d = disk(*item, name + ".ngg"); !d.empty()) {
+                    ngg = d, st.source = item->Source(name + ".ngg");
+                    break;
                 }
-                std::sort(variants.begin(), variants.end());
-            }
-            for (const std::string& v : variants) {
-                Stage st;
-                st.key = ngg.string() + "|" + v;
+            if (ngg.empty())
+                for (const std::string& name : {Lower(variant), mapNgg})
+                    if (const auto it = folderNggs.find(name); it != folderNggs.end()) {
+                        ngg = it->second, st.source = "ngg folder";
+                        break;
+                    }
+            if (!ngg.empty()) {
                 st.ngg = ngg.string();
-                st.stage = v;
-                st.map = map;
-                st.title = title(v, ngg.filename().string());
-                st.weathers = stageWeathers(map, v.size() >= 2 ? v.back() : ' ');
+                st.title = title(variant, ngg.filename().string());
                 // The .ngg's own presets, when it has some: those of this stage's time of day if any are named so,
                 // else all of them.
-                if (!drawn.empty()) {
+                if (const std::vector<std::string> drawn = NggWeathers(ngg); !drawn.empty()) {
                     std::vector<std::string> mine;
                     for (const std::string& d : drawn)
                         for (const std::string& w : st.weathers)
@@ -179,130 +207,105 @@ std::string Catalog::Scan(const app::Settings& s)
                     st.weathers = mine.empty() ? drawn : mine;
                     st.weathersDrawn = true;
                 }
-                stages.push_back(std::move(st));
+            } else {
+                // A protected (encrypted) stage is left out: it is never imported (formats::LbsEncryptedVersion);
+                // only an .ngg made from it on a licensed install, or the server's, can draw it.
+                const std::string lbs = disk(*item, variant + ".lbs");
+                if (lbs.empty()) continue;
+                if (formats::LbsEncryptedVersion(lbs)) {
+                    protectedStages.push_back(variant);
+                    continue;
+                }
+                st.ngg = lbs;
+                st.source = item->Source(variant + ".lbs");
+                st.title = title(variant, "imported from .lbs");
+                st.weathersDrawn = st.imported = true;   // (the import writes TrackSettings.ini's sections as presets)
             }
+            st.key = st.ngg + "|" + st.stage;
+            stages.push_back(std::move(st));
         }
-    }
-
-    // Every other RBR stage, imported when it is driven (assets/legacy_stage.h): an .lbs with its .trk in Maps that no
-    // .ngg above draws. Its weathers are drawn, since the import writes TrackSettings.ini's sections as presets.
-    // Where a stage comes from, best first: an .ngg in the folders (a Wallaby conversion), then this import. A
-    // hand-finished .ngg from the stage server goes before both when there is one (not yet).
-    // A protected (encrypted) stage is left out: it is never imported (formats::LbsEncryptedVersion); only an .ngg
-    // made from it on a licensed install, or the server's, can draw it.
-    std::vector<std::string> drawn;   // lower-case stage names an .ngg covers
-    for (const Stage& st : stages) drawn.push_back(Lower(st.stage));
-    std::vector<fs::path> lbss;
-    protectedStages.clear();
-    for (const auto& e : fs::directory_iterator(maps, ec)) {
-        const std::string stem = e.path().stem().string();
-        if (!e.is_regular_file() || Lower(e.path().extension().string()) != ".lbs" || rules::StageMap(stem) < 0 ||
-            stem.find('_') == std::string::npos || !fs::exists(maps + stem + ".trk", ec) ||
-            std::find(drawn.begin(), drawn.end(), Lower(stem)) != drawn.end())
-            continue;
-        if (formats::LbsEncryptedVersion(e.path().string())) protectedStages.push_back(stem);
-        else lbss.push_back(e.path());
     }
     std::sort(protectedStages.begin(), protectedStages.end());
-    std::sort(lbss.begin(), lbss.end(), [](const fs::path& a, const fs::path& b) {
-        const int ma = rules::StageMap(a.stem().string()), mb = rules::StageMap(b.stem().string());
-        return ma != mb ? ma < mb : a.stem().string() < b.stem().string();
-    });
-    for (const fs::path& lbs : lbss) {
-        Stage st;
-        st.ngg = lbs.string();
-        st.stage = lbs.stem().string();
-        st.key = st.ngg + "|" + st.stage;
-        st.map = rules::StageMap(st.stage);
-        st.title = title(st.stage, "imported from .lbs");
-        st.weathers = stageWeathers(st.map, st.stage.back());
-        st.weathersDrawn = true;
-        st.imported = true;
-        stages.push_back(std::move(st));
-    }
 
-    // Cars: every folder in Cars with an .sgc; Cars.ini names the slot cars.
-    const std::string carsIni = s.rbrPath + "\\Cars\\Cars.ini";
-    std::map<std::string, std::pair<int, std::string>> slotOf;   // lower folder -> slot, name
-    for (int slot = 0; slot < 8; ++slot) {
-        const std::string sec = "Car0" + std::to_string(slot);
-        std::string file = IniString(carsIni, sec, "FileName");
-        std::replace(file.begin(), file.end(), '/', '\\');
-        const size_t a = Lower(file).find("cars\\");
-        if (a == std::string::npos) continue;
-        const size_t b = file.find('\\', a + 5);
-        slotOf[Lower(file.substr(a + 5, b == std::string::npos ? std::string::npos : b - a - 5))] = {slot, IniString(carsIni, sec, "CarName")};
-    }
-    const std::string audioIni = s.rbrPath + "\\audio\\Cars\\Cars.ini";
-    for (const auto& e : fs::directory_iterator(s.rbrPath + "\\Cars", ec)) {
-        if (!e.is_directory()) continue;
+    // Cars: every car with an .sgc, its newest version.
+    const auto audioIni = v.Find("rbr/audio/Cars/Cars.ini");
+    for (const std::string& id : v.Ids(vfs::Kind::Car)) {
+        const auto item = v.Open({vfs::Kind::Car, id});
+        if (!item) continue;
         Car car;
-        car.folder = e.path().filename().string();
+        car.id = id, car.version = item->Ref().version;
+        car.folder = v.RbrCarFolder(id).empty() ? id : v.RbrCarFolder(id);
         std::string eng;
-        for (const auto& f : fs::directory_iterator(e.path(), ec)) {
-            const std::string ext = Lower(f.path().extension().string());
-            if (ext == ".sgc" && car.sgc.empty()) car.sgc = f.path().string();
-            if (ext == ".eng" && eng.empty()) eng = f.path().string();
+        for (const std::string& f : item->List()) {
+            const std::string ext = Lower(fs::path(f).extension().string());
+            if (ext == ".sgc" && car.sgc.empty()) car.sgc = disk(*item, f), car.source = item->Source(f);
+            if (ext == ".eng" && eng.empty()) eng = disk(*item, f);
         }
         if (car.sgc.empty()) continue;
+        // RBR's: its Cars.ini name and slot (the manifest the VFS made of them)
         car.name = car.folder;
-        if (const auto it = slotOf.find(Lower(car.folder)); it != slotOf.end()) {
-            car.slot = it->second.first;
-            if (!it->second.second.empty()) car.name = it->second.second;
+        if (const auto rbr = v.Open({vfs::Kind::Car, id, "", "rbr"})) {
+            car.name = rbr->Manifest().Str("name", car.name);
+            if (const formats::Json* r = rbr->Manifest().Get("rbr")) car.slot = static_cast<int>(r->Num("slot", -1));
         }
-        if (fs::exists(e.path() / "physics" / "common.lsp", ec)) {
-            car.physics = "Cars/" + car.folder + "/physics/";
-            car.physicsFrom = "its own";
-        } else if (car.slot >= 0) {
-            car.physics = SlotPhysics(car.slot);
-            car.physicsFrom = "slot " + std::to_string(car.slot) + " (" + car.physics + ")";
-        }   // (else none: unless its car.json names some, it cannot be driven)
+        // its physics: the variant "rbr", newest version
+        if (const auto p = v.Open({vfs::Kind::Physics, "rbr", id})) {
+            car.physics = vfs::ItemDir(p->Ref()) + "/";
+            const auto common = p->Find("common.lsp");
+            car.physicsFrom = common && common->bytes && car.slot >= 0 ? "slot " + std::to_string(car.slot) + " (" + SlotPhysics(car.slot) + ")"
+                                                                        : "its own";
+        }
         if (!eng.empty()) car.engine = eng;
-        else if (car.slot >= 0) car.engine = IniString(audioIni, "CARS", ("Car" + std::to_string(car.slot)).c_str());
+        else if (car.slot >= 0 && audioIni) car.engine = IniString(audioIni->file.string(), "CARS", ("Car" + std::to_string(car.slot)).c_str());
         cars.push_back(std::move(car));
     }
 
-    // What W-Rally knows of them: the registers over RBR's files, the server's list and the cars' and tracks' own
-    // manifests.
-    carRegister.Build(s.rbrPath, cars);
+    // What W-Rally knows of them: the registers over RBR's files, the server's list and the items' own manifests.
+    carRegister.Build(v, cars);
     for (Car& car : cars) {
         const CarInfo* info = carRegister.Find(car.folder);
         if (!info) continue;
         car.name = info->name;
-        // (its own folder first: car.json's physics only stands in for a car without one)
-        if (!info->physics.empty() && info->physics != car.physics && car.physicsFrom != "its own")
-            car.physics = info->physics, car.physicsFrom = "car.json (" + info->physics + ")";
+        // (its own physics first: car.json's only stands in for a car without one)
+        if (!info->physics.empty() && car.physics.empty()) {
+            // a physics.rbz folder's name ("s_i2003"), or a folder under the RBR folder ("Cars/i20_R5/physics/")
+            const std::string p = info->physics.find_first_of("/\\") == std::string::npos
+                                      ? "physics/rbr/rbr/" + info->physics + "/"
+                                      : "rbr/" + vfs::NormalPath(info->physics) + "/";
+            car.physics = p, car.physicsFrom = "car.json (" + info->physics + ")";
+        }
     }
-    trackRegister.Build(s.rbrPath, stages);
+    trackRegister.Build(v, stages);
     for (Stage& st : stages)
         if (const TrackInfo* t = trackRegister.Find(st.map); t && !t->name.empty()) {
             const char* tod = TimeOfDay(st.stage.size() >= 2 ? st.stage.back() : ' ');
             st.title = t->name + (tod[0] ? std::string(" (") + tod + ")" : "");
         }
     std::sort(cars.begin(), cars.end(), [](const Car& a, const Car& b) { return Lower(a.name) < Lower(b.name); });
-    if (stages.empty()) return "no stages: no .ngg with a matching Maps/track-<n>_*.trk in " + folders;
+    if (stages.empty())
+        return v.RbrRoot().empty() ? "no stages: no RBR folder set (Settings) and no track of W-Rally's"
+                                   : "no stages in " + v.RbrRoot().string() + " or W-Rally's content";
     return "";
 }
 
 std::vector<Setup> Catalog::SetupsFor(const Car& car) const
 {
     std::vector<Setup> out;
-    std::error_code ec;
-    // Its own physics' setups (not the defaults, d_<surface>.lsp: those are what "default" means).
-    if (car.physics.find('/') != std::string::npos)
-        for (const auto& e : fs::directory_iterator(m_root + "\\" + car.physics + "setups", ec)) {
-            const std::string n = e.path().filename().string();
-            if (Lower(e.path().extension().string()) != ".lsp" || !_strnicmp(n.c_str(), "d_", 2)) continue;
-            out.push_back({e.path().stem().string(), car.physics + "setups/" + n});
+    if (!m_content) return out;
+    // Its physics' setups (not the defaults, d_<surface>.lsp: those are what "default" means).
+    if (!car.physics.empty())
+        for (const std::string& n : m_content->List(car.physics + "setups")) {
+            if (Lower(fs::path(n).extension().string()) != ".lsp" || !_strnicmp(n.c_str(), "d_", 2)) continue;
+            out.push_back({fs::path(n).stem().string(), car.physics + "setups/" + n});
         }
-    // A slot car's saved ones: SavedGames/<slot>slot<n>_<name>.lsp.
+    // A slot car's saved ones: rbr/SavedGames/<slot>slot<n>_<name>.lsp.
     if (car.slot >= 0)
-        for (const auto& e : fs::directory_iterator(m_root + "\\SavedGames", ec)) {
-            const std::string n = e.path().filename().string();
+        for (const std::string& n : m_content->List("rbr/SavedGames")) {
             const std::string prefix = std::to_string(car.slot) + "slot";
-            if (Lower(e.path().extension().string()) != ".lsp" || n.compare(0, prefix.size(), prefix)) continue;
-            const size_t us = n.find('_');
-            out.push_back({us == std::string::npos ? e.path().stem().string() : e.path().stem().string().substr(us + 1), "SavedGames/" + n});
+            if (Lower(fs::path(n).extension().string()) != ".lsp" || n.compare(0, prefix.size(), prefix)) continue;
+            const std::string stem = fs::path(n).stem().string();
+            const size_t us = stem.find('_');
+            out.push_back({us == std::string::npos ? stem : stem.substr(us + 1), "rbr/SavedGames/" + n});
         }
     return out;
 }
@@ -317,45 +320,8 @@ const Stage* Catalog::FindStage(const std::string& key) const
 const Car* Catalog::FindCar(const std::string& folder) const
 {
     for (const Car& c : cars)
-        if (!_stricmp(c.folder.c_str(), folder.c_str())) return &c;
+        if (!_stricmp(c.folder.c_str(), folder.c_str()) || !_stricmp(c.id.c_str(), folder.c_str())) return &c;
     return nullptr;
-}
-
-std::string ExtractSlotPhysics(const std::string& rbrPath, const Catalog& catalog)
-{
-    std::string log;
-    const std::string rbz = rbrPath + "\\physics.rbz";
-    std::vector<std::string> members;
-    try {
-        members = phys::data::ListZip(rbz);
-    } catch (const std::exception& e) {
-        return e.what();
-    }
-    for (const Car& car : catalog.cars) {
-        if (car.slot < 0) continue;
-        const fs::path dir = fs::path(rbrPath) / "Cars" / car.folder / "physics";
-        std::error_code ec;
-        if (fs::exists(dir / "common.lsp", ec)) {
-            log += car.name + ": has its own physics already\n";
-            continue;
-        }
-        const std::string prefix = std::string("physics/") + SlotPhysics(car.slot) + "/";
-        size_t files = 0;
-        for (const std::string& m : members) {
-            if (Lower(m).compare(0, prefix.size(), prefix) || m.back() == '/') continue;
-            const fs::path to = dir / fs::path(m.substr(prefix.size()));
-            fs::create_directories(to.parent_path(), ec);
-            try {
-                const std::string bytes = phys::data::ReadZipMember(rbz, m);
-                std::ofstream(to, std::ios::binary).write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
-                ++files;
-            } catch (const std::exception& e) {
-                log += car.name + ": " + e.what() + "\n";
-            }
-        }
-        log += car.name + ": " + std::to_string(files) + " files of " + SlotPhysics(car.slot) + " to " + dir.string() + "\n";
-    }
-    return log.empty() ? "no slot cars\n" : log;
 }
 
 } // namespace wrally::assets

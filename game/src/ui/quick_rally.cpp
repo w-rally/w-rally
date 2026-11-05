@@ -9,6 +9,7 @@
 #include <cstdio>
 #include <cstring>
 #include <map>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -740,14 +741,17 @@ struct SetupValues {
     }
 };
 
-const SetupValues& ReadSetup(const std::string& path)
+// A setup's values: `path` a VFS path (a slot car's are physics.rbz's: no file on disk).
+const SetupValues& ReadSetup(const assets::Catalog& catalog, const std::string& path)
 {
     static std::map<std::string, SetupValues> cache;
     SetupValues& v = cache[path];
     if (v.read) return v;
     v.read = true;
     try {
-        v.root = phys::data::ParseLsp(phys::data::ReadFileText(path));
+        std::vector<uint8_t> bytes;
+        if (!catalog.Content() || !catalog.Content()->Read(path, bytes)) throw std::runtime_error("cannot open " + path);
+        v.root = phys::data::ParseLsp(std::string(bytes.begin(), bytes.end()));
         // The form: (("CarSetup" Car (...) Drive (...) ...)) - the list whose first item is "CarSetup", a level or two in.
         auto find = [&](auto&& self, const phys::data::LspNode& n, int depth) -> const phys::data::LspNode* {
             if (!n.IsList() || depth > 3) return nullptr;
@@ -787,7 +791,7 @@ void SetupPage(const ImGuiLayer& ui, const assets::Catalog& catalog, app::Settin
     std::string setupName = "DEFAULT";
     for (const assets::Setup& su : catalog.SetupsFor(*car))
         if (su.path == s.setup) setupName = Upper(su.name);
-    const SetupValues* v = s.setup.empty() ? nullptr : &ReadSetup(s.rbrPath + "\\" + s.setup);
+    const SetupValues* v = s.setup.empty() ? nullptr : &ReadSetup(catalog, s.setup);
     constexpr float kRad = 57.2957795f;
 
     std::vector<Row> rows;

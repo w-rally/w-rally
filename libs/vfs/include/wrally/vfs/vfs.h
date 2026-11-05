@@ -13,8 +13,9 @@
 // folder's first, then its base's, down the chain, file by file. The manifest itself is the version's own.
 //
 // The RBR folder is never written. It is reached two ways:
-//   mapped  its items at version "rbr": the maps of Maps/Tracks.ini as tracks (ids from rbr-tracks.json, else
-//           rbr_<n>; the map's files Maps/track-<n>_* and track-<n>.* inside the track), the folders of Cars with an
+//   mapped  its items at version "rbr": the maps of Maps/Tracks.ini, and those with a track-<n>_<X>.trk in Maps it does
+//           not list, as tracks (ids from rbr-tracks.json, else rbr_<n>; the map's files Maps/track-<n>_* and
+//           track-<n>.* inside the track), the folders of Cars with an
 //           .sgc as cars (id: the folder's name as a slug), each car's physics as the variant "rbr" (its loose
 //           Cars/<folder>/physics/, else its Cars.ini slot's folder in physics.rbz) and physics.rbz's Physics/ as the
 //           base "rbr". Their manifests are made in memory. physics.rbz is opened here and nowhere else.
