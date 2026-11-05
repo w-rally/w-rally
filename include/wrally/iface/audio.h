@@ -30,7 +30,9 @@
 namespace wrally::iface {
 
 // 2: CarSoundDesc's mix and the anti-lag bangs as data (text, file lists); setCarMix.
-constexpr uint32_t kAudioInterfaceVer = 2;
+// 3: the game's content layers (docs/content-layers.md): RBR's sound set is read under the VFS's rbr/ (the RBR folder
+//    as it is: rbr/audio/Cars/...), a path as the VFS has it.
+constexpr uint32_t kAudioInterfaceVer = 3;
 
 struct AudioModule;
 typedef uint32_t CarVoiceHandle;   // one car's sound (engine, drivetrain, tyres, wind)
@@ -67,8 +69,8 @@ struct AudioSettings {
 // folder of .wav files, and the VFS can neither reach the one (it is not under the game data root) nor list the other.
 struct CarSoundDesc {
     uint32_t           car;            // the physics' car index: records with this Stamp::car drive the voice
-    const char*        engine;         // RBR: the name of audio/Cars/<engine>.eng ("Focus03-08"), or a path to an .eng
-    const char*        bank;           // the sounds around it: "" RBR's set (audio/Cars/Effects, Surfaces, Ambient)
+    const char*        engine;         // RBR: the name of rbr/audio/Cars/<engine>.eng ("Focus03-08"), or a VFS path to an .eng
+    const char*        bank;           // the sounds around it: "" RBR's set (rbr/audio/Cars/Effects, Surfaces, Ambient)
     const char*        mix;            // the mix's TEXT (the module's format: `layer = volume [solo]` lines), "" defaults
     const char* const* bangs;          // the anti-lag's exhaust bangs: .wav paths, bangCount of them (0: the bank's)
     uint32_t           bangCount;

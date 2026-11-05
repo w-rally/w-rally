@@ -446,9 +446,14 @@ StageEnd RunStage(Shell& sh, const Options& o, bool fromMenu, std::string& error
     if (!loadingFor(0, 0.36f, 0, 0)) return StageEnd::Quit;
     // The modules hear the physics on the bus (before what it connects, which goes first).
     signals::Bus bus;
+    // The content layers the modules read through (docs/content-layers.md): the settings' downloads folder and W-Rally's
+    // content, the run's RBR folder.
+    const std::shared_ptr<const vfs::Vfs> content = MakeVfs(sh.settings, o.game);
     // The physics, through the session (a module DLL in modules/physics: --physics, "rbr" by default).
     session::Session sim;
-    if (const std::string e = sim.Open(o.session); !e.empty()) return fail(e);
+    session::Config simConfig = o.session;
+    simConfig.physics.content = content;
+    if (const std::string e = sim.Open(simConfig); !e.empty()) return fail(e);
     if (!loadingFor(1, 0, 0, 0)) return StageEnd::Quit;
     // The sound plays from its device's thread, a few ticks behind the physics.
     std::string mixPath;   // the mix file, watched ("" none)
@@ -465,7 +470,7 @@ StageEnd RunStage(Shell& sh, const Options& o, bool fromMenu, std::string& error
         car.engine = o.engine;
         car.bangs = o.bangs;
         car.idleBangs = o.idleBangs;
-        std::string e = sound.Open(ExeDir() / "modules" / "audio", o.audioId, o.game);
+        std::string e = sound.Open(ExeDir() / "modules" / "audio", o.audioId, content);
         if (e.empty()) e = sound.CreateCar(car);
         std::printf("%s", sound.TakeLog().c_str());
         if (!e.empty()) {

@@ -4,12 +4,15 @@
 // the game's DriverTick, every one, in order. The module turns them back into the same records, so the sound is what it
 // was when the audio was linked into the game.
 //
-// Paths: under `root` (the RBR folder) - the module's VFS; the anti-lag bang folders are listed here, since the module
-// cannot list through the VFS.
+// Paths: the module's are the VFS's (the content layers, docs/content-layers.md: RBR's sounds under rbr/); files on disk
+// are handed over as VFS paths. The anti-lag bang folders are listed here, since the module cannot list through the VFS.
 
 #include <cstdint>
 #include <filesystem>
 #include <memory>
+#include <string>
+
+#include "wrally/vfs/vfs.h"
 #include <string>
 #include <vector>
 
@@ -35,7 +38,10 @@ public:
 
     // The module with id `moduleId` ("waudio") among the audio DLLs in `modulesDir`; `offline`: no device, the samples
     // from RenderOffline. Returns "" or what is wrong.
-    std::string Open(const std::filesystem::path& modulesDir, const std::string& moduleId, const std::string& root,
+    std::string Open(const std::filesystem::path& modulesDir, const std::string& moduleId,
+                     std::shared_ptr<const vfs::Vfs> content, bool offline = false);
+    // The same over the RBR folder `rbr` alone (the tools').
+    std::string Open(const std::filesystem::path& modulesDir, const std::string& moduleId, const std::string& rbr,
                      bool offline = false);
     // The car's voice. Returns "" or what is wrong.
     std::string CreateCar(const CarSound& car);
@@ -49,7 +55,7 @@ public:
     // The game's pause: the world's sounds (the car, the co-driver) held.
     void SetPaused(bool paused);
 
-    // One-shot sounds (the co-driver's calls): a file under the root (.ogg or .wav) loaded once, played on a bus.
+    // One-shot sounds (the co-driver's calls): a VFS file (.ogg or .wav: rbr/audio/...) loaded once, played on a bus.
     enum class Bus : uint32_t { Master = 0, Car = 1, World = 2, CoDriver = 3, Ui = 4 };
     // The sound's handle (0: it could not be loaded - `error` says why).
     uint32_t LoadSound(const std::string& path, std::string* error = nullptr);

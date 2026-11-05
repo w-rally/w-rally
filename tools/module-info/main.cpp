@@ -4,7 +4,7 @@
 //
 // For each DLL: the kinds it implements, the interface version it reports for each and whether the game can use it.
 // --init also initialises every compatible physics and audio module (a renderer needs a window: skipped) with a
-// FileHost over --data (default: the current folder), prints its ModuleInfo and destroys it again.
+// FileHost over --data (default: the current folder; its one content layer), prints its ModuleInfo and destroys it again.
 //
 // Exit code: 0 all fine, 1 a DLL could not be asked or an --init failed, 2 usage.
 
@@ -12,10 +12,12 @@
 #include <cstring>
 #include <filesystem>
 #include <string>
+#include <type_traits>
 #include <vector>
 
 #include "wrally/iface/audio.h"
 #include "wrally/iface/physics.h"
+#include "wrally/vfs/vfs.h"
 #include "wrally/iface/renderer.h"
 #include "wrally/modules/file_host.h"
 #include "wrally/modules/module_host.h"
@@ -51,6 +53,12 @@ bool InitAndDestroy(modules::ModuleHost& host, const modules::ModuleEntry& e, mo
         return false;
     }
     PrintInfo(out.info);
+    if constexpr (std::is_same_v<Out, iface::PhysicsOutput>) {
+        std::printf("      sim version %u; formats:", out.simVersion);
+        for (uint32_t i = 0; i < out.formatCount; ++i)
+            std::printf(" %s %u..%u", out.formats[i].name, out.formats[i].minVersion, out.formats[i].maxVersion);
+        std::printf("\n");
+    }
     if (!out.api || !out.instance) {
         std::printf("      init FAILED: Ok without a table or an instance\n");
         return false;
@@ -84,7 +92,9 @@ int main(int argc, char** argv)
     bool ok = host.Problems().empty();
     for (const auto& p : host.Problems()) std::printf("%s: %s\n", p.path.string().c_str(), p.error.c_str());
 
-    modules::FileHost files(data, data / "cache");
+    // --data as the one content layer
+    modules::FileHost files(std::make_shared<vfs::Vfs>(std::vector<vfs::Layer>{{data, "data"}}, std::filesystem::path()),
+                            data / "cache");
     for (const auto& e : host.Entries()) {
         std::printf("%s: %s interface %u - %s\n", e.path.filename().string().c_str(), modules::KindName(e.kind),
                     e.interfaceVer, e.compatible ? "compatible" : "INCOMPATIBLE");

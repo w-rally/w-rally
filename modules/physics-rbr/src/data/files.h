@@ -1,7 +1,7 @@
 #pragma once
 // Every file the physics reads goes through here, whole, by path. By default that is the filesystem; a host installs its
-// own reader - WPhysicsRBR.dll the game's VFS (HostServices::files), so the paths are the VFS's and physics.rbz,
-// loose files and later mod layers resolve the way the game resolves them.
+// own reader - WPhysicsRBR.dll the game's VFS (HostServices::files), so the paths are the VFS's and the content layers
+// (physics.rbz's members among them, loose to the physics) resolve the way the game resolves them.
 //
 // One reader per process (the module's), set before the first load. Writing (data/rec.h's WriteRecording) stays on the
 // filesystem: the physics never writes.

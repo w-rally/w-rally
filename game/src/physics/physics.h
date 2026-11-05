@@ -6,7 +6,8 @@
 // Records: the module's RecordSink lands here and is emitted on the game's signals::Bus (signals/convert.h). CarInfo and
 // EngineInfo come once, at the load; Connect replays them, as the library did when connected after its load.
 //
-// Paths: the game's, under Config::root (the RBR folder) - handed to the module relative to it, as its VFS paths.
+// Paths: the game's files on disk, handed to the module as VFS paths (Config::content: rbr/... under the RBR folder; an
+// RBR car's physics.rbz folder as physics/rbr/rbr/<folder>/, loose to the module).
 
 #include <cstdint>
 #include <filesystem>
@@ -15,6 +16,7 @@
 #include <vector>
 
 #include "wrally/modules/module_host.h"
+#include "wrally/vfs/vfs.h"
 
 namespace signals {
 class Bus;
@@ -23,14 +25,14 @@ class Bus;
 namespace wrally::physics {
 
 struct Config {
-    std::string root;                                      // the game data root: the VFS's (the RBR folder)
-    std::string rbz;                                       // physics.rbz
+    std::string root;                                      // the RBR folder
+    std::shared_ptr<const vfs::Vfs> content;               // the content layers (null: the RBR folder alone, root)
     std::string trk, col, mat, fnc, lbs;                   // the stage's files (Maps/track-<n>_<M|O>.*)
     std::string sgc;                                       // the car's model: its collision meshes
-    std::string car = "s_i2003";                           // the car's physics folder in physics.rbz
+    std::string car = "s_i2003";                           // the car's physics: a physics.rbz folder's name, or a folder
     std::string surface = "tarmac";                        // tarmac, gravel or snow
     std::string tyres = "michelin";                        // the tyre brand
-    std::string setup;                                     // a setup member in physics.rbz ("" the surface's default)
+    std::string setup;                                     // a setup file, or a physics.rbz member Physics/... ("" the surface's default)
     std::string overrides;                                 // W-Rally's car data: a FILE, read here ("" none)
     uint32_t tyreIndex = 0;                                // TyreTypeNN
     uint32_t settings = 0x217;                             // the game's options word (data/rec.h)

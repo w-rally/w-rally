@@ -1,6 +1,7 @@
 #pragma once
-// The physics as a library (M5): a stage and a car loaded from the game's files - physics.rbz, the stage's .trk / .col /
-// .mat / .fnc / .lbs, the car's .sgc - and stepped with control records, natively in 64 bits.
+// The physics as a library (M5): a stage and a car loaded from the game's files - the physics' shared files and the
+// car's (loose: the game's VFS unpacks physics.rbz), the stage's .trk / .col / .mat / .fnc / .lbs, the car's .sgc - and
+// stepped with control records, natively in 64 bits.
 //
 // W-Rally has the native implementation only (NativeSim, sim/native_sim.h). plugin-rbr's classic Sim - the game's code
 // in a 4 GB arena, from the exe's image - stays there as the oracle the native port is checked against
@@ -21,13 +22,13 @@ namespace phys::sim {
 struct Config {
     std::string exe;            // empty: the exe's image from core/tables/exeimage.inc; else RichardBurnsRally_SSE.exe,
                                 // its image mapped from the file (data only, nothing of it runs) - for PHYS_SIM_TOUCH
-    std::string rbz;            // physics.rbz
+    std::string base;           // the format's shared files: a folder ending in / (physics.lsp, <brand>/tyres.lsp)
     std::string trk, col, mat, fnc, lbs;   // the stage's files (Maps/track-<n>_<M|O>.*)
     std::string sgc;            // the car's model (Cars/<car>/<car>.sgc): its collision meshes
-    std::string car = "s_i2003";            // the car's physics: a folder in physics.rbz, or a folder path ending in /
+    std::string car;                        // the car's physics: a folder of loose files, ending in /
     std::string surface = "tarmac";         // tarmac, gravel or snow: the car's <surface>.lsp, its setup and options
-    std::string tyres = "michelin";         // the tyre brand (Physics/<brand>/tyres.lsp; the game: pirelli for cars 5, 7)
-    std::string setup;                      // a setup: a physics.rbz member (Physics/...) or a file; default the car's setups/d_<surface>.lsp
+    std::string tyres = "michelin";         // the tyre brand (<base><brand>/tyres.lsp; the game: pirelli for cars 5, 7)
+    std::string setup;                      // a setup file; default the car's setups/d_<surface>.lsp
     // Our own values on top of RBR's car (W-Rally's car data, cars/<car>.ini; "" none): `Name = value` lines, written
     // into the car's defs once they are built - for what RBR's files cannot set or set otherwise than the real car.
     // Names (CarOverride): Engine.IdleThrottle (the eased throttle's minimum: the idle's revs).

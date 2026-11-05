@@ -45,7 +45,10 @@
 namespace wrally::iface {
 
 // 2: carParts (PartState: the doors, the bonnet, the bumpers... where the physics has them).
-constexpr uint32_t kPhysicsInterfaceVer = 2;
+// 3: the game's content layers (docs/content-layers.md): a car's physics is always a folder of loose files
+//    (CarDesc::physicsCar), the shared files a folder too (StageDesc::physicsBase) - no physics.rbz; a setup is always a
+//    file. The module reports the physics formats it reads and its simulation version (PhysicsOutput).
+constexpr uint32_t kPhysicsInterfaceVer = 3;
 
 struct PhysicsModule;   // the module's instance
 struct World;           // one stage with its cars
@@ -53,7 +56,7 @@ struct World;           // one stage with its cars
 // PhysicsCaps (ModuleInfo::caps)
 constexpr uint64_t kPhysicsCapMultiCar      = 1ull << 0;   // carCount > 1
 constexpr uint64_t kPhysicsCapSaveState     = 1ull << 1;   // saveState / loadState
-constexpr uint64_t kPhysicsCapRbrCars       = 1ull << 2;   // reads physics.rbz car definitions
+constexpr uint64_t kPhysicsCapRbrCars       = 1ull << 2;   // reads RBR's car physics (the "rbr-lsp" format)
 constexpr uint64_t kPhysicsCapRbrStages     = 1ull << 3;   // reads .trk / .col / .mat / .fnc / .lbs
 constexpr uint64_t kPhysicsCapSpectators    = 1ull << 4;   // animation objects (.lbs scripts)
 constexpr uint64_t kPhysicsCapCarOverrides  = 1ull << 5;   // CarDesc::overrides (W-Rally's car data)
@@ -71,7 +74,8 @@ struct StageDesc {
     const char* fnc;          //                         .fnc: fences
     const char* lbs;          //                         .lbs: script objects
     const char* dls;          //                         .dls: splits and finish along the drive line
-    const char* rbz;          // Physics/physics.rbz (RBR's physics defs); "" for a module that brings its own
+    const char* physicsBase;  // the car physics format's shared files: a VFS folder ending in '/' ("physics/rbr/rbr/":
+                              // physics.lsp, <brand>/tyres.lsp); "" for a module that brings its own
     uint32_t    weather;      // the .mat's weather: dry, damp, wet x new, normal, worn
     int32_t     wetness;      // 0 dry, 1 damp, 2 wet; -1 from weather
     uint32_t    settings;     // RBR's options word (phys data/rec.h: game mode, damage level)
@@ -84,14 +88,14 @@ constexpr uint32_t kStageSpectators = 1u << 0;   // load the animation objects (
 // (the module's own file, e.g. cars/<car>/wphysics.json). A module refuses a car
 // it has no data for with ErrNotSupported.
 struct CarDesc {
-    const char* physicsCar;   // RBR car physics: a folder in physics.rbz ("s_i2003"), or a VFS folder path ending in
-                              // '/' holding the same files loose ("Cars/i20_R5/physics/": common.lsp, <surface>.lsp,
-                              // r_<surface>.lsp, setups/d_<surface>.lsp)
+    const char* physicsCar;   // RBR car physics: a VFS folder ending in '/' of loose files
+                              // ("cars/s_i2003/physics/rbr/rbr/": common.lsp, <surface>.lsp, r_<surface>.lsp,
+                              // setups/d_<surface>.lsp)
     const char* carData;      // the module's own car file (VFS path)
     const char* model;        // Cars/<car>/<car>.sgc: the collision meshes
-    const char* setup;        // a setup: a physics.rbz member (Physics/...) or a VFS file (SavedGames/...); default the
-                              // car's setups/d_<surface>.lsp
-    const char* tyres;        // brand: "michelin" (Physics/<brand>/tyres.lsp)
+    const char* setup;        // a setup: a VFS file ("rbr/SavedGames/...", the car physics' setups/...); "" the car's
+                              // setups/d_<surface>.lsp
+    const char* tyres;        // brand: "michelin" (<physicsBase><brand>/tyres.lsp)
     const char* overrides;    // W-Rally's car data: `Name = value` lines (text, not a path), "" none
     Surface     surface;
     uint32_t    tyreType;     // TyreType00..06
@@ -238,11 +242,22 @@ struct PhysicsInput {
     const char*  config;      // the module's configuration file (VFS path), "" none
 };
 
+// A car physics format the module reads, and the range of its versions (physics.json's format, formatVersion).
+struct PhysicsFormat {
+    char     name[32];        // "rbr-lsp"
+    uint32_t minVersion, maxVersion;
+};
+
 struct PhysicsOutput {
-    StructHeader      header;
-    ModuleInfo        info;
-    const PhysicsApi* api;
-    PhysicsModule*    instance;
+    StructHeader         header;
+    ModuleInfo           info;
+    const PhysicsApi*    api;
+    PhysicsModule*       instance;
+    const PhysicsFormat* formats;      // what it can drive; valid for the instance's lifetime
+    uint32_t             formatCount;
+    // Bumped only when the same files and controls give a different result - not on every release (buildHash is the
+    // exact build). Replays and online results record it.
+    uint32_t             simVersion;
 };
 
 } // namespace wrally::iface

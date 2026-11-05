@@ -31,8 +31,8 @@ std::string Renderer::Open(const std::filesystem::path& modulesDir, const std::s
     m = std::make_unique<Impl>();
     m->host.Scan(modulesDir);
     Impl* impl = m.get();
-    // The renderer reads nothing through the VFS yet (the game hands it bytes); its root is the game's folder.
-    m->files = std::make_unique<modules::FileHost>(modulesDir.parent_path().parent_path(),
+    // The renderer reads nothing through the VFS (the game hands it bytes): an empty one.
+    m->files = std::make_unique<modules::FileHost>(nullptr,
                                                    app::UserDir() / "cache",
                                                    [impl](iface::LogLevel, const char* text) {
                                                        std::lock_guard<std::mutex> lock(impl->logLock);

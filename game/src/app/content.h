@@ -17,6 +17,8 @@ std::filesystem::path WRallyContentDir();
 
 // The layers for these settings: DownloadDir(downloadPath) ("downloaded"), WRallyContentDir() ("w-rally") and rbrPath.
 std::unique_ptr<vfs::Vfs> MakeVfs(const Settings& s);
+// The same with another RBR folder (a stage run's: its command line's).
+std::unique_ptr<vfs::Vfs> MakeVfs(const Settings& s, const std::string& rbr);
 
 // For the log: the folders and what was found in them, and the first of the notes.
 std::string DescribeVfs(const vfs::Vfs& v);

@@ -51,15 +51,17 @@ struct Physics::Impl {
 
 namespace {
 
-// `path` as the VFS sees it: relative to the root when under it, else as it is.
-std::string Relative(const std::string& root, const std::string& path)
+// physics.rbz's Physics/, as the VFS maps it (docs/content-layers.md): the RBR physics base.
+constexpr const char* kRbrBase = "physics/rbr/rbr/";
+
+// A physics.rbz member path (Physics/...) under the RBR base, else "".
+std::string RbzMember(const std::string& path)
 {
-    if (path.empty() || root.empty()) return path;
-    const std::filesystem::path p(path), r(root);
-    std::error_code ec;
-    const std::filesystem::path rel = std::filesystem::relative(p, r, ec);
-    if (ec || rel.empty() || *rel.begin() == "..") return path;
-    return rel.generic_string();
+    if (path.size() < 8 || (_strnicmp(path.c_str(), "Physics/", 8) != 0 && _strnicmp(path.c_str(), "Physics\\", 8) != 0))
+        return "";
+    std::string rest = path.substr(8);
+    std::replace(rest.begin(), rest.end(), '\\', '/');
+    return kRbrBase + rest;
 }
 
 } // namespace
@@ -71,7 +73,9 @@ std::string Physics::Open(const std::filesystem::path& modulesDir, const std::st
 {
     m = std::make_unique<Impl>();
     m->host.Scan(modulesDir);
-    m->files = std::make_unique<modules::FileHost>(c.root, app::UserDir() / "cache",
+    const std::shared_ptr<const vfs::Vfs> content =
+        c.content ? c.content : std::make_shared<vfs::Vfs>(std::vector<vfs::Layer>{}, std::filesystem::path(c.root));
+    m->files = std::make_unique<modules::FileHost>(content, app::UserDir() / "cache",
                                                    [this](iface::LogLevel level, const char* text) {
                                                        if (level >= iface::LogLevel::Info) m_log += text;
                                                    });
@@ -111,15 +115,18 @@ std::string Physics::Open(const std::filesystem::path& modulesDir, const std::st
         if (!f) return m_error = "cannot open " + c.overrides;
         overrides.assign(std::istreambuf_iterator<char>(f), std::istreambuf_iterator<char>());
     }
-    const std::string rbz = Relative(c.root, c.rbz), trk = Relative(c.root, c.trk), col = Relative(c.root, c.col),
-                      mat = Relative(c.root, c.mat), fnc = Relative(c.root, c.fnc), lbs = Relative(c.root, c.lbs),
-                      sgc = Relative(c.root, c.sgc), setup = Relative(c.root, c.setup);
-    // The car's physics: a folder in physics.rbz (a name), or a folder of its own (a path: relative to the root, ending
-    // in a slash, as the module tells the two apart).
+    auto vfsPath = [&](const std::string& p) { return content->VfsPath(p); };
+    const std::string trk = vfsPath(c.trk), col = vfsPath(c.col), mat = vfsPath(c.mat), fnc = vfsPath(c.fnc),
+                      lbs = vfsPath(c.lbs), sgc = vfsPath(c.sgc);
+    const std::string setup = c.setup.empty() ? "" : !RbzMember(c.setup).empty() ? RbzMember(c.setup) : vfsPath(c.setup);
+    // The car's physics, a folder of loose files: a physics.rbz folder (a name) under the RBR base, or a folder of its
+    // own (a path).
     std::string carPhysics = c.car;
-    if (carPhysics.find_first_of("/\\") != std::string::npos) {
-        carPhysics = Relative(c.root, carPhysics);
-        if (carPhysics.back() != '/' && carPhysics.back() != '\\') carPhysics += '/';
+    if (carPhysics.find_first_of("/\\") == std::string::npos) {
+        carPhysics = kRbrBase + carPhysics + "/";
+    } else {
+        carPhysics = vfsPath(carPhysics);
+        if (carPhysics.back() != '/') carPhysics += '/';
     }
     iface::CarDesc car{};
     car.physicsCar = carPhysics.c_str();
@@ -137,7 +144,7 @@ std::string Physics::Open(const std::filesystem::path& modulesDir, const std::st
 
     iface::WorldDesc d{};
     d.stage.trk = trk.c_str(), d.stage.col = col.c_str(), d.stage.mat = mat.c_str();
-    d.stage.fnc = fnc.c_str(), d.stage.lbs = lbs.c_str(), d.stage.dls = "", d.stage.rbz = rbz.c_str();
+    d.stage.fnc = fnc.c_str(), d.stage.lbs = lbs.c_str(), d.stage.dls = "", d.stage.physicsBase = kRbrBase;
     d.stage.weather = c.weather, d.stage.wetness = c.wetness, d.stage.settings = c.settings, d.stage.flags = 0;
     d.cars = &car;
     d.carCount = 1;
