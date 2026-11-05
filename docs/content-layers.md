@@ -238,7 +238,8 @@ public:
    `rbr`. Quick rally's PHYSICS row offers those a module drives, kept as `physics_<car-id>`; the setups are the
    chosen physics'. The command line: `--car <variant folder> --physics-base <its base> --physics <module>`. A car is
    usable when a module drives one of its physics.
-7. Versions: fingerprints with their cache; replays record and resolve exact versions; `versions.json` last use.
+7. **Deferred 2026-11-05** (a TODO in design.md §6.1). Versions: fingerprints with their cache; replays record and
+   resolve exact versions; `versions.json` last use.
 8. Cleaning: the keep rules, Settings → Storage, `download_keep_days`, `download_max_gb`.
 9. Writers to layer 1 (`car-pbr`); `content/cars/s_i2003.ini` removed from the content repository.
 10. Installer: `DOWNLOADDIR`, its page, `install.ini` `download_path`, registry value.
