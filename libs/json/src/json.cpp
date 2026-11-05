@@ -1,4 +1,4 @@
-#include "formats/json.h"
+#include "wrally/formats/json.h"
 
 #include <cstdlib>
 #include <fstream>

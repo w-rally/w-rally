@@ -7,7 +7,7 @@
 #include <filesystem>
 
 #include "assets/catalog.h"
-#include "formats/json.h"
+#include "wrally/formats/json.h"
 #include "rules/stage.h"
 
 namespace wrally::assets {
