@@ -5,7 +5,7 @@
 #include <cstring>
 
 #include "assets/catalog.h"
-#include "formats/json.h"
+#include "wrally/formats/json.h"
 
 namespace wrally::assets {
 
