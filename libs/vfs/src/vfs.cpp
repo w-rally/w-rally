@@ -199,10 +199,30 @@ std::string ItemDir(const ItemRef& r)
 const char* ManifestName(Kind kind)
 {
     switch (kind) {
-    case Kind::Track: return "track.json";
-    case Kind::Car: return "car.json";
-    default: return "physics.json";
+    case Kind::Track: return "track.yaml";
+    case Kind::Car: return "car.yaml";
+    default: return "physics.yaml";
     }
+}
+
+const std::vector<std::string>& ManifestNames(Kind kind)
+{
+    static const std::vector<std::string> track = {"track.yaml", "track.yml", "track.json"};
+    static const std::vector<std::string> car = {"car.yaml", "car.yml", "car.json"};
+    static const std::vector<std::string> physics = {"physics.yaml", "physics.yml", "physics.json"};
+    switch (kind) {
+    case Kind::Track: return track;
+    case Kind::Car: return car;
+    default: return physics;
+    }
+}
+
+bool IsManifestName(Kind kind, std::string_view name)
+{
+    const std::string lower = Lower(name);
+    for (const std::string& n : ManifestNames(kind))
+        if (lower == n) return true;
+    return false;
 }
 
 std::string Slug(std::string_view name)
@@ -224,6 +244,7 @@ struct Item::Version {
     std::string prefix;          // Maps: "track-41"; Rbz: the members' prefix, "physics/s_i2003/" (lowercase)
     std::string source;          // the layer's name, "rbr"
     std::string manifestText;    // made in memory ("" the folder's own file)
+    std::string manifestFile;    // the folder's own file's name ("car.yaml", "car.json"), "" none
     formats::Json manifest;
 };
 
@@ -297,6 +318,12 @@ void OwnList(const Version& v, const std::string& relDir, const std::map<std::st
 
 const formats::Json& Item::Manifest() const { return m_chain.front()->manifest; }
 
+std::string Item::ManifestFile() const
+{
+    const Version& v = *m_chain.front();
+    return !v.manifestText.empty() ? ManifestName(m_ref.kind) : v.manifestFile;
+}
+
 std::vector<std::string> Item::Chain() const
 {
     std::vector<std::string> out;
@@ -308,10 +335,11 @@ std::optional<Resolved> Item::Find(std::string_view relIn) const
 {
     const std::string rel = NormalPath(relIn), lower = Lower(rel);
     if (rel.empty()) return std::nullopt;
-    if (lower == ManifestName(m_ref.kind)) {   // the version's own, never its base's
+    if (IsManifestName(m_ref.kind, lower)) {   // the version's own, never its base's, whichever name it has
         const Version& v = *m_chain.front();
         if (!v.manifestText.empty()) return Resolved{{}, &v.manifestText, v.source};
-        return OwnFile(v, rel, lower, m_vfs->m_index->rbz);
+        if (v.manifestFile.empty()) return std::nullopt;
+        return OwnFile(v, v.manifestFile, Lower(v.manifestFile), m_vfs->m_index->rbz);
     }
     for (const Version* v : m_chain)
         if (auto r = OwnFile(*v, rel, lower, m_vfs->m_index->rbz)) return r;
@@ -331,10 +359,9 @@ std::vector<std::string> Item::List(std::string_view relDirIn) const
     for (const Version* v : m_chain) OwnList(*v, relDir, m_vfs->m_index->rbz, names);
     names.erase("");
     // the manifest: this version's, if it has one
-    const std::string manifest = ManifestName(m_ref.kind);
     for (auto it = names.begin(); it != names.end();)
-        it = Lower(*it) == manifest ? names.erase(it) : std::next(it);
-    if (relDir.empty() && Find(manifest)) names.insert(manifest);
+        it = IsManifestName(m_ref.kind, *it) ? names.erase(it) : std::next(it);
+    if (const std::string manifest = ManifestFile(); relDir.empty() && !manifest.empty()) names.insert(manifest);
     // one name per entry whatever its case in each version
     std::map<std::string, std::string> byLower;
     for (const std::string& n : names) byLower.emplace(Lower(n), n);
@@ -394,11 +421,16 @@ void Vfs::ReadLayers()
             v->version = version;
             v->dir = e.path();
             v->source = layer;
-            const fs::path manifest = e.path() / ManifestName(kind);
-            if (IsFile(manifest)) {
+            for (const std::string& name : ManifestNames(kind)) {
+                if (!IsFile(e.path() / name)) continue;
+                if (v->manifestFile.empty()) v->manifestFile = name;
+                else m_log += layer + ": " + NormalPath(U8(e.path() / name)) + ": left out, " + v->manifestFile + " is the manifest\n";
+            }
+            if (!v->manifestFile.empty()) {
+                const fs::path manifest = e.path() / v->manifestFile;
                 std::string error;
-                v->manifest = formats::ReadJsonFile(manifest.string(), error);
-                if (!error.empty()) m_log += layer + ": " + error + "\n";
+                v->manifest = formats::ReadDataFile(manifest.string(), error);
+                if (!error.empty()) m_log += layer + ": " + NormalPath(U8(manifest)) + ": " + error + "\n";
                 v->base = Lower(v->manifest.Str("base"));
                 if (!v->base.empty() && !ValidVersion(v->base))
                     m_log += layer + ": " + U8(manifest) + ": base \"" + v->base + "\" is not a version\n", v->base.clear();
@@ -458,21 +490,24 @@ void Vfs::ReadRbr()
         addRbr(Kind::PhysicsBase, "", "rbr", std::move(v));
     }
 
-    // Tracks: Tracks.ini's maps, their ids from rbr-tracks.json ({"41": "cz_ploskovice", ...}).
+    // Tracks: Tracks.ini's maps, their ids from rbr-tracks.yaml ("41: cz_ploskovice"), else the older rbr-tracks.json.
     std::map<int, std::string> table;
-    if (const auto t = FindPlain("rbr-tracks.json")) {
+    std::string tableName = "rbr-tracks.yaml";
+    auto tableFile = FindPlain(tableName);
+    if (!tableFile) tableFile = FindPlain(tableName = "rbr-tracks.json");
+    if (tableFile) {
         std::vector<uint8_t> bytes;
-        ReadResolved(*t, bytes);
+        ReadResolved(*tableFile, bytes);
         try {
-            const formats::Json j = formats::ParseJson(std::string(bytes.begin(), bytes.end()));
+            const formats::Json j = formats::ParseData(std::string(bytes.begin(), bytes.end()), tableName);
             for (const auto& [map, id] : j.members) {
                 const std::string slug = id.text;
                 if (id.type != formats::Json::String || !ValidId(slug))
-                    m_log += "rbr-tracks.json: map " + map + ": \"" + slug + "\" is not an id\n";
+                    m_log += tableName + ": map " + map + ": \"" + slug + "\" is not an id\n";
                 else table[std::atoi(map.c_str())] = slug;
             }
         } catch (const std::exception& e) {
-            m_log += std::string("rbr-tracks.json: ") + e.what() + "\n";
+            m_log += tableName + ": " + e.what() + "\n";
         }
     }
     // Tracks.ini's maps (where they are: TrackName), then those with files in Maps that Tracks.ini does not list
@@ -512,10 +547,10 @@ void Vfs::ReadRbr()
         std::string id = table.count(map) ? table[map] : "rbr_" + std::to_string(map);
         if (ix.trackMap.count(id)) {
             m_log += "rbr: maps " + std::to_string(ix.trackMap[id]) + " and " + std::to_string(map) + " both " + id +
-                     " in rbr-tracks.json; map " + std::to_string(map) + " is rbr_" + std::to_string(map) + "\n";
+                     " in " + tableName + "; map " + std::to_string(map) + " is rbr_" + std::to_string(map) + "\n";
             id = "rbr_" + std::to_string(map);
         }
-        if (!table.count(map)) m_log += "rbr: map " + std::to_string(map) + " is in no rbr-tracks.json: " + id + "\n";
+        if (!table.count(map)) m_log += "rbr: map " + std::to_string(map) + " is in no " + tableName + ": " + id + "\n";
         ix.mapTrack[map] = id;
         ix.trackMap[id] = map;
         v->manifestText = "{\"id\": " + Quoted(id) + ", \"version\": \"rbr\", \"rbr\": " + std::to_string(map) + "}";

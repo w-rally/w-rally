@@ -1,7 +1,7 @@
-"""rbr-tracks.json from the onlineracing.cz tracks table (docs/content-layers.md 3): every RBR map number the table knows
+"""rbr-tracks.yaml from the onlineracing.cz tracks table (docs/content-layers.md 3): every RBR map number the table knows
 to its W-Rally track id, <country>_<stagename>.
 
-    python make_table.py <rbr_ct_tracks.csv> <rbr-tracks.json> [--rbr <RBR folder>]
+    python make_table.py <rbr_ct_tracks.csv> <rbr-tracks.yaml> [--rbr <RBR folder>]
 
 The CSV is the table's export with its header (stage_id, ingame_stage_id, name, ..., country_ENG, ...): the map is
 ingame_stage_id. The country is ISO 3166-1 alpha-2 (the table's English name mapped, its spellings as they are); one
@@ -15,7 +15,6 @@ nothing changed (where the folder's number is another track, the table wins: dec
 import argparse
 import collections
 import csv
-import json
 import os
 import re
 import sys
@@ -76,8 +75,9 @@ def main():
             print(f'map {m}: {i} is map {maps[0]}\'s too - {ids[m]}', file=sys.stderr)
 
     with open(a.out, 'w', encoding='utf-8', newline='\n') as f:
-        json.dump({str(m): ids[m] for m in sorted(ids)}, f, indent=2)
-        f.write('\n')
+        f.write('# RBR map number: W-Rally track id (<country>_<stage name>) - tools/rbr-tracks/make_table.py\n')
+        for m in sorted(ids):
+            f.write(f'{m}: {ids[m]}\n')
     print(f'{len(ids)} tracks to {a.out}')
 
     if a.rbr:

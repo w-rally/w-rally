@@ -105,7 +105,7 @@ int RoadOfWeather(const std::string& preset)
 
 namespace {
 
-// The modules of `modules` that read `format` at `version`, and a variant's physics base (physics.json's physicsBase:
+// The modules of `modules` that read `format` at `version`, and a variant's physics base (physics.yaml's physicsBase:
 // "<id>@<version>", or "<id>" for its newest) as a VFS folder ("" none here).
 std::vector<std::string> Drivers(const std::vector<PhysicsModule>& modules, const std::string& format, uint32_t version)
 {
@@ -122,7 +122,7 @@ std::string BaseFolder(const vfs::Vfs& v, const std::string& base)
     return b ? vfs::ItemDir(b->Ref()) + "/" : "";
 }
 
-// A physics variant as the catalog lists it, from its physics.json (made in memory for RBR's own).
+// A physics variant as the catalog lists it, from its physics.yaml (made in memory for RBR's own).
 PhysicsVariant Variant(const vfs::Vfs& v, const vfs::Item& item, const std::vector<PhysicsModule>& modules)
 {
     const formats::Json& j = item.Manifest();
@@ -133,13 +133,13 @@ PhysicsVariant Variant(const vfs::Vfs& v, const vfs::Item& item, const std::vect
     p.format = j.Str("format");
     p.formatVersion = static_cast<uint32_t>(j.Num("formatVersion", 0));
     p.source = item.Source("common.lsp");
-    if (p.source.empty()) p.source = item.Source("physics.json");
+    if (p.source.empty()) p.source = item.Source(vfs::ManifestName(vfs::Kind::Physics));
     if (const std::string base = j.Str("physicsBase"); !base.empty()) p.base = BaseFolder(v, base);
     if (!p.base.empty()) p.modules = Drivers(modules, p.format, p.formatVersion);
     return p;
 }
 
-// The car's default physics first: car.json's `physics` (a variant's id - or, as before, a physics.rbz folder's name or
+// The car's default physics first: car.yaml's `physics` (a variant's id - or, as before, a physics.rbz folder's name or
 // a folder under the RBR folder, made a variant "car_json"), else "rbr", else the first a module drives.
 void ChooseDefault(Car& car, const CarInfo* info, const vfs::Vfs& v, const std::vector<PhysicsModule>& modules)
 {
@@ -150,7 +150,7 @@ void ChooseDefault(Car& car, const CarInfo* info, const vfs::Vfs& v, const std::
     };
     if (!wanted.empty() && has(wanted) == car.variants.end()) {
         PhysicsVariant p;
-        p.id = "car_json", p.version = "rbr", p.name = "car.json (" + wanted + ")";
+        p.id = "car_json", p.version = "rbr", p.name = "the car's manifest (" + wanted + ")";
         p.folder = wanted.find_first_of("/\\") == std::string::npos ? "physics/rbr/rbr/" + wanted + "/"
                                                                     : "rbr/" + vfs::NormalPath(wanted) + "/";
         p.format = "rbr-lsp", p.formatVersion = 1, p.source = "rbr";

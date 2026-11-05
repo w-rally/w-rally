@@ -2944,12 +2944,12 @@ Four decisions, the user's:
 2. **Time of day = date + time + place.** A preset (or the menu, or an event) gives a date, a local time and the
    stage's latitude/longitude. The sun's and the moon's positions, the moon's phase and the stars follow
    astronomically, so dusk, night and dawn come out right on every stage. RBR's stages carry no location: a
-   default latitude stands in until a stage's own metadata (stage.json, design.md 7) says where it is.
+   default latitude stands in until a stage's own metadata (stage.yaml, design.md 7) says where it is.
 3. **Every light is ray traced:** shadows for all of them, made affordable by many-light sampling (ReSTIR-style
    reservoir resampling, 5.1), not a shadow map or a "few shadowed, the rest fill" split. The VR tier (P4) and
    min-spec are the risk, measured, not designed around.
 4. **Car lights are the CAR's,** in this order:
-   1. the car's own W-Rally light specification (`car.json`, design.md decision 9: JSON with a schema). Per
+   1. the car's own W-Rally light specification (`car.yaml`, design.md decision 9: YAML with a schema). Per
       lamp: role, position and aim on the car, beam shape (an IES-like profile), colour and intensity, and the mesh
       that glows when it is lit;
    2. else **derived from RBR's car `.ini`**, which already names the lamps: `Point_light_lf/rf` headlights,
@@ -3148,9 +3148,9 @@ Four decisions, the user's:
     normals (`Point_light_lf/rf`), the tail, brake and reverse positions. Bonnet lamps in 5 of them only
     (`Point_light_bon1-4`), their normals mostly sideways - positions, no aim; a ramp mesh (`e_ramp`,
     `e_ramp_light_lit`) in 4, switched off (`Predicate=NotUsed`): RBR modelled ramps and never used them. So the
-    beams' character, the layouts and most ramps are W-Rally's (car.json presets), RBR's positions where they exist.
+    beams' character, the layouts and most ramps are W-Rally's (car.yaml presets), RBR's positions where they exist.
   - **Decided (the user, 2026-10-31):**
-    1. **Layouts per car, chosen in the setup:** car.json lists the configurations a car can run (e.g. 2 headlamps +
+    1. **Layouts per car, chosen in the setup:** car.yaml lists the configurations a car can run (e.g. 2 headlamps +
        a 2-lamp ramp, a 4-pod ramp, 2 LED bars, no ramp); the driver picks one; a car without its own spec gets a
        sensible default ramp.
     2. **The aim is set in the setup**, per ramp, yaw and pitch a few degrees (as crews do at service); while
@@ -3158,7 +3158,7 @@ Four decisions, the user's:
        state and keys.
     3. **Beams visible in dust, mist and rain: a later phase**, with the weather and dust work they depend on.
   - **Phases:** N3a the lamp model (lobes, orientation, colour temperature, reach; the renderer interface; the
-    car.json lamp schema; presets: halogen low/high, LED pod pencil/driving, LED bar flood, ditch lamp). N3b the
+    car.yaml lamp schema; presets: halogen low/high, LED pod pencil/driving, LED bar flood, ditch lamp). N3b the
     car's layouts and controls (derived from RBR where it has data, the setup's choices, the switches, the glowing
     lenses). N3c tuning on the references (intensities, spreads, aim, exposure). Later: haze, retroreflective
     materials, glare. Cost: shadows stay one ray per pixel however many lamps; shading ~0.15 ms per lamp over the
@@ -3186,7 +3186,7 @@ Four decisions, the user's:
     - Cost (1080p, the 780M, full clock): the ramp layout's 6 lamps add 5.5-8 ms to the GPU frame - their light
       rays 3.9 ms (the ray tracer weighs every lamp of a pixel's cluster to pick one: next to optimise), denoising
       +1.0, shading ~1.2. The day is unchanged.
-    - **car.json's lamps (draft, N3b settles it):**
+    - **car.yaml's lamps (draft, N3b settles it):**
       ```json
       "lamps": {
         "beams":   { "<name>": { "kelvin": 5800, "radius": 0.08,

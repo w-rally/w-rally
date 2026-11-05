@@ -6,12 +6,18 @@
 //                      (rules::StageSurface); the country where its particles say one (ps_british, ps_usa, ps_japan,
 //                      ps_australia, ps_montblanc: France)
 //   2. the server      W-Rally's track list (hardcoded until there is a server: track_register.cpp kServerTracks)
-//   3. track.json      the track's own manifest, for a mod or a fix: its newest version's in the content layers
-//                      (tracks/<id>/<version>/track.json, a downloaded or W-Rally's - docs/content-layers.md)
+//   3. track.yaml      the track's own manifest, for a mod or a fix: its newest version's in the content layers
+//                      (tracks/<id>/<version>/track.yaml, a downloaded or W-Rally's - docs/content-layers.md;
+//                      track.yml or an older track.json where there is no track.yaml)
 //
-// track.json (every key optional but the id and version the layers need):
-//   { "name": "Mont Gaudin", "country": "France", "surface": "tarmac", "length_km": 10.2,
-//     "splash": "Textures\\Splash\\load_23.dds" }
+// track.yaml (every key optional but the id and version the layers need):
+//   id: fr_mont_gaudin
+//   version: 1.0.0
+//   name: Mont Gaudin
+//   country: France
+//   surface: tarmac
+//   length_km: 10.2
+//   splash: Textures\Splash\load_23.dds     # (a plain YAML value: no escapes, one \ is one)
 
 #include <string>
 #include <vector>
@@ -31,7 +37,7 @@ struct TrackInfo {
     // Its splash picture (assets/splash.h): a path relative to the RBR folder, or an http(s) URL the server serves it
     // at ("" none). Tracks.ini's SplashScreen for a community track; the server's list (the original stages); its json.
     std::string splash;
-    std::string from;               // the layers that said something: "RBR", "RBR + server", "RBR + track.json (downloaded)"
+    std::string from;               // the layers that said something: "RBR", "RBR + server", "RBR + track.yaml (downloaded)"
     std::string error;              // its json's, if it could not be read ("" none)
 };
 

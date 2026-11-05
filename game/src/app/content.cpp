@@ -53,7 +53,7 @@ std::string DescribeVfs(const vfs::Vfs& v)
     out += "\n  rbr: " + (v.RbrRoot().empty() ? std::string("(not set)") : folder(v.RbrRoot()));
     out += "\n  " + std::to_string(v.Ids(vfs::Kind::Track).size()) + " tracks, " +
            std::to_string(v.Ids(vfs::Kind::Car).size()) + " cars";
-    // the notes: how many, and the first few (each RBR map without an id in rbr-tracks.json is one)
+    // the notes: how many, and the first few (each RBR map without an id in rbr-tracks.yaml is one)
     const std::string& log = v.Log();
     size_t lines = 0, shown = 0, at = 0;
     std::string first;

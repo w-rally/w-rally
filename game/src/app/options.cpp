@@ -160,7 +160,7 @@ int Parse(const std::vector<std::string>& args, Options& o)
         const std::string ownCar = own.generic_string() + "/";
         c.car = Arg(args, "--car", std::filesystem::exists(own / "common.lsp", ec) ? ownCar.c_str() : "s_i2003");
     }
-    // --physics-base: the physics' shared files, a VFS folder (the car physics.json's physicsBase); RBR's by default.
+    // --physics-base: the physics' shared files, a VFS folder (the car physics.yaml's physicsBase); RBR's by default.
     c.base = Arg(args, "--physics-base", c.base.c_str());
     // W-Rally's values on top of RBR's car: --overrides <file> ("none", or none given: RBR's car as it is).
     c.overrides = Arg(args, "--overrides", "");

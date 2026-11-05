@@ -3,18 +3,21 @@
 // RBR folder, in that order.
 //
 // Layers 1 and 2 have W-Rally's layout, every item kept per version:
-//   tracks/<track-id>/<version>/                 track.json, the track's files
-//   cars/<car-id>/<version>/                     car.json, the car's files
-//   cars/<car-id>/physics/<physics-id>/<version>/ physics.json, a physics variant's files
-//   physics/<base-id>/<version>/                 physics.json, a physics base's files (tyres, global defs)
-// and plain files that are no item (video/menu.mp4, rbr-tracks.json), the first layer's that has one.
+//   tracks/<track-id>/<version>/                 track.yaml, the track's files
+//   cars/<car-id>/<version>/                     car.yaml, the car's files
+//   cars/<car-id>/physics/<physics-id>/<version>/ physics.yaml, a physics variant's files
+//   physics/<base-id>/<version>/                 physics.yaml, a physics base's files (tyres, global defs)
+// and plain files that are no item (video/menu.mp4, rbr-tracks.yaml), the first layer's that has one.
+//
+// A manifest is YAML (car.yaml; car.yml too) or, as before, JSON (car.json): the first of those a version has is its
+// manifest, the others are left out (the log says so). Item::Find takes any of the names for the manifest.
 //
 // A version may name a `base` in its manifest (an earlier version of the same item, or "rbr"): its files are its own
 // folder's first, then its base's, down the chain, file by file. The manifest itself is the version's own.
 //
 // The RBR folder is never written. It is reached two ways:
 //   mapped  its items at version "rbr": the maps of Maps/Tracks.ini, and those with a track-<n>_<X>.trk in Maps it does
-//           not list, as tracks (ids from rbr-tracks.json, else rbr_<n>; the map's files Maps/track-<n>_* and
+//           not list, as tracks (ids from rbr-tracks.yaml or .json, else rbr_<n>; the map's files Maps/track-<n>_* and
 //           track-<n>.* inside the track), the folders of Cars with an
 //           .sgc as cars (id: the folder's name as a slug), each car's physics as the variant "rbr" (its loose
 //           Cars/<folder>/physics/, else its Cars.ini slot's folder in physics.rbz) and physics.rbz's Physics/ as the
@@ -65,7 +68,9 @@ bool ValidId(std::string_view id);
 bool ValidVersion(std::string_view version);            // "rbr" too
 int CompareVersions(std::string_view a, std::string_view b);   // <0, 0, >0; "rbr" below every number
 std::string ItemDir(const ItemRef& ref);                // "cars/s_i2003/1.0.0" (the version as given)
-const char* ManifestName(Kind kind);                    // track.json, car.json, physics.json
+const char* ManifestName(Kind kind);                    // track.yaml, car.yaml, physics.yaml: what to write
+const std::vector<std::string>& ManifestNames(Kind kind);   // the names read, in order: .yaml, .yml, .json
+bool IsManifestName(Kind kind, std::string_view name);  // one of them, any case
 std::string Slug(std::string_view name);                // lowercase, anything else than a-z 0-9 _ as _
 
 class Vfs;
@@ -75,6 +80,7 @@ class Item {
 public:
     const ItemRef& Ref() const { return m_ref; }                // the version filled in
     const formats::Json& Manifest() const;
+    std::string ManifestFile() const;                           // its manifest's name ("car.yaml", "car.json"), "" none
     std::vector<std::string> Chain() const;                     // this version, then its bases
     std::optional<Resolved> Find(std::string_view rel) const;   // the first version in the chain that has it
     std::string Source(std::string_view rel) const;             // its layer, "" none

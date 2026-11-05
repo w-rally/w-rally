@@ -703,8 +703,8 @@ void GaragePage(const ImGuiLayer& ui, const assets::Catalog& catalog, app::Setti
                 l.d->AddRectFilled(ImVec2(cx - bw * 0.5f - 40 * k, cy - 70 * k), ImVec2(cx + bw * 0.5f + 40 * k, cy + 76 * k), IM_COL32(10, 10, 11, 210));
                 l.d->AddText(l.mark, 64 * k, ImVec2(cx - bw * 0.5f, cy - 52 * k), kSignal, big);
                 const char* why = !info || !info->known
-                                      ? "Neither W-Rally's car list nor a car.json in its folder says what it is or how it drives."
-                                      : "It has no physics: no physics folder of its own, no Cars.ini slot, no \"physics\" in its car.json.";
+                                      ? "Neither W-Rally's car list nor a car.yaml in its folder says what it is or how it drives."
+                                      : "It has no physics: no physics folder of its own, no Cars.ini slot, no \"physics\" in its car.yaml.";
                 const float ww = l.text->CalcTextSizeA(20 * k, FLT_MAX, 0, why).x;
                 l.d->AddText(l.text, 20 * k, ImVec2(cx - ww * 0.5f, cy + 26 * k), kInkSecondary, why);
             }

@@ -12,7 +12,7 @@ namespace wrally::assets {
 namespace {
 
 // The server's car list, until there is a server: by the car's folder (any case). Only what is sure: a field left
-// empty (0) is unknown, for a car.json to give.
+// empty (0) is unknown, for a car.yaml to give.
 struct ServerCar {
     const char* id;
     const char* name;
@@ -81,7 +81,7 @@ void CarRegister::Build(const vfs::Vfs& content, const std::vector<Car>& cars)
                 info.name = s.name, info.maker = s.maker, info.year = s.year, info.carClass = s.carClass, info.drive = s.drive;
                 info.known = true, info.from += " + server";
             }
-        // 3. car.json: the RBR folder's old one, then the car's newest version's (one the VFS made of RBR's files is no
+        // 3. car.yaml: the RBR folder's old one, then the car's newest version's (one the VFS made of RBR's files is no
         // manifest of the car's own)
         auto apply = [&](const formats::Json& j, const std::string& where) {
             if (j.type != formats::Json::Object) return;
@@ -95,18 +95,20 @@ void CarRegister::Build(const vfs::Vfs& content, const std::vector<Car>& cars)
             info.physics = j.Str("physics", info.physics);
             // (one that names the car says what it is: a patch's - car-pbr's maps - only that it is a version)
             if (j.Get("name")) info.known = true;
-            info.from += " + car.json (" + where + ")";
+            info.from += " + " + where;
         };
-        if (std::vector<uint8_t> bytes; content.Read("rbr/Cars/" + car.folder + "/car.json", bytes)) {
-            try {
-                apply(formats::ParseJson(std::string(bytes.begin(), bytes.end())), "RBR folder");
-            } catch (const std::exception& e) {
-                info.error = "car.json: " + std::string(e.what());
+        for (const std::string& name : vfs::ManifestNames(vfs::Kind::Car))   // the first there: car.yaml, .yml, .json
+            if (std::vector<uint8_t> bytes; content.Read("rbr/Cars/" + car.folder + "/" + name, bytes)) {
+                try {
+                    apply(formats::ParseData(std::string(bytes.begin(), bytes.end()), name), name + " (RBR folder)");
+                } catch (const std::exception& e) {
+                    info.error = name + ": " + e.what();
+                }
+                break;
             }
-        }
         if (const auto item = content.Open({vfs::Kind::Car, car.id, "", car.version}))
-            if (const std::string source = item->Source("car.json"); !source.empty() && source != "rbr")
-                apply(item->Manifest(), source + " " + item->Ref().version);
+            if (const std::string source = item->Source(vfs::ManifestName(vfs::Kind::Car)); !source.empty() && source != "rbr")
+                apply(item->Manifest(), item->ManifestFile() + " (" + source + " " + item->Ref().version + ")");
         m_cars.push_back(std::move(info));
     }
 }
@@ -127,7 +129,7 @@ std::vector<std::string> CarRegister::Classes() const
                 out.push_back(cls);
                 break;
             }
-    for (const CarInfo& c : m_cars)   // a car.json's own classes after them
+    for (const CarInfo& c : m_cars)   // a car.yaml's own classes after them
         if (c.known && !c.carClass.empty() && std::find(out.begin(), out.end(), c.carClass) == out.end()) out.push_back(c.carClass);
     return out;
 }

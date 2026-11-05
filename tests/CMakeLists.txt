@@ -162,6 +162,15 @@ set_target_properties(mix-edit PROPERTIES CXX_STANDARD 17)
 add_test(NAME mix-edit COMMAND mix-edit ${PROJECT_SOURCE_DIR}/game/config/sound-mix.ini ${CMAKE_BINARY_DIR}/tests-bin/mix-edit.ini)
 set_tests_properties(mix-edit PROPERTIES PASS_REGULAR_EXPRESSION "mix-edit: all good")
 
+# The YAML subset the manifests are written in (libs/json): what it reads, every value text, the errors with their lines.
+add_executable(yaml-check yaml_check.cpp)
+target_link_libraries(yaml-check PRIVATE wrally-json)
+foreach(cfg "" _DEBUG _RELEASE _RELWITHDEBINFO _MINSIZEREL)
+    set_target_properties(yaml-check PROPERTIES RUNTIME_OUTPUT_DIRECTORY${cfg} ${CMAKE_BINARY_DIR}/tests-bin)
+endforeach()
+add_test(NAME yaml-subset COMMAND yaml-check)
+set_tests_properties(yaml-subset PROPERTIES PASS_REGULAR_EXPRESSION "yaml-check: all good")
+
 # Where a file is found (libs/vfs, docs/content-layers.md): a made-up downloaded layer, W-Rally layer and RBR folder
 # (with a physics.rbz) - versions newest first, patches over their bases and over RBR's items, RBR's maps and cars
 # mapped as items, physics.rbz's physics unpacked under the cars, writes only into the first layer; then the real RBR

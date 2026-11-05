@@ -1,6 +1,8 @@
 #include "wrally/formats/json.h"
 
+#include <cctype>
 #include <cstdlib>
+#include <cstring>
 #include <fstream>
 #include <sstream>
 #include <stdexcept>
@@ -147,7 +149,13 @@ std::string Json::Str(const std::string& key, const std::string& fallback) const
 double Json::Num(const std::string& key, double fallback) const
 {
     const Json* v = Get(key);
-    return v && v->type == Number ? v->number : fallback;
+    if (v && v->type == Number) return v->number;
+    if (v && v->type == String && !v->text.empty() && !std::isspace(static_cast<unsigned char>(v->text[0]))) {
+        char* end = nullptr;
+        const double d = std::strtod(v->text.c_str(), &end);
+        if (end == v->text.c_str() + v->text.size()) return d;
+    }
+    return fallback;
 }
 
 Json ParseJson(const std::string& text)
@@ -160,7 +168,24 @@ Json ParseJson(const std::string& text)
     return v;
 }
 
-Json ReadJsonFile(const std::string& path, std::string& error)
+bool IsYamlName(const std::string& name)
+{
+    auto ends = [&](const char* ext) {
+        const size_t n = std::strlen(ext);
+        if (name.size() < n) return false;
+        for (size_t i = 0; i < n; ++i)
+            if (std::tolower(static_cast<unsigned char>(name[name.size() - n + i])) != ext[i]) return false;
+        return true;
+    };
+    return ends(".yaml") || ends(".yml");
+}
+
+Json ParseData(const std::string& text, const std::string& name)
+{
+    return IsYamlName(name) ? ParseYaml(text) : ParseJson(text);
+}
+
+Json ReadDataFile(const std::string& path, std::string& error)
 {
     error.clear();
     std::ifstream f(path, std::ios::binary);
@@ -168,7 +193,7 @@ Json ReadJsonFile(const std::string& path, std::string& error)
     std::stringstream ss;
     ss << f.rdbuf();
     try {
-        return ParseJson(ss.str());
+        return ParseData(ss.str(), path);
     } catch (const std::exception& e) {
         error = e.what();
         return {};
