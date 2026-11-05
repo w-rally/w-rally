@@ -495,6 +495,13 @@ manifest: `Cars/<folder>/car.json` (name, maker, year, class, drive, power, weig
 beside the stage's `.ngg` or in `Maps` (name, country, surface, length). A car neither the server nor a `car.json`
 knows is listed but not usable by W-Rally: nothing says what it is or how it drives.
 
+- **TODO** (content layers step 7, [content-layers.md](content-layers.md) §5, deferred 2026-11-05): versions and
+  fingerprints. Each resolved item version gets a drive fingerprint and a full one (SHA-256 over its files through the
+  base chain; the drive files fixed in the game per item kind), cached per file in `cache\`; a replay records the
+  track's, the car's and the physics variant's id, version and drive fingerprint and the physics module's id,
+  `simVersion` and `buildHash`, and plays back with exactly those versions (a missing one named, `--force` for
+  development); `cache\versions.json` keeps each version's last use for the cleaning (step 8).
+
 ### 6.2 Formats — `wrally::formats`
 
 One static library used by the game and by modules that need it. Readers only, with one exception: the NGG writer the
