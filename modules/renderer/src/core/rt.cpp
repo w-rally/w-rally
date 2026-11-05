@@ -1550,7 +1550,7 @@ bool Rt::UpdateInstances(Device& dev, const std::vector<Scene::RtInstanceDesc>& 
         D3D12_RAYTRACING_INSTANCE_DESC id = {};
         ToInstanceTransform(d.xform, id.Transform);
         id.InstanceID = (UINT)descs.size();          // indexes the table below
-        id.InstanceMask = 0xFF;
+        id.InstanceMask = Scene::kRtMaskAll | (d.focus ? Scene::kRtMaskFocus : 0u);   // (the rays here: 0xFF, all)
         id.Flags = d.forceOpaque ? D3D12_RAYTRACING_INSTANCE_FLAG_FORCE_OPAQUE
                                  : D3D12_RAYTRACING_INSTANCE_FLAG_NONE;
         id.AccelerationStructure = it->second.as->GetGPUVirtualAddress();

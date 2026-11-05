@@ -68,6 +68,7 @@ public:
     size_t MeshCount() const { return m_blas.size(); }
     uint32_t InstanceCount() const { return m_instanceCount; }
     bool HasScene() const { return m_tlas != nullptr; }
+    D3D12_GPU_VIRTUAL_ADDRESS TlasVa() const { return m_tlas ? m_tlas->GetGPUVirtualAddress() : 0; }
 
     // One shadow ray per pixel, from the surface at `depth` along `normal`
     // towards the sun. `viewProj` is the JITTERED matrix the prepass rendered
