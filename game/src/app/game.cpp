@@ -298,12 +298,14 @@ private:
         const assets::Car* car = catalog.FindCar(m_wanted);
         const assets::CarInfo* info = car ? catalog.carRegister.Find(car->folder) : nullptr;
         if (!car || !info || !info->known || !assets::Catalog::Drivable(*car)) return;
-        m_reading = std::async(std::launch::async, [folder = car->folder, sgc = car->sgc] {
+        // (its files through its item: a downloaded patch's PBR maps over RBR's textures)
+        m_reading = std::async(std::launch::async, [folder = car->folder, sgc = car->sgc,
+                                                    files = assets::CarFilesOf(catalog.Content(), {vfs::Kind::Car, car->id, "", car->version})] {
             Read r;
             r.folder = folder;
             const auto t0 = std::chrono::steady_clock::now();
             try {
-                r.model = assets::ReadCarModel(sgc, "gravel");
+                r.model = assets::ReadCarModel(sgc, "gravel", &files);
                 r.ok = true;
             } catch (const std::exception& e) {
                 std::fprintf(stderr, "the car's model: %s\n", e.what());
@@ -587,7 +589,15 @@ StageEnd RunStage(Shell& sh, const Options& given, bool fromMenu, std::string& e
     assets::CarRender car;
     std::vector<physics::Part> parts;   // the car's parts that can come loose, as the physics loaded them
     sim.Physics().Parts(parts);
-    car.Create(renderer, o.session.physics.sgc, o.session.physics.surface, collision, parts);
+    // (its files through its item - --car-item - else beside the .sgc)
+    assets::CarFiles carFiles;
+    if (!o.carItem.empty()) {
+        const size_t at = o.carItem.find('@');
+        carFiles = assets::CarFilesOf(content, {vfs::Kind::Car, o.carItem.substr(0, at), "",
+                                                at == std::string::npos ? "" : o.carItem.substr(at + 1)});
+        if (!carFiles.read) std::printf("--car-item %s: not here - the model's files beside its .sgc\n", o.carItem.c_str());
+    }
+    car.Create(renderer, o.session.physics.sgc, o.session.physics.surface, collision, parts, &carFiles);
     // The stage's fences (its .fnc), knocked about by the car's hull (assets/fences.h).
     assets::Fences fences;
     if (const std::string e = fences.Create(renderer, o.session.physics.fnc, o.game); !e.empty())
@@ -1263,7 +1273,7 @@ std::vector<std::string> QuickArgs(const Settings& s, const assets::Catalog& cat
     // The stage from its track item, the car's model on disk (resolved through its versions), its physics (the variant
     // chosen, its base, the first module that drives it) and the setup as VFS paths (docs/content-layers.md).
     std::vector<std::string> a = {"W-Rally", s.rbrPath, st->ngg, "--stage", st->stage, "--track", st->track + "@" + st->version,
-                                  "--sgc", car->sgc, "--car", physics->folder, "--physics-base", physics->base,
+                                  "--sgc", car->sgc, "--car-item", car->id + "@" + car->version, "--car", physics->folder, "--physics-base", physics->base,
                                   "--physics", physics->modules.front(), "--damage", std::to_string(std::min(s.damage, 3u)),
                                   "--out", (UserDir() / "drive.phr").string()};
     if (!s.setup.empty()) a.insert(a.end(), {"--setup", s.setup});

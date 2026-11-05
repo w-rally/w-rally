@@ -22,6 +22,7 @@
 // wheel: the helper's place at the origin, the car's axes), for a renderer to put on the physics' wheel.
 
 #include <cstdint>
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -86,9 +87,16 @@ struct CarModel {
     float wheelAt[4][3] = {};
 };
 
+// Where a car's other files are, relative to its folder ("<car>.ini", "textures/<file>.dds"): the car's item through its
+// versions (docs/content-layers.md - a downloaded patch's PBR maps over RBR's textures), or the .sgc's folder on disk.
+struct CarFiles {
+    std::function<std::vector<uint8_t>(const std::string& rel)> read;           // empty: none
+    std::function<std::vector<std::string>(const std::string& relDir)> list;    // a folder's files (no subfolders)
+};
+
 // The exterior as seen from outside: the "e_" meshes, the wheels and spare wheel of `surface` only (tarmac, gravel,
-// snow), the lamps' lit twins too (CarPart::lit; other _lit meshes - hot brake discs - left out). Throws
-// std::runtime_error on a bad file.
-CarModel ReadCarModel(const std::string& sgcPath, const std::string& surface);
+// snow), the lamps' lit twins too (CarPart::lit; other _lit meshes - hot brake discs - left out). `files`: where its
+// .ini files and textures are (null: beside the .sgc). Throws std::runtime_error on a bad file.
+CarModel ReadCarModel(const std::string& sgcPath, const std::string& surface, const CarFiles* files = nullptr);
 
 } // namespace wrally::assets

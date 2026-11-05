@@ -48,6 +48,17 @@ int main(int argc, char** argv)
             if (!p || p->id != "rbr" || p->modules.empty() || p->base != "physics/rbr/rbr/")
                 return Fail(car.name + ": a slot car without RBR's physics as its default");
         }
+        // a newer version than RBR's (a download's patch: car-pbr's maps): the model read through the item
+        if (car.version != "rbr" && !car.sgc.empty()) {
+            const wrally::assets::CarFiles files = wrally::assets::CarFilesOf(c.Content(), {wrally::vfs::Kind::Car, car.id, "", car.version});
+            size_t textured = 0, maps = 0;
+            for (const wrally::assets::CarTexture& t : wrally::assets::ReadCarModel(car.sgc, "gravel", &files).materials) {
+                textured += !t.dds.empty();
+                for (const auto& m : t.maps) maps += !m.dds.empty();
+            }
+            std::printf("%s %s (%s over RBR's): %zu textured materials, %zu PBR maps\n", car.name.c_str(), car.version.c_str(),
+                        car.source.c_str(), textured, maps);
+        }
         if (car.variants.size() > 1) {
             std::printf("%s's physics:", car.name.c_str());
             for (const wrally::assets::PhysicsVariant& p : car.variants)

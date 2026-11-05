@@ -6,6 +6,11 @@
     or the one found, and fails without one.
   - The folder goes to install.ini beside the exe (rbr_path, read by the game before the user's W-Rally.ini) and to
     HKLM\Software\W-Rally (RbrPath), where an upgrade finds it again.
+  - Then asks for the downloads folder (docs/content-layers.md: the downloaded layer, the one the game writes),
+    pre-filled with this user's LocalAppData\W-Rally\Downloads (ca: DefaultDownloads). install.ini's download_path and
+    the registry's DownloadPath keep "%LOCALAPPDATA%\W-Rally\Downloads" when that default is kept - the game expands
+    it, each Windows user their own - else the folder chosen (ca: DownloadPath). A silent install takes
+    DOWNLOADDIR=<folder>. Each user can set their own in the game's Settings.
 -->
 <!-- The name as the game's corner shows the build: "W-Rally <version> · <commit>" (build-msi.ps1 passes both). -->
 <?if $(var.Commit) != "" ?>
@@ -28,20 +33,30 @@
       <RegistrySearch Root="HKLM" Key="Software\W-Rally" Name="RbrPath" Type="raw" Bitness="always64" />
     </Property>
     <Property Id="RBRPATH" Secure="yes" />
+    <!-- The downloads folder: the last install's (DownloadPath), else DefaultDownloads' (a directory, as RBRDIR). -->
+    <Property Id="DOWNLOADDIR" Secure="yes">
+      <RegistrySearch Root="HKLM" Key="Software\W-Rally" Name="DownloadPath" Type="raw" Bitness="always64" />
+    </Property>
+    <Property Id="DOWNLOADPATH" Secure="yes" />
     <Property Id="RBR_VALID" Secure="yes" />
 
     <Binary Id="RbrFolderCA" SourceFile="$(var.CaDll)" />
     <CustomAction Id="DetectRbr" BinaryRef="RbrFolderCA" DllEntry="DetectRbr" Execute="immediate" Return="check" />
     <CustomAction Id="ValidateRbr" BinaryRef="RbrFolderCA" DllEntry="ValidateRbr" Execute="immediate" Return="check" />
+    <CustomAction Id="DefaultDownloads" BinaryRef="RbrFolderCA" DllEntry="DefaultDownloads" Execute="immediate" Return="check" />
+    <CustomAction Id="DownloadPath" BinaryRef="RbrFolderCA" DllEntry="DownloadPath" Execute="immediate" Return="check" />
     <CustomAction Id="RbrMissing" Error="W-Rally needs Richard Burns Rally: no RBR folder was found. Install with RBRDIR=&quot;&lt;the RBR folder&gt;&quot;." />
 
     <InstallUISequence>
       <Custom Action="DetectRbr" After="AppSearch" Condition="NOT Installed" />
+      <Custom Action="DefaultDownloads" After="DetectRbr" />
     </InstallUISequence>
     <InstallExecuteSequence>
       <Custom Action="DetectRbr" After="AppSearch" Condition="NOT Installed" />
       <Custom Action="ValidateRbr" After="DetectRbr" Condition="NOT Installed" />
       <Custom Action="RbrMissing" After="ValidateRbr" Condition="NOT Installed AND RBR_VALID&lt;&gt;&quot;1&quot;" />
+      <Custom Action="DefaultDownloads" After="RbrMissing" />
+      <Custom Action="DownloadPath" After="CostFinalize" />
     </InstallExecuteSequence>
 
     <StandardDirectory Id="ProgramFiles64Folder">
@@ -49,6 +64,7 @@
     </StandardDirectory>
     <StandardDirectory Id="TARGETDIR">
       <Directory Id="RBRDIR" Name="Richard Burns Rally" />
+      <Directory Id="DOWNLOADDIR" Name="Downloads" />
     </StandardDirectory>
     <StandardDirectory Id="ProgramMenuFolder" />
 
@@ -60,6 +76,9 @@
       <RegistryValue Root="HKLM" Key="Software\W-Rally" Name="RbrPath" Type="string" Value="[RBRPATH]" KeyPath="yes" />
       <IniFile Id="InstallIni" Action="addLine" Directory="INSTALLFOLDER" Name="install.ini" Section="W-Rally"
                Key="rbr_path" Value="[RBRPATH]" />
+      <RegistryValue Root="HKLM" Key="Software\W-Rally" Name="DownloadPath" Type="string" Value="[DOWNLOADPATH]" />
+      <IniFile Id="InstallIniDownloads" Action="addLine" Directory="INSTALLFOLDER" Name="install.ini" Section="W-Rally"
+               Key="download_path" Value="[DOWNLOADPATH]" />
     </Component>
 
     <Component Id="StartMenu" Directory="ProgramMenuFolder" Guid="5E2F8C1D-9B3A-4C7E-8D6F-1A2B3C4D5E61">
@@ -113,11 +132,17 @@
       <Publish Dialog="RbrDirDlg" Control="Next" Event="SetTargetPath" Value="RBRDIR" Order="1" />
       <Publish Dialog="RbrDirDlg" Control="Next" Event="DoAction" Value="ValidateRbr" Order="2" />
       <Publish Dialog="RbrDirDlg" Control="Next" Event="SpawnDialog" Value="RbrInvalidDlg" Order="3" Condition="RBR_VALID&lt;&gt;&quot;1&quot;" />
-      <Publish Dialog="RbrDirDlg" Control="Next" Event="NewDialog" Value="VerifyReadyDlg" Order="4" Condition="RBR_VALID=&quot;1&quot;" />
+      <Publish Dialog="RbrDirDlg" Control="Next" Event="NewDialog" Value="DownloadDirDlg" Order="4" Condition="RBR_VALID=&quot;1&quot;" />
       <Publish Dialog="RbrDirDlg" Control="ChangeFolder" Property="_BrowseProperty" Value="RBRDIR" Order="1" />
       <Publish Dialog="RbrDirDlg" Control="ChangeFolder" Event="SpawnDialog" Value="BrowseDlg" Order="2" />
 
-      <Publish Dialog="VerifyReadyDlg" Control="Back" Event="NewDialog" Value="RbrDirDlg" Order="1" Condition="NOT Installed" />
+      <Publish Dialog="DownloadDirDlg" Control="Back" Event="NewDialog" Value="RbrDirDlg" />
+      <Publish Dialog="DownloadDirDlg" Control="Next" Event="SetTargetPath" Value="DOWNLOADDIR" Order="1" />
+      <Publish Dialog="DownloadDirDlg" Control="Next" Event="NewDialog" Value="VerifyReadyDlg" Order="2" />
+      <Publish Dialog="DownloadDirDlg" Control="ChangeFolder" Property="_BrowseProperty" Value="DOWNLOADDIR" Order="1" />
+      <Publish Dialog="DownloadDirDlg" Control="ChangeFolder" Event="SpawnDialog" Value="BrowseDlg" Order="2" />
+
+      <Publish Dialog="VerifyReadyDlg" Control="Back" Event="NewDialog" Value="DownloadDirDlg" Order="1" Condition="NOT Installed" />
       <Publish Dialog="VerifyReadyDlg" Control="Back" Event="NewDialog" Value="MaintenanceTypeDlg" Order="2" Condition="Installed AND NOT PATCH" />
       <Publish Dialog="VerifyReadyDlg" Control="Back" Event="NewDialog" Value="WelcomeDlg" Order="2" Condition="Installed AND PATCH" />
 
@@ -144,6 +169,27 @@
                  Text="W-Rally has no stages and cars of its own yet: it uses those of your Richard Burns Rally, read in place and never changed. Choose the folder with RichardBurnsRally_SSE.exe." />
         <Control Id="FolderLabel" Type="Text" X="20" Y="110" Width="320" Height="12" NoPrefix="yes" Text="RBR folder:" />
         <Control Id="Folder" Type="PathEdit" X="20" Y="124" Width="320" Height="18" Property="RBRDIR" />
+        <Control Id="ChangeFolder" Type="PushButton" X="20" Y="148" Width="56" Height="17" Text="!(loc.InstallDirDlgChange)" />
+      </Dialog>
+
+      <!-- The downloads folder: RbrDirDlg's layout. -->
+      <Dialog Id="DownloadDirDlg" Width="370" Height="270" Title="!(loc.InstallDirDlg_Title)">
+        <Control Id="Next" Type="PushButton" X="236" Y="243" Width="56" Height="17" Default="yes" Text="!(loc.WixUINext)" />
+        <Control Id="Back" Type="PushButton" X="180" Y="243" Width="56" Height="17" Text="!(loc.WixUIBack)" />
+        <Control Id="Cancel" Type="PushButton" X="304" Y="243" Width="56" Height="17" Cancel="yes" Text="!(loc.WixUICancel)">
+          <Publish Event="SpawnDialog" Value="CancelDlg" />
+        </Control>
+        <Control Id="Description" Type="Text" X="25" Y="23" Width="280" Height="15" Transparent="yes" NoPrefix="yes"
+                 Text="Where W-Rally keeps what it downloads." />
+        <Control Id="Title" Type="Text" X="15" Y="6" Width="200" Height="15" Transparent="yes" NoPrefix="yes"
+                 Text="{\WixUI_Font_Title}Downloads folder" />
+        <Control Id="BannerBitmap" Type="Bitmap" X="0" Y="0" Width="370" Height="44" TabSkip="no" Text="!(loc.InstallDirDlgBannerBitmap)" />
+        <Control Id="BannerLine" Type="Line" X="0" Y="44" Width="370" Height="0" />
+        <Control Id="BottomLine" Type="Line" X="0" Y="234" Width="370" Height="0" />
+        <Control Id="Info" Type="Text" X="20" Y="60" Width="320" Height="45" NoPrefix="yes"
+                 Text="Stages, cars and their physics downloaded, each version in a folder of its own - they can take a lot of room. Kept, this folder is each Windows user's own; each can choose another in the game's Settings." />
+        <Control Id="FolderLabel" Type="Text" X="20" Y="110" Width="320" Height="12" NoPrefix="yes" Text="Downloads folder:" />
+        <Control Id="Folder" Type="PathEdit" X="20" Y="124" Width="320" Height="18" Property="DOWNLOADDIR" />
         <Control Id="ChangeFolder" Type="PushButton" X="20" Y="148" Width="56" Height="17" Text="!(loc.InstallDirDlgChange)" />
       </Dialog>
 

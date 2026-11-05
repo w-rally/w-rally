@@ -43,8 +43,10 @@ class CarRender {
 public:
     // The model on the renderer's loaded scene. `collision`: the car's collision meshes (the hull's fallback); `parts`
     // the physics' parts that can come loose (their names place the meshes of the same names on their nodes).
+    // `files`: where the model's other files are (ReadCarModel's; null: beside the .sgc).
     void Create(render::Renderer& renderer, const std::string& sgc, const std::string& surface,
-                const std::vector<phys::data::RecMesh>& collision, const std::vector<physics::Part>& parts);
+                const std::vector<phys::data::RecMesh>& collision, const std::vector<physics::Part>& parts,
+                const CarFiles* files = nullptr);
     // The same from a model read already (ReadCarModel: any thread - the reading is the slow part; null: it failed).
     void Create(render::Renderer& renderer, const CarModel* model, const std::vector<phys::data::RecMesh>& collision,
                 const std::vector<physics::Part>& parts);

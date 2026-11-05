@@ -6,6 +6,8 @@
 //   ValidateRbr  RBR_VALID = "1" when RBRDIR holds the RBR files W-Rally reads (RichardBurnsRally_SSE.exe,
 //                Physics.rbz, Maps\Tracks.ini, Cars\Cars.ini), else ""; RBRPATH the
 //                folder without a trailing backslash (what install.ini and the registry keep).
+//   DefaultDownloads  DOWNLOADDIR unset (or the last install's "%LOCALAPPDATA%..."): LocalAppData\W-Rally\Downloads
+//   DownloadPath      DOWNLOADPATH: what install.ini keeps - "%LOCALAPPDATA%\W-Rally\Downloads" for the default
 
 #include <windows.h>
 
@@ -123,6 +125,28 @@ extern "C" __declspec(dllexport) UINT __stdcall DetectRbr(MSIHANDLE h)
 {
     if (IsRbr(Property(h, L"RBRDIR"))) return ERROR_SUCCESS;
     if (const std::wstring found = Detect(); !found.empty()) MsiSetPropertyW(h, L"RBRDIR", (found + L"\\").c_str());
+    return ERROR_SUCCESS;
+}
+
+// The downloads folder (docs/content-layers.md: the downloaded layer). DOWNLOADDIR unset - or the last install's
+// "%LOCALAPPDATA%\W-Rally\Downloads", which is no path: the default - is this user's LocalAppData\W-Rally\Downloads.
+extern "C" __declspec(dllexport) UINT __stdcall DefaultDownloads(MSIHANDLE h)
+{
+    const std::wstring dir = Property(h, L"DOWNLOADDIR");
+    if (dir.empty() || dir[0] == L'%')
+        MsiSetPropertyW(h, L"DOWNLOADDIR", (Property(h, L"LocalAppDataFolder") + L"W-Rally\\Downloads\\").c_str());
+    return ERROR_SUCCESS;
+}
+
+// DOWNLOADPATH, what install.ini and the registry keep: "%LOCALAPPDATA%\W-Rally\Downloads" when the default was kept
+// (the game expands it: each Windows user their own - a per-machine install runs as one user), else the folder chosen,
+// without a trailing backslash.
+extern "C" __declspec(dllexport) UINT __stdcall DownloadPath(MSIHANDLE h)
+{
+    const std::wstring dir = Trimmed(Property(h, L"DOWNLOADDIR"));
+    const std::wstring def = Trimmed(Property(h, L"LocalAppDataFolder") + L"W-Rally\\Downloads");
+    MsiSetPropertyW(h, L"DOWNLOADPATH", dir.empty() || _wcsicmp(dir.c_str(), def.c_str()) == 0
+                                            ? L"%LOCALAPPDATA%\\W-Rally\\Downloads" : dir.c_str());
     return ERROR_SUCCESS;
 }
 
