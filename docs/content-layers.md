@@ -48,7 +48,7 @@ tracks/<track-id>/<version>/
     <track-id>.ngg, ...
 physics/<base-id>/<version>/           a physics base: tyres, global defs
 video/menu.mp4                         W-Rally's own files that are no item, as today
-rbr/tracks.json                        the translation table: RBR map number <-> track id (§3)
+rbr-tracks.json                        the translation table: RBR map number <-> track id (§3)
 ```
 
 Layer 2 has the same layout, with the one version of each item that the installed W-Rally ships.
@@ -66,7 +66,7 @@ removed; `--overrides` stays for development.
 
 **Mapped** — the RBR layer answers W-Rally paths for RBR's items, all at version `rbr`:
 
-- **Tracks:** `rbr/tracks.json` (shipped in layer 2, a newer one downloadable into layer 1) is written by hand and
+- **Tracks:** `rbr-tracks.json` (shipped in layer 2, a newer one downloadable into layer 1) is written by hand and
   maps each RBR map number to a track id: `{ "41": "cz_ploskovice", ... }`. Then `tracks/<id>/rbr/track-41_M.trk` ↔
   `Maps/track-41_M.trk`, and so on for the map's files (`.lbs`, `.trk`, `.col`, `.dls`, `.ini`, textures), keeping
   RBR's file names inside the track's folder. A map the table does not know is offered as `rbr_<n>` until it is
@@ -215,13 +215,13 @@ public:
 
 1. Audit: every path the game builds from `rbrPath`, every path a module builds itself (incl. `physics.rbz` members);
    list each with its new VFS path.
-2. `libs/vfs`: layers, items and versions, base chains, `rbr/` raw, `RbrMap` (cars, tracks table, `physics.rbz`
+2. **Done 2026-11-05.** `libs/vfs`: layers, items and versions, base chains, `rbr/` raw, `RbrMap` (cars, tracks table, `physics.rbz`
    mapping), union listing; unit tests.
 3. `download_path` in Settings (+ expansion, UI field); `app::MakeVfs`.
 4. `FileHost` over the `Vfs`; physics interface v3 (`physicsCar` a folder, base folder, `formats`, `simVersion`);
    WPhysicsRBR, audio and renderer hosts moved over.
 5. Catalog and registers over the VFS: cars and tracks by id (newest version) with `source`; manifests from the
-   layers; `rbr/tracks.json` written for the stages at hand with `<country>_<stagename>` ids.
+   layers; `rbr-tracks.json` written for the stages at hand with `<country>_<stagename>` ids.
 6. Physics variants: `physics.json`, `Car::physics` as a list, Quick rally choice, `physics_<car-id>`;
    `--extract-slot-physics` removed.
 7. Versions: fingerprints with their cache; replays record and resolve exact versions; `versions.json` last use.

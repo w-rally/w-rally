@@ -89,9 +89,9 @@ set_tests_properties(astronomy-check PROPERTIES PASS_REGULAR_EXPRESSION "astrono
 add_executable(catalog-check catalog_check.cpp ${GAME_SRC}/assets/catalog.cpp ${GAME_SRC}/assets/car_register.cpp
                ${GAME_SRC}/assets/track_register.cpp ${GAME_SRC}/app/settings.cpp
                ${GAME_SRC}/app/options.cpp ${GAME_SRC}/input/bindings.cpp ${GAME_SRC}/rules/stage.cpp
-               ${GAME_SRC}/formats/track_settings.cpp ${GAME_SRC}/formats/lbs_geometry.cpp ${GAME_SRC}/formats/json.cpp)
+               ${GAME_SRC}/formats/track_settings.cpp ${GAME_SRC}/formats/lbs_geometry.cpp)
 target_include_directories(catalog-check PRIVATE ${GAME_SRC})
-target_link_libraries(catalog-check PRIVATE phys-data wrally-modules wrally-signals)
+target_link_libraries(catalog-check PRIVATE wrally-json phys-data wrally-modules wrally-signals)
 target_compile_definitions(catalog-check PRIVATE _CRT_SECURE_NO_WARNINGS NOMINMAX WRALLY_SOURCE_DIR="${PROJECT_SOURCE_DIR}")
 set_target_properties(catalog-check PROPERTIES CXX_STANDARD 17)
 if(EXISTS ${WRALLY_TEST_RBR_DIR}/Maps/track-4_E.lbs)
@@ -161,3 +161,19 @@ target_link_libraries(mix-edit PRIVATE game-audio)
 set_target_properties(mix-edit PROPERTIES CXX_STANDARD 17)
 add_test(NAME mix-edit COMMAND mix-edit ${PROJECT_SOURCE_DIR}/game/config/sound-mix.ini ${CMAKE_BINARY_DIR}/tests-bin/mix-edit.ini)
 set_tests_properties(mix-edit PROPERTIES PASS_REGULAR_EXPRESSION "mix-edit: all good")
+
+# Where a file is found (libs/vfs, docs/content-layers.md): a made-up downloaded layer, W-Rally layer and RBR folder
+# (with a physics.rbz) - versions newest first, patches over their bases and over RBR's items, RBR's maps and cars
+# mapped as items, physics.rbz's physics unpacked under the cars, writes only into the first layer; then the real RBR
+# folder where there is one.
+add_executable(vfs-check vfs_check.cpp)
+target_link_libraries(vfs-check PRIVATE wrally-vfs)
+foreach(cfg "" _DEBUG _RELEASE _RELWITHDEBINFO _MINSIZEREL)
+    set_target_properties(vfs-check PROPERTIES RUNTIME_OUTPUT_DIRECTORY${cfg} ${CMAKE_BINARY_DIR}/tests-bin)
+endforeach()
+add_test(NAME vfs-made-up COMMAND vfs-check ${CMAKE_BINARY_DIR}/tests-bin/vfs-scratch)
+set_tests_properties(vfs-made-up PROPERTIES PASS_REGULAR_EXPRESSION "vfs-check: all good")
+if(EXISTS ${WRALLY_TEST_RBR_DIR}/physics.rbz)
+    add_test(NAME vfs-rbr COMMAND vfs-check ${CMAKE_BINARY_DIR}/tests-bin/vfs-scratch-rbr ${WRALLY_TEST_RBR_DIR})
+    set_tests_properties(vfs-rbr PROPERTIES PASS_REGULAR_EXPRESSION "vfs-check: all good")
+endif()

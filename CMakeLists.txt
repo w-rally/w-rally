@@ -40,7 +40,9 @@ target_include_directories(wrally-iface INTERFACE ${CMAKE_CURRENT_SOURCE_DIR}/in
 
 add_subdirectory(third_party)
 add_subdirectory(libs/signals)
+add_subdirectory(libs/json)
 add_subdirectory(libs/modules)
+add_subdirectory(libs/vfs)
 add_subdirectory(modules/physics-rbr)
 add_subdirectory(modules/audio)
 add_subdirectory(modules/renderer)
