@@ -2,6 +2,7 @@
 
 #include <math.h>
 #include <stdio.h>
+#include <stdlib.h>
 
 namespace ngg {
 namespace core {
@@ -64,6 +65,20 @@ void CascadeVisibility::Record(Device& dev, ID3D12GraphicsCommandList* list, con
     (void)dev;
     ScreenSpaceAo(m_gtao, list, f, out);
     m_scene.RenderShadows(list, f.view, f.proj, f.sunTravel);
+    // The local lights' own shadow maps (Scene::RenderLocalShadows) - the ray tracer is not here to shadow them - and
+    // the screen-space AO's share of their diffuse: at night the ambient XeGTAO darkens is next to nothing, so without
+    // a share the lamps' light keeps no contact darkening at all (under the car on the Garage's turntable). A modest
+    // share (kNightAoShare), faded in as the sun goes down - none while it is up, so the day is as it was.
+    // NGG_LOCAL_SHADOWS=0: no maps (A/B); NGG_LOCAL_AO=<share>: another share at night.
+    static const bool maps = [] { const char* e = getenv("NGG_LOCAL_SHADOWS"); return !e || e[0] != '0'; }();
+    static const float kNightAoShare = [] { const char* e = getenv("NGG_LOCAL_AO"); return e ? (float)atof(e) : 0.5f; }();
+    float len = sqrtf(f.sunTravel[0] * f.sunTravel[0] + f.sunTravel[1] * f.sunTravel[1] + f.sunTravel[2] * f.sunTravel[2]);
+    if (len < 1e-6f) len = 1.0f;
+    const float sunUp = -f.sunTravel[1] / len;   // sin of the sun's elevation
+    const float night = sunUp >= 0.0f ? 0.0f : sunUp <= -0.1f ? 1.0f : -sunUp / 0.1f;
+    const float share = f.ao ? kNightAoShare * night : 0.0f;
+    if (maps) m_scene.RenderLocalShadows(list, share);
+    else      m_scene.RenderLocalShadows(nullptr, share);
     out.shadowSource = 0;
 }
 

@@ -102,6 +102,21 @@ public:
     const float* CamPos() const { return m_camPos; }
     const float* CamFwd() const { return m_camFwd; }
 
+    // SHADOW-MAPPED LIGHTS (the cascades' path: no ray tracer to shadow the local lights). Build picks the few
+    // shadowed spots and beams that matter most here - by what they give near the camera - out of the same list the
+    // ray tracer shadows, and gives each a perspective frustum from the lamp along its axis; its GPU record's flags
+    // carry the slot (bits 8-11: slot + 1). Point lights get none (unshadowed, as before). The scene renders the maps
+    // (Scene::RenderLocalShadows) and the lights' shading reads them only when it did.
+    static constexpr uint32_t kShadowSlots = 4;
+    static constexpr float    kShadowNear = 0.05f;   // metres from the lamp (the ray tracer stops 2 cm short of it)
+    static constexpr float    kShadowFar = 150.0f;   // the map's reach at most: a beam's light past it is faint
+    static constexpr float    kShadowMaxTan = 2.75f; // a map's half-angle at most (70 degrees): wider, its texels too coarse
+    uint32_t ShadowCount() const { return m_shadowCount; }
+    // Row-major, row-vector world -> clip (conventional depth, near kShadowNear, far ShadowInfo()[3]).
+    const float* ShadowViewProj(uint32_t slot) const { return m_shadowVP[slot]; }
+    // tan of the half-angles across and up, near, far.
+    const float* ShadowInfo(uint32_t slot) const { return m_shadowInfo[slot]; }
+
     D3D12_GPU_VIRTUAL_ADDRESS LightsVa() const   { return m_lightGpu ? m_lightGpu->GetGPUVirtualAddress() : 0; }
     D3D12_GPU_VIRTUAL_ADDRESS ClustersVa() const { return m_clusterGpu ? m_clusterGpu->GetGPUVirtualAddress() : 0; }
     D3D12_GPU_VIRTUAL_ADDRESS IndicesVa() const  { return m_indexGpu ? m_indexGpu->GetGPUVirtualAddress() : 0; }
@@ -120,6 +135,9 @@ private:
     struct ClusterSphere { float c[3], r; };          // view space
     std::vector<ClusterSphere> m_clusterSpheres;
     bool      m_active = false;
+    uint32_t  m_shadowCount = 0;
+    float     m_shadowVP[kShadowSlots][16] = {};
+    float     m_shadowInfo[kShadowSlots][4] = {};
 };
 
 // HLSL shared by the scene pass and the ray tracer: the Light struct, the three buffers (gLights, gClusters,

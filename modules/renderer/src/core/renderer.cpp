@@ -45,6 +45,8 @@ bool Renderer::Create(Device& dev, DXGI_FORMAT outputFormat, UINT width, UINT he
     if (!m_shadows.Create(d, 2048)) Log("renderer: cascaded shadow maps unavailable");
     if (!m_gtao.Create(d, dev.queue.Get())) Log("renderer: no screen-space AO - the cascades go without AO");
     m_scene.SetShadowMaps(&m_shadows);
+    if (!m_localShadows.Create(d, 1024)) Log("renderer: no local-light shadow maps - local lights unshadowed without RT");
+    m_scene.SetLocalShadowMaps(&m_localShadows);
 
     // Built here rather than at load: overlays depend on the OUTPUT format,
     // not on the HDR intermediate, and must survive a track change.
@@ -273,6 +275,7 @@ void Renderer::RecordFrame(Device& dev, D3D12_CPU_DESCRIPTOR_HANDLE outRtv,
 
     m_rtActive = false;
     m_vis = Visibility();
+    m_scene.ResetLocalShadows();   // (drawn by the cascades' provider only)
     m_scene.SetReflectionTlas(0);
     ID3D12Resource* motion = nullptr;
     if (m_scene.Ready())

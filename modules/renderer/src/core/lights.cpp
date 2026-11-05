@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <cstdlib>
 
 using Microsoft::WRL::ComPtr;
 
@@ -206,6 +207,10 @@ bool Lights::Build(ID3D12GraphicsCommandList* list, const float* view, const flo
     struct Shape { float c[3], range, dir[3], cosOuter, sinOuter; bool spot; };
     std::vector<Box> boxes;
     std::vector<Shape> shapes;
+    // The shadow maps' candidates (ShadowCount): shadowed spots and beams on screen, by what they give near the camera.
+    struct ShadowCand { uint32_t live, flags; bool beam; float score, tanX, tanY, range; float pos[3], dir[3], up[3]; };
+    std::vector<ShadowCand> cands;
+    m_shadowCount = 0;
     const uint32_t n = (uint32_t)(std::min<size_t>)(m_lights.size(), kMaxLights);
     uint32_t live = 0;
     for (uint32_t i = 0; i < n; ++i) {
@@ -216,7 +221,7 @@ bool Lights::Build(ID3D12GraphicsCommandList* list, const float* view, const flo
         // A beam's lobes, and what they decide: its peak (the reach) and how far off its axis it reaches (the
         // clusters' cone) - a lobe out to where it falls to 1% of its peak, (log2 100)^(1/sharpness) half-widths.
         const bool beam = L.type == LightDesc::kBeam && L.lobeCount > 0;
-        float peak = L.intensity, extent = 0.0f;
+        float peak = L.intensity, extent = 0.0f, extentX = 0.0f, extentY = 0.0f;
         if (beam) {
             peak = 0.0f;
             for (uint32_t k = 0; k < (std::min)(L.lobeCount, LightDesc::kMaxLobes); ++k) {
@@ -224,9 +229,10 @@ bool Lights::Build(ID3D12GraphicsCommandList* list, const float* view, const flo
                 peak = (std::max)(peak, o.candela * L.intensity);
                 const float f = std::pow(6.644f, 1.0f / (std::max)(o.sharpness, 0.5f));
                 const float dr = 3.14159265f / 180.0f;
-                extent = (std::max)(extent, (std::max)(std::fabs(std::tan(o.yawDeg * dr)) + std::tan(o.halfWidthDeg * dr) * f,
-                                                       std::fabs(std::tan(o.pitchDeg * dr)) + std::tan(o.halfHeightDeg * dr) * f));
+                extentX = (std::max)(extentX, std::fabs(std::tan(o.yawDeg * dr)) + std::tan(o.halfWidthDeg * dr) * f);
+                extentY = (std::max)(extentY, std::fabs(std::tan(o.pitchDeg * dr)) + std::tan(o.halfHeightDeg * dr) * f);
             }
+            extent = (std::max)(extentX, extentY);
         }
         // Its reach: where it falls under ~0.1 lux, at most kMaxRange (a pencil beam's).
         float range = L.range;
@@ -305,9 +311,115 @@ bool Lights::Build(ID3D12GraphicsCommandList* list, const float* view, const flo
         sh.cosOuter = g.cosOuter;
         sh.sinOuter = std::sin(outer);
         shapes.push_back(sh);
+        // A shadow map's candidate: a shadowed spot or beam (a point light would need a cube). Its frustum's half-angles
+        // - a spot's cone, a beam's lobes across and up - at most kShadowMaxTan (what is outside it reads as lit). Its score: its peak over its distance from the camera squared - the
+        // player's headlamps and the Garage's spots before a lamp down the road.
+        if (L.shadows && (beam || L.type == LightDesc::kSpot)) {
+            ShadowCand sc{};
+            sc.live = live;
+            sc.flags = g.flags;
+            sc.beam = beam;
+            sc.tanX = (std::min)(beam ? extentX : std::tan(outer), kShadowMaxTan);
+            sc.tanY = (std::min)(beam ? extentY : std::tan(outer), kShadowMaxTan);
+            sc.range = (std::min)(range, kShadowFar);
+            float d2 = 0.0f;
+            for (int k = 0; k < 3; ++k) {
+                sc.pos[k] = g.pos[k];
+                sc.dir[k] = g.dir[k];
+                sc.up[k] = g.up[k];
+                d2 += (g.pos[k] - m_camPos[k]) * (g.pos[k] - m_camPos[k]);
+            }
+            sc.score = peak * tintMax / (std::max)(d2, 1.0f);
+            if (sc.tanX > 0.01f && sc.tanY > 0.01f && sc.range > kShadowNear * 4.0f) cands.push_back(sc);
+        }
         ++live;
     }
     if (!live) return false;
+
+    // The shadow maps' lights: the best candidates, a map for each MOUNTING - lights side by side at one height share
+    // one (a headlamp's beams, a ramp's pods fanned out across the bonnet: within kShareDist of the map's lamp,
+    // within kShareRise of its height, their axes within ~45 degrees of its), seen from the map's own lamp, its frustum
+    // widened to the others' - at most kShadowSlots maps; their slots in their records' flags. The Impreza's ramp of
+    // four pods and its two headlamps: three maps, not six.
+    std::sort(cands.begin(), cands.end(), [](const ShadowCand& a, const ShadowCand& b) { return a.score > b.score; });
+    const float kShareDist = 0.8f, kShareRise = 0.12f, kShareCos = 0.7f;
+    ShadowCand groups[kShadowSlots];
+    for (const ShadowCand& c : cands) {
+        uint32_t slot = m_shadowCount;
+        for (uint32_t gi = 0; gi < m_shadowCount; ++gi) {
+            const ShadowCand& g = groups[gi];
+            const float dx = c.pos[0] - g.pos[0], dy = c.pos[1] - g.pos[1], dz = c.pos[2] - g.pos[2];
+            const float cd = c.dir[0] * g.dir[0] + c.dir[1] * g.dir[1] + c.dir[2] * g.dir[2];
+            if (dx * dx + dy * dy + dz * dz < kShareDist * kShareDist && std::fabs(dy) < kShareRise && cd > kShareCos) {
+                slot = gi;
+                break;
+            }
+        }
+        if (slot == m_shadowCount) {
+            if (m_shadowCount >= kShadowSlots) continue;   // unshadowed, as before
+            groups[m_shadowCount++] = c;
+        } else {
+            // The joined light's cone about the map's axis: its own half-angles plus the angle between the axes.
+            ShadowCand& g = groups[slot];
+            const float cd = (std::min)(c.dir[0] * g.dir[0] + c.dir[1] * g.dir[1] + c.dir[2] * g.dir[2], 1.0f);
+            const float off = std::sqrt((std::max)(1.0f - cd * cd, 0.0f)) / cd;
+            g.tanX = (std::min)((std::max)(g.tanX, c.tanX + off), kShadowMaxTan);
+            g.tanY = (std::min)((std::max)(g.tanY, c.tanY + off), kShadowMaxTan);
+            g.range = (std::max)(g.range, c.range);
+        }
+        m_lightMap[c.live].flags = c.flags | ((slot + 1u) << 8);   // (written, not read: upload memory)
+    }
+    if (std::getenv("NGG_LOCAL_SHADOW_LOG")) {
+        static uint32_t n = 0;
+        if ((n++ % 300) == 0)
+            for (const ShadowCand& c : cands)
+                Log("lights: shadow candidate %u at %.2f %.2f %.2f dir %.2f %.2f %.2f tan %.2f x %.2f range %.0f score %.3g", c.live,
+                    c.pos[0], c.pos[1], c.pos[2], c.dir[0], c.dir[1], c.dir[2], c.tanX, c.tanY, c.range, c.score);
+    }
+    for (uint32_t slot = 0; slot < m_shadowCount; ++slot) {
+        const ShadowCand& sc = groups[slot];
+        // The lamp's frame: forward its axis, up a beam's up (square to it already) or the world's, right = up x fwd.
+        const float* f = sc.dir;
+        float u[3] = { sc.up[0], sc.up[1], sc.up[2] };
+        if (!sc.beam) {
+            const bool vertical = std::fabs(f[1]) > 0.99f;
+            u[0] = vertical ? 1.0f : 0.0f; u[1] = vertical ? 0.0f : 1.0f; u[2] = 0.0f;
+            const float ud = u[0] * f[0] + u[1] * f[1] + u[2] * f[2];
+            for (int k = 0; k < 3; ++k) u[k] -= ud * f[k];
+            const float ul = std::sqrt(u[0] * u[0] + u[1] * u[1] + u[2] * u[2]);
+            for (int k = 0; k < 3; ++k) u[k] /= ul;
+        }
+        const float r[3] = { u[1] * f[2] - u[2] * f[1], u[2] * f[0] - u[0] * f[2], u[0] * f[1] - u[1] * f[0] };
+        float V[16] = {};
+        for (int k = 0; k < 3; ++k) {
+            V[k * 4 + 0] = r[k];
+            V[k * 4 + 1] = u[k];
+            V[k * 4 + 2] = f[k];
+        }
+        V[12] = -(sc.pos[0] * r[0] + sc.pos[1] * r[1] + sc.pos[2] * r[2]);
+        V[13] = -(sc.pos[0] * u[0] + sc.pos[1] * u[1] + sc.pos[2] * u[2]);
+        V[14] = -(sc.pos[0] * f[0] + sc.pos[1] * f[1] + sc.pos[2] * f[2]);
+        V[15] = 1.0f;
+        // Perspective, conventional depth (0 at the near plane, 1 at the far).
+        const float nz = kShadowNear, fz = sc.range;
+        float P[16] = {};
+        P[0] = 1.0f / sc.tanX;
+        P[5] = 1.0f / sc.tanY;
+        P[10] = fz / (fz - nz);
+        P[11] = 1.0f;
+        P[14] = -nz * fz / (fz - nz);
+        float* M = m_shadowVP[slot];
+        for (int i = 0; i < 4; ++i)
+            for (int j = 0; j < 4; ++j) {
+                float acc = 0.0f;
+                for (int k = 0; k < 4; ++k) acc += V[i * 4 + k] * P[k * 4 + j];
+                M[i * 4 + j] = acc;
+            }
+        m_shadowInfo[slot][0] = sc.tanX;
+        m_shadowInfo[slot][1] = sc.tanY;
+        m_shadowInfo[slot][2] = nz;
+        m_shadowInfo[slot][3] = fz;
+    }
 
     // Each cluster's bounding sphere in view space - its eight corners, from the tile's NDC rectangle at the slice's
     // near and far depth - and whether a light's sphere of reach, or a spot's CONE, touches it. The box above is the
@@ -393,8 +505,8 @@ bool Lights::Build(ID3D12GraphicsCommandList* list, const float* view, const flo
                 longest = (std::max)(longest, m_clusterMap[2 * i + 1]);
                 used += m_clusterMap[2 * i + 1] != 0;
             }
-            Log("lights: %u live, %u list entries, %u of %u clusters lit, the longest list %u", live, total, used,
-                kClusters, longest);
+            Log("lights: %u live, %u list entries, %u of %u clusters lit, the longest list %u; %u shadow map(s) for %zu "
+                "candidate(s)", live, total, used, kClusters, longest, m_shadowCount, cands.size());
         }
     }
 
