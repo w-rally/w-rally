@@ -100,6 +100,7 @@ public:
 
     // What was noticed while reading (an RBR map no table names, a bad manifest, an id two cars share...).
     const std::string& Log() const { return m_log; }
+    const std::vector<Layer>& Layers() const { return m_layers; }
     const std::filesystem::path& RbrRoot() const { return m_rbr; }
 
     std::vector<std::string> Ids(Kind kind, std::string_view car = {}) const;     // sorted

@@ -18,6 +18,7 @@
 #include <string>
 #include <vector>
 
+#include "app/content.h"
 #include "app/paths.h"
 #include "app/settings.h"
 #include "app/window.h"
@@ -1286,7 +1287,12 @@ enum class Screen { Main, Quick, Settings };
 int Menus(Shell& sh, std::string note, bool intro)
 {
     assets::Catalog catalog;
+    // The content layers (docs/content-layers.md), made again with every scan. The catalog does not read through them
+    // yet (step 5): for now they are made and logged.
+    std::unique_ptr<vfs::Vfs> content;
     auto scan = [&] {
+        content = MakeVfs(sh.settings);
+        std::printf("%s", DescribeVfs(*content).c_str());
         const std::string e = catalog.Scan(sh.settings);
         std::printf("content: %zu stages, %zu cars%s%s\n", catalog.stages.size(), catalog.cars.size(), e.empty() ? "" : " - ", e.c_str());
         return e;
@@ -1378,7 +1384,9 @@ int Menus(Shell& sh, std::string note, bool intro)
                 }
                 case ui::SettingsChoice::Back:
                     if (const std::string e = SaveSettings(sh.settings); !e.empty()) std::fprintf(stderr, "%s\n", e.c_str());
-                    if (sh.settings.rbrPath != atOpen.rbrPath || sh.settings.nggFolders != atOpen.nggFolders) scanned = scan();
+                    if (sh.settings.rbrPath != atOpen.rbrPath || sh.settings.downloadPath != atOpen.downloadPath ||
+                        sh.settings.nggFolders != atOpen.nggFolders)
+                        scanned = scan();
                     note = scanned;
                     screen = Screen::Main;
                     break;

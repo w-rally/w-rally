@@ -7,6 +7,7 @@
 #include <cstring>
 #include <map>
 
+#include "app/paths.h"
 #include "assets/car_lights.h"
 #include "imgui.h"
 #include "ui/hud.h"
@@ -332,8 +333,12 @@ SettingsChoice SettingsUi(const ImGuiLayer& ui, app::Settings& s, bool inStage, 
     if (tab == 0) {
         SetRow& rbr = add(SetRow::Text, "RBR FOLDER", "Where Richard Burns Rally is: the stages, the cars and their physics are read from it.");
         rbr.text = &s.rbrPath, rbr.hint = "the RBR folder";
+        SetRow& dl = add(SetRow::Text, "DOWNLOADS FOLDER",
+                         "Where downloaded stages, cars and physics are kept, each version in its own folder. Empty: the "
+                         "default. %LOCALAPPDATA% and other variables are expanded.");
+        dl.text = &s.downloadPath, dl.hint = app::DownloadDir("").string();
         // (The .ngg folders are W-Rally.ini's alone, for development: ngg_folders.)
-        add(SetRow::Action, "RESCAN CONTENT", "Read the stages and the cars again from the RBR folder.").action = SettingsChoice::Rescan;
+        add(SetRow::Action, "RESCAN CONTENT", "Read the stages and the cars again: the downloads folder, W-Rally's own and the RBR folder.").action = SettingsChoice::Rescan;
         for (SetRow& r : rows) {
             r.off = inStage;
             if (inStage) r.help = "The content can be changed from the main menu.";
