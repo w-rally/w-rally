@@ -217,7 +217,7 @@ public:
    list each with its new VFS path.
 2. **Done 2026-11-05.** `libs/vfs`: layers, items and versions, base chains, `rbr/` raw, `RbrMap` (cars, tracks table, `physics.rbz`
    mapping), union listing; unit tests.
-3. `download_path` in Settings (+ expansion, UI field); `app::MakeVfs`.
+3. **Done 2026-11-05.** `download_path` in Settings (+ expansion, UI field); `app::MakeVfs` (`app/content.*`), made and logged with every content scan.
 4. `FileHost` over the `Vfs`; physics interface v3 (`physicsCar` a folder, base folder, `formats`, `simVersion`);
    WPhysicsRBR, audio and renderer hosts moved over.
 5. Catalog and registers over the VFS: cars and tracks by id (newest version) with `source`; manifests from the

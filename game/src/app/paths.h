@@ -13,6 +13,7 @@
 
 #include <cstdlib>
 #include <filesystem>
+#include <string>
 #include <system_error>
 
 namespace wrally::app {
@@ -27,17 +28,40 @@ inline std::filesystem::path ExeFolder()
 // The installer's settings (rbr_path = the RBR folder chosen at install), read before the user's own.
 inline std::filesystem::path InstallIni() { return ExeFolder() / "install.ini"; }
 
+// Installed by the installer (its install.ini beside the exe).
+inline bool Installed()
+{
+    std::error_code e;
+    return std::filesystem::exists(InstallIni(), e);
+}
+
 inline std::filesystem::path UserDir()
 {
     static const std::filesystem::path dir = [] {
         std::error_code e;
         const char* local = std::getenv("LOCALAPPDATA");
-        if (!local || !std::filesystem::exists(InstallIni(), e)) return ExeFolder();
+        if (!local || !Installed()) return ExeFolder();
         std::filesystem::path d = std::filesystem::path(local) / "W-Rally";
         std::filesystem::create_directories(d, e);
         return d;
     }();
     return dir;
+}
+
+// The downloaded layer's folder (docs/content-layers.md): `setting` (download_path - the installer's in install.ini, a
+// user's own in W-Rally.ini) with its %VARIABLES% expanded, relative to the exe's folder; "" its default:
+// %LOCALAPPDATA%\W-Rally\Downloads installed, else <exe>\Downloads. Not made here: the first write makes it.
+inline std::filesystem::path DownloadDir(const std::string& setting)
+{
+    if (setting.empty()) {
+        const char* local = std::getenv("LOCALAPPDATA");
+        return Installed() && local ? std::filesystem::path(local) / "W-Rally" / "Downloads" : ExeFolder() / "Downloads";
+    }
+    std::string expanded(ExpandEnvironmentStringsA(setting.c_str(), nullptr, 0), '\0');
+    expanded.resize(ExpandEnvironmentStringsA(setting.c_str(), expanded.data(), static_cast<DWORD>(expanded.size())));
+    while (!expanded.empty() && expanded.back() == '\0') expanded.pop_back();
+    const std::filesystem::path p(expanded);
+    return p.is_absolute() ? p : ExeFolder() / p;
 }
 
 } // namespace wrally::app

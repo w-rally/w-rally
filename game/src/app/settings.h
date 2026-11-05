@@ -15,6 +15,7 @@ namespace wrally::app {
 struct Settings {
     // Content
     std::string rbrPath;                // the RBR folder ("" not set: Settings asks for it)
+    std::string downloadPath;           // the downloaded content's folder, %VARIABLES% kept ("" the default: DownloadDir)
     std::string nggFolders;             // folders of stage .ngg files, ';' between them ("": <rbr>/Ngg) - the .ini's alone, for development
 
     // Graphics
