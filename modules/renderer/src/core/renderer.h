@@ -172,6 +172,7 @@ private:
     Scene      m_scene;
     Sky        m_sky;
     ShadowMaps m_shadows;
+    ShadowMaps m_localShadows;   // the local lights' maps without the ray tracer (Scene::RenderLocalShadows)
     PostFx     m_post;
     Rt         m_rt;
     Gtao       m_gtao;

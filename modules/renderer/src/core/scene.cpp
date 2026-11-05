@@ -57,6 +57,10 @@ static const float kNoGlass[4] = { 8.0f, 8.0f, 0.0f, 0.0f };
 // The surface the deferred local lights read (Shade's GBufOut): the shading normal (octahedral), roughness and kind;
 // albedo and metallic. Only while there are local lights (the GBUF pipelines).
 static const DXGI_FORMAT kGbufFormats[2] = { DXGI_FORMAT_R10G10B10A2_UNORM, DXGI_FORMAT_R8G8B8A8_UNORM_SRGB };
+// The local lights' shadow maps' casters' kind (RenderLocalShadows), and the moved-shadow mask PSDeferredLights leaves
+// for TAA - RGBA16F, the format TAA views the ray tracer's lights' denoise in (post.cpp), the mask in z.
+static const DXGI_FORMAT kLocalFlagFormat = DXGI_FORMAT_R8_UNORM;
+static const DXGI_FORMAT kLocalMaskFormat = DXGI_FORMAT_R16G16B16A16_FLOAT;
 // A plant vertex's uv1.y is its size plus this times what it casts (Plant::shadow) - the same in the shaders.
 static const float kPlantShadowPack = 1000.0f;
 
@@ -141,6 +145,12 @@ cbuffer Camera : register(b0)
     // axes, each with its half extent in w - so the ground still gets its shadow and the sky it hides (CarBoxVis).
     float4             gCarBoxC;
     float4             gCarBoxX, gCarBoxY, gCarBoxZ;
+    // The local lights' shadow maps (Lights::ShadowCount, Scene::RenderLocalShadows) - the cascades' path only: each
+    // slot's world -> clip, its tan across / up, near and far; x 1: drawn this frame, y 1 / the map's size, z the
+    // screen-space AO's share of the local lights' diffuse (0 by day and with the ray tracer).
+    row_major float4x4 gLocalShadowVP[4];
+    float4             gLocalShadowInfo[4];
+    float4             gLocalShadowParams;
 };
 
 // Cascaded shadow maps. A comparison sampler so the hardware does the depth
@@ -278,6 +288,81 @@ static const float kSunDiscWiden = 0.0024;
 // (PSDeferredLights), only glass here (design 5.4 N2c).
 // `trans`: a foliage card's transmission, as for the sun - a leaf with the lamp behind it is backlit, not black
 // (design 5.4 N3: grass tufts lit by the lamps had black lower halves, their volume normals turned away).
+// THE LOCAL LIGHTS' SHADOW MAPS (Lights::ShadowCount, Scene::RenderLocalShadows) - the cascades' path, where no ray
+// tracer shadows them: a few spots and beams (the Garage's three spots, the player's headlamps) each have a
+// perspective depth map from the lamp. Their emitters are big (the Garage's spots are 0.6 m discs), so a hard map's
+// edge would be the wrong shadow: PERCENTAGE-CLOSER SOFT SHADOWS (Fernando 2005) - a blocker search over the region
+// the emitter could be hidden from (kLocalSearch gathers of 4 texels), the penumbra from the blockers' mean distance
+// (the emitter's radius x (receiver - blocker) / blocker), then kLocalPcf comparison taps over it (bilinear 2x2 each). The taps are turned per pixel
+// (interleaved gradient noise) so a wide penumbra is a fine grain, not bands. The receiver is pushed off its surface
+// along the normal by a texel and a half of the map at its distance, and a little towards the lamp: no acne.
+static float2 gShadePx = float2(0.0, 0.0);   // the pixel being shaded (LocalLights): the taps' turn
+static float  gLocalDiffAo = 1.0;              // the screen-space AO's share of the local lights' diffuse (callers)
+// The last map read at this pixel and what it gave: the lights of one mounting share a map (Lights::Build) and come
+// one after another in a cluster's list, so a ramp's four pods read it once. Two scalars, not an array by slot: a
+// static array indexed by a variable would be scratch memory.
+static uint   gShadowSlotLast = 0u;
+static float  gShadowVisLast = 1.0;
+static float  gShadowMovedLast = 0.0;
+// Whether a MOVING object (DrawItem::dynamic: the car turning on the turntable) shadows this pixel from any lamp
+// (LocalLights -> PSDeferredLights' moved-shadow mask, which TAA reads as it reads the ray tracer's distrust).
+static float  gLocalMoved = 0.0;
+static const float2 kLocalTaps[16] = {
+    float2(-0.613392, 0.617481), float2(0.170019, -0.040254), float2(-0.299417, 0.791925), float2(0.645680, 0.493210),
+    float2(-0.651784, 0.717887), float2(0.421003, 0.027070), float2(-0.817194, -0.271096), float2(-0.705374, -0.668203),
+    float2(0.977050, -0.108615), float2(0.063326, 0.142369), float2(0.203528, 0.214331), float2(-0.667531, 0.326090),
+    float2(-0.098422, -0.295755), float2(-0.885922, 0.215369), float2(0.566637, 0.605213), float2(0.039766, -0.396100) };
+static const uint kLocalSearch = 4u, kLocalPcf = 12u;   // gathers (4 texels each) and comparison taps
+float LocalShadowLinear(float d, float n, float f) { return n / max(1.0 - d * (f - n) / f, 1e-6); }
+float LocalShadow(uint s, float3 p, float3 N, float3 l, float dist, float radius, out float moved)
+{
+    moved = 0.0;
+    const float4 info = gLocalShadowInfo[s];   // tan across, tan up, near, far
+    const float texelUv = gLocalShadowParams.y;
+    const float texelM = 2.0 * max(info.x, info.y) * dist * texelUv;   // a texel here, metres
+    const float3 Nl = dot(N, l) < 0.0 ? -N : N;
+    const float3 q = p + Nl * (1.5 * texelM) + l * (0.5 * texelM + 0.005);
+    const float4 c = mul(float4(q, 1.0), gLocalShadowVP[s]);
+    if (c.w <= info.z || c.w >= info.w) return 1.0;
+    const float2 uv = c.xy / c.w * float2(0.5, -0.5) + 0.5;
+    if (any(abs(uv - 0.5) > 0.5)) return 1.0;
+    const float z = c.z / c.w, zR = c.w;
+    const float2 uvPerTan = 0.5 / info.xy;
+    const float ign = gLocalShadowParams.w * frac(52.9829189 * frac(dot(gShadePx, float2(0.06711056, 0.00583715))));
+    float2 cs;
+    sincos(ign * 6.28318530, cs.y, cs.x);
+    const float2x2 rot = float2x2(cs.x, -cs.y, cs.y, cs.x);
+    // The blocker search: where the emitter's disc could be hidden from here, for blockers half-way or nearer.
+    const float2 search = clamp(radius / zR * uvPerTan, 2.0 * texelUv, 32.0 * texelUv);
+    float zSum = 0.0, nB = 0.0;
+    [unroll] for (uint k = 0; k < kLocalSearch; ++k)
+    {
+        const float3 at = float3(uv + mul(rot, kLocalTaps[k * (16u / kLocalSearch)]) * search, (float)s);
+        const float4 g = gLocalShadow.GatherRed(gSampVolume, at);
+        [unroll] for (uint j = 0; j < 4u; ++j)
+            if (g[j] < z) { zSum += LocalShadowLinear(g[j], info.z, info.w); nB += 1.0; }
+    }
+    if (nB < 0.5) return 1.0;
+    // Blocked: by a moving object? The casters' kind (RenderLocalShadows) round the pixel's own spot and one search tap
+    // - a moving caster there lies between the lamp and this pixel (two reads, not one per tap: the mask it feeds
+    // lasts four frames and TAA relights a neighbourhood, so it need not be exact).
+    {
+        const float4 f0 = gLocalShadowFlag.GatherRed(gSampVolume, float3(uv, (float)s));
+        const float4 f1 = gLocalShadowFlag.GatherRed(gSampVolume, float3(uv + mul(rot, kLocalTaps[0]) * search, (float)s));
+        const float4 f = max(f0, f1);
+        moved = max(max(f.x, f.y), max(f.z, f.w));
+    }
+    const float zB = zSum / nB;
+    const float2 pen = clamp(radius * max(zR - zB, 0.0) / (zB * zR) * uvPerTan, 1.0 * texelUv, 32.0 * texelUv);
+    // A penumbra under a texel and a half: the comparison's own 2x2 is the whole filter.
+    [branch] if (max(pen.x, pen.y) < 1.5 * texelUv)
+        return gLocalShadow.SampleCmpLevelZero(gShadowSamp, float3(uv, (float)s), z);
+    float v = 0.0;
+    [unroll] for (uint t = 0; t < kLocalPcf; ++t)
+        v += gLocalShadow.SampleCmpLevelZero(gShadowSamp, float3(uv + mul(rot, kLocalTaps[t]) * pen, (float)s), z);
+    return v * (1.0 / (float)kLocalPcf);
+}
+
 void ShadeLocalLight(uint li, LightRec L, float3 p, float3 N, float3 V, float ndv, float3 diffuseCol, float3 f0,
                      float a, float specScale, float wrap, float trans, bool withSpec, float2 coat, inout float3 shadowed,
                      inout float3 open)
@@ -289,7 +374,7 @@ void ShadeLocalLight(uint li, LightRec L, float3 p, float3 N, float3 V, float nd
     // Nothing from it here - outside a spot's cone or past its range, or facing away: the rest is skipped (a cone's
     // edge on screen is a coherent boundary, so whole waves skip together).
     if (ndl <= 0.0 || max(E.r, max(E.g, E.b)) <= 0.0) return;
-    float3 c3 = diffuseCol * E * ndl;
+    float3 c3 = diffuseCol * E * (ndl * gLocalDiffAo);
     if (withSpec)
     {
         // GGX with Schlick by multiplies and the joint Smith term's sqrt-free approximation (Hammon 2017), D and V
@@ -317,6 +402,18 @@ void ShadeLocalLight(uint li, LightRec L, float3 p, float3 N, float3 V, float nd
             c3 = c3 * (1.0 - Fc) + E * (Fc * cw2 / max(1e-6, 3.14159265 * dc * dc * 2.0 * vdc) * specScale * ndlTrue);
         }
     }
+    // A shadow-mapped light (the cascades' path; its slot in flags bits 8-11): its own shadow, here.
+    const uint slot = (L.flags >> 8) & 15u;
+    [branch] if (slot != 0u && gLocalShadowParams.x > 0.5)
+    {
+        [branch] if (slot != gShadowSlotLast)
+        {
+            gShadowVisLast = LocalShadow(slot - 1u, p, N, l, dist, L.radius, gShadowMovedLast);
+            gShadowSlotLast = slot;
+        }
+        c3 *= gShadowVisLast;
+        gLocalMoved = max(gLocalMoved, gShadowMovedLast);
+    }
     if (L.flags & kLightShadows) shadowed += c3;
     else open += c3;
 }
@@ -338,6 +435,9 @@ float3 LocalLights(float3 p, float3 N, float3 V, float3 diffuseCol, float3 f0, f
                    float wrap, float trans, bool withSpec, float2 coat)
 {
     if (gLightsOn < 0.5) return float3(0.0, 0.0, 0.0);
+    gShadePx = px;
+    gShadowSlotLast = 0u;
+    gLocalMoved = 0.0;
     const float ndv = saturate(dot(N, V)) + 1e-5;
     float3 shadowed = float3(0.0, 0.0, 0.0), open = float3(0.0, 0.0, 0.0);
     if (gLightsOn > 1.5)
@@ -421,10 +521,8 @@ Texture2D               gIrr        : register(t11);
 // sqrt(distance / gAerialMaxDist). In-scatter and transmittance, both rgb.
 Texture3D               gAerialIn   : register(t9);
 Texture3D               gAerialTr   : register(t10);
-SamplerState            gSampVolume : register(s4);   // trilinear, CLAMP
-
-
-SamplerComparisonState  gShadowSamp : register(s3);
+// gSampVolume (s4, trilinear, CLAMP) and gShadowSamp (s3, the shadow comparison) are declared ahead of this source,
+// with the local lights' shadow maps (Scene's shader assembly), which read them first.
 
 // How much sun reaches this point. 0 = fully shadowed, 1 = fully lit.
 //
@@ -614,6 +712,19 @@ void PSShadow(VSOut i)
     float4 t0 = gTex0.Sample(gSamp, i.uv0);
     clip(t0.a * i.col.a - (170.0 / 255.0));
 #endif
+}
+
+// The local lights' shadow pass (RenderLocalShadows): beside the depth, what the nearest caster is - 1 a moving
+// object's (gObjectMoved, set per draw there), 0 the world's - so their lighting knows a moving object's shadow.
+float PSShadowFlag(VSOut i) : SV_Target
+{
+#ifdef ALPHA_TEST
+    if (i.plantShadow > 0.5 && i.plantShadow < 1.5) discard;
+    if (i.plantShadow > 1.5 && ((uint(i.pos.x) + uint(i.pos.y)) & 1u) != 0u) discard;
+    float4 t0 = gTex0.Sample(gSamp, i.uv0);
+    clip(t0.a * i.col.a - (170.0 / 255.0));
+#endif
+    return gObjectMoved != 0u ? 1.0 : 0.0;
 }
 
 // Which answer the lighting uses, and both answers kept for the comparison
@@ -1169,6 +1280,9 @@ float4 Shade(VSOut i, bool frontFace, out GBufOut g)
             const float  la    = specA;
             const float3 lV    = normalize(gCamPos - i.wpos);
             const float  lspec = physical ? 1.0 : 3.14159265;
+#if !defined(BLEND)
+            if (gLocalShadowParams.z > 0.0) gLocalDiffAo = lerp(1.0, rtAo, gLocalShadowParams.z);
+#endif
 #if defined(ALPHA_TEST)
             localLight = LocalLights(i.wpos, N, lV, ldiff, lf0, la, lspec, i.pos.xy, kFoliageWrap, kFoliageTransmission, false,
                                      float2(0.0, 0.0));
@@ -1634,12 +1748,20 @@ float4 VSFullscreen(uint id : SV_VertexID) : SV_Position
     return float4(uv * float2(2.0, -2.0) + float2(-1.0, 1.0), 0.0, 1.0);
 }
 
-float4 PSDeferredLights(float4 pos : SV_Position) : SV_Target
+// The second target: the MOVED-SHADOW MASK (z), for TAA (post.cpp, as the ray tracer's distrust): 1 where a moving
+// object shadows the pixel from a shadow-mapped lamp this frame, and for three frames after (last frame's, at where
+// the pixel was, less 1/8 a frame) - where the car's shadow has just left the floor, the floor's history is the
+// shadow. Without the maps: 0.
+struct DeferredOut { float4 c : SV_Target0; float4 m : SV_Target1; };
+DeferredOut PSDeferredLights(float4 pos : SV_Position)
 {
+    DeferredOut o;
+    o.c = 0.0;
+    o.m = 0.0;
     const int3 px = int3(pos.xy, 0);
     const float4 n = gGbufN.Load(px);
     const float kind = round(n.w * 3.0);
-    if (kind < 0.5) return float4(0.0, 0.0, 0.0, 0.0);   // no surface: the sky, glass, a debug view
+    if (kind < 0.5) return o;   // no surface: the sky, glass, a debug view
     // The roughness Shade left: widened by its pixel's spread of normals already; under a coat, packed with that
     // spread for the coat's own lobe (GbufRoughPack).
     float roughness = n.z, specK = 0.0;
@@ -1657,6 +1779,9 @@ float4 PSDeferredLights(float4 pos : SV_Position) : SV_Target
     const float la = max(0.002, roughness * roughness);
     const float lspec = physical ? 1.0 : 3.14159265;
     const bool foliage = kind > 1.5 && kind < 2.5;
+    // The screen-space AO's share of the lights' diffuse (gLocalShadowParams.z: at night, without the ray tracer).
+    if (gLocalShadowParams.z > 0.0 && gAoReady > 0.5 && gAoOn > 0.5)
+        gLocalDiffAo = lerp(1.0, gRtAo.Load(px), gLocalShadowParams.z);
     const float3 L = LocalLights(p, N, V, ldiff, lf0, la, lspec, pos.xy, foliage ? kFoliageWrap : 0.0,
                                  foliage ? kFoliageTransmission : 0.0, !foliage, float2(kind > 2.5 ? 1.0 : 0.0, coatA));
     float3 tr = float3(1.0, 1.0, 1.0), inscatter;
@@ -1665,7 +1790,19 @@ float4 PSDeferredLights(float4 pos : SV_Position) : SV_Target
         AtmSetWeather(gCloud, gFogBeta, gFogH, dot(gGroundColour, float3(0.3333, 0.3333, 0.3333)));
         AerialAt(p, pos.xy, tr, inscatter);
     }
-    return float4(L * tr, 0.0);
+    o.c = float4(L * tr, 0.0);
+    if (gLocalShadowParams.x > 0.5)
+    {
+        float was = 0.0;
+        const float4 hp2 = mul(float4(p, 1.0), gPrevViewProj);
+        if (hp2.w > 1e-4)
+        {
+            const float2 puv = hp2.xy / hp2.w * float2(0.5, -0.5) + 0.5;
+            if (all(puv > 0.0) && all(puv < 1.0)) was = gLocalShadowMaskPrev.Load(int3(puv / gInvScreen, 0)).z;
+        }
+        o.m = float4(0.0, 0.0, max(gLocalMoved, was - 0.125), 0.0);
+    }
+    return o;
 }
 )";
 
@@ -1725,6 +1862,9 @@ struct CameraCB
     float lightsOn, lightsVisOn, reflProbeOn, reflProbeMips;
     float invViewProj[16];
     float carBox[4][4];    // gCarBoxC, gCarBoxX/Y/Z: the probe's faces only
+    float localShadowVP[4][16];
+    float localShadowInfo[4][4];
+    float localShadowParams[4];
 };
 static_assert(sizeof(CameraCB) % 16 == 0,
               "CameraCB must be a whole number of float4 registers - see the note above");
@@ -3134,6 +3274,178 @@ void Scene::RenderShadows(ID3D12GraphicsCommandList* list,
     }
 }
 
+// THE LOCAL LIGHTS' SHADOW MAPS (lights.h Lights::ShadowCount, LocalShadow in the shader): the cascades' path only
+// (the ray tracer shadows every light itself). One perspective depth map per chosen lamp, the world drawn as the
+// cascades draw it - casters culled against the lamp's frustum, glass and the far scenery left out, foliage
+// alpha-tested - into a slice of the local maps each.
+void Scene::RenderLocalShadows(ID3D12GraphicsCommandList* list, float aoShare)
+{
+    m_localShadowsDrawn = 0;
+    m_localAoShare = aoShare;
+    if (!list) return;   // the share alone (NGG_LOCAL_SHADOWS=0)
+    if (!m_localShadows || !m_localShadows->Ready() || !m_psoLocalShadow || !Ready() || !m_shadowsOn) return;
+    if (!m_lights.Active() || !m_lights.ShadowCount()) return;
+
+    ID3D12Device* dev = nullptr;
+    list->GetDevice(IID_PPV_ARGS(&dev));
+    if (!dev) return;
+
+    const bool timed = m_localShadowTimer && m_localShadowTimerReadback && m_timerHz;
+    if (timed && m_localShadowTimerPending)
+    {
+        UINT64* t = nullptr;
+        D3D12_RANGE r = { 0, 2 * sizeof(UINT64) };
+        if (SUCCEEDED(m_localShadowTimerReadback->Map(0, &r, reinterpret_cast<void**>(&t))))
+        {
+            if (t[1] >= t[0]) m_localShadowMs = 1000.0 * double(t[1] - t[0]) / double(m_timerHz);
+            D3D12_RANGE none = { 0, 0 };
+            m_localShadowTimerReadback->Unmap(0, &none);
+        }
+        m_localShadowTimerPending = false;
+        static uint32_t calls = 0;
+        if ((calls++ % 120) == 0) Log("scene: local-light shadow maps: %u, %.2f ms", m_lights.ShadowCount(), m_localShadowMs);
+    }
+    if (timed) list->EndQuery(m_localShadowTimer.Get(), D3D12_QUERY_TYPE_TIMESTAMP, 0);
+
+    const UINT res = m_localShadows->Resolution();
+    // The casters' kind (PSShadowFlag), a slice beside each map: made at the maps' size the first time.
+    if (!m_localFlag)
+    {
+        D3D12_HEAP_PROPERTIES hp = {};
+        hp.Type = D3D12_HEAP_TYPE_DEFAULT;
+        D3D12_RESOURCE_DESC fd = {};
+        fd.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+        fd.Width = res;
+        fd.Height = res;
+        fd.DepthOrArraySize = ShadowMaps::kCascades;
+        fd.MipLevels = 1;
+        fd.Format = kLocalFlagFormat;
+        fd.SampleDesc.Count = 1;
+        fd.Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
+        D3D12_CLEAR_VALUE fc = {};
+        fc.Format = kLocalFlagFormat;
+        D3D12_DESCRIPTOR_HEAP_DESC hd = {};
+        hd.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
+        hd.NumDescriptors = ShadowMaps::kCascades;
+        if (FAILED(dev->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &fd, D3D12_RESOURCE_STATE_RENDER_TARGET, &fc,
+                                                IID_PPV_ARGS(&m_localFlag))) ||
+            FAILED(dev->CreateDescriptorHeap(&hd, IID_PPV_ARGS(&m_localFlagRtv))))
+        {
+            m_localFlag.Reset();
+            dev->Release();
+            return;
+        }
+        const UINT stride = dev->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
+        for (int k = 0; k < ShadowMaps::kCascades; ++k)
+        {
+            D3D12_RENDER_TARGET_VIEW_DESC rv = {};
+            rv.Format = kLocalFlagFormat;
+            rv.ViewDimension = D3D12_RTV_DIMENSION_TEXTURE2DARRAY;
+            rv.Texture2DArray.FirstArraySlice = k;
+            rv.Texture2DArray.ArraySize = 1;
+            D3D12_CPU_DESCRIPTOR_HANDLE h = m_localFlagRtv->GetCPUDescriptorHandleForHeapStart();
+            h.ptr += (SIZE_T)k * stride;
+            dev->CreateRenderTargetView(m_localFlag.Get(), &rv, h);
+        }
+        m_localFlagRtvStride = stride;
+        m_localFlagInRt = true;
+    }
+    auto flagTo = [&](bool rt) {
+        if (m_localFlagInRt == rt) return;
+        D3D12_RESOURCE_BARRIER b = {};
+        b.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        b.Transition.pResource = m_localFlag.Get();
+        b.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+        b.Transition.StateBefore = rt ? D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE : D3D12_RESOURCE_STATE_RENDER_TARGET;
+        b.Transition.StateAfter = rt ? D3D12_RESOURCE_STATE_RENDER_TARGET : D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+        list->ResourceBarrier(1, &b);
+        m_localFlagInRt = rt;
+    };
+    flagTo(true);
+    m_localShadows->ToDepthWrite(list);
+    D3D12_VIEWPORT vp = { 0.0f, 0.0f, (float)res, (float)res, 0.0f, 1.0f };
+    D3D12_RECT sc = { 0, 0, (LONG)res, (LONG)res };
+    const uint32_t count = (std::min)(m_lights.ShadowCount(), (uint32_t)ShadowMaps::kCascades);
+    for (uint32_t c = 0; c < count; ++c)
+    {
+        CameraCB cb = {};
+        memcpy(cb.view, m_lights.ShadowViewProj(c), sizeof(cb.view));
+        cb.proj[0] = cb.proj[5] = cb.proj[10] = cb.proj[15] = 1.0f;
+        cb.bakedScale = m_bakedScale;
+        ComPtr<ID3D12Resource> cbRes = MakeUploadBuffer(dev, &cb, sizeof(cb));
+        if (!cbRes) continue;
+
+        D3D12_CPU_DESCRIPTOR_HANDLE dsv = m_localShadows->Dsv((int)c);
+        D3D12_CPU_DESCRIPTOR_HANDLE frtv = m_localFlagRtv->GetCPUDescriptorHandleForHeapStart();
+        frtv.ptr += (SIZE_T)c * m_localFlagRtvStride;
+        list->OMSetRenderTargets(1, &frtv, FALSE, &dsv);
+        list->ClearDepthStencilView(dsv, D3D12_CLEAR_FLAG_DEPTH, 1.0f, 0, 0, nullptr);
+        const float zero[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+        list->ClearRenderTargetView(frtv, zero, 0, nullptr);
+        list->RSSetViewports(1, &vp);
+        list->RSSetScissorRects(1, &sc);
+        list->SetGraphicsRootSignature(m_rootSig.Get());
+        list->SetGraphicsRootConstantBufferView(0, cbRes->GetGPUVirtualAddress());
+        if (m_probe) list->SetGraphicsRootUnorderedAccessView(2, m_probe->GetGPUVirtualAddress());
+        if (m_rayQuery && m_reflTlas) list->SetGraphicsRootShaderResourceView(13, m_reflTlas);
+        list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+        list->IASetVertexBuffers(0, 1, &m_vbv);
+        list->IASetIndexBuffer(&m_ibv);
+        if (m_srvHeap)
+        {
+            ID3D12DescriptorHeap* heaps[] = { m_srvHeap.Get() };
+            list->SetDescriptorHeaps(1, heaps);
+        }
+
+        float cplanes[6][4];
+        ExtractPlanes(m_lights.ShadowViewProj(c), cplanes);
+        bool alphaBound = false;
+        int  xformState = -1;
+        int  geomState = 0;
+        list->SetPipelineState(m_psoLocalShadow.Get());
+        for (const DrawItem& o : m_objects)
+        {
+            if (!o.visible) continue;
+            if (o.materialId >= m_materials.size()) continue;
+            if (o.layerId == kLayerFarScenery) continue;
+            if (m_cull && AabbOutside(cplanes, o.bmin, o.bmax)) continue;
+            if (m_materials[o.materialId].flags & kMaterialBlend) continue;   // glass casts no shadow (as RT's)
+            const bool wantAlpha = (m_materials[o.materialId].flags & kMaterialAlphaTest) != 0;
+            if (wantAlpha && !m_psoLocalShadowAlpha) continue;
+            if (wantAlpha != alphaBound)
+            {
+                list->SetPipelineState(wantAlpha ? m_psoLocalShadowAlpha.Get() : m_psoLocalShadow.Get());
+                alphaBound = wantAlpha;
+            }
+            if (wantAlpha && m_srvHeap)
+            {
+                D3D12_GPU_DESCRIPTOR_HANDLE h = m_srvHeap->GetGPUDescriptorHandleForHeapStart();
+                h.ptr += (UINT64)o.materialId * kMaterialSrvCount * m_srvStride;
+                list->SetGraphicsRootDescriptorTable(1, h);
+            }
+            BindObjectXform(list, o.xform, o.identity, xformState);
+            // The caster's kind (PSShadowFlag). VSMain's motion output, which the flag also gates, goes unused here.
+            const uint32_t moving = o.dynamic ? 1u : 0u;
+            list->SetGraphicsRoot32BitConstants(4, 1, &moving, 2);
+            BindGeometry(list, o.meshId != 0, geomState,
+                         o.meshId ? m_dynVbv : m_vbv, o.meshId ? m_dynIbv : m_ibv);
+            list->DrawIndexedInstanced(o.indexCount, 1, o.firstIndex, o.baseVertex, 0);
+        }
+        m_localShadowCB[c] = cbRes;   // must outlive GPU execution
+        m_localShadowsDrawn = c + 1;
+    }
+    dev->Release();
+    m_localShadows->ToShaderResource(list);
+    flagTo(false);
+    if (timed)
+    {
+        list->EndQuery(m_localShadowTimer.Get(), D3D12_QUERY_TYPE_TIMESTAMP, 1);
+        list->ResolveQueryData(m_localShadowTimer.Get(), D3D12_QUERY_TYPE_TIMESTAMP, 0, 2,
+                               m_localShadowTimerReadback.Get(), 0);
+        m_localShadowTimerPending = true;
+    }
+}
+
 // The mode names, as ARRAYS rather than switches, for two reasons that both bit.
 //
 // A switch needs a `default`, and a default absorbs everything: it made an
@@ -3341,6 +3653,35 @@ bool Scene::CreateDepth(ID3D12Device* dev, UINT width, UINT height)
         dev->CreateRenderTargetView(m_gbuf[k].Get(), nullptr, grtv);
         grtv.ptr += m_prepassRtvStride;
     }
+    // The moved-shadow mask (PSDeferredLights' second target), two: written and read in turn.
+    if (!m_localMaskRtv)
+    {
+        D3D12_DESCRIPTOR_HEAP_DESC hd = {};
+        hd.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
+        hd.NumDescriptors = 2;
+        if (FAILED(dev->CreateDescriptorHeap(&hd, IID_PPV_ARGS(&m_localMaskRtv))))
+            return false;
+    }
+    D3D12_CPU_DESCRIPTOR_HANDLE mrtv = m_localMaskRtv->GetCPUDescriptorHandleForHeapStart();
+    for (int k = 0; k < 2; ++k)
+    {
+        D3D12_RESOURCE_DESC md = nd;
+        md.Format = kLocalMaskFormat;
+        D3D12_CLEAR_VALUE mclear = {};
+        mclear.Format = kLocalMaskFormat;
+        m_localMask[k].Reset();
+        if (FAILED(dev->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &md, D3D12_RESOURCE_STATE_RENDER_TARGET,
+                                                &mclear, IID_PPV_ARGS(&m_localMask[k]))))
+        {
+            Log("scene: the moved-shadow mask's creation failed");
+            return false;
+        }
+        m_localMaskState[k] = D3D12_RESOURCE_STATE_RENDER_TARGET;
+        dev->CreateRenderTargetView(m_localMask[k].Get(), nullptr, mrtv);
+        mrtv.ptr += m_prepassRtvStride;
+    }
+    m_localMaskFresh = true;
+    m_localMaskWritten = nullptr;
     D3D12_DEPTH_STENCIL_VIEW_DESC rdsv = dsv;
     rdsv.Flags = D3D12_DSV_FLAG_READ_ONLY_DEPTH;
     D3D12_CPU_DESCRIPTOR_HANDLE ro = m_dsvHeap->GetCPUDescriptorHandleForHeapStart();
@@ -3742,6 +4083,28 @@ bool Scene::LoadFromMemory(ID3D12Device* dev, ID3D12CommandQueue* queue,
                                                 IID_PPV_ARGS(&m_shadowTimerReadback))))
             m_shadowTimer.Reset();
     }
+    // And the local lights' maps (RenderLocalShadows), the same way.
+    if (!m_localShadowTimer && m_timer)
+    {
+        D3D12_QUERY_HEAP_DESC qh = {};
+        qh.Type = D3D12_QUERY_HEAP_TYPE_TIMESTAMP;
+        qh.Count = 2;
+        D3D12_HEAP_PROPERTIES hp = {};
+        hp.Type = D3D12_HEAP_TYPE_READBACK;
+        D3D12_RESOURCE_DESC rd = {};
+        rd.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+        rd.Width = 2 * sizeof(UINT64);
+        rd.Height = 1;
+        rd.DepthOrArraySize = 1;
+        rd.MipLevels = 1;
+        rd.SampleDesc.Count = 1;
+        rd.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+        if (FAILED(dev->CreateQueryHeap(&qh, IID_PPV_ARGS(&m_localShadowTimer))) ||
+            FAILED(dev->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &rd,
+                                                D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
+                                                IID_PPV_ARGS(&m_localShadowTimerReadback))))
+            m_localShadowTimer.Reset();
+    }
 
     if (!UploadTextures(dev, queue, texs, texBytes))
         return false;
@@ -3857,9 +4220,17 @@ bool Scene::LoadFromMemory(ID3D12Device* dev, ID3D12CommandQueue* queue,
     lightRange.NumDescriptors = 7;
     lightRange.BaseShaderRegister = 12;          // t12 lights, t13 clusters, t14 indices, t15 the RT fraction,
                                                  // t16-t18 the deferred pass's surface and depth (PSDeferredLights)
+    // ... and, in the same table (the root signature has no DWORD left for another), the local lights' shadow maps
+    // (Lights::ShadowCount): t21, right after the seven.
+    static D3D12_DESCRIPTOR_RANGE lightRanges[2] = {};
+    lightRanges[0] = lightRange;
+    lightRanges[1].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+    lightRanges[1].NumDescriptors = 3;   // t21 the maps, t22 their casters' kind, t23 last frame's moved-shadow mask
+    lightRanges[1].BaseShaderRegister = 21;
+    lightRanges[1].OffsetInDescriptorsFromTableStart = 7;
     params[11].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
-    params[11].DescriptorTable.NumDescriptorRanges = 1;
-    params[11].DescriptorTable.pDescriptorRanges = &lightRange;
+    params[11].DescriptorTable.NumDescriptorRanges = 2;
+    params[11].DescriptorTable.pDescriptorRanges = lightRanges;
     params[11].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
 
     // The cube probe around the car (probe.h), t19.
@@ -3965,7 +4336,12 @@ bool Scene::LoadFromMemory(ID3D12Device* dev, ID3D12CommandQueue* queue,
     // The local lights' HLSL (lights.h) and their buffers, ahead of the shader that shades them.
     std::string src = std::string(kAtmosphereHlsl) +
         "#define NGG_LIGHTS_T0 t12\n#define NGG_LIGHTS_T1 t13\n#define NGG_LIGHTS_T2 t14\n" + kLightsHlsl +
-        "Texture2D<float>        gRtLights : register(t15);\n" + kShaderSrc;
+        "Texture2D<float>        gRtLights : register(t15);\n"
+        "Texture2DArray<float>   gLocalShadow : register(t21);\n"   // Lights::ShadowCount's maps (LocalShadow)
+        "Texture2DArray<float>   gLocalShadowFlag : register(t22);\n"   // their casters: 1 a moving object's
+        "Texture2D<float4>       gLocalShadowMaskPrev : register(t23);\n"   // last frame's moved-shadow mask (z)
+        "SamplerComparisonState  gShadowSamp : register(s3);\n"
+        "SamplerState            gSampVolume : register(s4);\n" + kShaderSrc;
 
     enum Variant { kOpaque, kAlphaTest, kBlend };
     bool dxil = m_dxc.Load();
@@ -4008,6 +4384,7 @@ bool Scene::LoadFromMemory(ID3D12Device* dev, ID3D12CommandQueue* queue,
         return out;
     };
     ComPtr<ID3DBlob> vs, ps, psAlpha, psBlend, psPre, psPreAlpha, psShadowAlpha;   // (the opaque shadow pass: no PS)
+    ComPtr<ID3DBlob> psFlag, psFlagAlpha;                                            // the local lights' maps
     ComPtr<ID3DBlob> psGlassMotion;
     ComPtr<ID3DBlob> psG, psAlphaG, vsFull, psDeferred;                              // the deferred local lights
     auto compileAll = [&]() {
@@ -4019,11 +4396,13 @@ bool Scene::LoadFromMemory(ID3D12Device* dev, ID3D12CommandQueue* queue,
         psPreAlpha = compile("PSPrepass", false, kAlphaTest);
         psGlassMotion = compile("PSGlassMotion", false, kOpaque);
         psShadowAlpha = compile("PSShadow", false, kAlphaTest);
+        psFlag = compile("PSShadowFlag", false, kOpaque);
+        psFlagAlpha = compile("PSShadowFlag", false, kAlphaTest);
         psG = compile("PSMain", false, kOpaque, true);
         psAlphaG = compile("PSMain", false, kAlphaTest, true);
         vsFull = compile("VSFullscreen", true, kOpaque);
         psDeferred = compile("PSDeferredLights", false, kOpaque);
-        return vs && ps && psAlpha && psBlend && psPre && psPreAlpha && psShadowAlpha &&
+        return vs && ps && psAlpha && psBlend && psPre && psPreAlpha && psShadowAlpha && psFlag && psFlagAlpha &&
                psG && psAlphaG && vsFull && psDeferred;
     };
     if (!compileAll() && dxil)
@@ -4188,6 +4567,29 @@ bool Scene::LoadFromMemory(ID3D12Device* dev, ID3D12CommandQueue* queue,
             sp.PS = { psShadowAlpha->GetBufferPointer(), psShadowAlpha->GetBufferSize() };
         if (FAILED(dev->CreateGraphicsPipelineState(&sp, IID_PPV_ARGS(&m_psoShadowAlpha))))
             Log("scene: alpha-test shadow PSO creation failed");
+
+        // The local lights' maps (RenderLocalShadows): a perspective from the lamp, conventional depth. Both faces -
+        // the Garage's floor and a stage's ground are single-sided sheets, and the car's panels are not closed - with
+        // a slope bias only: the receiver's own normal offset (LocalShadow) does the rest, as a constant bias on a
+        // float depth would be a different distance at every depth.
+        // Beside the depth, the caster's kind (PSShadowFlag, kLocalFlagFormat): a moving object's or the world's.
+        sp.NumRenderTargets = 1;
+        sp.RTVFormats[0] = kLocalFlagFormat;
+        sp.BlendState.RenderTarget[0].BlendEnable = FALSE;
+        sp.BlendState.RenderTarget[0].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_RED;
+        sp.PS = { psFlag->GetBufferPointer(), psFlag->GetBufferSize() };
+        sp.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
+        sp.RasterizerState.DepthBias = 0;
+        sp.RasterizerState.SlopeScaledDepthBias = 1.5f;
+        sp.RasterizerState.DepthBiasClamp = 0.0f;
+        if (FAILED(dev->CreateGraphicsPipelineState(&sp, IID_PPV_ARGS(&m_psoLocalShadow))))
+            Log("scene: local-light shadow PSO creation failed - local lights unshadowed without RT");
+        if (psFlagAlpha)
+        {
+            sp.PS = { psFlagAlpha->GetBufferPointer(), psFlagAlpha->GetBufferSize() };
+            if (FAILED(dev->CreateGraphicsPipelineState(&sp, IID_PPV_ARGS(&m_psoLocalShadowAlpha))))
+                Log("scene: alpha-test local-light shadow PSO creation failed");
+        }
     }
 
     if (FAILED(dev->CreateGraphicsPipelineState(&pso, IID_PPV_ARGS(&m_pso))))
@@ -4250,6 +4652,12 @@ bool Scene::LoadFromMemory(ID3D12Device* dev, ID3D12CommandQueue* queue,
         b.SrcBlendAlpha = D3D12_BLEND_ZERO;
         b.DestBlendAlpha = D3D12_BLEND_ONE;
         b.BlendOpAlpha = D3D12_BLEND_OP_ADD;
+        // And the moved-shadow mask (PSDeferredLights' second target), written as it is.
+        dp.NumRenderTargets = 2;
+        dp.RTVFormats[1] = kLocalMaskFormat;
+        dp.BlendState.IndependentBlendEnable = TRUE;
+        dp.BlendState.RenderTarget[1] = D3D12_RENDER_TARGET_BLEND_DESC{};
+        dp.BlendState.RenderTarget[1].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
         ok = ok && SUCCEEDED(dev->CreateGraphicsPipelineState(&dp, IID_PPV_ARGS(&m_psoDeferred)));
         m_deferredReady = ok;
     }
@@ -6033,6 +6441,20 @@ void Scene::RecordPass(ID3D12GraphicsCommandList* list, D3D12_CPU_DESCRIPTOR_HAN
     cb.clusterParams[3] = m_lights.SliceScale();
     cb.lightsOn    = (m_lightsReady && m_lights.Active()) ? 1.0f : 0.0f;
     cb.lightsVisOn = (cb.lightsOn > 0.5f && m_rtLights) ? 1.0f : 0.0f;
+    // The local lights' shadow maps, when RenderLocalShadows drew them this frame (the cascades' path).
+    if (cb.lightsOn > 0.5f && m_localShadowsDrawn && !m_rtLights && m_localShadows)
+    {
+        for (uint32_t k = 0; k < m_localShadowsDrawn; ++k)
+        {
+            memcpy(cb.localShadowVP[k], m_lights.ShadowViewProj(k), sizeof(cb.localShadowVP[k]));
+            memcpy(cb.localShadowInfo[k], m_lights.ShadowInfo(k), sizeof(cb.localShadowInfo[k]));
+        }
+        cb.localShadowParams[0] = 1.0f;
+        cb.localShadowParams[1] = 1.0f / (float)m_localShadows->Resolution();
+        static const float turn = [] { const char* e = std::getenv("NGG_LOCAL_SHADOW_TURN"); return e ? (float)atof(e) : 1.0f; }();
+        cb.localShadowParams[3] = turn;
+    }
+    cb.localShadowParams[2] = (cb.lightsOn > 0.5f && !m_rtLights) ? m_localAoShare : 0.0f;
     if (!Invert4x4(m_lastViewProjJittered, cb.invViewProj)) memset(cb.invViewProj, 0, sizeof(cb.invViewProj));
 
     // Last frame's timings. The frame is synchronous (see the note at the end
@@ -6378,6 +6800,39 @@ void Scene::RecordPass(ID3D12GraphicsCommandList* list, D3D12_CPU_DESCRIPTOR_HAN
                     gh.ptr += (SIZE_T)(4 + k) * m_srvStride;
                     d->CreateShaderResourceView(r, &gd, gh);
                 }
+                // The local lights' shadow maps (t21): a null array view while there are none.
+                {
+                    D3D12_CPU_DESCRIPTOR_HANDLE sh2 = at;
+                    sh2.ptr += (SIZE_T)7 * m_srvStride;
+                    if (m_localShadows && m_localShadows->Ready())
+                        m_localShadows->CreateSrv(d, sh2);
+                    else
+                    {
+                        D3D12_SHADER_RESOURCE_VIEW_DESC nd = {};
+                        nd.Format = DXGI_FORMAT_R32_FLOAT;
+                        nd.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2DARRAY;
+                        nd.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+                        nd.Texture2DArray.MipLevels = 1;
+                        nd.Texture2DArray.ArraySize = 1;
+                        d->CreateShaderResourceView(nullptr, &nd, sh2);
+                    }
+                    // t22: the casters' kind; t23: the moved-shadow mask the deferred pass wrote last frame.
+                    D3D12_SHADER_RESOURCE_VIEW_DESC fd = {};
+                    fd.Format = kLocalFlagFormat;
+                    fd.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2DARRAY;
+                    fd.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+                    fd.Texture2DArray.MipLevels = 1;
+                    fd.Texture2DArray.ArraySize = m_localFlag ? ShadowMaps::kCascades : 1;
+                    sh2.ptr += m_srvStride;
+                    d->CreateShaderResourceView(m_localFlag.Get(), &fd, sh2);
+                    D3D12_SHADER_RESOURCE_VIEW_DESC qd = {};
+                    qd.Format = kLocalMaskFormat;
+                    qd.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+                    qd.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+                    qd.Texture2D.MipLevels = 1;
+                    sh2.ptr += m_srvStride;
+                    d->CreateShaderResourceView(m_localMask[(m_localMaskFrame & 1) ^ 1].Get(), &qd, sh2);
+                }
                 d->Release();
             }
             D3D12_GPU_DESCRIPTOR_HANDLE lh = m_srvHeap->GetGPUDescriptorHandleForHeapStart();
@@ -6557,6 +7012,7 @@ void Scene::RecordPass(ID3D12GraphicsCommandList* list, D3D12_CPU_DESCRIPTOR_HAN
         pcb.aerialLut = 0.0f;
         pcb.lightsOn = cb.lightsOn > 0.5f ? 2.0f : 0.0f;   // every light, unclustered (LocalLights)
         pcb.lightsVisOn = 0.0f;
+        pcb.localShadowParams[0] = pcb.localShadowParams[2] = 0.0f;   // the faces: no map or AO of theirs
         pcb.clusterParams[0] = (float)m_lights.Count();
         pcb.reflProbeOn = 0.0f;
         pcb.invScreen[0] = pcb.invScreen[1] = 1.0f / (float)ReflectionProbe::kFace;
@@ -6764,10 +7220,44 @@ void Scene::RecordPass(ID3D12GraphicsCommandList* list, D3D12_CPU_DESCRIPTOR_HAN
         list->ResourceBarrier(3, deferredBarriers);
         D3D12_CPU_DESCRIPTOR_HANDLE roDsv = dsv;
         roDsv.ptr += m_dsvStride;
-        list->OMSetRenderTargets(1, &rtv, FALSE, &roDsv);
+        // The moved-shadow mask: this frame's into one, last frame's read from the other (t23, bound above). Both
+        // cleared the first time (a new target's contents are undefined).
+        const int mw = (int)(m_localMaskFrame & 1);
+        D3D12_CPU_DESCRIPTOR_HANDLE mrtv[2] = { m_localMaskRtv->GetCPUDescriptorHandleForHeapStart(), {} };
+        mrtv[1] = mrtv[0];
+        mrtv[1].ptr += m_prepassRtvStride;
+        auto maskTo = [&](int k, D3D12_RESOURCE_STATES to) {
+            if (m_localMaskState[k] == to) return;
+            D3D12_RESOURCE_BARRIER b = {};
+            b.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+            b.Transition.pResource = m_localMask[k].Get();
+            b.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+            b.Transition.StateBefore = m_localMaskState[k];
+            b.Transition.StateAfter = to;
+            list->ResourceBarrier(1, &b);
+            m_localMaskState[k] = to;
+        };
+        if (m_localMaskFresh)
+        {
+            const float zero[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+            for (int k = 0; k < 2; ++k)
+            {
+                maskTo(k, D3D12_RESOURCE_STATE_RENDER_TARGET);
+                list->ClearRenderTargetView(mrtv[k], zero, 0, nullptr);
+            }
+            m_localMaskFresh = false;
+        }
+        maskTo(mw ^ 1, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+        maskTo(mw, D3D12_RESOURCE_STATE_RENDER_TARGET);
+        const D3D12_CPU_DESCRIPTOR_HANDLE dtargets[2] = { rtv, mrtv[mw] };
+        list->OMSetRenderTargets(2, dtargets, FALSE, &roDsv);
         list->SetPipelineState(m_psoDeferred.Get());
         bound = m_psoDeferred.Get();
         list->DrawInstanced(3, 1, 0, 0);
+        maskTo(mw, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+        m_localMaskWritten = m_localShadowsDrawn ? m_localMask[mw].Get() : nullptr;
+        ++m_localMaskFrame;
+        list->OMSetRenderTargets(1, &rtv, FALSE, &roDsv);
     }
 
     // The glass, over the opaque world (and the sky, drawn before this pass), far to near.
@@ -7065,7 +7555,7 @@ bool Scene::RebuildSrvHeap(ID3D12Device* dev)
     // cannot live in a heap of its own.
     // +2: the shadow cascade array and the label font both share this heap,
     // because only one CBV/SRV/UAV heap can be bound at a time.
-    hd.NumDescriptors = (UINT)(pairs * kMaterialSrvCount + 17);
+    hd.NumDescriptors = (UINT)(pairs * kMaterialSrvCount + 20);
     m_shadowSrvSlot = (UINT)(pairs * kMaterialSrvCount);
     m_fontSrvSlot = (UINT)(pairs * kMaterialSrvCount + 1);
     m_envSrvSlot  = (UINT)(pairs * kMaterialSrvCount + 2);
@@ -7074,8 +7564,9 @@ bool Scene::RebuildSrvHeap(ID3D12Device* dev)
     m_aerialSrvSlot = (UINT)(pairs * kMaterialSrvCount + 5);   // and +6
     m_irrSrvSlot    = (UINT)(pairs * kMaterialSrvCount + 7);
     m_msSrvSlot     = (UINT)(pairs * kMaterialSrvCount + 8);
-    m_lightSrvSlot  = (UINT)(pairs * kMaterialSrvCount + 9);    // and +10 .. +15 (lights.h, the deferred pass)
-    m_reflSrvSlot   = (UINT)(pairs * kMaterialSrvCount + 16);
+    m_lightSrvSlot  = (UINT)(pairs * kMaterialSrvCount + 9);    // and +10 .. +18 (lights.h, the deferred pass,
+                                                                 // the local lights' shadow maps, their mask)
+    m_reflSrvSlot   = (UINT)(pairs * kMaterialSrvCount + 19);
     hd.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
     if (FAILED(dev->CreateDescriptorHeap(&hd, IID_PPV_ARGS(&m_srvHeap))))
     {
