@@ -246,9 +246,12 @@ public:
     // tells the lights' shading to read them this frame (a null list: the share alone). `aoShare`: the screen-space
     // AO's share of the local lights' diffuse (0 by day).
     void SetLocalShadowMaps(ShadowMaps* maps) { m_localShadows = maps; }
-    void ResetLocalShadows() { m_localShadowsDrawn = 0; m_localAoShare = 0.0f; }
+    void ResetLocalShadows() { m_localShadowsDrawn = 0; m_localAoShare = 0.0f; m_localMaskWritten = nullptr; }
     void RenderLocalShadows(ID3D12GraphicsCommandList* list, float aoShare);
     uint32_t LocalShadowsDrawn() const { return m_localShadowsDrawn; }
+    // The MOVED-SHADOW MASK the deferred lights wrote this frame (z: a moving object's shadow from a mapped lamp, now
+    // or in the last three frames), for TAA as the ray tracer's lights' distrust; null when there is none.
+    ID3D12Resource* LocalShadowMask() const { return m_localShadowsDrawn ? m_localMaskWritten : nullptr; }
     double LocalShadowMs() const { return m_localShadowMs; }
 
     // The prefiltered sky and its irradiance (env.h). OWNED and rebuilt by the
@@ -842,6 +845,16 @@ private:
     Microsoft::WRL::ComPtr<ID3D12PipelineState>  m_psoLocalShadow, m_psoLocalShadowAlpha;   // RenderLocalShadows
     Microsoft::WRL::ComPtr<ID3D12Resource>       m_localShadowCB[4];
     ShadowMaps*              m_localShadows = nullptr;
+    Microsoft::WRL::ComPtr<ID3D12Resource>       m_localFlag;      // the casters' kind, a slice per map
+    Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> m_localFlagRtv;
+    UINT                     m_localFlagRtvStride = 0;
+    bool                     m_localFlagInRt = true;
+    Microsoft::WRL::ComPtr<ID3D12Resource>       m_localMask[2];   // the moved-shadow mask, written / read in turn
+    Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> m_localMaskRtv;
+    D3D12_RESOURCE_STATES    m_localMaskState[2] = { D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_RENDER_TARGET };
+    uint64_t                 m_localMaskFrame = 0;
+    bool                     m_localMaskFresh = true;
+    ID3D12Resource*          m_localMaskWritten = nullptr;
     uint32_t                 m_localShadowsDrawn = 0;
     float                    m_localAoShare = 0.0f;
     double                   m_localShadowMs = 0.0;

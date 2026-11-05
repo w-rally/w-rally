@@ -3145,7 +3145,17 @@ Four decisions, the user's:
     The lamps of one mounting read their map once per pixel (the last slot cached).
   - **The AO's share of the local diffuse:** 0.5 at night (faded in as the sun sets below 0 to -6 degrees; 0 while
     it is up, so the day is unchanged), `NGG_LOCAL_AO=<share>`; `NGG_LOCAL_SHADOWS=0` turns the maps off.
-  - **Numbers** (iGPU, gpu frame medians): Garage RT off 12.7 -> 14.4 ms (RT on 22.9), maps 0.37 ms; night stage
+  - **TAA: the moved shadow** (the user, 2026-11-05: trails of the car's shadow on the turntable at every drag speed,
+    RT off only). The turntable's floor is still world, so TAA kept its history at 0.97 unclipped - the shadow the
+    turning car had just left. The ray tracer's lights' denoise tells TAA where a moved object shadows (z, its
+    distrust); now the maps do too: beside each map the casters' kind (R8, `PSShadowFlag`: 1 a `DrawItem::dynamic`
+    object's), read round the pixel's spot where it is blocked; `PSDeferredLights` writes a MOVED-SHADOW MASK as a
+    second target (RGBA16F, z: 1 now, then last frame's at the reprojected pixel less 1/8 - four frames), and TAA
+    takes it in the RT lights' slot (`Scene::LocalShadowMask`): relit, not kept. Fast, bursty, slow drags, the
+    Garage's own turning and the stop: no copies. The mask costs ~0.1 ms. `NGG_LOCAL_SHADOW_TURN=0`: the taps
+    unturned (A/B).
+  - **Numbers** (iGPU, gpu frame medians; the longer runs, 60 frames x 3, TAA on): Garage RT off 12.4-13.0 ->
+    15.5-16.1 ms (maps off 12.8-12.9; RT on ~22.5), maps 0.4 ms (an earlier single 20-frame run said +1.7); night stage
     (user-4.phr, chase, 6 lamps: a 4-pod ramp + 2 headlamps -> 3 maps, ~0.9 ms) 18.2/18.1 -> 21.2/20.0 ms (RT on
     ~27.5). The RT path is pixel-identical (max 1/255, as run to run), and the day has no lights to change.
 - **N3 - car lights.** The spec and its fallbacks (above), lit meshes as emissive, the game's switching (brake,
