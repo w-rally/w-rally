@@ -661,6 +661,10 @@ void CSHistogram(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex)
 
 groupshared float gsWeight[BINS];
 
+// The night's highlight protection (CSAdapt): the percentile, and how far above the metered level it may sit.
+static const float kHighlightPct = 0.97;
+static const float kHighlightEv = 3.0;
+
 [numthreads(BINS, 1, 1)]
 void CSAdapt(uint gi : SV_GroupIndex)
 {
@@ -690,7 +694,31 @@ void CSAdapt(uint gi : SV_GroupIndex)
 
     const bool valid = gState[2] > 0.5;
     // An all-black frame (a load, a fade) has nothing to meter: hold.
-    const float metered = (sumW > 0.0) ? sumL / sumW : (valid ? gState[1] : gRefLog2);
+    float metered = (sumW > 0.0) ? sumL / sumW : (valid ? gState[1] : gRefLog2);
+
+    // THE NIGHT'S HIGHLIGHTS. At night the window above lands on the black of the sky and the verge, and the
+    // exposure opened up as far as the night lets it (gNightKnee, gNightSlope) - while the headlamps' patch of road
+    // beside the car, a tenth of the screen, clipped flat white, and everything that reflected a few percent of it
+    // with it: the car's paint, its tyres (the night glints). An eye adapts to the light in view, not to the dark
+    // around it. So at night the meter reads no darker than kHighlightEv under its kHighlightPct percentile: the
+    // brightest few percent of the screen at most that far above the grey. Blended in over 2 EV past the knee, so
+    // the day's metering is as before.
+    if (sumW > 0.0)
+    {
+        const float at = total * kHighlightPct;
+        float run = 0.0, pHigh = metered;
+        for (uint k = 1; k < BINS; ++k)
+        {
+            run += gsWeight[k];
+            if (run >= at)
+            {
+                pHigh = gMinLog2 + (float(k - 1) + 0.5) / float(BINS - 1) * gLog2Range;
+                break;
+            }
+        }
+        const float night = saturate((gRefLog2 - metered - gNightKnee) / 2.0);
+        metered = max(metered, lerp(metered, pHigh - kHighlightEv, night));
+    }
 
     // Adaptation in LOG space, exponential in time, so a step of N EV settles
     // in the same time whatever N is - which is how adaptation is perceived.
