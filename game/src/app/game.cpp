@@ -1605,6 +1605,9 @@ int RunGame(const std::vector<std::string>& args)
             jerk = std::max(1, std::atoi((t + 1)->c_str()));
         Showroom showroom;
         int settle = 0;
+        // PHYS_DRIVE_FRAMEMS: the captured frames' whole GPU time (RenderStats::frameMs), mean and median, as a stage's.
+        const bool frameMsLog = std::getenv("PHYS_DRIVE_FRAMEMS") != nullptr;
+        std::vector<float> frameMsSeen;
         for (int frame = 0; frame < 400 + shots && sh.window.Pump(); ++frame) {
             sh.FollowSize();
             sh.ui.NewFrame();
@@ -1628,7 +1631,16 @@ int RunGame(const std::vector<std::string>& args)
             if (const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - r0).count();
                 std::getenv("WRALLY_SHOWROOM_TIMES") && ms > 30)
                 std::printf("the showroom: frame %d drawn in %.0f ms\n", frame, ms);
+            if (frameMsLog && settle > 40)
+                if (const float ms = sh.renderer.Stats().frameMs; ms > 0.0f) frameMsSeen.push_back(ms);
             if (const std::string log = sh.renderer.TakeLog(); sh.rendererLog && !log.empty()) std::printf("%s", log.c_str());
+        }
+        if (!frameMsSeen.empty()) {
+            std::vector<float> v = frameMsSeen;
+            double sum = 0;
+            for (float ms : v) sum += ms;
+            std::nth_element(v.begin(), v.begin() + v.size() / 2, v.end());
+            std::printf("gpu frame: mean %.2f ms, median %.2f ms over %zu frames\n", sum / v.size(), v[v.size() / 2], v.size());
         }
         showroom.Unload(sh.renderer);
         return 0;
