@@ -59,6 +59,9 @@ struct Settings {
         float spread = 0.0f, pitch = 0.0f;
     };
     std::map<std::string, Lamps> lamps;
+    // The physics each car was last driven with (docs/content-layers.md 4): per car id its physics variant's id.
+    // W-Rally.ini: physics_<car id> = <variant id>.
+    std::map<std::string, std::string> physics;
 
     // The ';'-separated .ngg folders, or <rbr>/Ngg.
     std::string NggFolders() const;
