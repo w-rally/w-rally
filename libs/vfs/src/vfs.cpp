@@ -726,6 +726,23 @@ fs::path Vfs::WritePath(std::string_view pathIn) const
     return m_layers.front().root / P(path);
 }
 
+std::string Vfs::VfsPath(const fs::path& file) const
+{
+    if (file.empty()) return "";
+    std::error_code ec;
+    const fs::path abs = fs::absolute(file, ec).lexically_normal();
+    auto under = [&](const fs::path& root) -> std::optional<std::string> {
+        if (root.empty()) return std::nullopt;
+        const fs::path rel = abs.lexically_relative(fs::absolute(root, ec).lexically_normal());
+        if (rel.empty() || *rel.begin() == ".." || rel.is_absolute()) return std::nullopt;
+        return NormalPath(U8(rel));
+    };
+    if (const auto r = under(m_rbr)) return "rbr/" + *r;
+    for (const Layer& l : m_layers)
+        if (const auto r = under(l.root)) return *r;
+    return file.is_absolute() ? U8(file) : NormalPath(U8(file));
+}
+
 std::string Vfs::TrackOfMap(int map) const
 {
     const auto it = m_index->mapTrack.find(map);

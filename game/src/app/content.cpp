@@ -14,11 +14,13 @@ std::filesystem::path WRallyContentDir()
     return (std::filesystem::path(WRALLY_SOURCE_DIR) / "content").make_preferred();
 }
 
-std::unique_ptr<vfs::Vfs> MakeVfs(const Settings& s)
+std::unique_ptr<vfs::Vfs> MakeVfs(const Settings& s) { return MakeVfs(s, s.rbrPath); }
+
+std::unique_ptr<vfs::Vfs> MakeVfs(const Settings& s, const std::string& rbr)
 {
     return std::make_unique<vfs::Vfs>(std::vector<vfs::Layer>{{DownloadDir(s.downloadPath), "downloaded"},
                                                               {WRallyContentDir(), "w-rally"}},
-                                      std::filesystem::path(s.rbrPath));
+                                      std::filesystem::path(rbr));
 }
 
 std::string DescribeVfs(const vfs::Vfs& v)

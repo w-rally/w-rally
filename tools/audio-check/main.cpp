@@ -181,7 +181,6 @@ std::string ReplayDrive(signals::Bus& bus, int argc, char** argv, const std::str
     wrally::physics::Config c;
     c.root = game;
     const std::string maps = game + "/Maps/" + stage;
-    c.rbz = game + "/physics.rbz";
     c.trk = maps + ".trk", c.col = maps + ".col", c.mat = maps + ".mat", c.fnc = maps + ".fnc", c.lbs = maps + ".lbs";
     c.sgc = game + "/Cars/i20_R5/i20_R5.sgc";
     c.surface = wrally::rules::StageSurface(game, wrally::rules::StageMap(stage));

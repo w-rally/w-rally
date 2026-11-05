@@ -112,10 +112,11 @@ enum class LogLevel : uint32_t { Trace = 0, Debug = 1, Info = 2, Warn = 3, Error
 // HostServices - what the game lends every module.
 //
 // FILES GO THROUGH THE GAME. A module never opens a game data file by itself:
-// RBR's data lives loose, inside physics.rbz, and (later) in mod overlays and
-// packages, and only the game's VFS knows which copy wins. Paths are the VFS's:
-// relative to the game data root, forward slashes, case-insensitive -
-// "Maps/track-41_M.trk", "Physics/physics.rbz:Physics/s_i2003/common.lsp".
+// the content is in layers (downloaded, W-Rally's, RBR's - docs/content-layers.md),
+// each item per version over its bases, and only the game's VFS knows which copy
+// wins. Paths are the VFS's: forward slashes, case-insensitive - an item's file
+// "cars/s_i2003/physics/rbr/rbr/common.lsp", RBR's folder as it is under rbr/
+// ("rbr/Maps/track-41_M.trk"). No archive members: physics.rbz is the VFS's own.
 //
 // Every function pointer is non-null. All of them are thread-safe.
 // ---------------------------------------------------------------------------

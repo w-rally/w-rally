@@ -161,7 +161,7 @@ Status WRALLY_CALL CreateCarVoice(AudioModule* m, const CarSoundDesc* d, CarVoic
     // The bank: RBR's set around the engine, unless the engine is "none" (S0's pulse engine alone).
     const std::string engine = Str(d->engine).empty() ? "Focus03-08" : Str(d->engine);
     if (engine != "none") {
-        std::string missing = m->bank.LoadRbr("", engine);
+        std::string missing = m->bank.LoadRbr("rbr", engine);   // RBR's set: the VFS's rbr/ (interface 3)
         if (d->bangCount) missing += m->bank.LoadBangFiles(Paths(d->bangs, d->bangCount));
         if (d->idleBangCount) missing += m->bank.LoadBangFiles(Paths(d->idleBangs, d->idleBangCount), true);
         char t[160];

@@ -13,9 +13,10 @@ namespace wrally::modules {
 
 using iface::Status;
 
-FileHost::FileHost(std::filesystem::path dataRoot, std::filesystem::path cacheRoot, LogFn log)
-    : m_data(std::move(dataRoot)), m_cache(std::move(cacheRoot)), m_log(std::move(log))
+FileHost::FileHost(std::shared_ptr<const vfs::Vfs> content, std::filesystem::path cacheRoot, LogFn log)
+    : m_content(std::move(content)), m_cache(std::move(cacheRoot)), m_log(std::move(log))
 {
+    if (!m_content) m_content = std::make_shared<vfs::Vfs>(std::vector<vfs::Layer>{}, std::filesystem::path());
     if (!m_log)
         m_log = [](iface::LogLevel level, const char* m) {
             static const char* const kNames[] = {"trace", "debug", "info", "warn", "error"};
@@ -47,9 +48,16 @@ iface::HostServices FileHost::Services(const std::string& moduleId)
     return s;
 }
 
-std::filesystem::path FileHost::Resolve(const char* path) const
+std::optional<vfs::Resolved> FileHost::Resolve(const char* path) const
 {
-    return m_data / std::filesystem::path(std::u8string(reinterpret_cast<const char8_t*>(path ? path : "")));
+    if (!path || !*path) return std::nullopt;
+    const std::filesystem::path p(std::u8string(reinterpret_cast<const char8_t*>(path)));
+    if (p.is_absolute()) {
+        std::error_code ec;
+        if (!std::filesystem::is_regular_file(p, ec)) return std::nullopt;
+        return vfs::Resolved{p, nullptr, "disk"};
+    }
+    return m_content->Find(path);
 }
 
 void WRALLY_CALL FileHost::Log(void* ctx, iface::LogLevel level, const char* message)
@@ -71,23 +79,14 @@ Status WRALLY_CALL FileHost::Read(void* ctx, const char* path, iface::Blob* out)
 {
     if (!out) return Status::ErrInvalidArg;
     *out = {};
-    FileHost& h = *static_cast<Ctx*>(ctx)->host;
-    if (!path || std::strchr(path, ':')) {
-        h.m_log(iface::LogLevel::Warn, (std::string("no archive support yet: ") + (path ? path : "(null)")).c_str());
-        return Status::ErrIo;
-    }
-    std::ifstream f(h.Resolve(path), std::ios::binary | std::ios::ate);
-    if (!f) return Status::ErrIo;
-    const std::streamoff size = f.tellg();
-    auto* bytes = new std::vector<uint8_t>(static_cast<size_t>(size));
-    f.seekg(0);
-    if (size && !f.read(reinterpret_cast<char*>(bytes->data()), size)) {
-        delete bytes;
-        return Status::ErrIo;
-    }
+    const FileHost& h = *static_cast<Ctx*>(ctx)->host;
+    const auto r = h.Resolve(path);
+    if (!r) return Status::ErrIo;
+    auto bytes = std::make_unique<std::vector<uint8_t>>();
+    if (!vfs::ReadResolved(*r, *bytes)) return Status::ErrIo;
     out->data = bytes->data();
-    out->size = static_cast<uint64_t>(size);
-    out->owner = bytes;
+    out->size = static_cast<uint64_t>(bytes->size());
+    out->owner = bytes.release();
     return Status::Ok;
 }
 
@@ -100,9 +99,7 @@ void WRALLY_CALL FileHost::Release(void*, iface::Blob* blob)
 
 int32_t WRALLY_CALL FileHost::Exists(void* ctx, const char* path)
 {
-    if (!path || std::strchr(path, ':')) return 0;
-    std::error_code ec;
-    return std::filesystem::is_regular_file(static_cast<Ctx*>(ctx)->host->Resolve(path), ec) ? 1 : 0;
+    return static_cast<Ctx*>(ctx)->host->Resolve(path) ? 1 : 0;
 }
 
 const char* WRALLY_CALL FileHost::CacheDir(void* ctx)
