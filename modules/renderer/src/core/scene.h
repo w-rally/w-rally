@@ -240,6 +240,16 @@ public:
     // ShadowMaps owns the targets and the fitting. Call RenderShadows BEFORE
     // Record, with the same view/proj.
     void SetShadowMaps(ShadowMaps* s) { m_shadows = s; m_shadowSrvReady = false; }
+    // THE LOCAL LIGHTS' SHADOW MAPS (lights.h Lights::ShadowCount) - the cascades' path, where no ray tracer shadows
+    // them: one perspective depth map per chosen spot or beam, a slice of `maps` each (its four "cascades", Update
+    // never called). ResetLocalShadows at each frame's start; RenderLocalShadows after PrepareLights draws them and
+    // tells the lights' shading to read them this frame (a null list: the share alone). `aoShare`: the screen-space
+    // AO's share of the local lights' diffuse (0 by day).
+    void SetLocalShadowMaps(ShadowMaps* maps) { m_localShadows = maps; }
+    void ResetLocalShadows() { m_localShadowsDrawn = 0; m_localAoShare = 0.0f; }
+    void RenderLocalShadows(ID3D12GraphicsCommandList* list, float aoShare);
+    uint32_t LocalShadowsDrawn() const { return m_localShadowsDrawn; }
+    double LocalShadowMs() const { return m_localShadowMs; }
 
     // The prefiltered sky and its irradiance (env.h). OWNED and rebuilt by the
     // Scene at the start of every main pass, from the SkyParams SetAtmosphere
@@ -829,6 +839,15 @@ private:
                     bool prepass);
     Microsoft::WRL::ComPtr<ID3D12PipelineState>  m_psoShadow;
     Microsoft::WRL::ComPtr<ID3D12PipelineState>  m_psoShadowAlpha;
+    Microsoft::WRL::ComPtr<ID3D12PipelineState>  m_psoLocalShadow, m_psoLocalShadowAlpha;   // RenderLocalShadows
+    Microsoft::WRL::ComPtr<ID3D12Resource>       m_localShadowCB[4];
+    ShadowMaps*              m_localShadows = nullptr;
+    uint32_t                 m_localShadowsDrawn = 0;
+    float                    m_localAoShare = 0.0f;
+    double                   m_localShadowMs = 0.0;
+    Microsoft::WRL::ComPtr<ID3D12QueryHeap> m_localShadowTimer;
+    Microsoft::WRL::ComPtr<ID3D12Resource>  m_localShadowTimerReadback;
+    bool                     m_localShadowTimerPending = false;
     Microsoft::WRL::ComPtr<ID3D12Resource>       m_vb;
     Microsoft::WRL::ComPtr<ID3D12Resource>       m_ib;
     Microsoft::WRL::ComPtr<ID3D12Resource>       m_depth;
