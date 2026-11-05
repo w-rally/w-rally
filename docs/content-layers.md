@@ -222,14 +222,16 @@ public:
    `formats`, `simVersion`); WPhysicsRBR, audio and renderer hosts moved over. The game still names a stage's and a
    car's files by their place on disk, handed over as VFS paths (`rbr/Maps/...`, a slot car's physics.rbz folder as
    `physics/rbr/rbr/<folder>/`); item paths come with the catalog (step 5). Audio interface 3: RBR's sounds under `rbr/`.
-5. **Done 2026-11-05, but `rbr-tracks.json`.** Catalog and registers over the VFS: tracks and cars by id (newest
+5. **Done 2026-11-05.** Catalog and registers over the VFS: tracks and cars by id (newest
    version) with `source`, their files resolved through the versions; `car.json`/`track.json` from the layers (and
    an RBR car folder's old `car.json` under `rbr/`); a stage run takes `--track <id>[@<version>]` for its files, a
    car's physics and a setup as VFS paths. The RBR mapping also takes the maps with files in Maps that Tracks.ini
    does not list (40, 599, 771 here), as the catalog did. `--extract-slot-physics` and the `content/cars/<car>.ini`
-   lookup are gone. **Open:** `rbr-tracks.json` - Tracks.ini names none of the original stages and the particle
-   sets are no country, so the ids cannot be made from RBR's files; until the table is written the maps are
-   `rbr_<n>`.
+   lookup are gone. `content/rbr-tracks.json` comes from the onlineracing.cz tracks table (`tools/rbr-tracks/
+   make_table.py` over its CSV export: 344 tracks): the country its English name's ISO code, `xx` (ISO's private use)
+   for a track with no real country (Montekland, Rally school, Neverwhere); the name a slug, a release number at its
+   end dropped. Where an RBR folder's map number is another track than the table's (114, 119, 121 in this one), the
+   table wins. A map the table does not know stays `rbr_<n>` (31 in this folder).
 6. Physics variants: `physics.json`, `Car::physics` as a list, Quick rally choice, `physics_<car-id>`.
 7. Versions: fingerprints with their cache; replays record and resolve exact versions; `versions.json` last use.
 8. Cleaning: the keep rules, Settings → Storage, `download_keep_days`, `download_max_gb`.
