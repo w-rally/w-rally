@@ -86,12 +86,12 @@ set_tests_properties(astronomy-check PROPERTIES PASS_REGULAR_EXPRESSION "astrono
 # What the Quick rally menu offers (game/src/assets/catalog.cpp) from the RBR folder: every stage, those no .ngg draws
 # imported from their .lbs with drawn weathers, no protected (encrypted) one, and a map under 10's weathers under their
 # two-digit names.
-add_executable(catalog-check catalog_check.cpp ${GAME_SRC}/assets/catalog.cpp ${GAME_SRC}/assets/car_register.cpp
+add_executable(catalog-check catalog_check.cpp ${GAME_SRC}/app/content.cpp ${GAME_SRC}/assets/catalog.cpp ${GAME_SRC}/assets/car_register.cpp
                ${GAME_SRC}/assets/track_register.cpp ${GAME_SRC}/app/settings.cpp
                ${GAME_SRC}/app/options.cpp ${GAME_SRC}/input/bindings.cpp ${GAME_SRC}/rules/stage.cpp
                ${GAME_SRC}/formats/track_settings.cpp ${GAME_SRC}/formats/lbs_geometry.cpp)
 target_include_directories(catalog-check PRIVATE ${GAME_SRC})
-target_link_libraries(catalog-check PRIVATE wrally-json phys-data wrally-modules wrally-signals)
+target_link_libraries(catalog-check PRIVATE wrally-json wrally-vfs phys-data wrally-modules wrally-signals)
 target_compile_definitions(catalog-check PRIVATE _CRT_SECURE_NO_WARNINGS NOMINMAX WRALLY_SOURCE_DIR="${PROJECT_SOURCE_DIR}")
 set_target_properties(catalog-check PROPERTIES CXX_STANDARD 17)
 if(EXISTS ${WRALLY_TEST_RBR_DIR}/Maps/track-4_E.lbs)

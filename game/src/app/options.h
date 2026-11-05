@@ -53,6 +53,9 @@ namespace wrally::app {
 
 struct Options {
     std::string game, ngg, stage;
+    // --track <id>[@<version>]: the stage's files from that track item (docs/content-layers.md: its newest version, or
+    // that one), through its versions - a download's patch among them; "" from <game>/Maps (app::ApplyTrack).
+    std::string track;
     std::string stageWarning;            // shown on the screen ("" none)
     // The run as the menus name it, for the pause menu (Quick rally sets them; "" a command line's: from its files).
     std::string stageTitle, carName, weatherName;

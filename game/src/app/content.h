@@ -6,6 +6,7 @@
 #include <memory>
 #include <string>
 
+#include "app/options.h"
 #include "app/settings.h"
 #include "wrally/vfs/vfs.h"
 
@@ -19,6 +20,11 @@ std::filesystem::path WRallyContentDir();
 std::unique_ptr<vfs::Vfs> MakeVfs(const Settings& s);
 // The same with another RBR folder (a stage run's: its command line's).
 std::unique_ptr<vfs::Vfs> MakeVfs(const Settings& s, const std::string& rbr);
+
+// --track: the stage's files (.trk, .col, .mat, .fnc, .lbs, .dls) from the track item `o.track` ("<id>[@<version>]"),
+// each through its versions, on disk. Returns "" (nothing to do, or done) or why it could not; `o.track` gets the
+// version found.
+std::string ApplyTrack(Options& o, const vfs::Vfs& content);
 
 // For the log: the folders and what was found in them, and the first of the notes.
 std::string DescribeVfs(const vfs::Vfs& v);
