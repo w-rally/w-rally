@@ -367,6 +367,27 @@ const PhysicsVariant* Catalog::PhysicsFor(const Car& car, const app::Settings& s
     return !car.variants.empty() && !car.variants.front().modules.empty() ? &car.variants.front() : nullptr;
 }
 
+CarFiles CarFilesOf(std::shared_ptr<const vfs::Vfs> content, const vfs::ItemRef& ref)
+{
+    CarFiles f;
+    if (!content) return f;
+    auto item = content->Open(ref);
+    if (!item) return f;
+    const auto shared = std::make_shared<std::pair<std::shared_ptr<const vfs::Vfs>, vfs::Item>>(std::move(content), *item);
+    f.read = [shared](const std::string& rel) {
+        std::vector<uint8_t> bytes;
+        if (const auto r = shared->second.Find(rel)) vfs::ReadResolved(*r, bytes);
+        return bytes;
+    };
+    f.list = [shared](const std::string& relDir) {
+        std::vector<std::string> out;
+        for (const std::string& n : shared->second.List(relDir))
+            if (!n.empty() && n.back() != '/') out.push_back(n);
+        return out;
+    };
+    return f;
+}
+
 bool Catalog::Drivable(const Car& car)
 {
     return std::any_of(car.variants.begin(), car.variants.end(), [](const PhysicsVariant& p) { return !p.modules.empty(); });

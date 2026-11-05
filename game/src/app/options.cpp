@@ -123,6 +123,7 @@ int Parse(const std::vector<std::string>& args, Options& o)
     const std::string& game = o.game;
     o.stage = Arg(args, "--stage", "");
     o.track = Arg(args, "--track", "");
+    o.carItem = Arg(args, "--car-item", "");
     {
         std::string why;
         const std::string fromNgg = NggStage(game, o.ngg, why);
