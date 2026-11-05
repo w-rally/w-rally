@@ -92,10 +92,9 @@ bool Drawn(const std::string& n, const std::string& surface)
 
 // <car>_shaders.ini: sections and their keys.
 using Ini = std::map<std::string, std::map<std::string, std::string>>;
-Ini ReadIni(const std::string& path)
+Ini ReadIni(const std::vector<uint8_t>& d)
 {
     Ini ini;
-    const std::vector<uint8_t> d = ReadFile(path);
     std::string section, line;
     auto flush = [&] {
         auto trim = [](std::string s) {
@@ -117,17 +116,33 @@ Ini ReadIni(const std::string& path)
 
 } // namespace
 
-CarModel ReadCarModel(const std::string& sgcPath, const std::string& surface)
+CarModel ReadCarModel(const std::string& sgcPath, const std::string& surface, const CarFiles* given)
 {
     const std::vector<uint8_t> d = ReadFile(sgcPath);
     if (d.empty()) throw std::runtime_error("cannot read " + sgcPath);
     const std::string dir = sgcPath.substr(0, sgcPath.find_last_of("/\\") + 1);
     std::string base = sgcPath.substr(dir.size());
     base = base.substr(0, base.find_last_of('.'));
-    const Ini ini = ReadIni(dir + base + "_shaders.ini");
+    // Its other files: through the car's item, else beside the .sgc.
+    CarFiles disk;
+    disk.read = [&dir](const std::string& rel) { return ReadFile(dir + rel); };
+    disk.list = [&dir](const std::string& relDir) {
+        std::vector<std::string> out;
+        WIN32_FIND_DATAA fd;
+        HANDLE h = FindFirstFileA((dir + relDir + "\\*").c_str(), &fd);
+        if (h != INVALID_HANDLE_VALUE) {
+            do
+                if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) out.push_back(fd.cFileName);
+            while (FindNextFileA(h, &fd));
+            FindClose(h);
+        }
+        return out;
+    };
+    const CarFiles& files = given && given->read && given->list ? *given : disk;
+    const Ini ini = ReadIni(files.read(base + "_shaders.ini"));
     // <car>.ini: per mesh ([<name>]), its groups' materials (FaceBlock<g>_Material) - what the game draws, over the
     // .sgc's own names (often a placeholder: "Default Material", "09___Default").
-    const Ini carIni = ReadIni(dir + base + ".ini");
+    const Ini carIni = ReadIni(files.read(base + ".ini"));
 
     CarModel model;
     std::map<std::string, std::vector<std::string>> stageNames;   // the .sgc materials' texture names
@@ -374,16 +389,9 @@ CarModel ReadCarModel(const std::string& sgcPath, const std::string& surface)
     // The materials used: a texture through the shaders.ini (<material>_diffuse_bitmap, or <material>::..._diffuse_bitmap),
     // else the .sgc's texture name (or one in the textures folder ending as it does); without one, the ini's Diffuse.
     std::map<std::string, size_t> done;
-    std::vector<std::string> files;   // the textures folder
-    {
-        WIN32_FIND_DATAA fd;
-        HANDLE h = FindFirstFileA((dir + "textures\\*.dds").c_str(), &fd);
-        if (h != INVALID_HANDLE_VALUE) {
-            do files.push_back(fd.cFileName);
-            while (FindNextFileA(h, &fd));
-            FindClose(h);
-        }
-    }
+    std::vector<std::string> textures;   // the textures folder's .dds files
+    for (const std::string& f : files.list("textures"))
+        if (Lower(f).size() > 4 && Lower(f).compare(Lower(f).size() - 4, 4, ".dds") == 0) textures.push_back(f);
     auto textureFile = [&](const std::string& material) -> std::string {
         auto bitmap = [&](const std::string& section) -> std::string {
             const auto s = ini.find(section);
@@ -399,7 +407,7 @@ CarModel ReadCarModel(const std::string& sgcPath, const std::string& surface)
         const auto st = stageNames.find(material);
         if (st == stageNames.end() || st->second.empty()) return "";
         const std::string want = Lower(st->second[0]);
-        for (const std::string& f : files)
+        for (const std::string& f : textures)
             if (Lower(f) == want) return f;
         // a renamed model: the file whose name ends as the .sgc's does after its first two words (i20_wrc_16_x.dds ->
         // ..._x.dds)
@@ -408,7 +416,7 @@ CarModel ReadCarModel(const std::string& sgcPath, const std::string& surface)
             const std::string tail = want.substr(cut);
             std::string hit;
             int hits = 0;
-            for (const std::string& f : files)
+            for (const std::string& f : textures)
                 if (Lower(f).size() >= tail.size() && Lower(f).compare(Lower(f).size() - tail.size(), tail.size(), tail) == 0) ++hits, hit = f;
             if (hits == 1) return hit;
             cut = want.find('_', cut + 1);
@@ -422,15 +430,15 @@ CarModel ReadCarModel(const std::string& sgcPath, const std::string& surface)
         t.material = p.material;
         const std::string file = textureFile(p.material);
         t.file = file;
-        if (!file.empty()) t.dds = ReadFile(dir + "textures/" + file);
+        if (!file.empty()) t.dds = files.read("textures/" + file);
         // Its PBR maps (CarMap): <texture>_basecolor / _normal / _orm.dds, where the folder has them.
         if (!file.empty()) {
             static const char* const kSuffix[kCarMaps] = {"_basecolor.dds", "_normal.dds", "_orm.dds"};
             const std::string stem = Lower(file.substr(0, file.find_last_of('.')));
             for (int k = 0; k < kCarMaps; ++k)
-                for (const std::string& f : files)
+                for (const std::string& f : textures)
                     if (Lower(f) == stem + kSuffix[k]) {
-                        t.maps[k].dds = ReadFile(dir + "textures/" + f);
+                        t.maps[k].dds = files.read("textures/" + f);
                         break;
                     }
         }

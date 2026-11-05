@@ -1,7 +1,7 @@
-"""make_pbr.py - drafts a car's PBR maps from its RBR textures: an ORM map per atlas (assets/car_model.h CarMap).
+r"""make_pbr.py - drafts a car's PBR maps from its RBR textures: an ORM map per atlas (assets/car_model.h CarMap).
 
     car-uv-dump <car .sgc> > uv.txt
-    python make_pbr.py <car folder> uv.txt [--out DIR] [--preview DIR] [--force]
+    python make_pbr.py <car folder> uv.txt [--downloads DIR] [--version V] [--out DIR] [--preview DIR] [--force]
 
 RBR's car textures are colour alone, and one atlas serves paint, tyres, plastic and glass alike. The dump says which
 texels which parts sample - every exterior mesh group's UV triangles with its shader class (<car>.ini
@@ -10,14 +10,21 @@ texels. Inside the paint, what is dark and grey - a grille, black trim, a rubber
 (DARK), judged on the texture blurred (DARK_BLUR): a decal's black lettering averages out bright and keeps the
 lacquer, an area of grille stays dark. Empty texels take their neighbours' finish, so the mips do not bleed the default into the edges.
 
-Written beside each texture as <texture>_orm.dds (DXT5 with mips; r occlusion 1, g roughness, b metallic, a the clear
-coat); a map already there is kept unless --force. A DRAFT, to correct by hand: a black-painted car would lose its
-lacquer to DARK. No normal or base colour map: from colour alone they emboss every decal. --preview writes the class
-map and the ORM's channels as PNGs.
+Written as <texture>_orm.dds (DXT5 with mips; r occlusion 1, g roughness, b metallic, a the clear coat) into a new
+version of the car in W-Rally's downloaded layer (docs/content-layers.md: the RBR folder is never written):
+<downloads>/cars/<car id>/<version>/textures/, with a car.json saying it is a patch over RBR's car ("base": "rbr") -
+the game then finds the maps over RBR's textures. --downloads: the game's downloads folder (default
+%LOCALAPPDATA%\W-Rally\Downloads, an installed game's; a build's is <bin>\Downloads); --version: the version made
+(default 0.1.0); --out: a folder of your own instead, the maps alone. A map already there is kept unless --force.
+
+A DRAFT, to correct by hand: a black-painted car would lose its lacquer to DARK. No normal or base colour map: from
+colour alone they emboss every decal. --preview writes the class map and the ORM's channels as PNGs.
 """
 import argparse
 import io
+import json
 import os
+import re
 import struct
 import sys
 
@@ -108,13 +115,35 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument('car')
     ap.add_argument('dump')
-    ap.add_argument('--out', help='where the maps go (default: the car\'s textures folder)')
+    ap.add_argument('--downloads', default=os.path.join(os.environ.get('LOCALAPPDATA', ''), 'W-Rally', 'Downloads'),
+                    help='the game\'s downloads folder (default: an installed game\'s)')
+    ap.add_argument('--version', default='0.1.0', help='the car version the maps make (default 0.1.0)')
+    ap.add_argument('--out', help='a folder of your own for the maps alone (no car version)')
     ap.add_argument('--preview', help='PNGs of the class map and the ORM channels here')
     ap.add_argument('--force', action='store_true', help='replace an ORM map already there')
     a = ap.parse_args()
 
     tex_dir = os.path.join(a.car, 'textures')
-    out_dir = a.out or tex_dir
+    if a.out:
+        out_dir = a.out
+    else:
+        # a patch version of the car over RBR's: its id as the game makes it of the folder's name (vfs::Slug)
+        car_id = re.sub(r'[^a-z0-9]', '_', os.path.basename(os.path.normpath(a.car)).lower())
+        if not re.fullmatch(r'\d+(\.\d+)*', a.version):
+            sys.exit('--version %s: numbers joined by dots (1, 1.2, 1.2.3)' % a.version)
+        version_dir = os.path.join(a.downloads, 'cars', car_id, a.version)
+        out_dir = os.path.join(version_dir, 'textures')
+        manifest = os.path.join(version_dir, 'car.json')
+        if not os.path.exists(manifest):
+            os.makedirs(version_dir, exist_ok=True)
+            with open(manifest, 'w', encoding='utf-8', newline='\n') as f:
+                json.dump({'id': car_id, 'version': a.version, 'base': 'rbr',
+                           'note': 'PBR maps drafted by tools/car-pbr over RBR\'s textures'}, f, indent=2)
+                f.write('\n')
+        print('maps to %s (car %s version %s, over RBR\'s)' % (out_dir, car_id, a.version))
+    if os.path.commonpath([os.path.abspath(out_dir), os.path.abspath(a.car)]) == os.path.abspath(a.car):
+        sys.exit('%s: in the car\'s own folder - W-Rally never writes the RBR folder (--downloads or --out elsewhere)' % out_dir)
+    os.makedirs(out_dir, exist_ok=True)
     by_tex = {}
     for line in open(a.dump, encoding='latin-1'):
         p = line.split()

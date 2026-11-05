@@ -240,10 +240,19 @@ public:
    usable when a module drives one of its physics.
 7. **Deferred 2026-11-05** (a TODO in design.md §6.1). Versions: fingerprints with their cache; replays record and
    resolve exact versions; `versions.json` last use.
-8. Cleaning: the keep rules, Settings → Storage, `download_keep_days`, `download_max_gb`.
-9. Writers to layer 1 (`car-pbr`); `content/cars/s_i2003.ini` removed from the content repository.
-10. Installer: `DOWNLOADDIR`, its page, `install.ini` `download_path`, registry value.
-11. design.md §6.1 updated and this file folded in.
+8. **Deferred 2026-11-05** (a TODO in design.md §6.1). Cleaning: the keep rules, Settings → Storage, `download_keep_days`, `download_max_gb`.
+9. **Done 2026-11-05.** Writers to layer 1: `car-pbr` writes its maps as a new version of the car over RBR's in the
+   downloads folder (`cars/<id>/<version>/textures/`, a `car.json` with `"base": "rbr"`; `--downloads`, `--version`;
+   it refuses the car's own folder), and the game reads a car model's other files (its `.ini` files, textures, PBR
+   maps) through the car's item (`assets::CarFiles`; a stage run's `--car-item <id>@<version>`), so the maps lie over
+   RBR's textures. A layer's `car.json` makes a car known only when it names it (a patch's does not).
+   `content/cars/s_i2003.ini` removed from the content repository. The maps made earlier beside RBR's textures (in
+   `Cars/IMPREZA05/textures/`) are to be moved out by hand.
+10. **Done 2026-11-05.** Installer: a "Downloads folder" page after the RBR folder (`DOWNLOADDIR`, pre-filled with this
+   user's `LocalAppData\W-Rally\Downloads` by the custom action `DefaultDownloads`; a silent install takes
+   `DOWNLOADDIR=`); `DownloadPath` writes `install.ini`'s `download_path` and the registry's `DownloadPath` -
+   `%LOCALAPPDATA%\W-Rally\Downloads` when the default is kept, else the folder chosen.
+11. **Deferred 2026-11-05** (a TODO in design.md §6.1). design.md §6.1 updated and this file folded in.
 
 The server side (downloads on demand, events naming versions, validation) needs the server, so it is designed here
 and built later; the replay records and the per-version layout are what it builds on.

@@ -142,12 +142,13 @@ void PartNode(const float body[16], const physics::Part& p, const float car[16],
 }
 
 void CarRender::Create(render::Renderer& renderer, const std::string& sgc, const std::string& surface,
-                       const std::vector<phys::data::RecMesh>& collision, const std::vector<physics::Part>& parts)
+                       const std::vector<phys::data::RecMesh>& collision, const std::vector<physics::Part>& parts,
+                       const CarFiles* files)
 {
     CarModel model;
     bool read = false;
     try {
-        model = ReadCarModel(sgc, surface);
+        model = ReadCarModel(sgc, surface, files);
         read = true;
     } catch (const std::exception& e) {
         std::fprintf(stderr, "the car's model: %s\n", e.what());

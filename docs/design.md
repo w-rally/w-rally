@@ -501,6 +501,13 @@ knows is listed but not usable by W-Rally: nothing says what it is or how it dri
   track's, the car's and the physics variant's id, version and drive fingerprint and the physics module's id,
   `simVersion` and `buildHash`, and plays back with exactly those versions (a missing one named, `--force` for
   development); `cache\versions.json` keeps each version's last use for the cleaning (step 8).
+- **TODO** (content layers step 8, [content-layers.md](content-layers.md) §5, deferred 2026-11-05): cleaning the
+  downloaded layer. Kept: each item's newest version, every version used in the last `download_keep_days` (30) and the
+  bases those need; the rest removed at the start (in the background) and from Settings -> Storage ("Clean now", the
+  space each item takes); `download_max_gb` removes the least recently used first. Needs step 7's `versions.json`.
+- **TODO** (content layers step 11, deferred 2026-11-05): this section rewritten from
+  [content-layers.md](content-layers.md) (the layers, W-Rally's layout, the RBR mapping, physics variants, versions)
+  and that file folded in; until then content-layers.md is the authority where they differ.
 
 ### 6.2 Formats — `wrally::formats`
 
@@ -725,8 +732,10 @@ Each phase ends with a game you can drive. phys-drive works on day one, and ever
    - **Installed:** the MSI (`installer/`, built on every push by `.github/workflows/installer.yml`) installs to
      Program Files\W-Rally and asks for the RBR folder. It pre-fills the one it finds, and goes on only when the
      folder has `RichardBurnsRally_SSE.exe`, `Physics.rbz`, `Maps\Tracks.ini` and `Cars\Cars.ini`. It writes that
-     folder to `install.ini` beside the exe, which the game reads before `W-Rally.ini`. With `install.ini` present,
-     the user folder is `%LOCALAPPDATA%\W-Rally` (`W-Rally.ini`, `W-Rally.log`, `drive.phr`, `cache\`). Without it
+     folder to `install.ini` beside the exe, which the game reads before `W-Rally.ini`. Then it asks for the downloads
+     folder (the downloaded content, [content-layers.md](content-layers.md)): `install.ini`'s `download_path`,
+     `%LOCALAPPDATA%\W-Rally\Downloads` - each Windows user's own - unless another is chosen. With `install.ini`
+     present, the user folder is `%LOCALAPPDATA%\W-Rally` (`W-Rally.ini`, `W-Rally.log`, `drive.phr`, `cache\`). Without it
      (a build run from its tree), the user folder is the exe's own.
    - **Controls:** the Settings tab that binds every action's key (`game/src/input/bindings.*`). A key is held by its
      place (scan code), named as the layout prints it. Click an action and press a key: Esc keeps the old one, Delete

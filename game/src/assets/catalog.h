@@ -26,6 +26,7 @@
 #include <vector>
 
 #include "app/settings.h"
+#include "assets/car_model.h"
 #include "assets/car_register.h"
 #include "assets/track_register.h"
 #include "wrally/vfs/vfs.h"
@@ -121,6 +122,10 @@ public:
 private:
     std::shared_ptr<const vfs::Vfs> m_content;
 };
+
+// A car's files through its item (`ref`: cars/<id>/<version>, through its base chain), for ReadCarModel; empty when
+// the item is not in `content`.
+CarFiles CarFilesOf(std::shared_ptr<const vfs::Vfs> content, const vfs::ItemRef& ref);
 
 // The physics.rbz folder of RBR's car slot 0..7 ("" none).
 const char* SlotPhysics(int slot);

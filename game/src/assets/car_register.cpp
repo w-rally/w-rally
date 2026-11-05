@@ -93,7 +93,9 @@ void CarRegister::Build(const vfs::Vfs& content, const std::vector<Car>& cars)
             info.powerHp = static_cast<float>(j.Num("power_hp", info.powerHp));
             info.weightKg = static_cast<float>(j.Num("weight_kg", info.weightKg));
             info.physics = j.Str("physics", info.physics);
-            info.known = true, info.from += " + car.json (" + where + ")";
+            // (one that names the car says what it is: a patch's - car-pbr's maps - only that it is a version)
+            if (j.Get("name")) info.known = true;
+            info.from += " + car.json (" + where + ")";
         };
         if (std::vector<uint8_t> bytes; content.Read("rbr/Cars/" + car.folder + "/car.json", bytes)) {
             try {

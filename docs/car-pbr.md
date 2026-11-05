@@ -8,7 +8,8 @@ Status: 2026-11-03. Code: [`game/src/assets/car_model.*`](../game/src/assets/car
 RBR's car textures are colour only (DXT3, their alpha opaque or a transparency mask): nothing in them says which
 texels are lacquered paint, rubber, plastic, metal or glass. W-Rally decides a car's finish in two layers:
 
-1. **PBR maps** beside the car's textures, where a car has them (§2) — the finish per texel.
+1. **PBR maps** with the car's textures (beside them, or in a version of the car over them), where a car has them
+   (§2) — the finish per texel.
 2. **Rules from RBR's own data** otherwise (§1) — the finish per mesh group.
 
 A car with no maps looks exactly as the rules make it; a map, once there, overrides the rules for its texture only.
@@ -88,9 +89,14 @@ python tools/car-pbr/make_pbr.py <RBR>/Cars/IMPREZA05 uv.txt --preview <dir>
   wins a texel two kinds of part share, and texels no part samples take their neighbours' finish so the mips do not
   bleed. Inside the paint, what is **dark and grey** becomes matte (grilles, black trim, seals drawn on the body),
   judged on the texture **blurred** (4 texels), so a decal's black lettering keeps its lacquer.
-  It writes `<texture>_orm.dds` (DXT5, mips) beside each texture; an ORM map already there is kept unless `--force`
-  (hand-made maps are safe). `--out <dir>` writes elsewhere; `--preview <dir>` writes the class map and the ORM's
-  roughness / metallic / coat as PNGs — the place to start correcting.
+  It writes `<texture>_orm.dds` (DXT5, mips) into a **new version of the car in the downloaded layer**
+  ([content-layers.md](content-layers.md): the RBR folder is never written) — `<downloads>/cars/<car id>/<version>/
+  textures/`, with a `car.json` saying it is a patch over RBR's car (`"base": "rbr"`), so the game finds the maps over
+  RBR's textures (the model's files are read through the car's item). `--downloads <dir>`: the game's downloads
+  folder (default `%LOCALAPPDATA%\W-Rally\Downloads`, an installed game's; a build run from its tree reads
+  `<bin>\Downloads`); `--version` the version made (default 0.1.0). An ORM map already there is kept unless `--force`
+  (hand-made maps are safe). `--out <dir>` writes the maps alone to a folder of your own; `--preview <dir>` writes the
+  class map and the ORM's roughness / metallic / coat as PNGs — the place to start correcting.
 
 What it cannot know, and where to correct by hand:
 
