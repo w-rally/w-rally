@@ -22,6 +22,7 @@ std::string Trim(const std::string& s)
 template <class F> void Fields(Settings& s, F&& f)
 {
     f("rbr_path", s.rbrPath);
+    f("download_path", s.downloadPath);
     f("ngg_folders", s.nggFolders);
     f("fullscreen", s.fullscreen);
     f("quality", s.quality);
@@ -82,7 +83,7 @@ Settings LoadSettings()
     Settings s;
     // Unset, the RBR folder is the exe's own when W-Rally sits in one.
     if (std::filesystem::exists(ExeDir() / "RichardBurnsRally_SSE.exe")) s.rbrPath = ExeDir().string();
-    // The installer's install.ini first (the RBR folder chosen at install), then the user's own W-Rally.ini over it
+    // The installer's install.ini first (the RBR folder and the downloads folder chosen at install), then the user's own W-Rally.ini over it
     // (none yet: the wrally.ini of before the rename, written as W-Rally.ini at the next save).
     std::error_code e;
     const std::filesystem::path own = std::filesystem::exists(SettingsPath(), e) ? SettingsPath() : UserDir() / "wrally.ini";
