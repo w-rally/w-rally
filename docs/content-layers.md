@@ -239,7 +239,72 @@ replay their own recording; cleaning keeps the newest, the recently used and the
 layer off; nothing in the RBR folder changes (its file list and times compared before and after a run); a changed
 physics file changes the drive fingerprint, a changed texture only the full one.
 
-## 10. Decisions
+## 10. Audit (step 1, 2026-11-05)
+
+Every content path today, and what it becomes. `<t>` is the track id, `<c>` the car id. RBR's items are at version
+`rbr`. Raw `rbr/...` stays for what is RBR's only and is read as such.
+
+### The game
+
+| where | reads today | becomes |
+|---|---|---|
+| `app/options.cpp` `Parse` | `args[1]` (the RBR folder) as the root of everything; `Maps/<stage>.trk/.col/.mat/.fnc/.lbs/.dls`; `physics.rbz`; `--sgc` under the root | the run's resolved items: `tracks/<t>/<v>/<stage>.*`, `cars/<c>/<v>/<model>.sgc`; no `rbz` (§3). `args[1]` stays for development as the RBR layer's folder |
+| `app/options.cpp` `NggStage` | `Maps/track-<n>_*.trk` to name the `.ngg`'s stage | the track's `track.json` (its stages); the `.trk` listing only for an RBR track |
+| `app/options.cpp` | `--car`: `<sgc folder>/physics/` or `s_i2003` (a `physics.rbz` folder) | the chosen variant `cars/<c>/physics/<p>/<v>/` |
+| `app/options.cpp` | `WRallyFile("content/cars/<car>.ini")` | removed (§2) |
+| `app/options.cpp`, `rules/stage.cpp` | `Maps/Tracks.ini` `Surface` | `track.json`'s `surface` (for an RBR track filled from `rbr/Maps/Tracks.ini`) |
+| `app/game.cpp` quick-rally command line | `relative(car.sgc, rbrPath)`, `rbrPath\<physics>`, `rbrPath\<setup>` | item refs (id + version) instead of paths |
+| `app/game.cpp` splash | `Maps/Tracks.ini` `SplashScreen`; `assets/splash.cpp` the loose `.dds` or `Textures/splash.dat` | `track.json`'s splash, a file of the track; RBR's from `rbr/Maps/Tracks.ini` and `rbr/Textures/splash.dat` |
+| `app/game.cpp` | the `.ngg`, `fopen(o.ngg)`, its bytes to the renderer | `tracks/<t>/<v>/<t>.ngg` through the VFS (still bytes to the renderer) |
+| `app/game.cpp` | `WRallyFile("content/video/menu.mp4")` | `video/menu.mp4` through the layers |
+| `session` / `ReadDls` | `Maps/<stage>.dls` | `tracks/<t>/<v>/<stage>.dls` |
+| `assets/fences.cpp` | `<root>/Textures/fence.dat` | `rbr/Textures/fence.dat` (RBR's shared archive; a W-Rally track brings its own) |
+| `assets/legacy_stage.cpp` | `<lbs>`, `<lbs stem>_textures.rbz` and `TrackSettings.ini` beside it | `tracks/<t>/rbr/<stage>.lbs`, `.../track-<n>_textures.rbz` (an RBR archive read whole, as a file of the track); `rbr/Maps/TrackSettings.ini` |
+| `assets/catalog.cpp` `Scan` | `Maps/Tracks.ini`, `Maps/TrackSettings.ini`, `physics.rbz` (as the RBR check), `Cars/Cars.ini`, `audio/Cars/Cars.ini`, `Cars/*` | `RbrMap` from `rbr/...` (the check: `Tracks.ini`, `Cars.ini`); the lists by `Vfs::List("cars")`, `List("tracks")` |
+| `assets/catalog.cpp` `SetupsFor` | `<car physics>/setups/*`, `SavedGames/*` | the variant's `setups/`; `rbr/SavedGames/` for an RBR slot car's saved ones |
+| `assets/catalog.cpp` `ExtractSlotPhysics` | **writes** `Cars/<folder>/physics/` into the RBR folder | removed (§3) |
+| `assets/car_register.cpp` | `Cars/<folder>/car.json` | `cars/<c>/<v>/car.json` |
+| `assets/track_register.cpp` | `Maps/Tracks.ini`; `track-<n>.json` beside the `.ngg` or in `Maps` | `tracks/<t>/<v>/track.json`; `rbr/Maps/Tracks.ini` for RBR's |
+| `assets/car_model.cpp`, `car_render.cpp` | the `.sgc`, `<dir>/textures/<file>` and its `_basecolor/_normal/_orm` maps beside | `cars/<c>/<v>/...` through the base chain (a map in a patch version over RBR's texture) |
+| `assets/car_lights.cpp` | the car's lamps `.ini` | `cars/<c>/<v>/...` |
+| `camera/scenery.cpp` | `Maps/<stage>.col` | `tracks/<t>/<v>/<stage>.col` |
+| `sound/codriver.cpp` | `<root>\audio\CoDriver.ini`, `audio/Speech/PaceNote/*.ogg` | `rbr/audio/...` (RBR's voice; a W-Rally voice later its own item) |
+| `ui/quick_rally.cpp` | `rbrPath\<setup>` | the setup's VFS path |
+| `settings.cpp` | `ngg_folders` default `<RBR>\Ngg` | development only (§6) |
+
+### The modules
+
+| module | builds itself | becomes |
+|---|---|---|
+| WPhysicsRBR `native/run.cpp` | `physics.rbz:Physics/physics.lsp` (global defs) | base `physics/rbr/rbr/physics.lsp` |
+| | `physics.rbz:Physics/<brand>/tyres.lsp` | base `physics/rbr/rbr/<brand>/tyres.lsp` |
+| | `physics.rbz:Physics/<car>/<file>` or `<folder>/<file>` | always `<variant folder>/<file>`; `ReadZipMember` leaves the module |
+| | setup: a `Physics/...` member or a file | always a file (the variant's `setups/` or the user's) |
+| | `StageDesc` / `CarDesc` paths | given by the game, unchanged in kind |
+| WAudio `audio/bank.cpp` | `<base>audio/Cars/<eng>.eng`, `<base>audio.bak/...`, `audio/Cars/Effects/...`, `audio/Surfaces/...` (base `""`) | base `rbr/` from the game; a car's own `.eng` is a file of the car |
+| WRenderer | nothing: `loadScene` takes the `.ngg`'s bytes, models and textures come from the game | unchanged. (ngg-core's `Scene::Load(path)`, `LoadWeather`/`SaveWeather` by path are not called by the module) |
+
+### Writes found
+
+- `ExtractSlotPhysics` writes into the RBR folder — removed.
+- `tools/car-pbr` writes `_orm.dds` beside the car's textures by default (`--out` exists) — defaults to a patch
+  version in layer 1.
+- `sound/mix_edit.cpp` saves `sound-mix.ini` where `WRallyFile` found it: the source tree or the install folder,
+  which an installed game cannot write. Not content; it belongs in the user folder (a fix of its own).
+- Settings, the log, `drive.phr`, captures and caches already go to the user folder.
+
+### What this adds to the plan
+
+- **Two more RBR archives** besides `physics.rbz`: `Maps/track-<n>_textures.rbz` (read whole by the legacy importer,
+  so it is simply a file of the RBR track) and `Textures/fence.dat`, `Textures/splash.dat` (shared, raw `rbr/`).
+  None needs opening by the VFS.
+- **WPhysicsRBR is the only module that opens an archive**; with §3 it reads loose files only and
+  `data::ReadZipMember` moves to the game's `RbrMap`.
+- **WAudio's base** is the one module path to change (`""` → `rbr/`); the renderer needs nothing.
+- **Saved setups** are user data: a setup the player saves goes to the user folder (`setups/<car-id>/`), not into
+  content; RBR's `SavedGames` stays readable raw.
+
+## 11. Decisions
 
 1. Downloads folder: chosen at install, `%LOCALAPPDATA%\W-Rally\Downloads` by default; each user may set their own.
 2. Patching per file where a file stands alone.
