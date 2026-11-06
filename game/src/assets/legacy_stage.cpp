@@ -15,6 +15,7 @@
 
 #include "assets/legacy_weather.h"
 #include "data/lsp.h"
+#include "formats/dds_image.h"
 #include "formats/lbs_geometry.h"
 #include "ngg_scene.h"
 
@@ -282,6 +283,56 @@ public:
         return id;
     }
 
+    // Whether `mesh` samples only opaque texels of texture `t`: a wall, a rock, a house of RBR's vegetation block,
+    // which holds them beside the trees under the same flags - only the texture tells them apart (RBR's
+    // ObjectTexturePlateOpaque, transparent only in its unused corners, against the cards' cut-out outlines). Each
+    // triangle's UV footprint at 15 points, each the least alpha of its 2x2 bilinear footprint times the vertex
+    // alpha, against RBR's AlphaRef (170). Unreadable: not solid (the alpha test kept, the safe side).
+    bool Solid(const LbsMesh& mesh, int t)
+    {
+        if (mesh.uv0.empty()) return false;
+        auto it = m_images.find(t);
+        if (it == m_images.end()) {
+            formats::Image im;
+            const std::string* dds = t >= 0 && t < int(m_g.textureNames.size()) ? m_textures.Find(m_g.textureNames[t]) : nullptr;
+            if (!dds || !formats::DecodeDds(std::vector<uint8_t>(dds->begin(), dds->end()), im).empty()) im = {};
+            it = m_images.emplace(t, std::move(im)).first;
+        }
+        const formats::Image& im = it->second;
+        if (im.width <= 0 || im.height <= 0) return false;
+        auto alpha = [&](int x, int y) {
+            x %= im.width, y %= im.height;
+            if (x < 0) x += im.width;
+            if (y < 0) y += im.height;
+            return im.rgba[(size_t(y) * im.width + x) * 4 + 3];
+        };
+        for (size_t k = 0; k + 2 < mesh.indices.size(); k += 3) {
+            const uint16_t v[3] = {mesh.indices[k], mesh.indices[k + 1], mesh.indices[k + 2]};
+            // The grid as fine as the triangle is large on the texture: a point every 16 texels along its longest
+            // edge, 4 to 32 steps (a big card's small gaps between leaves not stepped over).
+            float edge = 0.0f;
+            for (int e = 0; e < 3; ++e)
+                edge = std::max(edge, std::hypot((mesh.uv0[v[(e + 1) % 3] * 2] - mesh.uv0[v[e] * 2]) * im.width,
+                                                 (mesh.uv0[v[(e + 1) % 3] * 2 + 1] - mesh.uv0[v[e] * 2 + 1]) * im.height));
+            const int steps = std::isfinite(edge) ? std::clamp(static_cast<int>(std::ceil(edge / 16.0f)), 4, 32) : 4;
+            for (int a = 0; a <= steps; ++a)
+                for (int b = 0; a + b <= steps; ++b) {
+                    const float w[3] = {1.0f - float(a + b) / steps, float(a) / steps, float(b) / steps};
+                    float u = 0, vv = 0, va = 0;
+                    for (int i = 0; i < 3; ++i) {
+                        u += w[i] * mesh.uv0[v[i] * 2];
+                        vv += w[i] * mesh.uv0[v[i] * 2 + 1];
+                        va += w[i] * (mesh.colours.empty() ? 255.0f : float(mesh.colours[v[i]] >> 24));
+                    }
+                    if (!std::isfinite(u) || !std::isfinite(vv) || std::fabs(u) > 1e4f || std::fabs(vv) > 1e4f) return false;
+                    const int x0 = static_cast<int>(std::floor(u * im.width - 0.5f)), y0 = static_cast<int>(std::floor(vv * im.height - 0.5f));
+                    const int lo = std::min(std::min(alpha(x0, y0), alpha(x0 + 1, y0)), std::min(alpha(x0, y0 + 1), alpha(x0 + 1, y0 + 1)));
+                    if (lo * va < 170.0f * 255.0f) return false;
+                }
+        }
+        return true;
+    }
+
     // Whether texture `t`'s artwork has alpha to test (no texture: keep the test).
     bool HasAlpha(int t)
     {
@@ -335,6 +386,7 @@ private:
     std::map<std::tuple<int, int, uint32_t>, uint32_t> m_materials;
     std::map<int, uint32_t> m_slots;
     std::map<int, bool> m_alpha;
+    std::map<int, formats::Image> m_images;   // (Solid's: the decoded textures)
     std::vector<int32_t> m_keys;
     uint64_t m_brightest[256] = {};
     std::vector<ngg::PlantRecord> m_plants;
@@ -390,9 +442,16 @@ std::string ImportLegacyStage(const std::string& lbsPath, int surface, LegacyImp
         }
     }
     // Vegetation: alpha-tested, two-sided, one texture (both slots the same: the blend a no-op).
-    // Each object's connected pieces its plants (Builder::Plants).
+    // Each object's connected pieces its plants (Builder::Plants). The block's solids - walls, rocks, houses, which
+    // sample only opaque texels (Builder::Solid) - are scenery: not alpha-tested, not plants, not lit as foliage.
+    size_t solids = 0;
     for (const LbsPlaced& p : g.vegetation) {
         const uint32_t first = b.Mesh(p.mesh, nullptr), count = static_cast<uint32_t>(p.mesh.indices.size());
+        if (b.Solid(p.mesh, p.texture)) {
+            b.Object(kScenery, b.Material(p.texture, -1, ngg::kMaterialTwoSided), first, count, -1);   // (one layer: uv1 is not theirs)
+            ++solids;
+            continue;
+        }
         b.Object(kVegetation, b.Material(p.texture, p.texture, ngg::kMaterialAlphaTest | ngg::kMaterialTwoSided), first, count, -1);
         b.Plants(static_cast<uint32_t>(b.scene.objects.size() - 1));
     }
@@ -412,11 +471,11 @@ std::string ImportLegacyStage(const std::string& lbsPath, int surface, LegacyImp
 
     if (const std::string e = ngg::Write(b.scene, out.ngg); !e.empty()) return lbsPath + ": the .ngg: " + e;
     const ngg::SceneData& s = b.scene;
-    char line[256];
+    char line[320];
     std::snprintf(line, sizeof line,
-                  "imported %s: %zu ground regions, %zu vegetation, %zu scenery, %zu movable meshes -> %zu objects, %zu "
+                  "imported %s: %zu ground regions, %zu vegetation (%zu solid), %zu scenery, %zu movable meshes -> %zu objects, %zu "
                   "triangles, %zu materials, %zu textures (%zu missing), %zu hidden ground chunks left out, baked scale %.2f\n",
-                  lbs.filename().string().c_str(), g.ground.size(), g.vegetation.size(), g.scenery.size(), g.movable.size(),
+                  lbs.filename().string().c_str(), g.ground.size(), g.vegetation.size(), solids, g.scenery.size(), g.movable.size(),
                   s.objects.size(), s.indices.size() / 3, s.materials.size(), s.textures.size(), b.missing, hidden, s.bakedScale);
     out.log += line;
     for (const std::string& n : g.notes) out.log += n + "\n";

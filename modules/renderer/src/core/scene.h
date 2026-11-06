@@ -678,6 +678,9 @@ private:
     // Load-time fallback for kMaterialSingleStage, in the same shape as
     // WeldNormals: measure first, act only where the data is unambiguous, say
     // what it did, and stand down by itself once the converter sets the flag.
+    void MeasureSolidCards(const ::ngg::Vertex* verts, uint32_t vertexCount,
+                           const uint8_t* indexData, uint32_t indexCount,
+                           const uint8_t* texData, size_t texBytes);
     void MeasureSingleStage(const ::ngg::Vertex* verts, uint32_t vertexCount,
                             const uint8_t* indexData, uint32_t indexCount);
     void SphericalFoliageNormals(std::vector<::ngg::Vertex>& verts,
@@ -711,6 +714,12 @@ private:
         // the material: an unrelated material edit recomposes matFlags, and
         // this is what survives it. See Scene::SetMaterial.
         bool     measuredSingleStage = false;
+        // Alpha-tested by its material, but every texel it samples is opaque
+        // (MeasureSolidCards): a wall, a rock, a house of RBR's vegetation
+        // block. Drawn as a solid - no alpha test, no foliage lighting, never
+        // a plant. From the geometry and the texture, so it survives a
+        // material edit as measuredSingleStage does.
+        bool     measuredSolid = false;
         // Culling bounds, in world space AFTER the transform. The untransformed
         // pair is kept alongside because moving an object has to recompute these
         // from the original, not from the last result -- accumulating would drift

@@ -2520,7 +2520,8 @@ bool Scene::SetMaterial(ID3D12Device* dev, uint32_t index, const MaterialSlot& i
     for (DrawItem& o : m_objects)
     {
         if (o.materialId != index) continue;
-        o.matFlags = m.flags | (o.measuredSingleStage ? (uint32_t)kDrawSingleStage : 0u);
+        o.matFlags = (m.flags | (o.measuredSingleStage ? (uint32_t)kDrawSingleStage : 0u)) &
+                     (o.measuredSolid ? ~kMaterialAlphaTest : ~0u);
     }
 
     if (texturesChanged && m_materialBatch)
@@ -2595,6 +2596,130 @@ void Scene::MeasureSingleStage(const Vertex* verts, uint32_t vertexCount,
             alreadyFlagged, alphaTested, flagged, partial);
 }
 
+// SOLIDS among the alpha-tested objects. RBR's vegetation block (.lbs (1,1)) is
+// not only foliage: the walls along a road, rocks and houses sit in it beside
+// the trees, all with the same attribute flags, and both converters mark the
+// whole block alpha-tested - which here means LIT AS FOLIAGE (the ALPHA_TEST
+// pixel path: wrapped and transmitted sun, no specular, a foliage card in the
+// G-buffer) and made a PLANT (volume normals, as a tree crown). On Joux Verte
+// that smeared the hairpin's walls into a mossy blur. Only the texture tells
+// them apart: a wall samples nothing but opaque texels (RBR's
+// ObjectTexturePlateOpaque - its alpha is only in the unused corners), a
+// card's outline is cut out of its texture.
+//
+// So, per object: its triangles' UV footprints sampled - a barycentric grid of
+// 15 points each, each point the smallest alpha of its 2x2 bilinear footprint,
+// times the vertex alpha and the factor, as the shader's clip() forms it. Not
+// one sample cut: the object is a solid and drawn as one. One cut: left
+// alpha-tested, exactly as before - the safe side. A texture this cannot read
+// leaves its objects alone.
+void Scene::MeasureSolidCards(const Vertex* verts, uint32_t vertexCount,
+                              const uint8_t* indexData, uint32_t indexCount,
+                              const uint8_t* texData, size_t texBytes)
+{
+    if (!verts || !indexData || !texData || texBytes < 4) return;
+    // NGG_NO_SOLIDS: not measured - every alpha-tested object foliage, as before (the A/B).
+    if (std::getenv("NGG_NO_SOLIDS")) { Log("scene: solids not measured (NGG_NO_SOLIDS)"); return; }
+    const uint32_t* index = reinterpret_cast<const uint32_t*>(indexData);
+
+    // The embedded textures (NGGT): where each one's DDS is.
+    std::vector<std::pair<const uint8_t*, size_t>> dds;
+    {
+        uint32_t count = 0;
+        memcpy(&count, texData, 4);
+        size_t at = 4;
+        for (uint32_t k = 0; k < count; ++k)
+        {
+            uint32_t len = 0, size = 0;
+            if (at + 4 > texBytes) break;
+            memcpy(&len, texData + at, 4);
+            at += 4;
+            if (len > texBytes - at) break;
+            at += len;
+            if (at + 4 > texBytes) break;
+            memcpy(&size, texData + at, 4);
+            at += 4;
+            if (size > texBytes - at) break;
+            dds.emplace_back(texData + at, (size_t)size);
+            at += size + (4 - size % 4) % 4;
+        }
+    }
+
+    struct Alpha { bool tried = false, ok = false; uint32_t w = 0, h = 0; std::vector<uint8_t> a; };
+    std::vector<Alpha> alphas(dds.size());
+    LARGE_INTEGER t0, t1, hz;
+    QueryPerformanceCounter(&t0);
+    QueryPerformanceFrequency(&hz);
+    size_t solids = 0, solidTris = 0, cards = 0, unread = 0;
+    for (DrawItem& o : m_objects)
+    {
+        if (o.meshId != 0 || !o.indexCount || o.materialId >= m_materials.size()) continue;
+        const MaterialSlot& m = m_materials[o.materialId];
+        if (!(m.flags & kMaterialAlphaTest)) continue;
+        const uint32_t t = m.tex[0];
+        if (t >= alphas.size()) { ++unread; continue; }
+        Alpha& A = alphas[t];
+        if (!A.tried)
+        {
+            A.tried = true;
+            A.ok = DecodeDdsAlpha(dds[t].first, dds[t].second, A.w, A.h, A.a);
+        }
+        if (!A.ok) { ++unread; continue; }
+
+        const float cutoff = m.alphaCutoff;
+        const float factor = m.baseColourFactor[3];
+        auto texel = [&](int x, int y) {
+            x %= (int)A.w; if (x < 0) x += (int)A.w;   // the sampler wraps
+            y %= (int)A.h; if (y < 0) y += (int)A.h;
+            return A.a[(size_t)y * A.w + x];
+        };
+        bool solid = true;
+        const uint32_t end = (std::min)(o.firstIndex + o.indexCount, indexCount);
+        for (uint32_t k = o.firstIndex; solid && k + 2 < end; k += 3)
+        {
+            const uint32_t i0 = index[k], i1 = index[k + 1], i2 = index[k + 2];
+            if (i0 >= vertexCount || i1 >= vertexCount || i2 >= vertexCount) continue;
+            const Vertex* v[3] = { &verts[i0], &verts[i1], &verts[i2] };
+            // The grid as fine as the triangle is large on the texture: a point every 16 texels along its
+            // longest edge (4 to 32 steps), so a big card's small gaps between leaves are not stepped over.
+            float edge = 0.0f;
+            for (int e = 0; e < 3; ++e)
+            {
+                const float du = (v[(e + 1) % 3]->uv0[0] - v[e]->uv0[0]) * A.w;
+                const float dv = (v[(e + 1) % 3]->uv0[1] - v[e]->uv0[1]) * A.h;
+                edge = (std::max)(edge, sqrtf(du * du + dv * dv));
+            }
+            const int kSteps = std::isfinite(edge) ? (std::min)(32, (std::max)(4, (int)ceilf(edge / 16.0f))) : 4;
+            for (int a = 0; solid && a <= kSteps; ++a)
+                for (int b = 0; solid && a + b <= kSteps; ++b)
+                {
+                    const float w1 = (float)a / kSteps, w2 = (float)b / kSteps, w0 = 1.0f - w1 - w2;
+                    const float u = w0 * v[0]->uv0[0] + w1 * v[1]->uv0[0] + w2 * v[2]->uv0[0];
+                    const float vv = w0 * v[0]->uv0[1] + w1 * v[1]->uv0[1] + w2 * v[2]->uv0[1];
+                    if (!std::isfinite(u) || !std::isfinite(vv) || fabsf(u) > 1e4f || fabsf(vv) > 1e4f) { solid = false; break; }
+                    // The vertex alpha (D3DCOLOR's, 0xAABBGGRR here): coverage on alpha-tested geometry.
+                    const float va = w0 * (v[0]->colour >> 24) + w1 * (v[1]->colour >> 24) + w2 * (v[2]->colour >> 24);
+                    const float x = u * A.w - 0.5f, y = vv * A.h - 0.5f;
+                    const int x0 = (int)floorf(x), y0 = (int)floorf(y);
+                    const uint8_t lo = (std::min)((std::min)(texel(x0, y0), texel(x0 + 1, y0)),
+                                                  (std::min)(texel(x0, y0 + 1), texel(x0 + 1, y0 + 1)));
+                    if (lo / 255.0f * (va / 255.0f) * factor < cutoff) solid = false;
+                }
+        }
+        if (!solid) { ++cards; continue; }
+        o.measuredSolid = true;
+        o.matFlags &= ~kMaterialAlphaTest;
+        ++solids;
+        solidTris += o.indexCount / 3;
+    }
+    QueryPerformanceCounter(&t1);
+    if (solids || cards || unread)
+        Log("scene: solids - %zu of the alpha-tested objects sample only opaque texels (%zu triangles): drawn as "
+            "solids, not foliage; %zu cut out, %zu with a texture not measured (%.0f ms). The converter should not "
+            "mark them alpha-tested; this is the fallback.", solids, solidTris, cards, unread,
+            1000.0 * (double)(t1.QuadPart - t0.QuadPart) / (double)hz.QuadPart);
+}
+
 void Scene::SphericalFoliageNormals(std::vector<Vertex>& verts,
                                     const uint8_t* indexData, uint32_t indexCount)
 {
@@ -2617,7 +2742,7 @@ void Scene::SphericalFoliageNormals(std::vector<Vertex>& verts,
         for (const DrawItem& o : m_objects)
         {
             if (o.materialId >= m_materials.size()) continue;
-            if (!(m_materials[o.materialId].flags & kMaterialAlphaTest)) continue;
+            if (!(m_materials[o.materialId].flags & kMaterialAlphaTest) || o.measuredSolid) continue;
             if (o.firstIndex + o.indexCount > indexCount) continue;
 
             double cx = 0.0, cy = 0.0, cz = 0.0;
@@ -2854,7 +2979,7 @@ void Scene::FindPlants(const Vertex* verts, uint32_t vertexCount,
     for (const DrawItem& o : m_objects)
     {
         if (o.meshId != 0 || o.materialId >= m_materials.size()) continue;
-        if (!(m_materials[o.materialId].flags & kMaterialAlphaTest)) continue;
+        if (!(m_materials[o.materialId].flags & kMaterialAlphaTest) || o.measuredSolid) continue;
         if (o.firstIndex + o.indexCount > indexCount || o.indexCount < 3) continue;
         const uint32_t tris = o.indexCount / 3;
         const uint32_t t0 = o.firstIndex / 3;
@@ -3239,7 +3364,7 @@ void Scene::RenderShadows(ID3D12GraphicsCommandList* list,
             // is where most of the shadow cost disappears.
             if (m_cull && AabbOutside(cplanes, o.bmin, o.bmax)) continue;
             if (m_materials[o.materialId].flags & kMaterialBlend) continue;   // glass casts no shadow
-            const bool wantAlpha = (m_materials[o.materialId].flags & kMaterialAlphaTest) != 0;
+            const bool wantAlpha = (m_materials[o.materialId].flags & kMaterialAlphaTest) != 0 && !o.measuredSolid;
             if (wantAlpha && !m_psoShadowAlpha) continue;
             if (wantAlpha != alphaBound)
             {
@@ -3410,7 +3535,7 @@ void Scene::RenderLocalShadows(ID3D12GraphicsCommandList* list, float aoShare)
             if (o.layerId == kLayerFarScenery) continue;
             if (m_cull && AabbOutside(cplanes, o.bmin, o.bmax)) continue;
             if (m_materials[o.materialId].flags & kMaterialBlend) continue;   // glass casts no shadow (as RT's)
-            const bool wantAlpha = (m_materials[o.materialId].flags & kMaterialAlphaTest) != 0;
+            const bool wantAlpha = (m_materials[o.materialId].flags & kMaterialAlphaTest) != 0 && !o.measuredSolid;
             if (wantAlpha && !m_psoLocalShadowAlpha) continue;
             if (wantAlpha != alphaBound)
             {
@@ -3980,6 +4105,11 @@ bool Scene::LoadFromMemory(ID3D12Device* dev, ID3D12CommandQueue* queue,
     if (idx && sh->indexCount && sh->vertexCount)
         MeasureSingleStage(reinterpret_cast<const Vertex*>(verts), sh->vertexCount,
                            idx, sh->indexCount);
+    // After the single-stage measure (an alpha-tested object stays single-stage: its uv1 is not to be trusted) and
+    // before the plants, which skip what it finds.
+    if (idx && sh->indexCount && sh->vertexCount)
+        MeasureSolidCards(reinterpret_cast<const Vertex*>(verts), sh->vertexCount,
+                          idx, sh->indexCount, texs, texBytes);
 
     // Normal repair happens BEFORE the upload, which is why the material and
     // object tables are read first: foliage is identified by its material's
@@ -3993,6 +4123,11 @@ bool Scene::LoadFromMemory(ID3D12Device* dev, ID3D12CommandQueue* queue,
         !ReadPlants(tagNames, tagNameBytes, plants, plantBytes, sh->indexCount, (sh->flags & kSceneFlagLegacyImport) != 0) &&
         !(sh->flags & kSceneFlagLegacyImport))
         FindPlants(reinterpret_cast<const Vertex*>(verts), sh->vertexCount, idx, sh->indexCount);
+    // A solid is never a plant, whatever a plant table says (an older import's put RBR's walls in its plants).
+    for (const DrawItem& o : m_objects)
+        if (o.measuredSolid)
+            for (uint32_t t = o.firstIndex / 3; t < (o.firstIndex + o.indexCount) / 3 && t < m_triPlant.size(); ++t)
+                m_triPlant[t] = 0xFFFFFFFFu;
 
     std::vector<Vertex> fixed;
     const uint8_t* vertexSource = verts;
@@ -7102,7 +7237,7 @@ void Scene::RecordPass(ID3D12GraphicsCommandList* list, D3D12_CPU_DESCRIPTOR_HAN
             for (const DrawItem& o : m_objects)
             {
                 if (!o.visible || o.probeFocus || o.materialId >= m_materials.size()) continue;
-                const uint32_t matFlags = m_materials[o.materialId].flags;
+                const uint32_t matFlags = m_materials[o.materialId].flags & (o.measuredSolid ? ~kMaterialAlphaTest : ~0u);
                 if (matFlags & kMaterialBlend) continue;
                 if (o.meshId != 0)
                 {
@@ -7141,7 +7276,7 @@ void Scene::RecordPass(ID3D12GraphicsCommandList* list, D3D12_CPU_DESCRIPTOR_HAN
         if (m_cull && AabbOutside(planes, o.bmin, o.bmax)) { ++culled; continue; }
         ++drawn;
 
-        const uint32_t matFlags = m_materials[o.materialId].flags;
+        const uint32_t matFlags = m_materials[o.materialId].flags & (o.measuredSolid ? ~kMaterialAlphaTest : ~0u);
         if (matFlags & kMaterialBlend)
         {
             if (prepass ? m_psoPrepassGlass[0] && movedOf(o) : m_psoBlend[0] != nullptr)

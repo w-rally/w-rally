@@ -9,8 +9,9 @@
 // tape stretched by the car pulls its posts in, and stretched past half its length again it snaps, its ends hanging
 // from the posts.
 //
-// The sizes are not RBR's (its fence renderer, 0x6058c0, is not reverse engineered): a 1.1 m post 6 cm thick, a 10 cm
-// band of tape near its top, the tile texture repeated every 0.5 m.
+// The tapes, nets and wires are RBR's own: its fence STYLES (the exe's table, fences.cpp kStyles; the .fnc group's first
+// word picks one) - the band's height under a top edge 1 m up the post, the tile repeated so many times along a segment
+// and down the band, one strand or two. The posts are not: a 1.1 m post (RBR's height) 6 cm thick (RBR's: 3 cm).
 //
 // A model per group: a node per post, two per tape (its halves, the car's push between them), a mesh on each. The
 // posts' nodes carry a post's lean (rows: its sides, its axis foot to top, its foot); a half's node carries a unit
@@ -56,13 +57,13 @@ private:
     struct Tape {
         uint32_t a, b;                 // its posts
         float rest;                    // its length between them
-        float u0;                      // the texture's u at its start
         math::V3 bulge{}, velocity{};  // its middle's offset from the straight line, and how it moves
         bool broken = false;
     };
     struct Group {
         uint32_t posts, postCount, tapes, tapeCount;
         math::V3 lo, hi;               // the posts' box
+        float band = 0.074f;           // its tapes' height (its style's: a tape's band, a net's whole panel)
         iface::InstanceHandle instance = 0;
         bool moving = true;            // (true: placed on the first frame)
     };
