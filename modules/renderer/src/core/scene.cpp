@@ -2618,6 +2618,8 @@ void Scene::MeasureSolidCards(const Vertex* verts, uint32_t vertexCount,
                               const uint8_t* texData, size_t texBytes)
 {
     if (!verts || !indexData || !texData || texBytes < 4) return;
+    // NGG_NO_SOLIDS: not measured - every alpha-tested object foliage, as before (the A/B).
+    if (std::getenv("NGG_NO_SOLIDS")) { Log("scene: solids not measured (NGG_NO_SOLIDS)"); return; }
     const uint32_t* index = reinterpret_cast<const uint32_t*>(indexData);
 
     // The embedded textures (NGGT): where each one's DDS is.
