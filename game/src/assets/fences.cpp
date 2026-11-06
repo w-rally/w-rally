@@ -7,7 +7,6 @@
 #include <map>
 #include <utility>
 
-#include "formats/dds_image.h"
 #include "formats/fnc.h"
 #include "render/renderer.h"
 
@@ -18,12 +17,29 @@ using math::V3;
 namespace {
 
 constexpr float kPostHeight = 1.1f, kPostBelow = 0.15f, kPostHalfWidth = 0.03f;
-constexpr float kAttach = 0.9f;          // the tape's top edge, up the post
-constexpr float kBand = 0.1f;            // the tape's height
-constexpr float kRepeat = 0.5f;          // metres a tile texture's width covers
-// A NET's tile (IsNet): one cell, tiled over the net's whole height - from kNetBottom over the ground up to the tape's
-// top edge - kNetCell metres a cell's width, its height as the texture's aspect has it.
-constexpr float kNetBottom = 0.05f, kNetCell = 0.2f;
+constexpr float kAttach = 1.0f / kPostHeight;   // the tape's top edge, up the post: 1 m over its foot (RBR's)
+// RBR's fence STYLES (the exe's table at 0x7d81b0, 0x2c bytes a style; its strip builder 0x604610), a group's by its
+// .fnc header's first word: the band's height, the texture's u across a whole segment post to post (u0 .. u1: the
+// tile repeated so many times between two posts, however far apart they are) and its v down the band, and how many
+// strands one under another, `step` apart. 0 and 1: a tape (14 or 28 tiles a segment); 2 and 3: a net, 0.9 m of it,
+// 32 or 64 cells along and 27 rows down (track-42_M's orange net, style 3 over 6 m segments: cells 9 x 3.3 cm);
+// 12 and 13: two strands of barbed wire. Styles 4 to 11 are the posts' (a sub-rectangle of the post's texture).
+struct Style {
+    float height, u0, v0, u1, v1;
+    int strands;
+    float step;
+};
+constexpr Style kStyles[] = {
+    {0.074f, 0, 0, 14, 1, 1, 0},     {0.074f, 0, 0, 28, 1, 1, 0},      // 0, 1: tape
+    {0.9f, 0, 0, 32, 27.12f, 1, 0},  {0.9f, 0, 0, 64, 27.12f, 1, 0},   // 2, 3: net
+};
+constexpr Style kWire[] = {{0.074f, 0, 0, 14, 1, 2, 0.4f}, {0.074f, 0, 0, 28, 1, 2, 0.4f}};   // 12, 13
+const Style& StyleOf(int32_t style)
+{
+    if (style >= 0 && style < 4) return kStyles[style];
+    if (style == 12 || style == 13) return kWire[style - 12];
+    return kStyles[0];   // (another: a tape)
+}
 constexpr float kStep = 1.0f / 240.0f;   // the fences' own step
 constexpr float kMargin = 0.03f;         // the car's box grown by this
 // A post: a spring back to upright (per second squared a metre of lean, and its damping), falling past half its height.
@@ -81,17 +97,21 @@ void PostMesh(std::vector<iface::Vertex>& v, std::vector<uint32_t>& idx)
 }
 
 // Half a tape in its node's frame: x along it (0 .. 1), y across the band (0 its top edge, -1 its bottom), facing z;
-// the texture `v1` times across it (a tape once, a net a cell a row).
-void TapeMesh(float u0, float u1, float v1, std::vector<iface::Vertex>& v, std::vector<uint32_t>& idx)
+// u from `u0` to `u1`, v as the style has it; a strand under another its `step` down (in bands).
+void TapeMesh(float u0, float u1, const Style& st, std::vector<iface::Vertex>& v, std::vector<uint32_t>& idx)
 {
-    v.push_back(Vert({0, 0, 0}, {0, 0, 1}, u0, 0));
-    v.push_back(Vert({1, 0, 0}, {0, 0, 1}, u1, 0));
-    v.push_back(Vert({1, -1, 0}, {0, 0, 1}, u1, v1));
-    v.push_back(Vert({0, -1, 0}, {0, 0, 1}, u0, v1));
-    // Wound as the posts are, to the side its normal faces: the renderer's two-sided materials turn a back face's
-    // normal round, and wound the other way the tape's turned into the wall behind it - every AO ray blocked, the
-    // tape black in the shade.
-    for (uint32_t k : {0u, 2u, 1u, 0u, 3u, 2u}) idx.push_back(k);
+    for (int k = 0; k < st.strands; ++k) {
+        const float y = -float(k) * st.step / st.height;
+        const uint32_t base = static_cast<uint32_t>(v.size());
+        v.push_back(Vert({0, y, 0}, {0, 0, 1}, u0, st.v0));
+        v.push_back(Vert({1, y, 0}, {0, 0, 1}, u1, st.v0));
+        v.push_back(Vert({1, y - 1, 0}, {0, 0, 1}, u1, st.v1));
+        v.push_back(Vert({0, y - 1, 0}, {0, 0, 1}, u0, st.v1));
+        // Wound as the posts are, to the side its normal faces: the renderer's two-sided materials turn a back face's
+        // normal round, and wound the other way the tape's turned into the wall behind it - every AO ray blocked, the
+        // tape black in the shade.
+        for (uint32_t i : {0u, 2u, 1u, 0u, 3u, 2u}) idx.push_back(base + i);
+    }
 }
 
 // A post's node: its sides across, its axis foot to top (the mesh's y 0 .. 1), at its foot.
@@ -126,28 +146,58 @@ V3 Hanging(V3 from, V3 towards, float length, float ground)
     return from + dir * out - V3{0, drop, 0};
 }
 
-// Whether a tile texture is one cell of a NET (RBR's orange plastic net fence_tile01, the blue fence_tile05): its four
-// edges opaque - the cell's frame, which tiles into the mesh - round a cut-out middle. A tape is opaque through (or cut
-// only along its top and bottom rows), a barbed wire's strand runs across a transparent tile: both stay a band.
-// `aspect`: a cell's height over its width.
-bool IsNet(const std::vector<uint8_t>& dds, float& aspect)
+// A tile's mips keep its COVERAGE: each level's alpha scaled so the share of texels passing the alpha test (170, RBR's
+// AlphaRef and the material's cutoff) is at least mip 0's (after Castano 2010). The shipped mips average a net's thin frame - 31 %
+// of fence_tile01's texels pass at mip 0 and none from mip 3 - so the net was cut away wherever a cell is a few pixels
+// on screen. DXT3 only (every fence.dat texture): its alpha is 4 bits a texel, rewritten in place, the colour kept.
+void KeepCoverage(std::vector<uint8_t>& dds)
 {
-    formats::Image im;
-    if (!formats::DecodeDds(dds, im).empty() || im.width < 4 || im.height < 4) return false;
-    auto opaque = [&](int x, int y) { return im.rgba[(size_t(y) * im.width + x) * 4 + 3] >= 170; };
-    size_t edge = 0, edgeOpaque = 0, inner = 0, innerCut = 0;
-    for (int y = 0; y < im.height; ++y)
-        for (int x = 0; x < im.width; ++x) {
-            if (x == 0 || y == 0 || x == im.width - 1 || y == im.height - 1) {
-                ++edge;
-                edgeOpaque += opaque(x, y);
-            } else {
-                ++inner;
-                innerCut += !opaque(x, y);
+    if (dds.size() < 128 || std::memcmp(dds.data(), "DDS ", 4) || std::memcmp(dds.data() + 84, "DXT3", 4)) return;
+    uint32_t h = 0, w = 0, mips = 0;
+    std::memcpy(&h, dds.data() + 12, 4);
+    std::memcpy(&w, dds.data() + 16, 4);
+    std::memcpy(&mips, dds.data() + 28, 4);
+    constexpr int kCut = 10;   // 170 / 17: the 4-bit alpha passing the test
+    float cover0 = -1.0f;
+    size_t at = 128;
+    for (uint32_t m = 0; m < std::max(mips, 1u); ++m, w = std::max(1u, w / 2), h = std::max(1u, h / 2)) {
+        const size_t blocks = size_t((w + 3) / 4) * ((h + 3) / 4);
+        if (at + blocks * 16 > dds.size()) return;
+        // This level's alphas (its texels only: a block's padding past a 1- or 2-texel level left out).
+        int count[16] = {};
+        size_t texels = 0;
+        for (size_t b = 0; b < blocks; ++b)
+            for (int i = 0; i < 16; ++i) {
+                const uint32_t x = uint32_t(b % ((w + 3) / 4)) * 4 + (i & 3), y = uint32_t(b / ((w + 3) / 4)) * 4 + (i >> 2);
+                if (x >= w || y >= h) continue;
+                ++count[(dds[at + b * 16 + i / 2] >> ((i & 1) * 4)) & 15];
+                ++texels;
             }
+        auto passing = [&](int cut) {
+            size_t n = 0;
+            for (int a = cut; a < 16; ++a) n += count[a];
+            return float(n) / float(texels);
+        };
+        if (m == 0) {
+            cover0 = passing(kCut);
+        } else if (cover0 > 0.0f) {
+            // The highest alpha whose passing share is at least mip 0's, scaled up (or down) to the cut: never less
+            // coverage than mip 0 - a level of a texel or two (a uniform alpha) passes whole, and the net far off is
+            // an orange band rather than nothing.
+            int best = 1;
+            for (int a = 15; a >= 1; --a)
+                if (passing(a) >= cover0) { best = a; break; }
+            if (best != kCut)
+                for (size_t b = 0; b < blocks; ++b)
+                    for (int i = 0; i < 16; ++i) {
+                        uint8_t& byte = dds[at + b * 16 + i / 2];
+                        const int shift = (i & 1) * 4, a = (byte >> shift) & 15;
+                        const int scaled = std::clamp(a * kCut / best + (a >= best && a * kCut / best < kCut), 0, 15);
+                        byte = uint8_t((byte & ~(15 << shift)) | (scaled << shift));
+                    }
         }
-    aspect = float(im.height) / float(im.width);
-    return edgeOpaque * 10 >= edge * 9 && innerCut * 10 >= inner * 3;
+        at += blocks * 16;
+    }
 }
 
 } // namespace
@@ -163,7 +213,6 @@ std::string Fences::Create(render::Renderer& renderer, const std::string& fncPat
     const std::string dat = formats::ReadFenceTextures(ReadBytes(game + "/Textures/fence.dat"), textures);
     if (!dat.empty()) std::printf("fences: %s - drawn untextured\n", dat.c_str());
     std::map<std::string, iface::TextureHandle> made;   // by type
-    std::map<std::string, float> nets;                   // the nets' types: a cell's height over its width
     auto texture = [&](int32_t type) -> iface::TextureHandle {
         if (type < 0 || static_cast<size_t>(type) >= fnc.types.size()) return 0;
         const std::string& name = fnc.types[static_cast<size_t>(type)];
@@ -171,14 +220,15 @@ std::string Fences::Create(render::Renderer& renderer, const std::string& fncPat
         iface::TextureHandle t = 0;
         for (const auto& [file, dds] : textures)
             if (!_stricmp(file.c_str(), (name + ".dds").c_str())) {
-                t = renderer.CreateTexture(dds.data(), dds.size());
-                if (float aspect = 0; IsNet(dds, aspect)) nets[name] = aspect;
+                std::vector<uint8_t> kept = dds;   // (alpha-tested: its mips keep its coverage)
+                KeepCoverage(kept);
+                t = renderer.CreateTexture(kept.data(), kept.size());
             }
         if (!t) std::printf("fences: no texture %s\n", name.c_str());
         return made[name] = t;
     };
 
-    size_t netGroups = 0;
+    size_t nets = 0;
     std::vector<iface::Vertex> postV;
     std::vector<uint32_t> postI;
     PostMesh(postV, postI);
@@ -188,7 +238,6 @@ std::string Fences::Create(render::Renderer& renderer, const std::string& fncPat
         g.posts = static_cast<uint32_t>(m_posts.size());
         g.tapes = static_cast<uint32_t>(m_tapes.size());
         g.lo = g.hi = V3{fg.items[0].point[0], fg.items[0].point[1], fg.items[0].point[2]};
-        float u = 0.0f;
         for (size_t i = 0; i < fg.items.size(); ++i) {
             Post p;
             p.foot = {fg.items[i].point[0], fg.items[i].point[1], fg.items[i].point[2]};
@@ -200,8 +249,7 @@ std::string Fences::Create(render::Renderer& renderer, const std::string& fncPat
                 const float* q = fg.items[i + 1].point;
                 const float d = Length(V3{q[0], q[1], q[2]} - p.foot);
                 if (d > 0.2f && d < 15.0f) {
-                    m_tapes.push_back({g.posts + static_cast<uint32_t>(i), g.posts + static_cast<uint32_t>(i + 1), d, u});
-                    u += d;   // (metres: over the group's repeat below)
+                    m_tapes.push_back({g.posts + static_cast<uint32_t>(i), g.posts + static_cast<uint32_t>(i + 1), d});
                 }
             }
         }
@@ -211,15 +259,10 @@ std::string Fences::Create(render::Renderer& renderer, const std::string& fncPat
         // Its model: the tape's material (0), the post's (1); the posts' nodes, then the tapes' halves.
         iface::MaterialDesc tape = iface::DefaultMaterialDesc(), post = iface::DefaultMaterialDesc();
         tape.baseColour = texture(fg.tile);
-        // A net: a panel over the fence's height, its cell tiled across it; a tape: a band near the top, the tile once.
-        float across = 1.0f;
-        if (fg.tile >= 0 && static_cast<size_t>(fg.tile) < fnc.types.size())
-            if (const auto it = nets.find(fnc.types[static_cast<size_t>(fg.tile)]); it != nets.end()) {
-                g.band = kAttach * kPostHeight - kNetBottom;
-                g.repeat = kNetCell;
-                across = std::max(1.0f, std::round(g.band / (kNetCell * it->second)));
-                ++netGroups;
-            }
+        // Its style (RBR's): a tape, a net or a wire - the band, and the tile's repeats along and down it.
+        const Style& style = StyleOf(fg.words[0]);
+        g.band = style.height;
+        nets += style.height > 0.5f;
         tape.flags = iface::kMaterialAlphaTest | iface::kMaterialTwoSided;
         tape.roughness = 0.55f;
         if (!tape.baseColour) tape.baseColourFactor[1] = tape.baseColourFactor[2] = 0.1f;   // (a red tape)
@@ -252,8 +295,8 @@ std::string Fences::Create(render::Renderer& renderer, const std::string& fncPat
                 if (h % 2 == 0) TapeNode(a, mid, g.band, node.local);
                 else TapeNode(mid, b, g.band, node.local);
                 std::snprintf(node.name, sizeof node.name, "tape %u %s", h / 2, h % 2 ? "b" : "a");
-                const float u0 = t.u0 / g.repeat, half = t.rest * 0.5f / g.repeat;
-                TapeMesh(u0 + half * float(h % 2), u0 + half * float(h % 2 + 1), across, tapeV[h], tapeI[h]);
+                const float uMid = 0.5f * (style.u0 + style.u1);   // (the tape's halves: a half of the segment's u each)
+                TapeMesh(h % 2 ? uMid : style.u0, h % 2 ? style.u1 : uMid, style, tapeV[h], tapeI[h]);
                 mesh.vertices = tapeV[h].data(), mesh.vertexCount = static_cast<uint32_t>(tapeV[h].size());
                 mesh.indices = tapeI[h].data(), mesh.indexCount = static_cast<uint32_t>(tapeI[h].size());
                 mesh.material = 0;
@@ -268,7 +311,7 @@ std::string Fences::Create(render::Renderer& renderer, const std::string& fncPat
         if (!g.instance) return "a fence's model: " + renderer.Error();
         m_groups.push_back(g);
     }
-    if (netGroups) std::printf("fences: %zu of %zu groups nets\n", netGroups, m_groups.size());
+    if (nets) std::printf("fences: %zu of %zu groups nets\n", nets, m_groups.size());
     m_nodes.resize(16 * (m_posts.size() + 2 * m_tapes.size()));
     return "";
 }
