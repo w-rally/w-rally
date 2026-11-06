@@ -83,7 +83,10 @@ void TapeMesh(float u0, float u1, std::vector<iface::Vertex>& v, std::vector<uin
     v.push_back(Vert({1, 0, 0}, {0, 0, 1}, u1, 0));
     v.push_back(Vert({1, -1, 0}, {0, 0, 1}, u1, 1));
     v.push_back(Vert({0, -1, 0}, {0, 0, 1}, u0, 1));
-    for (uint32_t k : {0u, 1u, 2u, 0u, 2u, 3u}) idx.push_back(k);
+    // Wound as the posts are, to the side its normal faces: the renderer's two-sided materials turn a back face's
+    // normal round, and wound the other way the tape's turned into the wall behind it - every AO ray blocked, the
+    // tape black in the shade.
+    for (uint32_t k : {0u, 2u, 1u, 0u, 3u, 2u}) idx.push_back(k);
 }
 
 // A post's node: its sides across, its axis foot to top (the mesh's y 0 .. 1), at its foot.
