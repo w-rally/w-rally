@@ -65,5 +65,12 @@ struct MipGenResult
 bool GenerateDdsMips(const uint8_t* dds, size_t bytes, const MipGenOptions& options,
                      std::vector<uint8_t>& out, MipGenResult* result = nullptr);
 
+// The top level's ALPHA, one byte a texel, rows top down - for measuring what an
+// alpha test would cut (Scene::MeasureSolidCards). DXT1 (its punch-through),
+// DXT3, DXT5 and uncompressed 32-bit with an alpha mask; 32-bit without one is
+// opaque (255). Returns false for anything else or a malformed file.
+bool DecodeDdsAlpha(const uint8_t* dds, size_t bytes, uint32_t& width, uint32_t& height,
+                    std::vector<uint8_t>& alpha);
+
 } // namespace core
 } // namespace ngg
