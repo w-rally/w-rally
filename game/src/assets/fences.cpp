@@ -146,56 +146,45 @@ V3 Hanging(V3 from, V3 towards, float length, float ground)
     return from + dir * out - V3{0, drop, 0};
 }
 
-// A tile's mips keep its COVERAGE: each level's alpha scaled so the share of texels passing the alpha test (170, RBR's
-// AlphaRef and the material's cutoff) is at least mip 0's (after Castano 2010). The shipped mips average a net's thin frame - 31 %
-// of fence_tile01's texels pass at mip 0 and none from mip 3 - so the net was cut away wherever a cell is a few pixels
-// on screen. DXT3 only (every fence.dat texture): its alpha is 4 bits a texel, rewritten in place, the colour kept.
-void KeepCoverage(std::vector<uint8_t>& dds)
+// A tile's mips keep its LINES: each level's alpha the MOST of the 2 x 2 texels it stands for, a level up - not their
+// mean. A net's frame is a line a texel or two wide (fence_tile01: 31 % of its texels pass the alpha test, 170, RBR's
+// AlphaRef); the shipped mips average it, from mip 2 its sides fall under the cut while its top stays, and from mip 3
+// nothing passes - the net a few metres off broke into dots, then went. Taken the most of, a line stays a line at every
+// level and the net far off is a whole orange band (as a fine mesh reads there). The colour mips are the shipped ones:
+// the cell's inside is orange too, so the band has no dark fringe. DXT3 only (every fence.dat texture): its alpha is
+// 4 bits a texel, rewritten in place. A texture opaque through (a post) is left as it was.
+void KeepLines(std::vector<uint8_t>& dds)
 {
     if (dds.size() < 128 || std::memcmp(dds.data(), "DDS ", 4) || std::memcmp(dds.data() + 84, "DXT3", 4)) return;
     uint32_t h = 0, w = 0, mips = 0;
     std::memcpy(&h, dds.data() + 12, 4);
     std::memcpy(&w, dds.data() + 16, 4);
     std::memcpy(&mips, dds.data() + 28, 4);
-    constexpr int kCut = 10;   // 170 / 17: the 4-bit alpha passing the test
-    float cover0 = -1.0f;
+    std::vector<uint8_t> above;   // the level above's alphas, row by row
+    uint32_t aw = 0, ah = 0;
     size_t at = 128;
     for (uint32_t m = 0; m < std::max(mips, 1u); ++m, w = std::max(1u, w / 2), h = std::max(1u, h / 2)) {
         const size_t blocks = size_t((w + 3) / 4) * ((h + 3) / 4);
         if (at + blocks * 16 > dds.size()) return;
-        // This level's alphas (its texels only: a block's padding past a 1- or 2-texel level left out).
-        int count[16] = {};
-        size_t texels = 0;
-        for (size_t b = 0; b < blocks; ++b)
-            for (int i = 0; i < 16; ++i) {
-                const uint32_t x = uint32_t(b % ((w + 3) / 4)) * 4 + (i & 3), y = uint32_t(b / ((w + 3) / 4)) * 4 + (i >> 2);
-                if (x >= w || y >= h) continue;
-                ++count[(dds[at + b * 16 + i / 2] >> ((i & 1) * 4)) & 15];
-                ++texels;
+        std::vector<uint8_t> level(size_t(w) * h);
+        for (uint32_t y = 0; y < h; ++y)
+            for (uint32_t x = 0; x < w; ++x) {
+                // Its nibble: block (x / 4, y / 4), texel (x & 3, y & 3) in it, two a byte.
+                const int i = int((y & 3) * 4 + (x & 3)), shift = (i & 1) * 4;
+                uint8_t& byte = dds[at + (size_t(y / 4) * ((w + 3) / 4) + x / 4) * 16 + i / 2];
+                uint8_t a = (byte >> shift) & 15;
+                if (m > 0) {
+                    a = 0;
+                    for (uint32_t dy = 0; dy < 2; ++dy)
+                        for (uint32_t dx = 0; dx < 2; ++dx)
+                            a = std::max(a, above[size_t(std::min(2 * y + dy, ah - 1)) * aw + std::min(2 * x + dx, aw - 1)]);
+                    byte = uint8_t((byte & ~(15 << shift)) | (a << shift));
+                }
+                level[size_t(y) * w + x] = a;
             }
-        auto passing = [&](int cut) {
-            size_t n = 0;
-            for (int a = cut; a < 16; ++a) n += count[a];
-            return float(n) / float(texels);
-        };
-        if (m == 0) {
-            cover0 = passing(kCut);
-        } else if (cover0 > 0.0f) {
-            // The highest alpha whose passing share is at least mip 0's, scaled up (or down) to the cut: never less
-            // coverage than mip 0 - a level of a texel or two (a uniform alpha) passes whole, and the net far off is
-            // an orange band rather than nothing.
-            int best = 1;
-            for (int a = 15; a >= 1; --a)
-                if (passing(a) >= cover0) { best = a; break; }
-            if (best != kCut)
-                for (size_t b = 0; b < blocks; ++b)
-                    for (int i = 0; i < 16; ++i) {
-                        uint8_t& byte = dds[at + b * 16 + i / 2];
-                        const int shift = (i & 1) * 4, a = (byte >> shift) & 15;
-                        const int scaled = std::clamp(a * kCut / best + (a >= best && a * kCut / best < kCut), 0, 15);
-                        byte = uint8_t((byte & ~(15 << shift)) | (scaled << shift));
-                    }
-        }
+        if (m == 0 && std::all_of(level.begin(), level.end(), [](uint8_t a) { return a == 15; })) return;   // (opaque)
+        above.swap(level);
+        aw = w, ah = h;
         at += blocks * 16;
     }
 }
@@ -220,8 +209,8 @@ std::string Fences::Create(render::Renderer& renderer, const std::string& fncPat
         iface::TextureHandle t = 0;
         for (const auto& [file, dds] : textures)
             if (!_stricmp(file.c_str(), (name + ".dds").c_str())) {
-                std::vector<uint8_t> kept = dds;   // (alpha-tested: its mips keep its coverage)
-                KeepCoverage(kept);
+                std::vector<uint8_t> kept = dds;   // (alpha-tested: its mips keep its lines)
+                KeepLines(kept);
                 t = renderer.CreateTexture(kept.data(), kept.size());
             }
         if (!t) std::printf("fences: no texture %s\n", name.c_str());
