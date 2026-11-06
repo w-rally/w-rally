@@ -10,7 +10,9 @@
 // from the posts.
 //
 // The sizes are not RBR's (its fence renderer, 0x6058c0, is not reverse engineered): a 1.1 m post 6 cm thick, a 10 cm
-// band of tape near its top, the tile texture repeated every 0.5 m.
+// band of tape near its top, the tile texture repeated every 0.5 m. A NET's tile - one cell, its frame round a cut-out
+// (the orange plastic net, the blue one) - is a panel from just over the ground up to the tape's top edge instead, the
+// cell tiled across it 20 cm wide.
 //
 // A model per group: a node per post, two per tape (its halves, the car's push between them), a mesh on each. The
 // posts' nodes carry a post's lean (rows: its sides, its axis foot to top, its foot); a half's node carries a unit
@@ -56,13 +58,15 @@ private:
     struct Tape {
         uint32_t a, b;                 // its posts
         float rest;                    // its length between them
-        float u0;                      // the texture's u at its start
+        float u0;                      // metres along its group's fence at its start (over the repeat: the texture's u)
         math::V3 bulge{}, velocity{};  // its middle's offset from the straight line, and how it moves
         bool broken = false;
     };
     struct Group {
         uint32_t posts, postCount, tapes, tapeCount;
         math::V3 lo, hi;               // the posts' box
+        float band = 0.1f;             // its tapes' height: a tape's band, a net's whole panel
+        float repeat = 0.5f;           // metres along its tile texture's width covers
         iface::InstanceHandle instance = 0;
         bool moving = true;            // (true: placed on the first frame)
     };

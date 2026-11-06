@@ -7,6 +7,7 @@
 #include <map>
 #include <utility>
 
+#include "formats/dds_image.h"
 #include "formats/fnc.h"
 #include "render/renderer.h"
 
@@ -20,6 +21,9 @@ constexpr float kPostHeight = 1.1f, kPostBelow = 0.15f, kPostHalfWidth = 0.03f;
 constexpr float kAttach = 0.9f;          // the tape's top edge, up the post
 constexpr float kBand = 0.1f;            // the tape's height
 constexpr float kRepeat = 0.5f;          // metres a tile texture's width covers
+// A NET's tile (IsNet): one cell, tiled over the net's whole height - from kNetBottom over the ground up to the tape's
+// top edge - kNetCell metres a cell's width, its height as the texture's aspect has it.
+constexpr float kNetBottom = 0.05f, kNetCell = 0.2f;
 constexpr float kStep = 1.0f / 240.0f;   // the fences' own step
 constexpr float kMargin = 0.03f;         // the car's box grown by this
 // A post: a spring back to upright (per second squared a metre of lean, and its damping), falling past half its height.
@@ -76,13 +80,14 @@ void PostMesh(std::vector<iface::Vertex>& v, std::vector<uint32_t>& idx)
     for (uint32_t k : {0u, 2u, 1u, 0u, 3u, 2u}) idx.push_back(base + k);
 }
 
-// Half a tape in its node's frame: x along it (0 .. 1), y across the band (0 its top edge, -1 its bottom), facing z.
-void TapeMesh(float u0, float u1, std::vector<iface::Vertex>& v, std::vector<uint32_t>& idx)
+// Half a tape in its node's frame: x along it (0 .. 1), y across the band (0 its top edge, -1 its bottom), facing z;
+// the texture `v1` times across it (a tape once, a net a cell a row).
+void TapeMesh(float u0, float u1, float v1, std::vector<iface::Vertex>& v, std::vector<uint32_t>& idx)
 {
     v.push_back(Vert({0, 0, 0}, {0, 0, 1}, u0, 0));
     v.push_back(Vert({1, 0, 0}, {0, 0, 1}, u1, 0));
-    v.push_back(Vert({1, -1, 0}, {0, 0, 1}, u1, 1));
-    v.push_back(Vert({0, -1, 0}, {0, 0, 1}, u0, 1));
+    v.push_back(Vert({1, -1, 0}, {0, 0, 1}, u1, v1));
+    v.push_back(Vert({0, -1, 0}, {0, 0, 1}, u0, v1));
     // Wound as the posts are, to the side its normal faces: the renderer's two-sided materials turn a back face's
     // normal round, and wound the other way the tape's turned into the wall behind it - every AO ray blocked, the
     // tape black in the shade.
@@ -98,14 +103,14 @@ void PostNode(V3 foot, V3 top, float* m)
     for (int r = 0; r < 4; ++r) m[4 * r] = rows[r].x, m[4 * r + 1] = rows[r].y, m[4 * r + 2] = rows[r].z, m[4 * r + 3] = r == 3;
 }
 
-// Half a tape's node: from `a` to `b`, the band hanging below that line, facing sideways.
-void TapeNode(V3 a, V3 b, float* m)
+// Half a tape's node: from `a` to `b`, the band (`band` metres) hanging below that line, facing sideways.
+void TapeNode(V3 a, V3 b, float band, float* m)
 {
     const V3 along = b - a;
     V3 side = math::Cross(along, V3{0, 1, 0});
     if (Length(side) < 1e-4f) side = math::Cross(along, V3{1, 0, 0});   // (hanging straight down)
     side = math::Norm(side);
-    const V3 up = math::Norm(math::Cross(side, along)) * kBand;
+    const V3 up = math::Norm(math::Cross(side, along)) * band;
     const V3 rows[4] = {along, up, side, a};
     for (int r = 0; r < 4; ++r) m[4 * r] = rows[r].x, m[4 * r + 1] = rows[r].y, m[4 * r + 2] = rows[r].z, m[4 * r + 3] = r == 3;
 }
@@ -121,6 +126,30 @@ V3 Hanging(V3 from, V3 towards, float length, float ground)
     return from + dir * out - V3{0, drop, 0};
 }
 
+// Whether a tile texture is one cell of a NET (RBR's orange plastic net fence_tile01, the blue fence_tile05): its four
+// edges opaque - the cell's frame, which tiles into the mesh - round a cut-out middle. A tape is opaque through (or cut
+// only along its top and bottom rows), a barbed wire's strand runs across a transparent tile: both stay a band.
+// `aspect`: a cell's height over its width.
+bool IsNet(const std::vector<uint8_t>& dds, float& aspect)
+{
+    formats::Image im;
+    if (!formats::DecodeDds(dds, im).empty() || im.width < 4 || im.height < 4) return false;
+    auto opaque = [&](int x, int y) { return im.rgba[(size_t(y) * im.width + x) * 4 + 3] >= 170; };
+    size_t edge = 0, edgeOpaque = 0, inner = 0, innerCut = 0;
+    for (int y = 0; y < im.height; ++y)
+        for (int x = 0; x < im.width; ++x) {
+            if (x == 0 || y == 0 || x == im.width - 1 || y == im.height - 1) {
+                ++edge;
+                edgeOpaque += opaque(x, y);
+            } else {
+                ++inner;
+                innerCut += !opaque(x, y);
+            }
+        }
+    aspect = float(im.height) / float(im.width);
+    return edgeOpaque * 10 >= edge * 9 && innerCut * 10 >= inner * 3;
+}
+
 } // namespace
 
 std::string Fences::Create(render::Renderer& renderer, const std::string& fncPath, const std::string& game)
@@ -134,17 +163,22 @@ std::string Fences::Create(render::Renderer& renderer, const std::string& fncPat
     const std::string dat = formats::ReadFenceTextures(ReadBytes(game + "/Textures/fence.dat"), textures);
     if (!dat.empty()) std::printf("fences: %s - drawn untextured\n", dat.c_str());
     std::map<std::string, iface::TextureHandle> made;   // by type
+    std::map<std::string, float> nets;                   // the nets' types: a cell's height over its width
     auto texture = [&](int32_t type) -> iface::TextureHandle {
         if (type < 0 || static_cast<size_t>(type) >= fnc.types.size()) return 0;
         const std::string& name = fnc.types[static_cast<size_t>(type)];
         if (const auto it = made.find(name); it != made.end()) return it->second;
         iface::TextureHandle t = 0;
         for (const auto& [file, dds] : textures)
-            if (!_stricmp(file.c_str(), (name + ".dds").c_str())) t = renderer.CreateTexture(dds.data(), dds.size());
+            if (!_stricmp(file.c_str(), (name + ".dds").c_str())) {
+                t = renderer.CreateTexture(dds.data(), dds.size());
+                if (float aspect = 0; IsNet(dds, aspect)) nets[name] = aspect;
+            }
         if (!t) std::printf("fences: no texture %s\n", name.c_str());
         return made[name] = t;
     };
 
+    size_t netGroups = 0;
     std::vector<iface::Vertex> postV;
     std::vector<uint32_t> postI;
     PostMesh(postV, postI);
@@ -167,7 +201,7 @@ std::string Fences::Create(render::Renderer& renderer, const std::string& fncPat
                 const float d = Length(V3{q[0], q[1], q[2]} - p.foot);
                 if (d > 0.2f && d < 15.0f) {
                     m_tapes.push_back({g.posts + static_cast<uint32_t>(i), g.posts + static_cast<uint32_t>(i + 1), d, u});
-                    u += d / kRepeat;
+                    u += d;   // (metres: over the group's repeat below)
                 }
             }
         }
@@ -177,6 +211,15 @@ std::string Fences::Create(render::Renderer& renderer, const std::string& fncPat
         // Its model: the tape's material (0), the post's (1); the posts' nodes, then the tapes' halves.
         iface::MaterialDesc tape = iface::DefaultMaterialDesc(), post = iface::DefaultMaterialDesc();
         tape.baseColour = texture(fg.tile);
+        // A net: a panel over the fence's height, its cell tiled across it; a tape: a band near the top, the tile once.
+        float across = 1.0f;
+        if (fg.tile >= 0 && static_cast<size_t>(fg.tile) < fnc.types.size())
+            if (const auto it = nets.find(fnc.types[static_cast<size_t>(fg.tile)]); it != nets.end()) {
+                g.band = kAttach * kPostHeight - kNetBottom;
+                g.repeat = kNetCell;
+                across = std::max(1.0f, std::round(g.band / (kNetCell * it->second)));
+                ++netGroups;
+            }
         tape.flags = iface::kMaterialAlphaTest | iface::kMaterialTwoSided;
         tape.roughness = 0.55f;
         if (!tape.baseColour) tape.baseColourFactor[1] = tape.baseColourFactor[2] = 0.1f;   // (a red tape)
@@ -206,11 +249,11 @@ std::string Fences::Create(render::Renderer& renderer, const std::string& fncPat
                 const uint32_t h = n - g.postCount;
                 const Tape& t = m_tapes[g.tapes + h / 2];
                 const V3 a = Attach(m_posts[t.a]), b = Attach(m_posts[t.b]), mid = Middle(t);
-                if (h % 2 == 0) TapeNode(a, mid, node.local);
-                else TapeNode(mid, b, node.local);
+                if (h % 2 == 0) TapeNode(a, mid, g.band, node.local);
+                else TapeNode(mid, b, g.band, node.local);
                 std::snprintf(node.name, sizeof node.name, "tape %u %s", h / 2, h % 2 ? "b" : "a");
-                const float half = t.rest * 0.5f / kRepeat;
-                TapeMesh(t.u0 + half * float(h % 2), t.u0 + half * float(h % 2 + 1), tapeV[h], tapeI[h]);
+                const float u0 = t.u0 / g.repeat, half = t.rest * 0.5f / g.repeat;
+                TapeMesh(u0 + half * float(h % 2), u0 + half * float(h % 2 + 1), across, tapeV[h], tapeI[h]);
                 mesh.vertices = tapeV[h].data(), mesh.vertexCount = static_cast<uint32_t>(tapeV[h].size());
                 mesh.indices = tapeI[h].data(), mesh.indexCount = static_cast<uint32_t>(tapeI[h].size());
                 mesh.material = 0;
@@ -225,6 +268,7 @@ std::string Fences::Create(render::Renderer& renderer, const std::string& fncPat
         if (!g.instance) return "a fence's model: " + renderer.Error();
         m_groups.push_back(g);
     }
+    if (netGroups) std::printf("fences: %zu of %zu groups nets\n", netGroups, m_groups.size());
     m_nodes.resize(16 * (m_posts.size() + 2 * m_tapes.size()));
     return "";
 }
@@ -384,11 +428,11 @@ void Fences::Place(Group& g)
         float* half = nodes + 16 * (g.postCount + 2 * i);
         if (!t.broken) {
             const V3 m = Middle(t);
-            TapeNode(a, m, half);
-            TapeNode(m, b, half + 16);
+            TapeNode(a, m, g.band, half);
+            TapeNode(m, b, g.band, half + 16);
         } else {
-            TapeNode(a, Hanging(a, b, t.rest * 0.5f, pa.foot.y), half);
-            TapeNode(Hanging(b, a, t.rest * 0.5f, pb.foot.y), b, half + 16);
+            TapeNode(a, Hanging(a, b, t.rest * 0.5f, pa.foot.y), g.band, half);
+            TapeNode(Hanging(b, a, t.rest * 0.5f, pb.foot.y), b, g.band, half + 16);
         }
     }
     iface::InstanceUpdate u{};
