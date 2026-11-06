@@ -468,5 +468,58 @@ bool GenerateDdsMips(const uint8_t* dds, size_t bytes, const MipGenOptions& opt,
     return true;
 }
 
+bool DecodeDdsAlpha(const uint8_t* dds, size_t bytes, uint32_t& width, uint32_t& height,
+                    std::vector<uint8_t>& alpha)
+{
+    if (!dds || bytes < kHeaderBytes || memcmp(dds, "DDS ", 4) != 0) return false;
+    const uint32_t W = Rd32(dds + kOffWidth), H = Rd32(dds + kOffHeight);
+    if (!W || !H || W > 16384 || H > 16384) return false;
+    const uint32_t pf = Rd32(dds + kOffPfFlags);
+    const uint8_t* data = dds + kHeaderBytes;
+    alpha.assign((size_t)W * H, 255);
+    if (pf & kDdpfFourCC)
+    {
+        const uint32_t fcc = Rd32(dds + kOffFourCC);
+        Format fmt = kNone;
+        if (fcc == FourCC('D','X','T','1')) fmt = kDxt1;
+        else if (fcc == FourCC('D','X','T','3')) fmt = kDxt3;
+        else if (fcc == FourCC('D','X','T','5')) fmt = kDxt5;
+        if (fmt == kNone) return false;                     // includes DX10 headers
+        const uint32_t blockBytes = (fmt == kDxt1) ? 8 : 16;
+        const uint32_t bw = (W + 3) / 4, bh = (H + 3) / 4;
+        if (bytes - kHeaderBytes < (size_t)bw * bh * blockBytes) return false;
+        for (uint32_t by = 0; by < bh; ++by)
+            for (uint32_t bx = 0; bx < bw; ++bx)
+            {
+                const uint8_t* blk = data + ((size_t)by * bw + bx) * blockBytes;
+                uint8_t t[16][4];
+                if (fmt == kDxt1) DecodeColour(blk, false, t);
+                else if (fmt == kDxt3) DecodeAlphaDxt3(blk, t);
+                else DecodeAlphaDxt5(blk, t);
+                for (int i = 0; i < 16; ++i)
+                {
+                    const uint32_t x = bx * 4 + (i & 3), y = by * 4 + (i >> 2);
+                    if (x < W && y < H) alpha[(size_t)y * W + x] = t[i][3];
+                }
+            }
+        width = W, height = H;
+        return true;
+    }
+    // Uncompressed: 32 bits a texel, the alpha where its mask says (DDPF_ALPHAPIXELS), else opaque.
+    const uint32_t bits = Rd32(dds + 4 + 84), aMask = (pf & 0x1) ? Rd32(dds + 4 + 100) : 0;
+    if (bits != 32) return false;
+    if (bytes - kHeaderBytes < (size_t)W * H * 4) return false;
+    if (aMask)
+    {
+        int shift = 0;
+        while (!((aMask >> shift) & 1)) ++shift;
+        const uint32_t top = aMask >> shift;
+        for (size_t i = 0; i < (size_t)W * H; ++i)
+            alpha[i] = (uint8_t)(((Rd32(data + i * 4) & aMask) >> shift) * 255u / top);
+    }
+    width = W, height = H;
+    return true;
+}
+
 } // namespace core
 } // namespace ngg
