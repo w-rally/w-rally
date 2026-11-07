@@ -50,9 +50,11 @@ namespace wrally::iface {
 // 16: FrameDesc::reflectionFocus (the car the cube probe is centred on: the world in its paint).
 // 17: createTextureData (a DDS read as data, not colour: normal and ORM maps); MaterialDesc::orm's alpha is the
 //     clear coat's mask.
-constexpr uint32_t kRendererInterfaceVer = 17;
+// 18: editApi (the editor's table, renderer_edit.h - versioned on its own from here on).
+constexpr uint32_t kRendererInterfaceVer = 18;
 
 struct Renderer;                     // the module's instance, opaque
+struct RendererEditApi;              // renderer_edit.h
 typedef uint32_t SceneHandle;        // a loaded .ngg stage
 typedef uint32_t TextureHandle;
 typedef uint32_t ModelHandle;        // geometry + materials + node tree (a car)
@@ -409,6 +411,10 @@ struct RendererApi {
     // As createTexture, for a texture that holds DATA (a normal map, an ORM map): read as stored, no sRGB decode.
     // Also takes the DX10 header's BC4, BC5 and BC7.
     Status (WRALLY_CALL* createTextureData)(Renderer*, const void* dds, uint64_t bytes, TextureHandle* out);
+
+    // The editor's table (renderer_edit.h) at `editVer` (kRendererEditVer), for this renderer: ErrVersion when the
+    // module implements another. A game never needs it.
+    Status (WRALLY_CALL* editApi)(Renderer*, uint32_t editVer, const RendererEditApi** out);
 };
 
 struct RendererInput {

@@ -3946,6 +3946,32 @@ optional `.ngg` field (the format bakes today, and §9b item 4's culling bounds 
 data); and whether picking should be GPU readback or a CPU ray cast against `Wallaby.Formats` meshes, which
 already has Möller–Trumbore and would keep the renderer out of it.
 
+#### 8.2a The editor API moved into WRenderer (2026-11-07)
+
+`ngg-api` did not survive the move to W-Rally (phase 4 replaced it with the game's `FrameDesc`), so the editor was
+left drawing through plugin-rbr's last build of it: an ngg-core that no longer received fixes. Its editor surface is
+now `include/wrally/iface/renderer_edit.h`, reached from `RendererApi::editApi` with its own version, over the same
+core calls - objects by index, selection, overlay layers, labels, materials, light mode, culling, the probe. Picking
+stayed on the CPU, as the paragraph above leaned towards.
+
+Measured through it on stage 41 (`tests/editor_api.cpp`, CTest `editor-api-41`):
+
+```
+translate +10 m                       moved exactly (10, 0, 0)
+turn 90 deg about its centre          0.0000 m;  about the origin 2706 m
+scene + camera moved 64 m together    max delta 0.0002  (float rounding 64 m further out)
+scene moved alone                     max delta 60.5
+selection, occluders hidden           35,835 / 46,430  ->  36,036 / 46,229, total conserved
+lines, scene hidden                   4,179 / 2,489    ->  6,668 / 0
+labels, twice the text                9,580 = 2 x 4,790
+```
+
+Two things the old self-test never had to say. The transform comparison runs **without sun shadows**: the cascades
+snap to a texel grid fixed in the world, so moving the camera 64 m moves the snap (shadowUV 0.5338 -> 0.5333), which
+is the maps' stability design and not the transform. And the editor's line layer L is the core's L + 1, because
+`FrameDesc::lines` owns layer 0 and a frame that drops them clears it - on the same layer, the editor's gizmos would
+vanish with the game's debug lines.
+
 ---
 
 ## 9. Phasing
