@@ -5211,12 +5211,21 @@ bool Scene::UploadDynamic(ID3D12Device* dev)
 
 void Scene::SetReflectionFocus(const uint32_t* objects, uint32_t count, const float centre[3])
 {
-    for (uint32_t o : m_probeObjects)
-        if (o < m_objects.size()) m_objects[o].probeFocus = false;
-    m_probeObjects.assign(objects, objects + count);
-    for (uint32_t o : m_probeObjects)
-        if (o < m_objects.size()) m_objects[o].probeFocus = true;
-    ++m_geomRevision;   // the TLAS's instance masks (RtInstanceDesc::focus)
+    // Called every frame, and the focus almost never changes. Only a CHANGE moves the TLAS's instance masks
+    // (RtInstanceDesc::focus), so only a change counts as a revision: counting every call refitted the TLAS every
+    // frame for nothing - in an editor with no car at all, an idle viewport rebuilt its instances and logged it on
+    // every frame.
+    const bool same = count == m_probeObjects.size() &&
+                      (count == 0 || std::equal(objects, objects + count, m_probeObjects.begin()));
+    if (!same)
+    {
+        for (uint32_t o : m_probeObjects)
+            if (o < m_objects.size()) m_objects[o].probeFocus = false;
+        m_probeObjects.assign(objects, objects + count);
+        for (uint32_t o : m_probeObjects)
+            if (o < m_objects.size()) m_objects[o].probeFocus = true;
+        ++m_geomRevision;
+    }
     if (!count)
     {
         m_probeFacesDrawn = 0;
