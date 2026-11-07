@@ -2,6 +2,7 @@
 #include "log.h"
 
 #include <string>
+#include <cstdlib>
 #include <algorithm>
 #include <math.h>
 
@@ -338,6 +339,21 @@ float2 AoSample(uint2 px, uint frame, uint i, uint n)
     return frac(u + frac(float(frame) * float2(0.7548776662, 0.5698402910)));
 }
 
+// HOW FAST THE OCCLUSION CHANGES across the ground about an occluder at a
+// distance t, per metre of t: what Allow takes as an AO ray's "penumbra". It
+// was the whole distance (1.0), and behind a driving car - 17 cm a frame at
+// 18 km/h, its bumper some 0.3-1 m from the road its rays leave - that let
+// the road keep over half its history: the car's occlusion where it had been,
+// the road 10-15 grey darker than its rays said, half a metre behind the car;
+// and where the exhaust or the bumper had just uncovered the road, which had
+// no history to lag, it came out right - lighter, in their shape: the GHOST
+// BEHIND THE CAR, a copy of the bumper and the exhaust a frame of travel
+// behind them (view 13, TAA off; tools/car-ghost). The occlusion under a car
+// falls off far faster than its distance: 0.15 leaves a driving car's road
+// nothing to lag (its weight under gBlendMoved, the AO's 0), and the Garage's
+// turning car, its sill a few millimetres a frame, still over two thirds.
+static const float kAoPenumbra = 0.15;
+
 [numthreads(8, 8, 1)]
 void CSMain(uint3 tid : SV_DispatchThreadID)
 {
@@ -384,9 +400,9 @@ void CSMain(uint3 tid : SV_DispatchThreadID)
         ray.TMax      = gAoRadius;
         float2 mover;
         if (!Occluded(ray, false, plant, mover)) open += 1.0;
-        // An occluder this far off changes the occlusion over about as far
-        // across the ground: its "penumbra" is its distance.
-        const float a = Allow(mover, 1.0);
+        // An occluder this far off changes the occlusion over a fraction of
+        // that across the ground: its "penumbra" (kAoPenumbra).
+        const float a = Allow(mover, kAoPenumbra);
         if (a >= 0.0) allow = allow < 0.0 ? a : min(allow, a);
     }
     gOut[tid.xy] = EncodeRaw(open / max(1.0, float(gAoRays)), allow);
@@ -2045,18 +2061,30 @@ void Rt::Trace(Device& dev, ID3D12GraphicsCommandList* list, ID3D12Resource* dep
         dc.period4 = 1.0f;
         if (unjitteredViewProj) memcpy(m_prevViewProj, unjitteredViewProj, sizeof(m_prevViewProj));
     }
-    Denoise(list, dc, m_result.Get(), kSlotPair0, kSlotPair1, kSlotHistUav0, kSlotHistUav1,
+    // NGG_RT_NO_HISTORY=1: the sun's and the AO's denoise without their history nor the AO's wide pass - this frame's
+    // 5x5 alone: grainy, but unbiased, the reference a ghost (anything a history carries that this frame's rays do not
+    // say) is measured against (tools/car-ghost).
+    static const bool noHistory = [] { const char* e = std::getenv("NGG_RT_NO_HISTORY"); return e && *e && *e != '0'; }();
+    DenoiseCB dcSun = dc;
+    if (noHistory) dcSun.valid = 0.0f;
+    Denoise(list, dcSun, m_result.Get(), kSlotPair0, kSlotPair1, kSlotHistUav0, kSlotHistUav1,
             m_hist, m_histState, m_histValid, m_filtered);
     DenoiseCB dcAo = dc;
     // AoSample's stratification. And the history stays 0.85: 0.92 was smoother
     // standing still but lagged - noisier and further from a 32-ray reference -
     // once the car (and the camera) drove.
     dcAo.period4 = 1.0f;
+    // Where its rays hit an object on the move, the AO keeps only what they allow (Allow, kAoPenumbra) - not, as the
+    // sun's, a quarter at least: behind a driving car that quarter alone left the road 7 grey darker than its rays,
+    // the bumper's and the exhaust's ghosts still there (tools/car-ghost). What the cut leaves grainy, the wide pass
+    // smooths (frame-to-frame change behind the car +9%).
+    dcAo.blendMoved = 0.0f;
+    if (noHistory) dcAo.valid = 0.0f;
     if (doAo)
     {
         Denoise(list, dcAo, m_aoResult.Get(), kSlotAoPair0, kSlotAoPair1, kSlotAoHistUav0, kSlotAoHistUav1,
                 m_aoHist, m_aoHistState, m_aoHistValid, m_filteredAo);
-        if (m_psoAoWide && m_aoWide)
+        if (m_psoAoWide && m_aoWide && !noHistory)
             Widen(list, dcAo, m_aoHist, m_aoHistState, kSlotAoPair0, kSlotAoPair1, m_aoWide.Get(), m_aoWideState,
                   kSlotAoWideUav, m_filteredAo);
     }
