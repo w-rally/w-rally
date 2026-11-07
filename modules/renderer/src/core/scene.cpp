@@ -3883,14 +3883,10 @@ bool Scene::LoadFromMemory(ID3D12Device* dev, ID3D12CommandQueue* queue,
         Log("scene: bad magic 0x%08X (not a .ngg file)", fh->magic);
         return false;
     }
-    // v2 is accepted alongside v3 for one reason only: the converter lives in
-    // another repository, and a hard cut would mean the two had to land in the
-    // same hour or every asset stops loading. Only the MATERIAL table differs -
-    // see the upgrade branch below - and this goes when Wallaby writes v3.
-    if (fh->version != kFormatCurrent && fh->version != kFormatV2)
+    if (fh->version != kFormatCurrent)
     {
-        Log("scene: format version %u, this build reads %u (and %u in transition) "
-            "- reconvert the asset", fh->version, kFormatCurrent, kFormatV2);
+        Log("scene: format version %u, this build reads %u - reconvert the asset",
+            fh->version, kFormatCurrent);
         return false;
     }
 
@@ -4016,32 +4012,9 @@ bool Scene::LoadFromMemory(ID3D12Device* dev, ID3D12CommandQueue* queue,
             m_materials.push_back(s);
         };
 
-        if (fh->version >= kFormatV3)
         {
             const Material* m = reinterpret_cast<const Material*>(mats);
             for (size_t i = 0; i < matBytes / sizeof(Material); ++i) take(m[i]);
-        }
-        else
-        {
-            // TRANSITION, not compatibility: v2 knew two texture stages and
-            // nothing else, so everything PBR gets the default. Delete this
-            // branch, MaterialV2 and this log line once Wallaby writes v3.
-            const MaterialV2* m = reinterpret_cast<const MaterialV2*>(mats);
-            const size_t n = matBytes / sizeof(MaterialV2);
-            for (size_t i = 0; i < n; ++i)
-            {
-                Material up = DefaultMaterial();
-                up.baseColour = m[i].texture0;
-                // v2 wrote texture1 == texture0 on single-stage materials
-                // rather than saying "none", so the pairing alone cannot tell
-                // a real detail layer from a duplicate. MeasureSingleStage
-                // settles it from the geometry, as it always has.
-                up.detail = m[i].texture1;
-                up.flags  = m[i].flags & (kMaterialAlphaTest | kMaterialTwoSided);
-                take(up);
-            }
-            Log("scene: v%u materials upgraded to v3 defaults (%zu) - the converter "
-                "is still writing the old struct", fh->version, n);
         }
         {
             size_t twoSided = 0;

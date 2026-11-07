@@ -754,7 +754,7 @@ Each phase ends with a game you can drive. phys-drive works on day one, and ever
 8. **Legacy stages.** W-Rally's own automatic importer (decision 2), so every RBR stage draws without Wallaby:
    1. a C++ NGG writer next to the renderer's reader, with a round-trip test; the `.lbs` geometry reader; a minimal
       importer (geometry, textures, object keys, baked shading dropped) — DONE 2026-10-26.
-      - **Writer:** `modules/renderer/src/format/ngg_scene.*` (library `ngg-format`) writes v3 and reads v3 and v2.
+      - **Writer:** `modules/renderer/src/format/ngg_scene.*` (library `ngg-format`) writes and reads v3 only (v2 reading went 2026-11-07, once Wallaby wrote v3).
       - **Tests:** `tools/ngg-check` runs three CTests. `ngg-roundtrip` writes a made-up scene, reads it back and
         has the renderer load it. `ngg-producer-wallaby` reads Wallaby's stage 41 `.ngg`, rewrites it identically
         and has the renderer load both. `legacy-import-41` imports RBR's `track-41_M.lbs`.

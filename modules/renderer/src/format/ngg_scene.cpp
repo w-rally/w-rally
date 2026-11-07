@@ -136,12 +136,11 @@ std::string Read(const void* bytes, size_t n, SceneData& out)
     Cursor c{static_cast<const uint8_t*>(bytes), n};
     FileHeader fh;
     if (!c.Get(&fh, sizeof fh) || fh.magic != kMagic) return "not an .ngg (no NGG0 header)";
-    if (fh.version != kFormatCurrent && fh.version != kFormatV2)
-        return "format version " + std::to_string(fh.version) + " (this reads " + std::to_string(kFormatCurrent) + " and 2)";
+    if (fh.version != kFormatCurrent)
+        return "format version " + std::to_string(fh.version) + " (this reads " + std::to_string(kFormatCurrent) + ")";
     out.version = fh.version;
     bool header = false;
     SceneHeader h{};
-    std::vector<MaterialV2> v2;
     for (uint32_t i = 0; i < fh.chunkCount; ++i) {
         ChunkHeader ch;
         if (!c.Get(&ch, sizeof ch)) return "the chunk table is truncated";
@@ -167,7 +166,7 @@ std::string Read(const void* bytes, size_t n, SceneData& out)
         } else if (f == ChunkIndices()) {
             if (!take(out.indices)) return "NGGI is not whole indices";
         } else if (f == ChunkMaterials()) {
-            if (fh.version >= kFormatV3 ? !take(out.materials) : !take(v2)) return "NGGM is not whole materials";
+            if (!take(out.materials)) return "NGGM is not whole materials";
         } else if (f == ChunkObjects()) {
             if (!take(out.objects)) return "NGGO is not whole objects";
         } else if (f == ChunkTextures()) {
@@ -221,13 +220,6 @@ std::string Read(const void* bytes, size_t n, SceneData& out)
     std::memcpy(out.bboxMax, h.bboxMax, sizeof h.bboxMax);
     out.flags = h.flags;
     out.bakedScale = h.bakedScale;
-    for (const MaterialV2& m : v2) {   // the v2 transition, as core/scene.cpp upgrades it
-        Material up = DefaultMaterial();
-        up.baseColour = m.texture0;
-        up.detail = m.texture1;
-        up.flags = m.flags & (kMaterialAlphaTest | kMaterialTwoSided);
-        out.materials.push_back(up);
-    }
     if (!out.objectKeys.empty() && out.objectKeys.size() != out.objects.size()) return "NGGK is not one key per object";
     return "";
 }

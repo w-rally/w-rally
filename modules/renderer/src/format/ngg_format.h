@@ -38,10 +38,8 @@ const uint32_t kFormatV2    = 2;   // SceneHeader.bakedScale
 // texture slots, per-material alpha cutoff. See Material below for why this is
 // a break rather than an extension.
 //
-// The reader still accepts v2 materials, and that is a TRANSITION, not a
-// compatibility promise: it exists so a converter and a renderer in two
-// different repositories do not have to land the same change in the same hour.
-// Delete it once Wallaby writes v3.
+// Only kFormatCurrent is read. v2 was accepted for a while as a transition,
+// until Wallaby wrote v3 (2026-11-07); an older file is reconverted, not upgraded.
 const uint32_t kFormatV3    = 3;
 const uint32_t kFormatCurrent = kFormatV3;
 
@@ -217,18 +215,6 @@ inline Material DefaultMaterial()
     m.alphaCutoff       = 170.0f / 255.0f;   // RBR's AlphaRef, as the default only
     return m;
 }
-
-// The v2 material, READ ONLY, so a v2 asset still loads while the converter
-// catches up. This is a transition, not a compatibility promise - delete it and
-// the version branch in Scene::Load once Wallaby writes v3.
-struct MaterialV2
-{
-    uint32_t texture0;
-    uint32_t texture1;
-    uint32_t flags;
-    uint32_t reserved;
-};
-static_assert(sizeof(MaterialV2) == 16, "MaterialV2 layout");
 
 // 'NGGO' - objects. The unit of addressing for layers and variants (design
 // 3.4b) and, more immediately, the unit of drawing: one object = one index

@@ -4,8 +4,7 @@
 // one place (docs/design.md decision 2). The writer is what W-Rally's legacy importer (.lbs -> .ngg) produces through;
 // the reader is for tools and tests (the renderer keeps its own loader, which the round-trip test runs too).
 //
-// Write always writes kFormatCurrent (v3 materials). Read accepts v3 and the v2 transition, upgrading v2 materials as
-// the renderer does (Material = DefaultMaterial with v2's two textures and flags).
+// Write always writes kFormatCurrent (v3 materials), and Read accepts only kFormatCurrent, as the renderer does.
 //
 // The plants (NGGG, NGGP) are carried as raw payloads: read and written as they are, not interpreted.
 

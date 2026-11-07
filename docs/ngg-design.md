@@ -1195,13 +1195,16 @@ shading overrides, keyed on the **material** for the reason §3.0 gives — obje
 regroups. `rbrtm.exe --view` drives the same calls from `1`/`2` and `3`/`4`, so the path is testable before any
 UI exists.
 
-#### v2 is still readable, and that is a transition with an expiry date
+#### v2 was readable for a transition, and that has ended
 
-The converter is in another repository. A hard cut would mean both sides landing the same change in the same
-hour or every asset stops loading, so `Scene::Load` reads a v2 material table and fills the PBR fields from
-`DefaultMaterial()`, logging that it did. Delete the branch, `MaterialV2`, and the version test once Wallaby
-writes v3. Measured: `track-42` (119 materials) and `track-108` (92) both load and render unchanged apart from
-the new specular lobe and §3.3f's single-stage fix.
+The converter is in another repository. A hard cut would have meant both sides landing the same change in the
+same hour or every asset stops loading, so `Scene::Load` read a v2 material table for a while and filled the PBR
+fields from `DefaultMaterial()`, logging that it did. Measured then: `track-42` (119 materials) and `track-108`
+(92) both loaded and rendered unchanged apart from the new specular lobe and §3.3f's single-stage fix.
+
+**Ended 2026-11-07:** Wallaby's `NggWriter` writes v3, so the branch, `MaterialV2` and the v2 version test are
+gone from `Scene::Load` and from `ngg_scene.*`. A v2 file is refused with "reconvert the asset"; the
+`ngg-producer-wallaby` test file (`phys-data/m5/track-41.ngg`) was re-exported as v3 by `wallaby-cli convert`.
 
 ### 3.4a `TrackSettings.ini` already IS the weather preset system — 762 presets
 
