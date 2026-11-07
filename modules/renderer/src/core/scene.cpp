@@ -6871,7 +6871,19 @@ void Scene::RecordPass(ID3D12GraphicsCommandList* list, D3D12_CPU_DESCRIPTOR_HAN
                 d->CreateShaderResourceView(m_rtVis, &sd, dest);
                 d->Release();
                 m_rtSrvReady = true;
-                Log("scene: RT visibility SRV created in heap slot %u", m_rtSrvSlot);
+                // Rewritten every frame on purpose (SetRtVisibility: a pointer is not an identity), and the
+                // texture is one of the denoiser's two histories, alternating - so neither "every write" nor
+                // "a new pointer" is news. Said once per size and format (creation, a resize): said every frame
+                // it was most of the log, in the game and in the editor.
+                const D3D12_RESOURCE_DESC rd = m_rtVis->GetDesc();
+                if (rd.Width != m_rtSrvLoggedW || rd.Height != m_rtSrvLoggedH || rd.Format != m_rtSrvLoggedFormat)
+                {
+                    Log("scene: RT visibility SRV created in heap slot %u (%llux%u)", m_rtSrvSlot,
+                        (unsigned long long)rd.Width, rd.Height);
+                    m_rtSrvLoggedW = rd.Width;
+                    m_rtSrvLoggedH = rd.Height;
+                    m_rtSrvLoggedFormat = rd.Format;
+                }
             }
         }
         D3D12_GPU_DESCRIPTOR_HANDLE rh = m_srvHeap->GetGPUDescriptorHandleForHeapStart();

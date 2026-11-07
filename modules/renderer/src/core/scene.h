@@ -977,6 +977,9 @@ private:
     bool                     m_aoOn = true;
     UINT                     m_rtSrvSlot = 0;
     bool                     m_rtSrvReady = false;
+    UINT64                   m_rtSrvLoggedW = 0;        // the size and format the log last reported (the log only)
+    UINT                     m_rtSrvLoggedH = 0;
+    DXGI_FORMAT              m_rtSrvLoggedFormat = DXGI_FORMAT_UNKNOWN;
 
     Environment              m_ownEnv;
     Environment*             m_env = &m_ownEnv;
