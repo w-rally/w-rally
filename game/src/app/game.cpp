@@ -618,7 +618,7 @@ StageEnd RunStage(Shell& sh, const Options& given, bool fromMenu, std::string& e
     // The renderer's switches: T its TAA, O its ambient occlusion (quality medium / low), L its shadows, K its ray
     // tracing (off: the cascaded shadow maps, no RT AO), V its debug views, F1 its readout. P a pause (the physics, a
     // replay and the rendering stop - the picture stays as it was; a switch draws one frame), F2 a screenshot
-    // (shot-NNN.bmp beside the recording).
+    // (shot-NNN.png beside the recording).
     Press taaKey, pauseKey, aoKey, shadowKey, shotKey, viewKey, rtKey, debugHudKey, muteKey, antiLagIdleKey;
     Press gearUpKey, gearDownKey, cameraKey, resetKey;
     int debugView = startView;
@@ -1133,7 +1133,7 @@ StageEnd RunStage(Shell& sh, const Options& given, bool fromMenu, std::string& e
         if (keyShot || timedShot) {
             const size_t slash = o.out.find_last_of("/\\");
             char name[32];
-            std::snprintf(name, sizeof name, "shot-%03d.bmp", shots++);
+            std::snprintf(name, sizeof name, "shot-%03d.png", shots++);
             shotPath = (slash == std::string::npos ? std::string() : o.out.substr(0, slash + 1)) + name;
             if (timedShot) renderer.CaptureFrame(shotPath);
         }
@@ -1532,7 +1532,7 @@ int RunLab(Shell& sh, const std::vector<std::string>& args)
         math::Perspective(view.fovY, sh.height ? float(sh.width) / float(sh.height) : 16.0f / 9.0f, 0.25f, 8000.0f, proj);
         if (shotEvery && frame >= shotEvery && frame % shotEvery == 0) {
             char name[32];
-            std::snprintf(name, sizeof name, "shot-%03d.bmp", shots++);
+            std::snprintf(name, sizeof name, "shot-%03d.png", shots++);
             renderer.CaptureFrame(name);
             std::printf("screenshot %s (frame %u)\n", name, frame);
         }
@@ -1566,7 +1566,7 @@ int RunGame(const std::vector<std::string>& args)
         if (const std::string e = OpenShell(sh, "wrenderer"); !e.empty()) return std::fprintf(stderr, "%s\n", e.c_str()), 3;
         return RunLab(sh, args);
     }
-    // --showroom <car folder> [--turn <degrees>]: the Garage's showroom with that car, one capture (showroom.bmp, in the
+    // --showroom <car folder> [--turn <degrees>]: the Garage's showroom with that car, one capture (showroom.png, in the
     // working folder) once it is loaded, then out - a look at a car's model without the menus.
     if (const auto it = std::find(args.begin(), args.end(), std::string("--showroom")); it != args.end() && it + 1 != args.end()) {
         if (const char* off = std::getenv("PHYS_DRIVE_OFF")) {   // as a stage's
@@ -1584,7 +1584,7 @@ int RunGame(const std::vector<std::string>& args)
         if (const auto t = std::find(args.begin(), args.end(), std::string("--turn")); t != args.end() && t + 1 != args.end())
             view.turn = static_cast<float>(std::atof((t + 1)->c_str()) * 3.14159265 / 180);
         // --spin <degrees / s>: the turntable turning, a 60th of that a frame (the Garage turns at 12.6); --shots <n>:
-        // n captures, frame after frame (showroom-00.bmp ...) - the denoisers' grain around a moving car, measured.
+        // n captures, frame after frame (showroom-00.png ...) - the denoisers' grain around a moving car, measured.
         float spin = 0;
         int shots = 1;
         if (const auto t = std::find(args.begin(), args.end(), std::string("--spin")); t != args.end() && t + 1 != args.end())
@@ -1620,8 +1620,8 @@ int RunGame(const std::vector<std::string>& args)
                 if (stop < 0 || settle < 40 + stop) view.turn += settle % jerk == 0 ? spin * jerk : 0.0f;
                 if (++settle >= 40 && settle < 40 + shots) {
                     char name[32];
-                    std::snprintf(name, sizeof name, "showroom-%02d.bmp", settle - 40);
-                    sh.renderer.CaptureFrame(shots == 1 ? "showroom.bmp" : name);
+                    std::snprintf(name, sizeof name, "showroom-%02d.png", settle - 40);
+                    sh.renderer.CaptureFrame(shots == 1 ? "showroom.png" : name);
                 }
                 if (settle == 41 + shots) break;
             }

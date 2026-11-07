@@ -5,6 +5,7 @@
 
 #include "input/bindings.h"
 #include "ui/imgui_layer.h"
+#include "wrally/png/png.h"
 
 namespace wrally::app {
 
@@ -116,7 +117,7 @@ bool Window::Screenshot(const std::string& path) const
     BITMAPINFOHEADER bi{};
     bi.biSize = sizeof bi;
     bi.biWidth = w;
-    bi.biHeight = h;   // bottom-up, as a .bmp stores it
+    bi.biHeight = -h;   // top-down, as a .png stores it
     bi.biPlanes = 1;
     bi.biBitCount = 24;
     const int stride = (w * 3 + 3) & ~3;
@@ -127,16 +128,7 @@ bool Window::Screenshot(const std::string& path) const
     DeleteDC(mdc);
     ReleaseDC(m_hwnd, wdc);
     if (!printed) return false;
-    FILE* f = std::fopen(path.c_str(), "wb");
-    if (!f) return false;
-    BITMAPFILEHEADER fh{};
-    fh.bfType = 0x4d42;
-    fh.bfOffBits = sizeof fh + sizeof bi;
-    fh.bfSize = fh.bfOffBits + static_cast<DWORD>(pixels.size());
-    std::fwrite(&fh, sizeof fh, 1, f);
-    std::fwrite(&bi, sizeof bi, 1, f);
-    std::fwrite(pixels.data(), 1, pixels.size(), f);
-    return std::fclose(f) == 0;
+    return png::WriteBgr(path, w, h, pixels.data(), static_cast<size_t>(stride));
 }
 
 } // namespace wrally::app
