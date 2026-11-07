@@ -826,11 +826,15 @@ PrepassOut PSPrepass(VSOut i, bool frontFace : SV_IsFrontFace)
         o.normal = float4(G, 0.5);
         o.plant = i.plant;
     }
-    else if (gLegacyMode > 0.5)
+    else
     {
-        // A card of an automatic legacy import (Scene::SetLegacyProfile): no plants, and its rays skip EVERY
-        // card - ~0 says so (rt.cpp Occluded) - so only opaque geometry shadows it. The card's plane for the
-        // ray origin, as a plant's.
+        // Any other card - an automatic legacy import's (Scene::SetLegacyProfile: no plants), a forest wall (RBR's
+        // ribbons of 13 m cards round a hillside, too wide for a plant), a single card: its rays skip the cards
+        // within kLegacyCardSkip of their start - ~0 says so (rt.cpp Occluded) - so it never shadows ITSELF, while
+        // cards further off and everything opaque still do. With the vertex normal it had (turned to the camera),
+        // a card the sun lit from behind sent its ray back through its own plane: that stretch of a forest wall
+        // went black to the joint with the next, sun-facing one - a hard lit/dark split down a "tree" (track-42's
+        // first hairpin). The card's plane for the ray origin, as a plant's.
         float3 G = cross(ddy(i.wpos), ddx(i.wpos));
         G = dot(G, G) > 1e-20 ? normalize(G) : float3(0.0, 1.0, 0.0);
         if (dot(G, gCamPos - i.wpos) < 0.0) G = -G;
