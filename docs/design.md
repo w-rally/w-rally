@@ -219,6 +219,14 @@ environment → prepass → sun visibility (RT or cascades) → AO → sky → s
   white.
 - Released models and destroyed instances leave their meshes in ngg-core's dynamic pool until the scene goes.
 - One renderer per process: ngg-core's log sink is global.
+- **The editor's table** (interface 18, 2026-11-07): `editApi` hands a track editor
+  [`renderer_edit.h`](../include/wrally/iface/renderer_edit.h) - ngg-api's editor calls, removed in phase 4, back
+  over the same ngg-core calls: per-object hide and move by object index, the selection highlight, overlay line layers
+  (`FrameDesc::lines` keeps the core's layer 0 to itself), world-space labels, live materials, the light mode, culling
+  and the pixel probe. Its client is Wallaby (decision 11); the game never asks for it. It has its own version,
+  `kRendererEditVer`, so the two tables move separately. CTest `editor-api-41` (`tests/editor_api.cpp`) is
+  ngg-preview's self-test ported to it, and it fails against a stub: planted breaks of the move, the selection and the
+  layer mapping each turn it red.
 
 ### 3.2 New work inside the renderer
 
@@ -850,6 +858,12 @@ Each phase ends with a game you can drive. phys-drive works on day one, and ever
     formats until the game runs end to end. Then collision, surfaces, fences, the drive line, splits and pacenotes
     become `.ngg` chunks, so a W-Rally stage is one file. Physics modules read them through the same VFS. Readers
     still accept the RBR formats, because RBR stages keep using them.
+11. **Wallaby draws through WRenderer** (2026-11-07). Its viewport used plugin-rbr's `ngg-api.dll`, an ngg-core copy
+    that stopped getting fixes when the renderer moved here - so the editor's preview drifted from what W-Rally draws,
+    the two-renderers problem NGG design 8.2 exists to prevent. It now loads `WRenderer.dll` like the game and takes
+    the editor's table (`renderer_edit.h`, §3.1a) from it. That is renderer code, not Wallaby code, so decision 2
+    stands. The cost is Wallaby following `kRendererInterfaceVer`, which it meets by generating its bindings from
+    the header.
 
 ## 11. Open questions
 

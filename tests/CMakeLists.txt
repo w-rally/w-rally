@@ -64,6 +64,20 @@ add_test(NAME renderer-handshake COMMAND module-info ${WRALLY_BIN}/modules/rende
 set_tests_properties(renderer-handshake PROPERTIES PASS_REGULAR_EXPRESSION
     "WRenderer.dll: renderer interface [0-9]+ - compatible")
 
+# The renderer's editor table (renderer_edit.h, Wallaby's viewport) on stage 41's .ngg: hide and move, the selection
+# highlight, overlay lines, labels, materials, added instances, the probe - each built so that a stub fails it. It
+# opens (and never shows) a window of its own. Left out without the .ngg.
+add_executable(editor-api-check editor_api.cpp)
+target_link_libraries(editor-api-check PRIVATE wrally-iface)
+target_compile_definitions(editor-api-check PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN _CRT_SECURE_NO_WARNINGS)
+target_compile_options(editor-api-check PRIVATE /W4 /permissive-)
+if(EXISTS ${WRALLY_TEST_NGG})
+    add_test(NAME editor-api-41 COMMAND editor-api-check ${WRALLY_BIN}/modules/renderer/WRenderer.dll ${WRALLY_TEST_NGG})
+    set_tests_properties(editor-api-41 PROPERTIES PASS_REGULAR_EXPRESSION "editor-api-check: all good" TIMEOUT 300)
+else()
+    message(STATUS "editor-api-41 left out: no ${WRALLY_TEST_NGG}")
+endif()
+
 # A car's part drawn where the physics has it (game/src/assets/car_render.cpp's PartNode): at rest exactly the body,
 # and torn off it does not jump (the world pose of a moment gives the in-car pose's node).
 set(GAME_SRC ${PROJECT_SOURCE_DIR}/game/src)

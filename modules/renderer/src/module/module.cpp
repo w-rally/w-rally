@@ -30,6 +30,7 @@
 #include "sky.h"
 #include "weather.h"
 #include "wrally/iface/renderer.h"
+#include "wrally/iface/renderer_edit.h"
 #include "wrally/png/png.h"
 
 using Microsoft::WRL::ComPtr;
@@ -796,12 +797,230 @@ Status WRALLY_CALL SetLegacyProfile(Renderer* r, int32_t mode)
     return Status::Ok;
 }
 
+// ------------------------------------------------------- the editor's table (renderer_edit.h)
+//
+// ngg-api's editor calls (plugin-rbr ngg/api/ngg_api.cpp), over the same core calls, addressed by the scene's object
+// index as ngg-api's instance handles were. The overlay's layer 0 is FrameDesc::lines', so the editor's layer L is
+// the core's L + 1.
+
+static_assert(sizeof(EditLabel) == sizeof(ngg::core::Scene::Label), "labels are handed over raw");
+static_assert(kEditNoDepth == ngg::core::Scene::kOverlayNoDepth && kEditScreenSpace == ngg::core::Scene::kOverlayScreenSpace &&
+                  kEditTextShadow == ngg::core::Scene::kOverlayTextShadow,
+              "renderer_edit.h's flags and ngg-core's");
+
+bool EditOk(Renderer* r) { return r && r->sceneLoaded; }
+bool ObjectOk(Renderer* r, uint32_t o) { return EditOk(r) && o < r->scene.ObjectCount(); }
+
+uint32_t ToTextureHandle(uint32_t index) { return index == ngg::kNoTexture ? 0u : index + 1u; }
+uint32_t ToTextureIndex(TextureHandle h) { return h ? h - 1u : ngg::kNoTexture; }
+
+uint32_t WRALLY_CALL EditObjectCount(Renderer* r) { return EditOk(r) ? r->scene.ObjectCount() : 0; }
+uint32_t WRALLY_CALL EditVisibleObjectCount(Renderer* r) { return EditOk(r) ? r->scene.VisibleObjectCount() : 0; }
+
+Status WRALLY_CALL EditSetObjectVisible(Renderer* r, uint32_t o, uint32_t visible)
+{
+    if (!ObjectOk(r, o)) return Status::ErrInvalidArg;
+    return r->scene.SetObjectVisible(o, visible != 0) ? Status::Ok : r->Fail(Status::ErrInvalidArg, "setObjectVisible: refused");
+}
+
+Status WRALLY_CALL EditSetObjectTransform(Renderer* r, uint32_t o, const float delta[16])
+{
+    if (!ObjectOk(r, o) || !delta) return Status::ErrInvalidArg;
+    return r->scene.SetObjectTransform(o, delta) ? Status::Ok : r->Fail(Status::ErrInvalidArg, "setObjectTransform: refused");
+}
+
+Status WRALLY_CALL EditObjectBounds(Renderer* r, uint32_t o, float outMin[3], float outMax[3])
+{
+    if (!ObjectOk(r, o) || !outMin || !outMax) return Status::ErrInvalidArg;
+    return r->scene.ObjectBounds(o, outMin, outMax) ? Status::Ok : Status::ErrInvalidArg;
+}
+
+Status WRALLY_CALL EditInstanceObjects(Renderer* r, InstanceHandle h, uint32_t* out, uint32_t capacity, uint32_t* count)
+{
+    if (count) *count = 0;
+    if (!r || !h || h > r->instances.size() || !r->instances[h - 1].alive) return Status::ErrInvalidArg;
+    const std::vector<uint32_t>& objects = r->instances[h - 1].objects;
+    if (count) *count = static_cast<uint32_t>(objects.size());
+    for (uint32_t i = 0; out && i < capacity && i < objects.size(); ++i) out[i] = objects[i];
+    return Status::Ok;
+}
+
+Status WRALLY_CALL EditFocusPoint(Renderer* r, float out[3])
+{
+    if (!EditOk(r) || !out) return Status::ErrInvalidArg;
+    return r->scene.FocusPoint(out) ? Status::Ok : Status::ErrInvalidArg;
+}
+
+Status WRALLY_CALL EditSetSelection(Renderer* r, const uint32_t* objects, uint32_t count)
+{
+    if (!r || (count && (!objects || !r->sceneLoaded))) return Status::ErrInvalidArg;
+    return r->scene.SetSelection(objects, count) ? Status::Ok : r->Fail(Status::ErrInvalidArg, "setSelection: refused");
+}
+
+Status WRALLY_CALL EditSetOverlayLines(Renderer* r, uint32_t layer, const LineVertex* v, uint32_t count, uint32_t flags)
+{
+    if (!r || layer >= kEditOverlayLayers || (count && !v)) return Status::ErrInvalidArg;
+    if (count & 1u) return r->Fail(Status::ErrInvalidArg, "setOverlayLines: an odd vertex count (a segment is a pair)");
+    if (!r->scene.SetOverlayLines(r->dev.device.Get(), layer + 1, reinterpret_cast<const ngg::core::Scene::OverlayVertex*>(v),
+                                  count, flags))
+        return r->Fail(Status::ErrDevice, "setOverlayLines: the layer could not be uploaded");
+    return Status::Ok;
+}
+
+void WRALLY_CALL EditClearOverlays(Renderer* r)
+{
+    if (!r) return;
+    r->scene.ClearOverlays();
+    r->linesSet = false;
+}
+
+Status WRALLY_CALL EditSetFont(Renderer* r, const void* rgba, uint32_t width, uint32_t height, uint32_t columns,
+                               uint32_t rows, uint32_t firstChar)
+{
+    if (!r || !rgba || !width || !height || !columns || !rows) return Status::ErrInvalidArg;
+    if (!r->scene.SetFont(r->dev.device.Get(), r->dev.queue.Get(), rgba, width, height, columns, rows, firstChar))
+        return r->Fail(Status::ErrDevice, "setFont: the atlas could not be uploaded");
+    return Status::Ok;
+}
+
+Status WRALLY_CALL EditSetLabels(Renderer* r, uint32_t layer, const EditLabel* labels, uint32_t count, const char* blob,
+                                 uint32_t blobBytes, float pixelHeight, uint32_t flags)
+{
+    if (!r || layer >= kEditLabelLayers || (count && (!labels || !blob))) return Status::ErrInvalidArg;
+    if (count && !r->scene.HasFont()) return r->Fail(Status::ErrInvalidArg, "setLabels: no font yet (setFont)");
+    if (!r->scene.SetLabels(r->dev.device.Get(), layer, reinterpret_cast<const ngg::core::Scene::Label*>(labels), count,
+                            blob, blobBytes, pixelHeight, flags))
+        return r->Fail(Status::ErrInvalidArg, "setLabels: refused - pixelHeight must be positive, every text inside the blob");
+    return Status::Ok;
+}
+
+Status WRALLY_CALL EditOverlayStatsOf(Renderer* r, EditOverlayStats* out)
+{
+    if (!r || !out) return Status::ErrInvalidArg;
+    out->selectionVisible = r->scene.SelectionPixelsVisible();
+    out->selectionOccluded = r->scene.SelectionPixelsOccluded();
+    out->linesVisible = r->scene.OverlayPixelsVisible();
+    out->linesOccluded = r->scene.OverlayPixelsOccluded();
+    out->labelsVisible = r->scene.LabelPixelsVisible();
+    out->labelsOccluded = r->scene.LabelPixelsOccluded();
+    return Status::Ok;
+}
+
+uint32_t WRALLY_CALL EditMaterialCount(Renderer* r) { return EditOk(r) ? r->scene.MaterialCount() : 0; }
+
+Status WRALLY_CALL EditGetMaterial(Renderer* r, uint32_t h, MaterialDesc* out)
+{
+    ngg::core::Scene::MaterialSlot s;
+    if (!EditOk(r) || !h || !out || !r->scene.GetMaterial(h - 1, &s)) return Status::ErrInvalidArg;
+    *out = {};
+    out->baseColour = ToTextureHandle(s.tex[0]);
+    out->detail = ToTextureHandle(s.tex[1]);
+    out->normal = ToTextureHandle(s.tex[2]);
+    out->orm = ToTextureHandle(s.tex[3]);
+    out->emissive = ToTextureHandle(s.tex[4]);
+    // The format's blend bit is 3 and the interface's 2 (as createModel maps them); what the renderer derives from
+    // the slots stays inside it.
+    out->flags = (s.flags & (ngg::kMaterialAlphaTest | ngg::kMaterialTwoSided)) |
+                 ((s.flags & ngg::kMaterialBlend) ? kMaterialBlend : 0u);
+    for (int k = 0; k < 4; ++k) out->baseColourFactor[k] = s.baseColourFactor[k];
+    out->roughness = s.roughness;
+    out->metallic = s.metallic;
+    out->normalScale = s.normalScale;
+    out->occlusionStrength = s.occlusionStrength;
+    out->emissiveStrength = s.emissiveStrength;
+    out->alphaCutoff = s.alphaCutoff;
+    out->clearCoat = s.clearCoat;
+    return Status::Ok;
+}
+
+Status WRALLY_CALL EditSetMaterial(Renderer* r, uint32_t h, const MaterialDesc* in)
+{
+    ngg::core::Scene::MaterialSlot s;
+    if (!EditOk(r) || !h || !in || !r->scene.GetMaterial(h - 1, &s)) return Status::ErrInvalidArg;
+    s.tex[0] = ToTextureIndex(in->baseColour);
+    s.tex[1] = ToTextureIndex(in->detail);
+    s.tex[2] = ToTextureIndex(in->normal);
+    s.tex[3] = ToTextureIndex(in->orm);
+    s.tex[4] = ToTextureIndex(in->emissive);
+    uint32_t flags = in->flags & (ngg::kMaterialAlphaTest | ngg::kMaterialTwoSided);
+    if (in->flags & kMaterialBlend) flags = (flags & ~ngg::kMaterialAlphaTest) | ngg::kMaterialBlend;   // as createModel
+    s.flags = flags;
+    for (int k = 0; k < 4; ++k) s.baseColourFactor[k] = in->baseColourFactor[k];
+    s.roughness = in->roughness;
+    s.metallic = in->metallic;
+    s.normalScale = in->normalScale;
+    s.occlusionStrength = in->occlusionStrength;
+    s.emissiveStrength = in->emissiveStrength;
+    s.alphaCutoff = in->alphaCutoff;
+    s.clearCoat = in->clearCoat;
+    return r->scene.SetMaterial(r->dev.device.Get(), h - 1, s) ? Status::Ok
+                                                               : r->Fail(Status::ErrDevice, "setMaterial: update failed");
+}
+
+Status WRALLY_CALL EditMaterialName(Renderer* r, uint32_t h, char* buf, uint32_t bytes)
+{
+    if (!EditOk(r) || !h || h > r->scene.MaterialCount() || !buf || !bytes) return Status::ErrInvalidArg;
+    const char* name = r->scene.MaterialName(h - 1);
+    strncpy_s(buf, bytes, name ? name : "", _TRUNCATE);
+    return Status::Ok;
+}
+
+Status WRALLY_CALL EditObjectMaterial(Renderer* r, uint32_t o, uint32_t* out)
+{
+    if (out) *out = 0;
+    uint32_t m = 0;
+    if (!ObjectOk(r, o) || !out || !r->scene.ObjectMaterial(o, &m)) return Status::ErrInvalidArg;
+    *out = m + 1;
+    return Status::Ok;
+}
+
+Status WRALLY_CALL EditSetLightMode(Renderer* r, int32_t mode)
+{
+    if (!r) return Status::ErrInvalidArg;
+    r->scene.SetLightMode(mode);
+    return Status::Ok;
+}
+
+const char* WRALLY_CALL EditLightModeName(int32_t mode) { return ngg::core::Scene::LightModeName(mode); }
+
+Status WRALLY_CALL EditSetCull(Renderer* r, uint32_t on)
+{
+    if (!r) return Status::ErrInvalidArg;
+    r->scene.SetCull(on != 0);
+    return Status::Ok;
+}
+
+Status WRALLY_CALL EditProbePixel(Renderer* r, int32_t x, int32_t y)
+{
+    if (!r || x < 0 || y < 0) return Status::ErrInvalidArg;
+    r->scene.SetProbe(x, y);
+    return Status::Ok;
+}
+
+const RendererEditApi kEditApi = {
+    &EditObjectCount,     &EditVisibleObjectCount, &EditSetObjectVisible, &EditSetObjectTransform, &EditObjectBounds,
+    &EditInstanceObjects, &EditFocusPoint,         &EditSetSelection,     &EditSetOverlayLines,    &EditClearOverlays,
+    &EditSetFont,         &EditSetLabels,          &EditOverlayStatsOf,   &EditMaterialCount,      &EditGetMaterial,
+    &EditSetMaterial,     &EditMaterialName,       &EditObjectMaterial,   &EditSetLightMode,       &EditLightModeName,
+    &EditSetCull,         &EditProbePixel};
+
+Status WRALLY_CALL EditApi(Renderer* r, uint32_t editVer, const RendererEditApi** out)
+{
+    if (out) *out = nullptr;
+    if (!r || !out) return Status::ErrInvalidArg;
+    if (editVer != kRendererEditVer)
+        return r->Fail(Status::ErrVersion, "editApi: this module implements editor table " + std::to_string(kRendererEditVer) +
+                                               ", asked for " + std::to_string(editVer));
+    *out = &kEditApi;
+    return Status::Ok;
+}
+
 const RendererApi kApi = {&Destroy,       &LastError,         &ApplySettings,  &Resize,         &LoadScene,
                           &UnloadScene,   &SceneBounds,       &SceneKeyStats,  &WeatherPresetCount,
                           &WeatherPresetAt, &FindWeatherPreset, &CreateTexture, &CreateTextureRgba,
                           &ReleaseTexture, &CreateModel,      &ReleaseModel,   &CreateInstance, &DestroyInstance,
                           &RenderFrame,   &Present,           &Stats,          &CaptureFrame,   &SetDebugView,
-                          &DebugViewName, &SetLegacyProfile, &UpdateTextureRgba, &CreateTextureData};
+                          &DebugViewName, &SetLegacyProfile, &UpdateTextureRgba, &CreateTextureData, &EditApi};
 
 } // namespace
 

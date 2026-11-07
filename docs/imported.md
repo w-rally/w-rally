@@ -92,6 +92,11 @@ native physics is bit-exact with RBR only under them.
   setup from a loose folder when `physicsCar` is a VFS path ending in '/' (`CarFile`), and from `physics.rbz` as
   before otherwise. A setup can be a VFS file as well as an rbz member. The tyres still come from `physics.rbz`.
 
+- The editor's table (2026-11-07): ngg-api's editor calls, removed in phase 4, come back as
+  `include/wrally/iface/renderer_edit.h`, implemented in `module/module.cpp` over the same core calls `api/ngg_api.cpp`
+  made (design.md 3.1a, decision 11). Not a re-import: written against today's core. ngg-preview's self-test came
+  with it as `tests/editor_api.cpp`.
+
 ## Third-party code
 
 | here | what | from |
