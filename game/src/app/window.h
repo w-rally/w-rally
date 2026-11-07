@@ -28,7 +28,7 @@ public:
     // The whole of its monitor, borderless (the window's place kept), or back to that window. The new size shows at the
     // next Pump, as a resize does.
     void SetFullscreen(bool on);
-    // The client area to a 24-bit .bmp, as shown (PrintWindow with the full content, which reads a flip-model swap
+    // The client area to a .png, as shown (PrintWindow with the full content, which reads a flip-model swap
     // chain too).
     bool Screenshot(const std::string& path) const;
 

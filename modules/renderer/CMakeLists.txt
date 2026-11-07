@@ -46,7 +46,7 @@ set_target_properties(ngg-format PROPERTIES CXX_STANDARD 17)
 
 add_library(WRenderer SHARED src/module/module.cpp src/module/ui.cpp)
 target_include_directories(WRenderer PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
-target_link_libraries(WRenderer PRIVATE ngg-core wrally-iface)
+target_link_libraries(WRenderer PRIVATE ngg-core wrally-iface wrally-png)
 target_compile_definitions(WRenderer PRIVATE _CRT_SECURE_NO_WARNINGS NOMINMAX)
 target_compile_options(WRenderer PRIVATE /W4)
 set_target_properties(WRenderer PROPERTIES CXX_STANDARD 17)

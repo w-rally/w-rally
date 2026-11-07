@@ -28,7 +28,7 @@ add_executable(W-Rally
 target_include_directories(W-Rally PRIVATE src)
 wrally_build_info(W-Rally)   # the version and commit in the screens' corner
 # Media Foundation: the main menu's video loop.
-target_link_libraries(W-Rally PRIVATE wrally-json wrally-vfs phys-data rbr-collision ngg-format wrally-modules wrally-signals imgui mfplat mfreadwrite mfuuid)
+target_link_libraries(W-Rally PRIVATE wrally-json wrally-vfs phys-data rbr-collision ngg-format wrally-modules wrally-signals wrally-png imgui mfplat mfreadwrite mfuuid)
 # Not linked: loaded at run time from bin/modules - but built with the game.
 add_dependencies(W-Rally WPhysicsRBR WAudio WRenderer)
 # Where WRallyFile finds content/ and game/config/ when they are not beside the exe (a build run from its tree).

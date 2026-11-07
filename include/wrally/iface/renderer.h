@@ -394,7 +394,7 @@ struct RendererApi {
 
     // ---- diagnostics
     Status (WRALLY_CALL* stats)(Renderer*, RenderStats* out);
-    Status (WRALLY_CALL* captureFrame)(Renderer*, const char* path);    // the next rendered frame, .bmp
+    Status (WRALLY_CALL* captureFrame)(Renderer*, const char* path);    // the next rendered frame, .png
     Status (WRALLY_CALL* setDebugView)(Renderer*, int32_t mode);         // 0 off
     const char* (WRALLY_CALL* debugViewName)(int32_t mode);              // null past the last
     // How a scene W-Rally's .lbs importer made (its kSceneFlagLegacyImport) lights its alpha-tested cards: 0 as

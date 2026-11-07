@@ -30,6 +30,7 @@
 #include "sky.h"
 #include "weather.h"
 #include "wrally/iface/renderer.h"
+#include "wrally/png/png.h"
 
 using Microsoft::WRL::ComPtr;
 using namespace wrally::iface;
@@ -296,34 +297,21 @@ void WriteCapture(Renderer& r)
     const UINT w = r.captureFoot.Footprint.Width, h = r.captureFoot.Footprint.Height, pitch = r.captureFoot.Footprint.RowPitch;
     const unsigned char* p = nullptr;
     if (FAILED(r.captureBuf->Map(0, nullptr, (void**)&p))) return void(r.Fail(Status::ErrDevice, "capture: readback would not map"));
-    FILE* f = std::fopen(r.capturePath.c_str(), "wb");
-    if (!f) ngg::core::Log("wrenderer: capture: cannot write %s", r.capturePath.c_str());
-    if (f) {
-        // 24-bit, bottom-up, BGR - from the R8G8B8A8 back buffer.
-        const UINT stride = (w * 3 + 3) & ~3u;
-        BITMAPFILEHEADER fh = {};
-        BITMAPINFOHEADER bi = {};
-        fh.bfType = 0x4d42;
-        fh.bfOffBits = sizeof fh + sizeof bi;
-        fh.bfSize = fh.bfOffBits + stride * h;
-        bi.biSize = sizeof bi;
-        bi.biWidth = (LONG)w;
-        bi.biHeight = (LONG)h;
-        bi.biPlanes = 1;
-        bi.biBitCount = 24;
-        std::fwrite(&fh, sizeof fh, 1, f);
-        std::fwrite(&bi, sizeof bi, 1, f);
-        std::vector<unsigned char> row(stride, 0);
+    {
+        // 24-bit BGR, top-down - from the R8G8B8A8 back buffer.
+        const size_t stride = (size_t)w * 3;
+        std::vector<unsigned char> bgr(stride * h);
         for (UINT y = 0; y < h; ++y) {
-            const unsigned char* src = p + (size_t)(h - 1 - y) * pitch;
+            const unsigned char* src = p + (size_t)y * pitch;
+            unsigned char* dst = bgr.data() + y * stride;
             for (UINT x = 0; x < w; ++x) {
-                row[x * 3 + 0] = src[x * 4 + 2];
-                row[x * 3 + 1] = src[x * 4 + 1];
-                row[x * 3 + 2] = src[x * 4 + 0];
+                dst[x * 3 + 0] = src[x * 4 + 2];
+                dst[x * 3 + 1] = src[x * 4 + 1];
+                dst[x * 3 + 2] = src[x * 4 + 0];
             }
-            std::fwrite(row.data(), 1, stride, f);
         }
-        std::fclose(f);
+        if (!wrally::png::WriteBgr(r.capturePath, (int)w, (int)h, bgr.data(), stride))
+            ngg::core::Log("wrenderer: capture: cannot write %s", r.capturePath.c_str());
     }
     D3D12_RANGE none = {0, 0};
     r.captureBuf->Unmap(0, &none);
