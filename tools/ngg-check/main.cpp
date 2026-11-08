@@ -55,6 +55,7 @@ std::string Compare(const ngg::SceneData& a, const ngg::SceneData& b)
     if (a.objectKeys != b.objectKeys) return "the object keys";
     if (!SameVec(a.weather, b.weather)) return "the weather presets";
     if (a.tagNames != b.tagNames || a.plants != b.plants) return "the plants";
+    if (a.variants != b.variants || a.variantMasks != b.variantMasks) return "the stage variants";
     return "";
 }
 
@@ -92,6 +93,10 @@ ngg::SceneData MadeUp()
     s.materials = {ground, leaf, glass};
     s.objects = {{0, 0, 0, 6}, {3, 1, 6, 6}, {2, 2, 0, 3}};
     s.objectKeys = {-1, 42, -1};
+    // A reversed stage in the file too (ngg_format.h: names map-qualified then): the ground in both, the leaf only
+    // in 42_M, the glass only in 45_N.
+    s.variants = {"42_M", "45_N"};
+    s.variantMasks = {3, 1, 2};
     // Two 4x4 DXT1 textures: a header and one block each.
     for (const char* name : {"ground.dds", "leaf.dds"}) {
         std::vector<uint8_t> dds(128 + 8, 0);

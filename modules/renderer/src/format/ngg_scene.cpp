@@ -70,11 +70,17 @@ std::string Write(const SceneData& s, std::vector<uint8_t>& out)
         return "object keys: " + std::to_string(s.objectKeys.size()) + " for " + std::to_string(s.objects.size()) + " objects";
     for (const WeatherRecord& w : s.weather)
         if (!std::memchr(w.name, 0, sizeof w.name)) return "a weather preset's name is not terminated";
+    if (s.variants.size() > kMaxVariants) return "more than 32 stage variants";
+    for (const std::string& name : s.variants)
+        if (name.empty() || name.size() >= sizeof(VariantRecord::name)) return "a stage variant's name is empty or over 15 bytes";
+    if (!s.variantMasks.empty() && s.variantMasks.size() != s.objects.size())
+        return "variant masks: " + std::to_string(s.variantMasks.size()) + " for " + std::to_string(s.objects.size()) + " objects";
 
     std::vector<uint8_t> o;
     const bool spawn = s.hasSpawn;
     const uint32_t chunks = 6 + (spawn ? 1 : 0) + (s.weather.empty() ? 0 : 1) + (s.objectKeys.empty() ? 0 : 1) +
-                            (s.tagNames.empty() ? 0 : 1) + (s.plants.empty() ? 0 : 1);
+                            (s.tagNames.empty() ? 0 : 1) + (s.plants.empty() ? 0 : 1) +
+                            (s.variants.empty() ? 0 : 1) + (s.variantMasks.empty() ? 0 : 1);
     const FileHeader fh{kMagic, kFormatCurrent, chunks, 0};
     Put(o, &fh, sizeof fh);
 
@@ -126,6 +132,23 @@ std::string Write(const SceneData& s, std::vector<uint8_t>& out)
     }
     if (!s.tagNames.empty()) Chunk(o, ChunkTagNames(), s.tagNames);
     if (!s.plants.empty()) Chunk(o, ChunkPlants(), s.plants);
+    if (!s.variants.empty()) {      // (names and count checked above, before anything was written)
+        p.clear();
+        const VariantChunkHeader vh{1, static_cast<uint32_t>(s.variants.size()), sizeof(VariantRecord), 0};
+        Put(p, &vh, sizeof vh);
+        for (const std::string& name : s.variants) {
+            VariantRecord r{};
+            std::memcpy(r.name, name.data(), name.size());
+            Put(p, &r, sizeof r);
+        }
+        Chunk(o, ChunkVariants(), p);
+    }
+    if (!s.variantMasks.empty()) {
+        p.clear();
+        PutU32(p, static_cast<uint32_t>(s.variantMasks.size()));
+        Put(p, s.variantMasks.data(), s.variantMasks.size() * 4);
+        Chunk(o, ChunkVariantMasks(), p);
+    }
     out.swap(o);
     return "";
 }
@@ -211,6 +234,24 @@ std::string Read(const void* bytes, size_t n, SceneData& out)
             out.tagNames.assign(d, d + size);
         } else if (f == ChunkPlants()) {
             out.plants.assign(d, d + size);
+        } else if (f == ChunkVariants()) {
+            VariantChunkHeader vh{};
+            if (size < sizeof vh) return "NGGR is truncated";
+            std::memcpy(&vh, d, sizeof vh);
+            if (vh.version != 1 || vh.recordSize < sizeof(VariantRecord) || vh.count > kMaxVariants ||
+                sizeof vh + uint64_t(vh.count) * vh.recordSize > size)
+                return "NGGR is not version 1 or is truncated";
+            for (uint32_t k = 0; k < vh.count; ++k) {
+                VariantRecord r{};
+                std::memcpy(&r, d + sizeof vh + size_t(k) * vh.recordSize, sizeof r);
+                r.name[sizeof r.name - 1] = 0;
+                out.variants.push_back(r.name);
+            }
+        } else if (f == ChunkVariantMasks()) {
+            uint32_t count = 0;
+            if (size < 4 || (std::memcpy(&count, d, 4), 4 + uint64_t(count) * 4 > size)) return "NGGQ is truncated";
+            out.variantMasks.resize(count);
+            if (count) std::memcpy(out.variantMasks.data(), d + 4, size_t(count) * 4);
         }
         // (an unknown chunk is skipped: that is what keeps the format open)
     }
@@ -221,6 +262,7 @@ std::string Read(const void* bytes, size_t n, SceneData& out)
     out.flags = h.flags;
     out.bakedScale = h.bakedScale;
     if (!out.objectKeys.empty() && out.objectKeys.size() != out.objects.size()) return "NGGK is not one key per object";
+    if (!out.variantMasks.empty() && out.variantMasks.size() != out.objects.size()) return "NGGQ is not one mask per object";
     return "";
 }
 

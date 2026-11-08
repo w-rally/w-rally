@@ -3830,6 +3830,8 @@ void Scene::OnResize(ID3D12Device* dev, UINT width, UINT height)
 void Scene::ResetScene()
 {
     m_objects.clear();
+    m_variant.clear();
+    m_variantNames.clear();
     m_materials.clear();
     m_textures.clear();
     m_textureNames.clear();
@@ -3859,6 +3861,89 @@ bool Scene::Load(ID3D12Device* dev, ID3D12CommandQueue* queue, const wchar_t* pa
     }
     Log("scene: loading %ls (%zu bytes)", path, blob.size());
     return LoadFromMemory(dev, queue, blob.data(), blob.size(), rtvFormat, width, height);
+}
+
+// The stage variants (NGGR, NGGQ; ngg_format.h): which of the file's objects the requested variant has. The others
+// are marked removed rather than dropped, so object indices - which NGGK, NGGP and the editor's handles all are - stay
+// the file's. Done right after the objects are made: culling bounds, plants and the ray tracer all read `removed`.
+void Scene::ApplyVariant(const uint8_t* variants, size_t variantBytes, const uint8_t* masks, size_t maskBytes)
+{
+    if (!variants) return;
+    VariantChunkHeader h = {};
+    if (variantBytes < sizeof(h)) { Log("scene: NGGR truncated - every object drawn"); return; }
+    memcpy(&h, variants, sizeof(h));
+    if (h.version != 1 || h.recordSize < sizeof(VariantRecord) || h.count == 0 || h.count > kMaxVariants ||
+        variantBytes < sizeof(h) + (size_t)h.count * h.recordSize)
+    {
+        Log("scene: NGGR version %u, %u variant(s) of %u bytes in %zu - not understood, every object drawn",
+            h.version, h.count, h.recordSize, variantBytes);
+        return;
+    }
+    for (uint32_t v = 0; v < h.count; ++v)
+    {
+        VariantRecord r = {};
+        memcpy(&r, variants + sizeof(h) + (size_t)v * h.recordSize, sizeof(r));
+        r.name[sizeof(r.name) - 1] = 0;
+        m_variantNames.push_back(r.name);
+    }
+
+    // The request: a stage name ("track-45_N"), the name without "track-" ("45_N"), or RBR's letter ("N"). Names are
+    // letters for one map's variants and map-qualified ("42_M", "45_N") when a file also holds a REVERSED stage (Joux
+    // Verte 42 is 45 driven the other way), so the full name is tried first, and a bare letter only picks a variant
+    // when exactly one name ends in it.
+    auto strip = [](std::string s) {
+        if (s.size() > 6 && _strnicmp(s.c_str(), "track-", 6) == 0) s = s.substr(6);
+        return s;
+    };
+    const std::string want = strip(m_variantRequest);
+    const size_t us = want.rfind('_');
+    const std::string letter = us == std::string::npos ? want : want.substr(us + 1);
+    int chosen = -1;
+    for (uint32_t v = 0; v < h.count && chosen < 0 && !want.empty(); ++v)
+        if (_stricmp(strip(m_variantNames[v]).c_str(), want.c_str()) == 0) chosen = (int)v;
+    if (chosen < 0 && !letter.empty())
+    {
+        auto lastPart = [](const std::string& nm) {
+            const size_t u = nm.rfind('_');
+            return u == std::string::npos ? nm : nm.substr(u + 1);
+        };
+        int hit = -1, hits = 0;
+        for (uint32_t v = 0; v < h.count; ++v)
+            if (_stricmp(lastPart(m_variantNames[v]).c_str(), letter.c_str()) == 0) { hit = (int)v; ++hits; }
+        if (hits == 1) chosen = hit;     // two would be ambiguous: "N" in a file holding 42_N and 45_N
+    }
+    const bool found = want.empty() || chosen >= 0;
+    if (chosen < 0) chosen = 0;
+    m_variant = m_variantNames[chosen];
+
+    std::string all;
+    for (const std::string& n : m_variantNames) all += (all.empty() ? "" : ", ") + n;
+    if (!found)
+        Log("scene: variant [%s] is not in this file (%s) - drawing the main one, %s", m_variantRequest.c_str(),
+            all.c_str(), m_variant.c_str());
+
+    uint32_t n = 0;
+    if (masks && maskBytes >= 4) memcpy(&n, masks, 4);
+    if (!masks || n != m_objects.size() || maskBytes < 4 + (size_t)n * 4)
+    {
+        if (masks) Log("scene: NGGQ has %u mask(s) for %zu object(s) - ignored, every object drawn", n, m_objects.size());
+        Log("scene: variant %s of %u (%s), every object", m_variant.c_str(), h.count, all.c_str());
+        return;
+    }
+    const uint32_t bit = 1u << chosen;
+    size_t dropped = 0, droppedTris = 0;
+    for (uint32_t i = 0; i < n; ++i)
+    {
+        uint32_t m;
+        memcpy(&m, masks + 4 + (size_t)i * 4, 4);
+        if (m & bit) continue;
+        m_objects[i].removed = true;
+        m_objects[i].visible = false;
+        ++dropped;
+        droppedTris += m_objects[i].indexCount / 3;
+    }
+    Log("scene: variant %s of %u (%s): %zu of %zu object(s) drawn, %zu (%zu triangles) belong to other variants",
+        m_variant.c_str(), h.count, all.c_str(), m_objects.size() - dropped, m_objects.size(), dropped, droppedTris);
 }
 
 bool Scene::LoadFromMemory(ID3D12Device* dev, ID3D12CommandQueue* queue,
@@ -3900,6 +3985,8 @@ bool Scene::LoadFromMemory(ID3D12Device* dev, ID3D12CommandQueue* queue,
     const uint8_t* keys = nullptr;    size_t keyBytes = 0;
     const uint8_t* tagNames = nullptr; size_t tagNameBytes = 0;
     const uint8_t* plants = nullptr;  size_t plantBytes = 0;
+    const uint8_t* variants = nullptr; size_t variantBytes = 0;
+    const uint8_t* masks = nullptr;    size_t maskBytes = 0;
 
     size_t off = sizeof(FileHeader);
     for (uint32_t i = 0; i < fh->chunkCount; ++i)
@@ -3930,6 +4017,10 @@ bool Scene::LoadFromMemory(ID3D12Device* dev, ID3D12CommandQueue* queue,
         { tagNames = payload; tagNameBytes = ch->byteSize; }
         else if (ch->fourcc == ChunkPlants())
         { plants = payload; plantBytes = ch->byteSize; }
+        else if (ch->fourcc == ChunkVariants())
+        { variants = payload; variantBytes = ch->byteSize; }
+        else if (ch->fourcc == ChunkVariantMasks())
+        { masks = payload; maskBytes = ch->byteSize; }
         // Unknown chunks are skipped on purpose - that is what makes the format
         // forward-compatible.
 
@@ -4052,6 +4143,8 @@ bool Scene::LoadFromMemory(ID3D12Device* dev, ID3D12CommandQueue* queue,
             m_objects.push_back(d);
         }
     }
+
+    ApplyVariant(variants, variantBytes, masks, maskBytes);
 
     // Per-object AABBs, for frustum and cascade culling. One pass over the
     // index buffer at load; without it every cascade redraws the entire stage.
@@ -5215,6 +5308,9 @@ bool Scene::SetObjectVisible(uint32_t index, bool visible)
 {
     ++m_geomRevision;   // the RT structure follows this (Renderer::KeepRtCurrent)
     if (index >= m_objects.size()) return false;
+    // A removed object stays removed - a runtime delete, or an object of another stage variant (ApplyVariant). Showing
+    // one would put a variant's object in a stage that does not have it, with nothing to say why.
+    if (visible && m_objects[index].removed) return false;
     m_objects[index].visible = visible;
     return true;
 }

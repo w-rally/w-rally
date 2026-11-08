@@ -355,6 +355,16 @@ public:
     int32_t ObjectKey(uint32_t index) const { return index < m_objectKeys.size() ? m_objectKeys[index] : -1; }
     uint32_t VisibleObjectCount() const;
 
+    // --- stage variants (NGGR/NGGQ, ngg_format.h) -----------------------------
+    // Which variant the NEXT load draws: RBR's letter ("M", "O"), or a stage name ending in it ("track-41_M"); null
+    // or empty for the file's main one. A file with variants then draws only that variant's objects - the others
+    // are loaded and marked removed, so object indices, keys and plants stay the file's. A file without variants
+    // ignores it.
+    void SetVariant(const char* variant) { m_variantRequest = variant ? variant : ""; }
+    // What the last load drew: the variant's name, empty for a file without variants.
+    const std::string& Variant() const { return m_variant; }
+    const std::vector<std::string>& VariantNames() const { return m_variantNames; }
+
     // --- editor: selection highlight (design 8.2, tier 1) -------------------
     //
     // The renderer draws this, not the host, for one reason: the depth buffer
@@ -766,7 +776,11 @@ private:
     // Clears all per-stage state. Called at the top of Load, because loading a
     // second track must replace the first rather than accumulate onto it.
     void ResetScene();
+    void ApplyVariant(const uint8_t* variants, size_t variantBytes, const uint8_t* masks, size_t maskBytes);
     std::vector<int32_t> m_objectKeys;   // NGGK, parallel to the file's objects
+    std::string              m_variantRequest;   // SetVariant: applies at the next load
+    std::string              m_variant;          // what the last load drew
+    std::vector<std::string> m_variantNames;     // NGGR, the main one first
 
     // The CPU copy is the source of truth for the dynamic pool: growth,
     // compaction and bounds all read it, and an UPLOAD heap is write-combined

@@ -268,6 +268,40 @@ inline uint32_t ChunkSpawn()       { return FourCC('N','G','G','S'); }
 // OPTIONAL: without it nothing is linked.
 inline uint32_t ChunkObjectKeys()  { return FourCC('N','G','G','K'); }
 
+// STAGE VARIANTS (design 3.4b) - one file for a map whose stage RBR ships as several .lbs (_M, _N, _E, _O).
+// Measured over 57 variant pairs: the drawn terrain is the same triangles and the objects mostly match, so the
+// geometry is stored once and a variant is only WHICH OBJECTS it has. What else RBR varied is not carried: its
+// baked vertex colour (W-Rally lights dynamically; only light mode 0 reads it) and its darkened overcast/wet
+// textures (weather and wetness are dynamic) - both come from the MAIN variant, the first record.
+//
+// 'NGGR' - VariantChunkHeader, then `count` VariantRecord of `recordSize` bytes. The first is the main variant.
+// 'NGGQ' - parallel to NGGO: uint32 count, then uint32 mask[count]; bit v set = the object is in variant v.
+// Both OPTIONAL: without NGGR the file is one variant; without NGGQ every object is in every variant. At most 32
+// variants. A loader asked for a variant draws the objects whose bit is set and treats the rest as removed
+// (Scene::SetVariant); asked for none, or for one the file lacks, it draws the main variant and says so.
+struct VariantChunkHeader
+{
+    uint32_t version;       // 1
+    uint32_t count;
+    uint32_t recordSize;    // sizeof(VariantRecord); larger records keep their prefix
+    uint32_t reserved;
+};
+struct VariantRecord
+{
+    char     name[16];      // RBR's letter ("M", "O") for one map's variants; map-qualified ("42_M", "45_N") when the
+                            // file also holds a reversed stage of another map number. NUL-terminated, unique ignoring
+                            // case. A loader matches the game's stage name first ("track-45_N"), a bare letter only
+                            // when one name alone ends in it.
+    uint32_t flags;         // 0
+    uint32_t reserved[3];
+};
+static_assert(sizeof(VariantChunkHeader) == 16, "VariantChunkHeader layout - keep Wallaby's NggWriter in step");
+static_assert(sizeof(VariantRecord) == 32,      "VariantRecord layout - keep Wallaby's NggWriter in step");
+constexpr uint32_t kMaxVariants = 32;
+
+inline uint32_t ChunkVariants()     { return FourCC('N','G','G','R'); }
+inline uint32_t ChunkVariantMasks() { return FourCC('N','G','G','Q'); }
+
 // PLANTS - the trees, bushes and grass of the alpha-tested geometry, and what each is.
 // Written by Wallaby (Plants.cs). OPTIONAL: without them the renderer finds plants
 // itself (Scene::FindPlants), which a human cannot correct.

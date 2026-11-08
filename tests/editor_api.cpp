@@ -237,6 +237,114 @@ std::vector<uint8_t> Atlas(uint32_t& size, uint32_t& columns, uint32_t& rows)
     return rgba;
 }
 
+// ---- stage variants (NGGR/NGGQ): the stage's bytes with the two chunks appended, so the test needs no writer
+
+void PutU32(std::vector<char>& b, uint32_t v) { b.insert(b.end(), reinterpret_cast<char*>(&v), reinterpret_cast<char*>(&v) + 4); }
+
+std::vector<char> WithVariants(const std::vector<char>& ngg, const std::vector<const char*>& names,
+                               const std::vector<uint32_t>& masks)
+{
+    std::vector<char> b = ngg;
+    while (b.size() % 4) b.push_back(0);
+    PutU32(b, 'N' | 'G' << 8 | 'G' << 16 | uint32_t('R') << 24);
+    PutU32(b, uint32_t(16 + 32 * names.size()));
+    PutU32(b, 1), PutU32(b, uint32_t(names.size())), PutU32(b, 32), PutU32(b, 0);
+    for (const char* n : names) {
+        char rec[32] = {};
+        std::memcpy(rec, n, std::strlen(n));
+        b.insert(b.end(), rec, rec + 32);
+    }
+    PutU32(b, 'N' | 'G' << 8 | 'G' << 16 | uint32_t('Q') << 24);
+    PutU32(b, uint32_t(4 + 4 * masks.size()));
+    PutU32(b, uint32_t(masks.size()));
+    for (uint32_t m : masks) PutU32(b, m);
+    uint32_t chunks = 0;
+    std::memcpy(&chunks, b.data() + 8, 4);
+    chunks += 2;
+    std::memcpy(b.data() + 8, &chunks, 4);
+    return b;
+}
+
+// One file, two variants: every third object only in M, every third only in O, the rest in both. Each check asks the
+// renderer, and each can fail: a loader that ignored the masks would draw every object in both; one that ignored the
+// request would draw M twice.
+void CheckVariants(Rig& rig, const std::vector<char>& ngg)
+{
+    const RendererApi& api = *rig.api;
+    const RendererEditApi& edit = *rig.edit;
+    SceneHandle s = 0;
+    if (api.loadScene(rig.r, ngg.data(), ngg.size(), &s) != Status::Ok) return Check(false, "variants: the stage reloads");
+    const uint32_t n = edit.objectCount(rig.r);
+    std::vector<uint32_t> masks(n);
+    uint32_t inM = 0, inO = 0, onlyO = 0;
+    for (uint32_t i = 0; i < n; ++i) {
+        masks[i] = i % 3 == 1 ? 2u : i % 3 == 2 ? 1u : 3u;
+        inM += masks[i] & 1, inO += (masks[i] >> 1) & 1;
+        if (masks[i] == 2 && !onlyO) onlyO = i;
+    }
+    const std::vector<char> two = WithVariants(ngg, {"M", "O"}, masks);
+
+    auto load = [&](const char* variant) -> uint32_t {
+        TakeLog();
+        if (api.loadSceneVariant(rig.r, two.data(), two.size(), variant, &s) != Status::Ok) return ~0u;
+        return edit.visibleObjectCount(rig.r);
+    };
+
+    uint32_t got = load("M");
+    std::string log = TakeLog();
+    Check(got == inM, "variants: M draws M's objects", "%u of %u (M has %u)", got, n, inM);
+    Check(log.find("variant M of 2 (M, O)") != std::string::npos, "variants: and the log names it",
+          "%s", log.find("variant M") != std::string::npos ? "" : "no variant line");
+    Check(edit.objectCount(rig.r) == n, "variants: object indices stay the file's", "%u objects", edit.objectCount(rig.r));
+    Check(edit.setObjectVisible(rig.r, onlyO, 1) != Status::Ok && edit.visibleObjectCount(rig.r) == inM,
+          "variants: another variant's object cannot be shown", "object %u", onlyO);
+    Check(rig.Render(), "variants: M renders");
+
+    got = load("track-41_O");
+    Check(got == inO, "variants: a stage name picks its variant (track-41_O)", "%u (O has %u)", got, inO);
+    edit.setObjectVisible(rig.r, onlyO, 0);
+    const uint32_t hid = edit.visibleObjectCount(rig.r);
+    edit.setObjectVisible(rig.r, onlyO, 1);
+    Check(hid == inO - 1 && edit.visibleObjectCount(rig.r) == inO, "variants: O's own object is drawn in O",
+          "object %u: %u hidden, %u shown", onlyO, hid, edit.visibleObjectCount(rig.r));
+    Check(rig.Render(), "variants: O renders");
+
+    got = load(nullptr);
+    Check(got == inM, "variants: none asked for draws the main one", "%u", got);
+    got = load("x");
+    log = TakeLog();
+    Check(got == inM && log.find("not in this file") != std::string::npos, "variants: an unknown one draws the main one, and says so",
+          "%u", got);
+    TakeLog();
+    api.loadScene(rig.r, two.data(), two.size(), &s);
+    Check(edit.visibleObjectCount(rig.r) == inM, "variants: loadScene draws a variant file's main one", "%u",
+          edit.visibleObjectCount(rig.r));
+
+    // A reversed stage in the same file (Joux Verte 42 is 45 driven the other way): names are map-qualified, the
+    // game's full stage name picks one, and a bare letter both end in picks neither.
+    const std::vector<char> rev = WithVariants(ngg, {"41_M", "45_M"}, masks);
+    TakeLog();
+    api.loadSceneVariant(rig.r, rev.data(), rev.size(), "track-45_M", &s);
+    log = TakeLog();
+    Check(edit.visibleObjectCount(rig.r) == inO && log.find("variant 45_M") != std::string::npos,
+          "variants: a reversed stage's full name picks it (track-45_M)", "%u", edit.visibleObjectCount(rig.r));
+    api.loadSceneVariant(rig.r, rev.data(), rev.size(), "M", &s);
+    log = TakeLog();
+    Check(edit.visibleObjectCount(rig.r) == inM && log.find("not in this file") != std::string::npos,
+          "variants: an ambiguous letter draws the main one, and says so", "%u", edit.visibleObjectCount(rig.r));
+
+    // A file without variants ignores the request; masks that do not fit the objects are ignored, not half-applied.
+    api.loadSceneVariant(rig.r, ngg.data(), ngg.size(), "O", &s);
+    Check(edit.visibleObjectCount(rig.r) == n, "variants: a file without them draws everything", "%u", edit.visibleObjectCount(rig.r));
+    std::vector<uint32_t> shortMasks(masks.begin(), masks.end() - 1);
+    const std::vector<char> bad = WithVariants(ngg, {"M", "O"}, shortMasks);
+    TakeLog();
+    api.loadSceneVariant(rig.r, bad.data(), bad.size(), "O", &s);
+    log = TakeLog();
+    Check(edit.visibleObjectCount(rig.r) == n && log.find("ignored") != std::string::npos,
+          "variants: masks for the wrong object count are ignored", "%u", edit.visibleObjectCount(rig.r));
+}
+
 } // namespace
 
 int main(int argc, char** argv)
@@ -655,6 +763,8 @@ int main(int argc, char** argv)
         api.destroyInstance(rig.r, inst);
         Check(edit->instanceObjects(rig.r, inst, objs, 4, &cnt) == Status::ErrInvalidArg, "a destroyed instance has none");
     }
+
+    CheckVariants(rig, ngg);
 
     // ---- switches
     Check(edit->lightModeName(0) && edit->lightModeName(1) && !edit->lightModeName(2), "light modes are named, then null",

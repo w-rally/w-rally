@@ -369,6 +369,15 @@ Status WRALLY_CALL LoadScene(Renderer* r, const void* bytes, uint64_t count, Sce
     return Status::Ok;
 }
 
+Status WRALLY_CALL LoadSceneVariant(Renderer* r, const void* bytes, uint64_t count, const char* variant, SceneHandle* out)
+{
+    if (!r) return Status::ErrInvalidArg;
+    r->scene.SetVariant(variant);
+    const Status s = LoadScene(r, bytes, count, out);
+    r->scene.SetVariant(nullptr);      // a later loadScene draws a file's main variant, as it always did
+    return s;
+}
+
 void WRALLY_CALL UnloadScene(Renderer* r, SceneHandle s)
 {
     if (r && s == 1) ForgetScene(*r);   // (the core keeps the geometry until the next load: nothing draws it)
@@ -1020,7 +1029,8 @@ const RendererApi kApi = {&Destroy,       &LastError,         &ApplySettings,  &
                           &WeatherPresetAt, &FindWeatherPreset, &CreateTexture, &CreateTextureRgba,
                           &ReleaseTexture, &CreateModel,      &ReleaseModel,   &CreateInstance, &DestroyInstance,
                           &RenderFrame,   &Present,           &Stats,          &CaptureFrame,   &SetDebugView,
-                          &DebugViewName, &SetLegacyProfile, &UpdateTextureRgba, &CreateTextureData, &EditApi};
+                          &DebugViewName, &SetLegacyProfile, &UpdateTextureRgba, &CreateTextureData, &EditApi,
+                          &LoadSceneVariant};
 
 } // namespace
 

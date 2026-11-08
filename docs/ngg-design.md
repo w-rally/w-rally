@@ -1308,6 +1308,32 @@ NGGR  variants    [id, name, layer set, override list (add|remove|replace object
 
 A reader that knows none of them still renders the shared pool, which keeps v0 files valid.
 
+**DONE (2026-11-08), smaller than sketched, because the measurement said so.** Over 57 RBR variant pairs (Wallaby,
+`<RBR>\Maps`): the DRAWN terrain is the same triangles (0 of 86,510 differ on track-42; 0.45% on 108) -- compared
+per sub-mesh it looks different only because variants split the same ground across RBR's per-format sub-meshes
+differently; the objects mostly match (exactly on 42; 112 plants and 8 placements on 108); the baked vertex colour
+differs almost everywhere; and of the textures that differ under one name, 108 of 230 are the `_O` copy darkened
+(down to 0.68x), 17 lighter, the rest re-encodes. Track-99's `_M` and `_O` share no terrain at all. Two of the
+three things a variant varied are therefore things W-Rally now does LIVE -- the baked light (only light mode 0, the
+A/B reference, reads it) and the darkened overcast/wet textures (weather and `SetWetness`) -- so a variant is only
+WHICH OBJECTS it has:
+
+```
+NGGR  variants      VariantChunkHeader {1, count, 32, 0}, then VariantRecord {char name[16]; flags; reserved[3]}
+                    the first is the MAIN variant: its vertex colours and textures are the file's
+NGGQ  object masks  uint32 count (= objects), uint32 mask[count]; bit v = in variant v (at most 32)
+```
+
+No NGGL (the object's layerId already is one) and no per-variant colour or texture set. Names are RBR's letters
+("M", "O") for one map's stages and map-qualified ("42_M", "45_N") when the file also holds a REVERSED stage of
+another map number -- Joux Verte 42 is 45 driven the other way, and one file for both is the aim. `loadSceneVariant`
+(renderer interface 19) takes the game's stage name; the loader matches the full name first and a bare letter only
+when one variant alone ends in it, else draws the main one and logs it. Objects outside the variant are loaded and
+marked REMOVED, not dropped, so object indices -- which NGGK, NGGP and the editor's handles all are -- stay the file's;
+`SetObjectVisible` can no longer show a removed object (a physics-keyed prop of another variant stays out). Checked in
+`editor-api-41` (each variant's count, a stage name, a reversed stage, an ambiguous letter, a file without variants,
+masks of the wrong length) and `ngg-roundtrip` (both chunks through `ngg_scene`).
+
 ### 3.5 Format sketch
 
 Chunked, GPU-ready, little-endian, memory-mappable, every chunk independently skippable so a version bump never

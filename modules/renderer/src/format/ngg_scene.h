@@ -37,6 +37,8 @@ struct SceneData {
     std::vector<int32_t> objectKeys;     // parallel to objects; empty: no NGGK
     std::vector<WeatherRecord> weather;  // the first the default; empty: no NGGW
     std::vector<uint8_t> tagNames, plants;   // NGGG, NGGP payloads as they are (empty: none)
+    std::vector<std::string> variants;       // NGGR: the stage variants, the main one first; empty: none
+    std::vector<uint32_t> variantMasks;      // NGGQ, parallel to objects; empty: every object in every variant
 };
 
 // The scene as .ngg bytes. Returns "" or what is inconsistent (an index past the vertices, an object past the

@@ -51,7 +51,8 @@ namespace wrally::iface {
 // 17: createTextureData (a DDS read as data, not colour: normal and ORM maps); MaterialDesc::orm's alpha is the
 //     clear coat's mask.
 // 18: editApi (the editor's table, renderer_edit.h - versioned on its own from here on).
-constexpr uint32_t kRendererInterfaceVer = 18;
+// 19: loadSceneVariant (a .ngg holding several of a stage's variants, NGGR/NGGQ, draws the one asked for).
+constexpr uint32_t kRendererInterfaceVer = 19;
 
 struct Renderer;                     // the module's instance, opaque
 struct RendererEditApi;              // renderer_edit.h
@@ -415,6 +416,14 @@ struct RendererApi {
     // The editor's table (renderer_edit.h) at `editVer` (kRendererEditVer), for this renderer: ErrVersion when the
     // module implements another. A game never needs it.
     Status (WRALLY_CALL* editApi)(Renderer*, uint32_t editVer, const RendererEditApi** out);
+
+    // loadScene, drawing one of the file's stage variants (ngg_format.h, NGGR/NGGQ: one .ngg for a map whose stage RBR
+    // ships as _M/_N/_E/_O, and reversed stages of other map numbers). `variant`: the stage's name ("track-41_M"), or
+    // RBR's letter ("M") when only one of the file's variants ends in it; null or empty for the file's main variant. A file without variants loads as loadScene; one that lacks the variant
+    // asked for draws its main one and says so in the log. The variant's absent objects are not drawn, cast nothing
+    // and are not traced; object indices and keys stay the file's.
+    Status (WRALLY_CALL* loadSceneVariant)(Renderer*, const void* ngg, uint64_t bytes, const char* variant,
+                                           SceneHandle* out);
 };
 
 struct RendererInput {
