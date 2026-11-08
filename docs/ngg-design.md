@@ -1334,6 +1334,15 @@ marked REMOVED, not dropped, so object indices -- which NGGK, NGGP and the edito
 `editor-api-41` (each variant's count, a stage name, a reversed stage, an ambiguous letter, a file without variants,
 masks of the wrong length) and `ngg-roundtrip` (both chunks through `ngg_scene`).
 
+**Then (same day): each variant's own car start, and a variant at ANOTHER ORIGIN.** `VariantRecord` grew to 68 bytes
+(32-byte records still read, as the prefix): `spawnPosition`/`spawnFacing` (a reversed stage starts where the other
+ends; NGGS stays the main one's) and `offset`. Measured over RBR's own reversed pairs (Wallaby CLAUDE.md has the table):
+23 of 25 merge, and two of them are the same terrain built elsewhere -- 55 is 51 moved by (-1193, +665, +1793) m, 66 is
+63 moved by (-51, 0, +3350) -- with physics, cameras and start in their own frame. The file stores every object in the
+main variant's frame and the loader moves a copy of the vertices, the bounds and the plant boxes by the drawn variant's
+offset before anything reads them. `editor-api-41` checks an object moves by exactly the offset; Wallaby's
+`WRendererCheck` does it on the real 51/55 file.
+
 ### 3.5 Format sketch
 
 Chunked, GPU-ready, little-endian, memory-mappable, every chunk independently skippable so a version bump never
