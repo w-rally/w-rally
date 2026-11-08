@@ -781,6 +781,7 @@ private:
     std::string              m_variantRequest;   // SetVariant: applies at the next load
     std::string              m_variant;          // what the last load drew
     std::vector<std::string> m_variantNames;     // NGGR, the main one first
+    float                    m_variantOffset[3] = {0, 0, 0};   // the drawn variant's world, relative to the file's
 
     // The CPU copy is the source of truth for the dynamic pool: growth,
     // compaction and bounds all read it, and an UPLOAD heap is write-combined

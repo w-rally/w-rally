@@ -3868,6 +3868,7 @@ bool Scene::Load(ID3D12Device* dev, ID3D12CommandQueue* queue, const wchar_t* pa
 // the file's. Done right after the objects are made: culling bounds, plants and the ray tracer all read `removed`.
 void Scene::ApplyVariant(const uint8_t* variants, size_t variantBytes, const uint8_t* masks, size_t maskBytes)
 {
+    m_variantOffset[0] = m_variantOffset[1] = m_variantOffset[2] = 0.0f;
     if (!variants) return;
     VariantChunkHeader h = {};
     if (variantBytes < sizeof(h)) { Log("scene: NGGR truncated - every object drawn"); return; }
@@ -3915,6 +3916,15 @@ void Scene::ApplyVariant(const uint8_t* variants, size_t variantBytes, const uin
     const bool found = want.empty() || chosen >= 0;
     if (chosen < 0) chosen = 0;
     m_variant = m_variantNames[chosen];
+    {
+        VariantRecord r = {};
+        memcpy(&r, variants + sizeof(h) + (size_t)chosen * h.recordSize, (std::min)((size_t)h.recordSize, sizeof(r)));
+        if (h.recordSize >= sizeof(r))
+            for (int k = 0; k < 3; ++k) m_variantOffset[k] = std::isfinite(r.offset[k]) ? r.offset[k] : 0.0f;
+        if (m_variantOffset[0] != 0.0f || m_variantOffset[1] != 0.0f || m_variantOffset[2] != 0.0f)
+            Log("scene: variant %s is the file's world moved by (%.3f, %.3f, %.3f) m", m_variant.c_str(),
+                m_variantOffset[0], m_variantOffset[1], m_variantOffset[2]);
+    }
 
     std::string all;
     for (const std::string& n : m_variantNames) all += (all.empty() ? "" : ", ") + n;
@@ -4146,6 +4156,18 @@ bool Scene::LoadFromMemory(ID3D12Device* dev, ID3D12CommandQueue* queue,
 
     ApplyVariant(variants, variantBytes, masks, maskBytes);
 
+    // A variant in another frame (VariantRecord::offset): its world is the file's moved, so everything below reads
+    // moved vertices - the boxes, the plants, the ray tracer's meshes and the upload all start from this copy.
+    std::vector<Vertex> movedVerts;
+    const bool moved = m_variantOffset[0] != 0.0f || m_variantOffset[1] != 0.0f || m_variantOffset[2] != 0.0f;
+    if (moved && verts && sh->vertexCount)
+    {
+        movedVerts.assign(reinterpret_cast<const Vertex*>(verts), reinterpret_cast<const Vertex*>(verts) + sh->vertexCount);
+        for (Vertex& v : movedVerts)
+            for (int k = 0; k < 3; ++k) v.pos[k] += m_variantOffset[k];
+        verts = reinterpret_cast<const uint8_t*>(movedVerts.data());
+    }
+
     // Per-object AABBs, for frustum and cascade culling. One pass over the
     // index buffer at load; without it every cascade redraws the entire stage.
     if (idx && sh->indexCount)
@@ -4193,6 +4215,9 @@ bool Scene::LoadFromMemory(ID3D12Device* dev, ID3D12CommandQueue* queue,
         !ReadPlants(tagNames, tagNameBytes, plants, plantBytes, sh->indexCount, (sh->flags & kSceneFlagLegacyImport) != 0) &&
         !(sh->flags & kSceneFlagLegacyImport))
         FindPlants(reinterpret_cast<const Vertex*>(verts), sh->vertexCount, idx, sh->indexCount);
+    else if (moved)
+        for (Plant& p : m_plants)      // the file's plant boxes are in its own frame; FindPlants' come from moved vertices
+            for (int k = 0; k < 3; ++k) p.bmin[k] += m_variantOffset[k], p.bmax[k] += m_variantOffset[k];
     // A solid is never a plant, whatever a plant table says (an older import's put RBR's walls in its plants).
     for (const DrawItem& o : m_objects)
         if (o.measuredSolid)
@@ -4230,7 +4255,11 @@ bool Scene::LoadFromMemory(ID3D12Device* dev, ID3D12CommandQueue* queue,
     m_anchorToCamera = (sh->flags & kSceneFlagAnchorToCamera) != 0;
     m_legacyImport = (sh->flags & kSceneFlagLegacyImport) != 0;
     if (m_legacyImport) Log("scene: an automatic legacy import - its cards lit by the legacy profile %d", m_legacyProfile);
-    for (int i = 0; i < 3; ++i) { m_bboxMin[i] = sh->bboxMin[i]; m_bboxMax[i] = sh->bboxMax[i]; }
+    for (int i = 0; i < 3; ++i)
+    {
+        m_bboxMin[i] = sh->bboxMin[i] + m_variantOffset[i];
+        m_bboxMax[i] = sh->bboxMax[i] + m_variantOffset[i];
+    }
     ComputeFocusPoint(reinterpret_cast<const Vertex*>(verts), sh->vertexCount);
 
 

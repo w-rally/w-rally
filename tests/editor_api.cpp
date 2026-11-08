@@ -242,18 +242,20 @@ std::vector<uint8_t> Atlas(uint32_t& size, uint32_t& columns, uint32_t& rows)
 void PutU32(std::vector<char>& b, uint32_t v) { b.insert(b.end(), reinterpret_cast<char*>(&v), reinterpret_cast<char*>(&v) + 4); }
 
 std::vector<char> WithVariants(const std::vector<char>& ngg, const std::vector<const char*>& names,
-                               const std::vector<uint32_t>& masks)
+                               const std::vector<uint32_t>& masks, const std::vector<V3>& offsets = {})
 {
+    // 32-byte records, the first layout, unless offsets are given: then the whole 68-byte VariantRecord.
+    const uint32_t rec = offsets.empty() ? 32u : 68u;
     std::vector<char> b = ngg;
     while (b.size() % 4) b.push_back(0);
     PutU32(b, 'N' | 'G' << 8 | 'G' << 16 | uint32_t('R') << 24);
-    // 32-byte records, the first layout (no car start): the loader must still read them as the prefix.
-    PutU32(b, uint32_t(16 + 32 * names.size()));
-    PutU32(b, 1), PutU32(b, uint32_t(names.size())), PutU32(b, 32), PutU32(b, 0);
-    for (const char* n : names) {
-        char rec[32] = {};
-        std::memcpy(rec, n, std::strlen(n));
-        b.insert(b.end(), rec, rec + 32);
+    PutU32(b, uint32_t(16 + rec * names.size()));
+    PutU32(b, 1), PutU32(b, uint32_t(names.size())), PutU32(b, rec), PutU32(b, 0);
+    for (size_t k = 0; k < names.size(); ++k) {
+        char r[68] = {};
+        std::memcpy(r, names[k], std::strlen(names[k]));
+        if (!offsets.empty()) std::memcpy(r + 56, &offsets[k], 12);   // VariantRecord::offset
+        b.insert(b.end(), r, r + rec);
     }
     PutU32(b, 'N' | 'G' << 8 | 'G' << 16 | uint32_t('Q') << 24);
     PutU32(b, uint32_t(4 + 4 * masks.size()));
@@ -333,6 +335,26 @@ void CheckVariants(Rig& rig, const std::vector<char>& ngg)
     log = TakeLog();
     Check(edit.visibleObjectCount(rig.r) == inM && log.find("not in this file") != std::string::npos,
           "variants: an ambiguous letter draws the main one, and says so", "%u", edit.visibleObjectCount(rig.r));
+
+    // A reversed stage built at another origin (RBR's 55 is 51 moved): its world is the file's moved by the offset.
+    // Object 0 is in both variants; its box must move by exactly that, and the scene's bounds with it.
+    const V3 off{-1193.0f, 664.25f, 1793.5f};
+    const std::vector<char> shifted = WithVariants(ngg, {"41_M", "45_M"}, masks, {V3{0, 0, 0}, off});
+    V3 lo0, hi0, lo1, hi1;
+    float sb0[3], sB0[3], sb1[3], sB1[3];
+    api.loadSceneVariant(rig.r, shifted.data(), shifted.size(), "track-41_M", &s);
+    Bounds(rig, 0, lo0, hi0);
+    api.sceneBounds(rig.r, s, sb0, sB0);
+    TakeLog();
+    api.loadSceneVariant(rig.r, shifted.data(), shifted.size(), "track-45_M", &s);
+    log = TakeLog();
+    Bounds(rig, 0, lo1, hi1);
+    api.sceneBounds(rig.r, s, sb1, sB1);
+    const V3 d = lo1 - lo0;
+    Check(std::fabs(d.x - off.x) < 1e-2f && std::fabs(d.y - off.y) < 1e-2f && std::fabs(d.z - off.z) < 1e-2f &&
+              std::fabs(sb1[0] - sb0[0] - off.x) < 1e-2f && log.find("moved by") != std::string::npos,
+          "variants: a variant at another origin draws its world moved", "object 0 moved (%.2f, %.2f, %.2f)", d.x, d.y, d.z);
+    Check(rig.Render(), "variants: and renders");
 
     // A file without variants ignores the request; masks that do not fit the objects are ignored, not half-applied.
     api.loadSceneVariant(rig.r, ngg.data(), ngg.size(), "O", &s);

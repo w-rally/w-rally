@@ -57,6 +57,7 @@ std::string Compare(const ngg::SceneData& a, const ngg::SceneData& b)
     if (a.tagNames != b.tagNames || a.plants != b.plants) return "the plants";
     if (a.variants != b.variants || a.variantMasks != b.variantMasks || a.variantHasSpawn != b.variantHasSpawn)
         return "the stage variants";
+    if (a.variantOffsets != b.variantOffsets) return "a stage variant's offset";
     for (size_t k = 0; k < a.variantSpawns.size() && k < b.variantSpawns.size(); ++k)
         if (std::memcmp(&a.variantSpawns[k], &b.variantSpawns[k], sizeof(ngg::SpawnPoint))) return "a stage variant's car start";
     return "";
@@ -103,6 +104,8 @@ ngg::SceneData MadeUp()
     // Each its own start: the reversed stage starts where the other ends.
     s.variantHasSpawn = {1, 1};
     s.variantSpawns = {{{1, 2, 3}, {0, 0, 1}}, {{900, 5, -40}, {0, 0, -1}}};
+    // and the reversed stage built at another origin (RBR's 55 is 51 moved)
+    s.variantOffsets = {{0, 0, 0}, {-1193.0f, 664.25f, 1793.5f}};
     // Two 4x4 DXT1 textures: a header and one block each.
     for (const char* name : {"ground.dds", "leaf.dds"}) {
         std::vector<uint8_t> dds(128 + 8, 0);

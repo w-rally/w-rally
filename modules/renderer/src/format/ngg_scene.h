@@ -10,6 +10,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <array>
 #include <string>
 #include <vector>
 
@@ -40,6 +41,7 @@ struct SceneData {
     std::vector<std::string> variants;       // NGGR: the stage variants, the main one first; empty: none
     std::vector<uint8_t> variantHasSpawn;    // parallel to variants: 1 when the variant has its own car start
     std::vector<SpawnPoint> variantSpawns;   // parallel to variants (zero where it has none)
+    std::vector<std::array<float, 3>> variantOffsets;   // parallel to variants: its world relative to the file's
     std::vector<uint32_t> variantMasks;      // NGGQ, parallel to objects; empty: every object in every variant
 };
 

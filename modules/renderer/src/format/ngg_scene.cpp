@@ -144,6 +144,7 @@ std::string Write(const SceneData& s, std::vector<uint8_t>& out)
                 std::memcpy(r.spawnPosition, s.variantSpawns[k].position, sizeof r.spawnPosition);
                 std::memcpy(r.spawnFacing, s.variantSpawns[k].facing, sizeof r.spawnFacing);
             }
+            if (k < s.variantOffsets.size()) std::memcpy(r.offset, s.variantOffsets[k].data(), sizeof r.offset);
             Put(p, &r, sizeof r);
         }
         Chunk(o, ChunkVariants(), p);
@@ -256,6 +257,9 @@ std::string Read(const void* bytes, size_t n, SceneData& out)
                 SpawnPoint sp{};
                 if (has) std::memcpy(sp.position, r.spawnPosition, sizeof sp.position), std::memcpy(sp.facing, r.spawnFacing, sizeof sp.facing);
                 out.variantSpawns.push_back(sp);
+                std::array<float, 3> off{};
+                if (vh.recordSize >= sizeof r) std::memcpy(off.data(), r.offset, sizeof r.offset);
+                out.variantOffsets.push_back(off);
             }
         } else if (f == ChunkVariantMasks()) {
             uint32_t count = 0;

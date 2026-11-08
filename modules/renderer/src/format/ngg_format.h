@@ -299,11 +299,17 @@ struct VariantRecord
     // ends, so the start is per variant; NGGS keeps the main one's, for a reader that knows no variants.
     float    spawnPosition[3];
     float    spawnFacing[3];
+    // Where this variant's WORLD is, relative to the file's: a reversed stage can be the same terrain built at another
+    // origin (RBR's 55 is 51 moved by (-1193, +664, +1793) m, 66 is 63 moved by (-51, 0, +3350), 56 is 54 lifted by
+    // 6.49 cm), and its physics, cameras and car start are in its own frame. The file stores every object in the main
+    // variant's frame; a loader drawing this variant moves the world by `offset` (every vertex, the bounds, the plant
+    // boxes). Zero for a variant in the main one's frame. The car start above is already in the variant's own frame.
+    float    offset[3];
 };
 constexpr uint32_t kVariantHasSpawn = 1u << 0;
 constexpr uint32_t kVariantRecordV1Bytes = 32;   // the first records had no start: read as the prefix, no spawn
 static_assert(sizeof(VariantChunkHeader) == 16, "VariantChunkHeader layout - keep Wallaby's NggWriter in step");
-static_assert(sizeof(VariantRecord) == 56,      "VariantRecord layout - keep Wallaby's NggWriter in step");
+static_assert(sizeof(VariantRecord) == 68,      "VariantRecord layout - keep Wallaby's NggWriter in step");
 constexpr uint32_t kMaxVariants = 32;
 
 inline uint32_t ChunkVariants()     { return FourCC('N','G','G','R'); }
