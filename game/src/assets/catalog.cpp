@@ -47,17 +47,6 @@ std::vector<std::string> IniSections(const std::string& file)
     return out;
 }
 
-const char* TimeOfDay(char t)
-{
-    switch (std::toupper(static_cast<unsigned char>(t))) {
-    case 'M': return "morning";
-    case 'N': return "noon";
-    case 'E': return "evening";
-    case 'O': return "overcast";
-    default: return "";
-    }
-}
-
 // The weather presets an .ngg carries (its NGGW chunk's records' names), from its chunk headers alone: the file's
 // header (magic, version, chunk count, reserved), then each chunk's fourcc and byte size before its payload, padded
 // to 4 bytes (modules/renderer/src/format/ngg_format.h).
@@ -86,43 +75,102 @@ std::vector<std::string> NggWeathers(const fs::path& ngg)
     return names;
 }
 
-// The stages an .ngg holds (NGGR), each with the names it answers to (NGGA: RBR's stage names of the times of day the
-// converter made one stage): {name, alias...} a stage, the file's order. Empty: one stage, or no .ngg.
-std::vector<std::vector<std::string>> NggStages(const fs::path& ngg)
+// RBR's weather section ("42M_crisp_clear", "42O_M_heavyrain_heavycloud", "69S_E_..."): the file's letter (M N E O S),
+// the time of day's (M N E), the weather and the sky words. False for another name.
+bool WeatherParts(const std::string& name, char& file, char& time, std::string& weather, std::string& sky)
 {
-    std::vector<std::vector<std::string>> out;
-    std::ifstream f(ngg, std::ios::binary);
-    uint32_t header[4] = {};
-    if (!f.read(reinterpret_cast<char*>(header), sizeof header) || std::memcmp(header, "NGG0", 4)) return out;
-    std::vector<std::pair<uint32_t, std::string>> aliases;
-    for (uint32_t i = 0; i < header[2]; ++i) {
-        uint32_t chunk[2] = {};
-        if (!f.read(reinterpret_cast<char*>(chunk), sizeof chunk)) break;
-        const std::streamoff next = static_cast<std::streamoff>(f.tellg()) + chunk[1] + (4 - chunk[1] % 4) % 4;
-        const bool names = !std::memcmp(chunk, "NGGR", 4), alias = !std::memcmp(chunk, "NGGA", 4);
-        uint32_t h[4] = {};   // version 1, count, record size, reserved
-        if ((names || alias) && f.read(reinterpret_cast<char*>(h), sizeof h) && h[0] == 1) {
-            std::vector<char> record(h[2]);
-            for (uint32_t r = 0; r < h[1] && h[2] >= (names ? 16u : 36u) && f.read(record.data(), h[2]); ++r)
-                if (names) {
-                    record[15] = 0;
-                    out.push_back({record.data()});
-                } else {
-                    uint32_t v = 0;
-                    std::memcpy(&v, record.data(), 4);
-                    record[35] = 0;
-                    aliases.emplace_back(v, record.data() + 4);
-                }
-        }
-        f.clear();
-        f.seekg(next);
+    size_t at = 0;
+    while (at < name.size() && std::isdigit(static_cast<unsigned char>(name[at]))) ++at;
+    if (at == 0 || at + 2 >= name.size() || !std::isalpha(static_cast<unsigned char>(name[at]))) return false;
+    file = time = static_cast<char>(std::toupper(static_cast<unsigned char>(name[at])));
+    std::string rest = name.substr(at + 1);
+    if (rest.size() > 2 && rest[0] == '_' && std::isalpha(static_cast<unsigned char>(rest[1])) && rest[2] == '_') {
+        time = static_cast<char>(std::toupper(static_cast<unsigned char>(rest[1])));
+        rest = rest.substr(2);
     }
-    for (const auto& [v, name] : aliases)
-        if (v < out.size()) out[v].push_back(name);
-    return out;
+    if (rest.empty() || rest[0] != '_') return false;
+    const size_t us = rest.find('_', 1);
+    if (us == std::string::npos) return false;
+    weather = Lower(rest.substr(1, us - 1));
+    sky = Lower(rest.substr(us + 1));
+    return !weather.empty() && !sky.empty() && sky.find('_') == std::string::npos;
 }
 
 } // namespace
+
+namespace {
+
+// RBR's weather words read: "heavy rain, heavy clouds" ("" for a name that is not RBR's, or a word not known).
+std::string WeatherWords(const std::string& name, char& day)
+{
+    char file, time;
+    std::string weather, sky;
+    day = 0;
+    if (WeatherParts(name, file, time, weather, sky)) {
+        static const std::pair<const char*, const char*> kWeather[] = {
+            {"crisp", "crisp"}, {"hazy", "hazy"}, {"norain", "no rain"}, {"lightrain", "light rain"},
+            {"heavyrain", "heavy rain"}, {"nosnow", "no snow"}, {"lightsnow", "light snow"}, {"heavysnow", "heavy snow"},
+            {"lightfog", "light fog"}, {"heavyfog", "heavy fog"}};
+        static const std::pair<const char*, const char*> kSky[] = {
+            {"clear", "clear"}, {"partcloud", "partly cloudy"}, {"lightcloud", "light clouds"},
+            {"ligthcloud", "light clouds"}, {"heavycloud", "heavy clouds"}};
+        const char* w = nullptr;
+        const char* k = nullptr;
+        for (const auto& [from, to] : kWeather) if (weather == from) w = to;
+        for (const auto& [from, to] : kSky) if (sky == from) k = to;
+        if ((time == 'M' || time == 'N' || time == 'E') && w && k) return day = time, std::string(w) + ", " + k;
+    }
+    return "";
+}
+
+} // namespace
+
+const char* DayName(char day)
+{
+    return day == 'M' ? "MORNING" : day == 'N' ? "NOON" : day == 'E' ? "EVENING" : "";
+}
+
+char WeatherDay(const std::string& name)
+{
+    char day;
+    WeatherWords(name, day);
+    return day;
+}
+
+std::string WeatherKind(const std::string& name)
+{
+    char day;
+    std::string words = WeatherWords(name, day);
+    if (words.empty()) {
+        words = name;
+        std::replace(words.begin(), words.end(), '_', ' ');
+        return words;
+    }
+    words[0] = static_cast<char>(std::toupper(static_cast<unsigned char>(words[0])));
+    return words;
+}
+
+std::string WeatherTitle(const std::string& name)
+{
+    char day;
+    const std::string words = WeatherWords(name, day);
+    if (words.empty()) {
+        std::string out = name;
+        std::replace(out.begin(), out.end(), '_', ' ');
+        return out;
+    }
+    return std::string(day == 'M' ? "Morning " : day == 'N' ? "Noon " : "Evening ") + words;
+}
+
+const StageTime& Stage::TimeOf(const std::string& weather) const
+{
+    static const StageTime kNone;
+    if (times.empty()) return kNone;
+    for (size_t i = 0; i < weathers.size() && i < weatherTime.size(); ++i)
+        if (!_stricmp(weathers[i].c_str(), weather.c_str()) && weatherTime[i] >= 0 && weatherTime[i] < static_cast<int>(times.size()))
+            return times[weatherTime[i]];
+    return times.front();
+}
 
 const char* SlotPhysics(int slot)
 {
@@ -233,21 +281,16 @@ std::string Catalog::Scan(const app::Settings& s, std::shared_ptr<const vfs::Vfs
     // The weathers: RBR's TrackSettings.ini's sections, by their stage prefix.
     const auto trackSettings = v.Find("rbr/Maps/TrackSettings.ini");
     const std::vector<std::string> sections = trackSettings ? IniSections(trackSettings->file.string()) : std::vector<std::string>{};
-    // A stage's: its map's sections of its time of day, and the overcast ones of it ("41M_...", "41O_M_..."; the map
-    // in two digits at least, as TrackSettings.ini writes it: "04M_...", not "4M_...").
-    auto stageWeathers = [&](int map, char tod) {
-        const char t = static_cast<char>(std::toupper(static_cast<unsigned char>(tod)));
+    // A map's sections ("41M_...", "41O_M_..."; the map in two digits at least, as TrackSettings.ini writes it:
+    // "04M_...", not "4M_...").
+    auto mapWeathers = [&](int map) {
         const std::string mapName = formats::TrackSettingsMap(map);
-        const std::string prefix = mapName + t + "_", overcast = mapName + "O_" + t + "_";
         std::vector<std::string> out;
         for (const std::string& sec : sections)
-            if (!_strnicmp(sec.c_str(), prefix.c_str(), prefix.size()) || !_strnicmp(sec.c_str(), overcast.c_str(), overcast.size()))
+            if (sec.size() > mapName.size() && !_strnicmp(sec.c_str(), mapName.c_str(), mapName.size()) &&
+                std::isalpha(static_cast<unsigned char>(sec[mapName.size()])))
                 out.push_back(sec);
         return out;
-    };
-    auto title = [](const std::string& stage, const std::string& from) {
-        const char* tod = TimeOfDay(stage.size() >= 2 ? stage.back() : ' ');
-        return stage + (tod[0] ? std::string(" (") + tod + ")" : "") + "  -  " + from;
     };
 
     // The .ngg folders' (development): by lower-case stem.
@@ -281,7 +324,10 @@ std::string Catalog::Scan(const app::Settings& s, std::shared_ptr<const vfs::Vfs
         for (const std::string& f : item->List()) {
             const fs::path p(f);
             const std::string stem = p.stem().string();
-            if (Lower(p.extension().string()) == ".trk" && stem.find('_') != std::string::npos && rules::StageMap(stem) >= 0)
+            // RBR's shape only, track-<n>_<letter>: a stray "track-13_O_.trk" is no time of day of anything
+            const size_t us = stem.rfind('_');
+            if (Lower(p.extension().string()) == ".trk" && us != std::string::npos && us + 2 == stem.size() &&
+                std::isalpha(static_cast<unsigned char>(stem.back())) && rules::StageMap(stem) >= 0)
                 variants.push_back(stem);
         }
         std::sort(variants.begin(), variants.end());
@@ -289,82 +335,110 @@ std::string Catalog::Scan(const app::Settings& s, std::shared_ptr<const vfs::Vfs
         // be the stage's, the track's, or a map's.
         std::vector<std::string> trackNggs = {t.id};
         for (const int m : v.MapsOfTrack(t.id)) trackNggs.push_back("track-" + std::to_string(m));
-        for (const std::string& variant : variants) {
+        // One stage a ROUTE (a map): its RBR files of a time of day are its times, the weather says which one a run
+        // drives. _M _N _E first (their own times of day), then _O and _S.
+        std::map<int, std::vector<std::string>> byMap;
+        for (const std::string& variant : variants) byMap[rules::StageMap(variant)].push_back(variant);
+        auto letterOrder = [](const std::string& s) {
+            static const std::string kOrder = "MNEOS";
+            const size_t at = kOrder.find(static_cast<char>(std::toupper(static_cast<unsigned char>(s.back()))));
+            return at == std::string::npos ? kOrder.size() : at;
+        };
+        for (auto& [map, files] : byMap) {
+            std::stable_sort(files.begin(), files.end(), [&](const std::string& a, const std::string& b) {
+                return letterOrder(a) < letterOrder(b);
+            });
             Stage st;
-            st.stage = variant;
-            st.map = rules::StageMap(variant);
+            st.map = map;
             st.track = item->Ref().id, st.version = item->Ref().version;
-            st.trackStage = v.StageOfMap(st.map);
+            st.trackStage = v.StageOfMap(map);
             {
                 const std::vector<int> maps = v.MapsOfTrack(t.id);
-                st.trackOrder = static_cast<int>(std::find(maps.begin(), maps.end(), st.map) - maps.begin());
+                st.trackOrder = static_cast<int>(std::find(maps.begin(), maps.end(), map) - maps.begin());
             }
-            st.times = {variant};
-            st.weathers = stageWeathers(st.map, variant.back());
-            // Drawn by: the track's own .ngg, an .ngg folder's, else its .lbs imported.
-            const std::string mapNgg = "track-" + std::to_string(st.map);
-            std::vector<std::string> names = {variant, mapNgg};
-            for (const std::string& n : trackNggs)
-                if (std::find(names.begin(), names.end(), n) == names.end()) names.push_back(n);
-            fs::path ngg;
-            for (const std::string& name : names)
-                if (const std::string d = disk(*item, name + ".ngg"); !d.empty()) {
-                    ngg = d, st.source = item->Source(name + ".ngg");
-                    break;
-                }
-            if (ngg.empty())
+            // Each time's drawing: the track's own .ngg (the time's, the map's or the track's), an .ngg folder's,
+            // else its .lbs imported. A protected (encrypted) .lbs is never imported (formats::LbsEncryptedVersion):
+            // only an .ngg made from it on a licensed install, or the server's, can draw that time.
+            const std::string mapNgg = "track-" + std::to_string(map);
+            for (const std::string& variant : files) {
+                StageTime time;
+                time.stage = variant;
+                std::vector<std::string> names = {variant, mapNgg};
+                for (const std::string& n : trackNggs)
+                    if (std::find(names.begin(), names.end(), n) == names.end()) names.push_back(n);
                 for (const std::string& name : names)
-                    if (const auto it = folderNggs.find(Lower(name)); it != folderNggs.end()) {
-                        ngg = it->second, st.source = "ngg folder";
+                    if (const std::string d = disk(*item, name + ".ngg"); !d.empty()) {
+                        time.ngg = d, time.source = item->Source(name + ".ngg");
                         break;
                     }
-            if (!ngg.empty()) {
-                st.ngg = ngg.string();
-                // A map's .ngg names its stages and the RBR stages each is (Wallaby collapses times of day that drive
-                // the same): a time of day another stage stands for is no stage of its own; one that stands for others
-                // has their weathers too.
-                bool folded = false;
-                for (const std::vector<std::string>& listed : NggStages(ngg)) {
-                    const auto me = std::find_if(listed.begin() + 1, listed.end(), [&](const std::string& a) {
-                        return !_stricmp(a.c_str(), variant.c_str());
-                    });
-                    if (me == listed.end()) continue;
-                    if (me != listed.begin() + 1) folded = true;
-                    else st.times.assign(listed.begin() + 1, listed.end());
-                    break;
+                if (time.ngg.empty())
+                    for (const std::string& name : names)
+                        if (const auto it = folderNggs.find(Lower(name)); it != folderNggs.end()) {
+                            time.ngg = it->second.string(), time.source = "ngg folder";
+                            break;
+                        }
+                if (time.ngg.empty()) {
+                    const std::string lbs = disk(*item, variant + ".lbs");
+                    if (lbs.empty()) continue;
+                    if (formats::LbsEncryptedVersion(lbs)) {
+                        protectedStages.push_back(variant);
+                        continue;
+                    }
+                    time.ngg = lbs, time.source = item->Source(variant + ".lbs"), time.imported = true;
                 }
-                if (folded) continue;
-                if (st.times.size() > 1) {
-                    st.weathers.clear();
-                    for (const std::string& time : st.times)
-                        for (const std::string& w : stageWeathers(rules::StageMap(time), time.back()))
-                            if (std::find(st.weathers.begin(), st.weathers.end(), w) == st.weathers.end()) st.weathers.push_back(w);
-                }
-                st.title = st.times.size() > 1 ? variant + "  -  " + ngg.filename().string() : title(variant, ngg.filename().string());
-                // The .ngg's own presets, when it has some: those of this stage's time of day if any are named so,
-                // else all of them.
-                if (const std::vector<std::string> drawn = NggWeathers(ngg); !drawn.empty()) {
-                    std::vector<std::string> mine;
-                    for (const std::string& d : drawn)
-                        for (const std::string& w : st.weathers)
-                            if (!_stricmp(d.c_str(), w.c_str())) mine.push_back(d);
-                    st.weathers = mine.empty() ? drawn : mine;
-                    st.weathersDrawn = true;
-                }
-            } else {
-                // A protected (encrypted) stage is left out: it is never imported (formats::LbsEncryptedVersion);
-                // only an .ngg made from it on a licensed install, or the server's, can draw it.
-                const std::string lbs = disk(*item, variant + ".lbs");
-                if (lbs.empty()) continue;
-                if (formats::LbsEncryptedVersion(lbs)) {
-                    protectedStages.push_back(variant);
-                    continue;
-                }
-                st.ngg = lbs;
-                st.source = item->Source(variant + ".lbs");
-                st.title = title(variant, "imported from .lbs");
-                st.weathersDrawn = st.imported = true;   // (the import writes TrackSettings.ini's sections as presets)
+                st.times.push_back(std::move(time));
             }
+            if (st.times.empty()) continue;
+            const StageTime& main = st.times.front();
+            st.stage = main.stage, st.ngg = main.ngg, st.source = main.source, st.imported = main.imported;
+            st.title = st.stage + "  -  " + (main.imported ? std::string("imported from .lbs") : fs::path(main.ngg).filename().string());
+
+            // Its weathers: the main .ngg's presets when it carries some, else the map's sections - each driven on
+            // the file it names (42O_M_...: the _O one), else on its time of day's (42O_M_ with no _O: the _M), else
+            // left out (no file plays it). A name that is not RBR's runs on the main time.
+            std::vector<std::string> names = mapWeathers(map);
+            if (!main.imported)
+                if (const std::vector<std::string> drawn = NggWeathers(main.ngg); !drawn.empty()) names = drawn, st.weathersDrawn = true;
+            if (main.imported) st.weathersDrawn = true;   // (the import writes TrackSettings.ini's sections as presets)
+            auto timeOf = [&](char letter) {
+                for (size_t i = 0; i < st.times.size(); ++i)
+                    if (std::toupper(static_cast<unsigned char>(st.times[i].stage.back())) == letter) return static_cast<int>(i);
+                return -1;
+            };
+            struct W { std::string name; int time; size_t order, at; };
+            std::vector<W> ws;
+            for (size_t i = 0; i < names.size(); ++i) {
+                char file, tod;
+                std::string weather, sky;
+                int at = 0;
+                if (WeatherParts(names[i], file, tod, weather, sky)) {
+                    at = timeOf(file);
+                    if (at < 0) at = timeOf(tod);
+                    if (at < 0) continue;
+                }
+                const size_t order = std::string("MNE").find(WeatherParts(names[i], file, tod, weather, sky) ? tod : '?');
+                ws.push_back({names[i], at, order == std::string::npos ? 3 : order, i});
+            }
+            std::stable_sort(ws.begin(), ws.end(), [](const W& a, const W& b) { return a.order < b.order; });   // morning, noon, evening
+            for (const W& w : ws) {
+                st.weathers.push_back(w.name);
+                st.weatherTime.push_back(w.time);
+                st.weatherTitles.push_back(WeatherTitle(w.name));
+                st.weatherDays.push_back(WeatherDay(w.name));
+                st.weatherKinds.push_back(WeatherKind(w.name));
+            }
+            // Two that read the same (a time's own and its overcast file's): told apart by the file.
+            for (size_t i = 0; i < st.weatherTitles.size(); ++i)
+                for (size_t j = i + 1; j < st.weatherTitles.size(); ++j)
+                    if (st.weatherTitles[i] == st.weatherTitles[j]) {
+                        for (const size_t k : {i, j}) {
+                            const char f = static_cast<char>(std::toupper(static_cast<unsigned char>(st.times[st.weatherTime[k]].stage.back())));
+                            const std::string tag = f == 'O' ? " (overcast)" : f == 'S' ? " (S)" : "";
+                            if (tag.empty() || st.weatherTitles[k].find(tag) != std::string::npos) continue;
+                            st.weatherTitles[k] += tag;
+                            st.weatherKinds[k] += tag;
+                        }
+                    }
             st.key = st.ngg + "|" + st.stage;
             stages.push_back(std::move(st));
         }
@@ -410,11 +484,8 @@ std::string Catalog::Scan(const app::Settings& s, std::shared_ptr<const vfs::Vfs
     for (Car& car : cars) ChooseDefault(car, carRegister.Find(car.folder), v, physicsModules);
     trackRegister.Build(v, stages);
     for (Stage& st : stages)
-        if (const TrackInfo* t = trackRegister.Find(st.map); t && !t->name.empty()) {
-            // (no time of day for a stage that is all of its map's: the time of day is its weather)
-            const char* tod = st.times.size() > 1 ? "" : TimeOfDay(st.stage.size() >= 2 ? st.stage.back() : ' ');
-            st.title = t->name + (tod[0] ? std::string(" (") + tod + ")" : "");
-        }
+        if (const TrackInfo* t = trackRegister.Find(st.map); t && !t->name.empty())
+            st.title = t->name;   // (no time of day: that is the weather's)
     std::sort(cars.begin(), cars.end(), [](const Car& a, const Car& b) { return Lower(a.name) < Lower(b.name); });
     if (stages.empty())
         return v.RbrRoot().empty() ? "no stages: no RBR folder set (Settings) and no track of W-Rally's"
@@ -490,13 +561,12 @@ const Stage* Catalog::FindStage(const std::string& key) const
 {
     for (const Stage& s : stages)
         if (s.key == key) return &s;
-    // A key kept before its .ngg made times of day one stage ("...|track-42_O"): the stage that stands for it.
+    // A key kept when each time of day was a stage of its own ("...|track-42_O"): the stage that has that time.
     const size_t bar = key.rfind('|');
     if (bar != std::string::npos)
         for (const Stage& s : stages)
-            if (s.ngg == key.substr(0, bar))
-                for (const std::string& t : s.times)
-                    if (!_stricmp(t.c_str(), key.c_str() + bar + 1)) return &s;
+            for (const StageTime& t : s.times)
+                if (!_stricmp(t.stage.c_str(), key.c_str() + bar + 1)) return &s;
     return nullptr;
 }
 

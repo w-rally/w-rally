@@ -50,6 +50,9 @@ COUNTRY = {'Itally': 'Italy', 'Sweeden': 'Sweden', 'Swiss': 'Switzerland', 'Bras
 SURFACE = {'0': 'tarmac', '1': 'gravel', '2': 'snow'}
 # The table's names corrected: RBR's own spelling.
 FIX = {60: 'Fraizer Wells II'}
+# RBR's maps that are no stage to drive, whatever their files say (map 4 has a .trk with a drive line of a few nodes):
+# written as `not_stages`, and never offered.
+NOT_STAGES = {4: "RBR's main menu backdrop"}
 
 
 def slug(name):
@@ -121,6 +124,9 @@ def read_table(path):
         key, _, value = text.strip().partition(':')
         key, value = key.strip(), unquote(value)
         country = lambda: track.split('_', 1)[0]
+        if indent == 0 and key == 'not_stages':                  # (written again from NOT_STAGES)
+            track = stage = None
+            continue
         if indent == 0 and key.isdigit():                        # the oldest form: a map, its track
             maps[int(key)] = {'id': value}
             track = stage = None
@@ -171,6 +177,8 @@ def write(path, maps):
                     f.write(f'    length_km: {s["length_km"]}\n')
                 if s.get('surface'):
                     f.write(f'    surface: {s["surface"]}\n')
+        f.write('# RBR maps that are no stage to drive: ' + '; '.join(f'{m} {why}' for m, why in sorted(NOT_STAGES.items())) + '\n')
+        f.write('not_stages: [' + ', '.join(str(m) for m in sorted(NOT_STAGES)) + ']\n')
     several = sum(1 for s in tracks.values() if len(s) > 1)
     print(f'{len(maps)} maps, {len(tracks)} tracks ({several} with more than one stage) to {path}')
 

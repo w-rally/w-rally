@@ -126,7 +126,7 @@ void MadeUp(const fs::path& root)
 
     // W-Rally: the track table (map 41 and its reverse 45 one track, 4 not named; 77 in the older one-a-line form), a
     // track of its own, a car version (an older car.json).
-    Write(wr / "rbr-tracks.yaml", "# track: its stages\ncz_test:\n  41: test\n  45: test_ii\n77: BadId\n");
+    Write(wr / "rbr-tracks.yaml", "# track: its stages\ncz_test:\n  41: test\n  45: test_ii\n77: BadId\nnot_stages: [12]\n");
     Write(wr / "tracks/fr_own/1.0.0/track.yaml", "id: fr_own\nversion: 1.0.0\n");
     Write(wr / "tracks/fr_own/1.0.0/a.trk", "a 1.0.0");
     Write(wr / "tracks/fr_own/1.0.0/b.trk", "b 1.0.0");
@@ -158,7 +158,7 @@ void MadeUp(const fs::path& root)
     // versions, newest first, RBR's the oldest
     Check(Joined(vfs.Versions(Kind::Car, "impreza03")) == "1.1.0,1.0.0,rbr", "car versions: " + Joined(vfs.Versions(Kind::Car, "impreza03")));
     Check(Joined(vfs.Versions(Kind::Track, "fr_own")) == "1.1.0,1.0.0", "track versions");
-    Check(Joined(vfs.Ids(Kind::Track)) == "broken,cz_test,fr_own,lost,rbr_12,rbr_4,round", "track ids: " + Joined(vfs.Ids(Kind::Track)));
+    Check(Joined(vfs.Ids(Kind::Track)) == "broken,cz_test,fr_own,lost,rbr_4,round", "track ids (12 no stage): " + Joined(vfs.Ids(Kind::Track)));
     Check(Joined(vfs.Ids(Kind::Car)) == "impreza03,own_car", "car ids: " + Joined(vfs.Ids(Kind::Car)));
 
     // a patch over RBR's car: its own files, then RBR's
@@ -207,6 +207,7 @@ void MadeUp(const fs::path& root)
               vfs.StageOfMap(41) == "test" && vfs.StageOfMap(45) == "test_ii" && vfs.StageOfMap(4) == "rbr_4",
           "a track's stages: " + vfs.StageOfMap(41) + ", " + vfs.StageOfMap(45));
     Check(Text(vfs, "tracks/cz_test/rbr/track-45_N.trk") == "trk 45, 41 reversed", "the reversed stage's file in the track");
+    Check(vfs.TrackOfMap(12).empty() && !vfs.Open({Kind::Track, "rbr_12"}), "a map the table says is no stage: no track");
     {
         const auto rt = vfs.Open({Kind::Track, "cz_test", "", "rbr"});
         const wrally::formats::Json* st = rt ? rt->Manifest().Get("stages") : nullptr;

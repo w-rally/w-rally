@@ -33,26 +33,56 @@
 
 namespace wrally::assets {
 
+// One of a stage's RBR files of a time of day (track-42_O): the gameplay files a run drives, and the name the .ngg is
+// asked for its stage by (NGGA lists it).
+struct StageTime {
+    std::string stage;                  // track-42_O
+    std::string ngg;                    // the .ngg that draws it, or its .lbs to import
+    std::string source;                 // where that is: "downloaded", "w-rally", "rbr", "ngg folder"
+    bool imported = false;              // no .ngg: the .lbs is imported when the stage loads
+};
+
+// A stage: one ROUTE of a track (Joux Verte, Joux Verte II) - not a time of day. RBR shipped each time of day as a file
+// of its own (_M _N _E _O, and _S); here they are the stage's `times`, and which one a run drives follows from the
+// weather chosen (42O_M_heavyrain_heavycloud: the _O file, in the morning).
 struct Stage {
-    std::string key;                    // ngg path '|' stage: what Settings keeps
-    std::string ngg;                    // the .ngg file, or the .lbs of an imported stage
-    std::string stage;                  // track-41_M: its gameplay files, and the name its .ngg is asked for it by
+    std::string key;                    // ngg path '|' stage (its main time's): what Settings keeps
+    std::string ngg;                    // its main time's .ngg, or .lbs of an imported stage
+    std::string stage;                  // its main time's RBR file (track-42_M)
     int map = -1;
     std::string track, version;         // its track item: id and version (fr_joux_verte, rbr)
     std::string trackStage;             // its stage of the track (rbr-tracks.yaml: "joux_verte_ii"), "" none
     int trackOrder = 0;                 // its place among the track's stages (the table's order, its main one first)
-    // The RBR stages it is, itself first: a map's times of day (_M _N _E _O) that its .ngg made one stage (NGGA) - they
-    // drive the same, and W-Rally makes the time of day as weather. One for a stage no .ngg collapsed.
-    std::vector<std::string> times;
-    std::string source;                 // where its .ngg (or .lbs) is: "downloaded", "w-rally", "rbr", "ngg folder"
-    std::string title;                  // for the menu
-    // Its weathers: the .ngg's own presets (NGGW) when it carries some - what the sky is drawn from - else the
-    // TrackSettings.ini names for its map and time of day, which then set only the road's wetness (Road: from the
-    // weather); the sky stays the .ngg's own.
+    std::vector<StageTime> times;       // its RBR files, _M _N _E _O _S: the first the main one
+    std::string source;                 // where its main time's .ngg (or .lbs) is
+    std::string title;                  // for the menu: the stage's name
+    // Its weathers, every time of day's: the .ngg's own presets (NGGW) when it carries some - what the sky is drawn from
+    // - else TrackSettings.ini's sections of its map, which then set only the road's wetness; the sky stays the .ngg's
+    // own. Parallel: the time each is driven on (into `times`), and its name for people (WeatherTitle).
     std::vector<std::string> weathers;
+    std::vector<int> weatherTime;
+    std::vector<std::string> weatherTitles;     // "Morning heavy rain, heavy clouds"
+    // The menu offers the time of day and then that time's weathers: a weather's time ('M', 'N', 'E'; 0 for a name
+    // that says none), and its title without it ("Heavy rain, heavy clouds").
+    std::vector<char> weatherDays;
+    std::vector<std::string> weatherKinds;
     bool weathersDrawn = false;         // the weathers are the .ngg's presets
-    bool imported = false;              // no .ngg: the .lbs is imported when the stage loads
+    bool imported = false;              // its main time has no .ngg: the .lbs is imported when the stage loads
+
+    // The time a weather is driven on: its file, and its .ngg or .lbs. The main one for none, or a name not listed.
+    const StageTime& TimeOf(const std::string& weather) const;
 };
+
+// A weather's name for people: RBR's section names read ("42M_crisp_clear": "Morning crisp, clear";
+// "42O_M_heavyrain_heavycloud": "Morning heavy rain, heavy clouds" - the clouds say the overcast). Another name as it
+// is, its underscores spaces.
+std::string WeatherTitle(const std::string& name);
+// The same split for a menu that chooses the time of day first: the time ('M', 'N', 'E'; 0 none) and the rest
+// ("Heavy rain, heavy clouds"; another name as WeatherTitle reads it).
+char WeatherDay(const std::string& name);
+std::string WeatherKind(const std::string& name);
+// "MORNING", "NOON", "EVENING" ("" for 0).
+const char* DayName(char day);
 
 // A physics module as the catalog needs it (physics::ListModules): what it is and the car physics formats it reads.
 struct PhysicsModule {

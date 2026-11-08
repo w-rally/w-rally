@@ -511,6 +511,7 @@ void Vfs::ReadRbr()
     };
     std::map<int, Entry> table;
     std::map<std::string, std::string> trackFields;   // a track's name and country, as JSON members
+    std::set<int> notStages;                           // maps that are no stage to drive (RBR's menu backdrop, 4)
     std::string tableName = "rbr-tracks.yaml";
     auto tableFile = FindPlain(tableName);
     if (!tableFile) tableFile = FindPlain(tableName = "rbr-tracks.json");
@@ -543,6 +544,13 @@ void Vfs::ReadRbr()
                 return m->text.empty() ? "" : std::string(", ") + Quoted(key) + ": " + Quoted(m->text);
             };
             for (const auto& [key, value] : j.members) {
+                if (key == "not_stages") {                                  // [4]: not offered as tracks at all
+                    for (const formats::Json& m : value.items) {
+                        const int n = m.type == formats::Json::Number ? static_cast<int>(m.number) : std::atoi(m.text.c_str());
+                        if (n > 0) notStages.insert(n);
+                    }
+                    continue;
+                }
                 if (value.type == formats::Json::String) {                  // "41: cz_ploskovice"
                     const size_t us = value.text.find('_');
                     put(key, value.text, us == std::string::npos ? value.text : value.text.substr(us + 1));
@@ -601,7 +609,7 @@ void Vfs::ReadRbr()
         const std::string file = Lower(slash == std::string::npos ? base : base.substr(slash + 1));
         if (!StartsWith(file, "track-")) continue;
         const int map = std::atoi(file.c_str() + 6);
-        if (!seen.insert(map).second) continue;   // (listed twice)
+        if (!seen.insert(map).second || notStages.count(map)) continue;   // (listed twice; or no stage)
         Version probe;
         probe.type = Version::Maps;
         probe.maps = {{m_rbr / P(slash == std::string::npos ? "" : base.substr(0, slash)), file}};

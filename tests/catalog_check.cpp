@@ -20,10 +20,12 @@
 
 namespace {
 
+// The stage a time of day's file (track-42_O) is one of.
 const wrally::assets::Stage* Find(const wrally::assets::Catalog& c, const char* stage)
 {
     for (const wrally::assets::Stage& s : c.stages)
-        if (!_stricmp(s.stage.c_str(), stage)) return &s;
+        for (const wrally::assets::StageTime& t : s.times)
+            if (!_stricmp(t.stage.c_str(), stage)) return &s;
     return nullptr;
 }
 
@@ -79,22 +81,48 @@ int main(int argc, char** argv)
     std::printf("%zu stages: %zu from .ngg files, %zu imported from .lbs; %zu with drawn weathers; %zu protected (encrypted, "
                 "not offered); %zu cars\n", c.stages.size(), c.stages.size() - imported, imported, drawn,
                 c.protectedStages.size(), c.cars.size());
-    // Stages a map's .ngg made of several times of day: offered once, the others not at all.
-    size_t collapsed = 0;
-    for (const wrally::assets::Stage& st : c.stages) {
+    // A stage is a ROUTE: one a map of a track, its times of day inside it; every weather on one of its times, the
+    // one its name says (42O_M_...: the _O file), a kept choice of any time finding the stage.
+    size_t several = 0;
+    for (size_t i = 0; i < c.stages.size(); ++i) {
+        const wrally::assets::Stage& st = c.stages[i];
+        for (size_t j = i + 1; j < c.stages.size(); ++j)
+            if (c.stages[j].track == st.track && c.stages[j].map == st.map) return Fail(st.stage + ": its map offered twice");
+        if (st.weathers.size() != st.weatherTime.size() || st.weathers.size() != st.weatherTitles.size() ||
+            st.weathers.size() != st.weatherDays.size() || st.weathers.size() != st.weatherKinds.size())
+            return Fail(st.stage + ": weathers, their times and titles disagree");
+        for (size_t w = 0; w < st.weathers.size(); ++w) {
+            const std::string& name = st.weathers[w];
+            const std::string& file = st.times[st.weatherTime[w]].stage;
+            const std::string map = std::to_string(st.map), padded = st.map < 10 ? "0" + map : map;
+            if (_strnicmp(name.c_str(), padded.c_str(), padded.size()) || st.TimeOf(name).stage != file) continue;
+            const char want = static_cast<char>(std::toupper(static_cast<unsigned char>(name[padded.size()])));
+            const char got = static_cast<char>(std::toupper(static_cast<unsigned char>(file.back())));
+            bool fileThere = false;
+            for (const wrally::assets::StageTime& t : st.times) fileThere |= std::toupper(static_cast<unsigned char>(t.stage.back())) == want;
+            if (fileThere && want != got) return Fail(name + ": driven on " + file);
+        }
+        for (const wrally::assets::StageTime& t : st.times)
+            if (c.FindStage(t.ngg + "|" + t.stage) != &st) return Fail(t.stage + ": a kept choice does not find its stage");
         if (st.times.size() < 2) continue;
-        ++collapsed;
-        for (size_t i = 1; i < st.times.size(); ++i)
-            for (const wrally::assets::Stage& other : c.stages)
-                if (other.ngg == st.ngg && !_stricmp(other.stage.c_str(), st.times[i].c_str()))
-                    return Fail(st.times[i] + ": offered on its own, and as a time of day of " + st.stage);
-        std::string times;
-        for (const std::string& t : st.times) times += (times.empty() ? "" : ", ") + t;
-        std::printf("%s (track %s, stage %s): one stage for %s, %zu weathers%s\n", st.stage.c_str(), st.track.c_str(),
-                    st.trackStage.c_str(), times.c_str(), st.weathers.size(), st.weathersDrawn ? " drawn" : "");
-        if (c.FindStage(st.ngg + "|" + st.times[1]) != &st) return Fail(st.times[1] + ": a kept choice does not find " + st.stage);
+        ++several;
+        if (several <= 4) {
+            std::string times;
+            for (const wrally::assets::StageTime& t : st.times) times += (times.empty() ? "" : ", ") + t.stage;
+            std::printf("%s (track %s): times %s, %zu weathers, e.g. \"%s\"\n", st.title.c_str(), st.track.c_str(), times.c_str(),
+                        st.weathers.size(), st.weatherTitles.empty() ? "" : st.weatherTitles.back().c_str());
+        }
     }
-    if (collapsed) std::printf("%zu stages stand for several times of day\n", collapsed);
+    std::printf("%zu stages hold several times of day\n", several);
+    // Weather names for people
+    for (const auto& [in, out] : {std::pair<const char*, const char*>{"42M_crisp_clear", "Morning crisp, clear"},
+                                  {"42O_M_heavyrain_heavycloud", "Morning heavy rain, heavy clouds"},
+                                  {"04O_E_lightfog_partcloud", "Evening light fog, partly cloudy"},
+                                  {"69S_N_heavysnow_ligthcloud", "Noon heavy snow, light clouds"}, {"Evening_Clear", "Evening Clear"}})
+        if (wrally::assets::WeatherTitle(in) != out) return Fail(std::string(in) + " reads \"" + wrally::assets::WeatherTitle(in) + "\"");
+    if (wrally::assets::WeatherDay("42O_M_heavyrain_heavycloud") != 'M' || wrally::assets::WeatherKind("42O_M_heavyrain_heavycloud") != "Heavy rain, heavy clouds" ||
+        wrally::assets::WeatherDay("Evening_Clear") != 0)
+        return Fail("the time of day and the weather are not told apart");
 
     // The names the track table gives (rbr-tracks.yaml, from the onlineracing.cz table): a stage's own, its track's (the
     // place), its country, length and surface - and the menus' title is the stage's name.
@@ -120,14 +148,20 @@ int main(int argc, char** argv)
     for (const wrally::assets::Stage& st : c.stages)
         if (st.imported && wrally::formats::LbsEncryptedVersion(st.ngg)) return Fail(st.stage + ": encrypted, but offered");
 
-    // A map under 10, imported (no .ngg draws it in a stock RBR folder): its evening weathers, two-digit names.
-    const wrally::assets::Stage* four = Find(c, "track-4_E");
-    if (!four) return Fail("track-4_E is not offered");
-    if (four->weathers.empty()) return Fail("track-4_E has no weathers (a \"4E_\" prefix finds none)");
-    for (const std::string& w : four->weathers)
-        if (_strnicmp(w.c_str(), "04E_", 4) && _strnicmp(w.c_str(), "04O_E_", 6)) return Fail("track-4_E offers " + w);
-    std::printf("track-4_E: %s, %zu weathers (%s ...)\n", four->imported ? "imported" : "from an .ngg", four->weathers.size(),
-                four->weathers[0].c_str());
+    // Map 4 is RBR's main menu backdrop, no stage (rbr-tracks.yaml's not_stages): never offered.
+    if (Find(c, "track-4_E") || Find(c, "track-4_M")) return Fail("map 4, the menu's backdrop, is offered as a stage");
+    // An overcast weather of a stage with an _O file is driven on it; its morning, noon and evening ones on theirs.
+    if (const wrally::assets::Stage* jv = Find(c, "track-42_M")) {
+        size_t onO = 0;
+        for (size_t w = 0; w < jv->weathers.size(); ++w) {
+            const std::string& name = jv->weathers[w];
+            const std::string& file = jv->TimeOf(name).stage;
+            if (!_strnicmp(name.c_str(), "42O_", 4) && (++onO, file != "track-42_O")) return Fail(name + ": driven on " + file);
+            if (!_strnicmp(name.c_str(), "42M_", 4) && file != "track-42_M") return Fail(name + ": driven on " + file);
+        }
+        std::printf("%s: %zu weathers, %zu on track-42_O (\"%s\")\n", jv->title.c_str(), jv->weathers.size(), onO,
+                    jv->weatherTitles.empty() ? "" : jv->weatherTitles.back().c_str());
+    }
     std::printf("catalog-check: all good\n");
     return 0;
 }

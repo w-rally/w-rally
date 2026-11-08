@@ -280,6 +280,7 @@ const char* const kRoads[4] = {"FROM THE WEATHER", "DRY", "DAMP", "WET"};
 // ---------------------------------------------------------------- Quick rally
 
 List g_quick;
+char g_quickDay = 0;          // the time of day chosen while the weather is the stage's default
 
 QuickChoice QuickPage(const ImGuiLayer& ui, const assets::Catalog& catalog, app::Settings& s, int width, int height,
                       const VideoFrame& video)
@@ -300,7 +301,7 @@ QuickChoice QuickPage(const ImGuiLayer& ui, const assets::Catalog& catalog, app:
             }
     const bool carOk = car && usableCar(*car);
 
-    std::vector<Row> rows(7);
+    std::vector<Row> rows(8);
     Row& stage = rows[0];
     stage.kind = Row::Open, stage.label = "STAGE";
     stage.shown = st ? Upper(st->title) : "NO STAGES";
@@ -354,23 +355,50 @@ QuickChoice QuickPage(const ImGuiLayer& ui, const assets::Catalog& catalog, app:
     damageRow.options.assign(std::begin(kDamage), std::end(kDamage));
     damageRow.help = "How much the car takes: off, safe, reduced or realistic.";
 
-    Row& weatherRow = rows[5];
+    // The time of day, then that time's weathers: the times the stage has weathers for (morning, noon, evening; "other"
+    // for a preset whose name says none), each weather driven on the stage's file of its time (assets::Stage::TimeOf).
+    std::vector<char> days;
+    int chosenWeather = -1;   // into st->weathers
+    if (st) {
+        for (size_t i = 0; i < st->weathers.size(); ++i) {
+            if (std::find(days.begin(), days.end(), st->weatherDays[i]) == days.end()) days.push_back(st->weatherDays[i]);
+            if (!s.weatherCustom && !_stricmp(st->weathers[i].c_str(), s.weather.c_str())) chosenWeather = static_cast<int>(i);
+        }
+        std::sort(days.begin(), days.end(), [](char a, char b) {
+            auto at = [](char d) { const size_t p = std::string("MNE").find(d); return d && p != std::string::npos ? p : 3; };
+            return at(a) < at(b);
+        });
+    }
+    char day = chosenWeather >= 0 ? st->weatherDays[chosenWeather] : g_quickDay;
+    if (std::find(days.begin(), days.end(), day) == days.end()) day = days.empty() ? 0 : days.front();
+    int dayAt = static_cast<int>(std::find(days.begin(), days.end(), day) - days.begin());
+    Row& dayRow = rows[5];
+    dayRow.kind = Row::Choice, dayRow.label = "TIME OF DAY";
+    for (const char d : days) dayRow.options.push_back(d ? assets::DayName(d) : "OTHER");
+    if (days.empty()) dayRow.options = {"THE STAGE'S"}, dayAt = 0;
+    dayRow.at = &dayAt;
+    dayRow.help = "Morning, noon or evening: the times of day this stage has weathers for. The weather below is that time's.";
+
+    Row& weatherRow = rows[6];
     weatherRow.kind = Row::Choice, weatherRow.label = "WEATHER", weatherRow.options = {"STAGE DEFAULT"};
+    std::vector<int> ofDay;   // the day's weathers, into st->weathers
     int weather = 0;
     if (st)
-        for (size_t i = 0; i < st->weathers.size(); ++i) {
-            weatherRow.options.push_back(Upper(st->weathers[i]));
-            if (!_stricmp(st->weathers[i].c_str(), s.weather.c_str())) weather = static_cast<int>(i) + 1;
-        }
+        for (size_t i = 0; i < st->weathers.size(); ++i)
+            if (st->weatherDays[i] == day) {
+                ofDay.push_back(static_cast<int>(i));
+                weatherRow.options.push_back(Upper(st->weatherKinds[i]));
+                if (static_cast<int>(i) == chosenWeather) weather = static_cast<int>(ofDay.size());
+            }
     const int custom = static_cast<int>(weatherRow.options.size());
     weatherRow.options.push_back("CUSTOM");
     if (s.weatherCustom) weather = custom;
     weatherRow.at = &weather;
     if (weather == custom) weatherRow.sub = "ENTER: EDIT", weatherRow.subSignal = true;
-    weatherRow.help = "A preset weather, or Custom: Enter opens the weather - the clouds, the fog, the rain, the time of day, the season "
-                      "and the road.";
+    weatherRow.help = "A preset weather of that time of day, or Custom: Enter opens the weather - the clouds, the fog, the rain, the "
+                      "time of day, the season and the road.";
 
-    Row& start = rows[6];
+    Row& start = rows[7];
     start.kind = Row::Open, start.label = "START STAGE", start.shown = "", start.sub = "";
     start.off = !st || !carOk;
     start.help = "To the start line.";
@@ -386,14 +414,15 @@ QuickChoice QuickPage(const ImGuiLayer& ui, const assets::Catalog& catalog, app:
         else if (done == 1) g_page = Page::Garage;
         else if (done == 2) Change(physicsRow, +1);
         else if (done == 3 && car) g_page = Page::Setup;
-        else if (done == 5 && weather == custom) g_page = Page::Weather;
-        else if (done == 5) Change(weatherRow, +1);
+        else if (done == 6 && weather == custom) g_page = Page::Weather;
+        else if (done == 6) Change(weatherRow, +1);
+        else if (done == 5) Change(dayRow, +1);
         else if (done == 4) Change(damageRow, +1);
-        else if (done == 6 && !start.off) c = QuickChoice::Start;
+        else if (done == 7 && !start.off) c = QuickChoice::Start;
         const Row& sel = rows[g_quick.at];
         Help(l, g_quick.at == 1 && car && !carOk ? "W-Rally does not know this car: choose another in the garage." : sel.help);
         const char* enter = g_quick.at == 0 ? "CHOOSE" : g_quick.at == 1 ? "GARAGE" : g_quick.at == 3 ? "DETAILS"
-                            : g_quick.at == 5 && weather == custom ? "EDIT" : g_quick.at == 6 ? "START" : "SELECT";
+                            : g_quick.at == 6 && weather == custom ? "EDIT" : g_quick.at == 7 ? "START" : "SELECT";
         if (Footer(l, {{"W S", "MOVE"}, {"A D", "CHANGE"}, {"ENTER", enter}, {"ESC", "BACK"}})) c = QuickChoice::Back;
     });
     if (KeyEsc()) c = QuickChoice::Back;
@@ -408,7 +437,21 @@ QuickChoice QuickPage(const ImGuiLayer& ui, const assets::Catalog& catalog, app:
     }
     s.damage = static_cast<uint32_t>(damage);
     s.weatherCustom = weather == custom;
-    if (!s.weatherCustom) s.weather = weather && st ? st->weathers[weather - 1] : "";
+    if (!s.weatherCustom) s.weather = weather && st ? st->weathers[ofDay[weather - 1]] : "";
+    // Another time of day: the same weather at that time when it has one, else its first; the default stays the default.
+    if (dayAt >= 0 && dayAt < static_cast<int>(days.size()) && days[dayAt] != day) {
+        g_quickDay = days[dayAt];
+        if (!s.weatherCustom && !s.weather.empty() && st) {
+            const std::string kind = st->weatherKinds[chosenWeather >= 0 ? chosenWeather : 0];
+            std::string first, same;
+            for (size_t i = 0; i < st->weathers.size(); ++i)
+                if (st->weatherDays[i] == g_quickDay) {
+                    if (first.empty()) first = st->weathers[i];
+                    if (same.empty() && st->weatherKinds[i] == kind) same = st->weathers[i];
+                }
+            s.weather = !same.empty() ? same : first;
+        }
+    }
     return c;
 }
 
@@ -418,6 +461,7 @@ int g_stageSide = 1;          // 0 the countries, 1 the stages
 int g_collection = 0;         // the country: 0 all, then the register's countries, then the stages of none known
 int g_stageAt = -1;           // in the collection's list of stages (-1: the chosen stage's)
 int g_stageTop = 0;           // the first ROW shown (a track's name is a row too)
+int g_countryTop = 0;         // the first country shown
 float g_stagePlate = -1;
 
 void StagePage(const ImGuiLayer& ui, const assets::Catalog& catalog, app::Settings& s, int width, int height,
@@ -532,23 +576,34 @@ void StagePage(const ImGuiLayer& ui, const assets::Catalog& catalog, app::Settin
         const bool moved = io.MouseDelta.x || io.MouseDelta.y, click = ImGui::IsMouseClicked(ImGuiMouseButton_Left);
         const float ease = Ease();
 
-        // The countries
+        // The countries: as many as fit beside the stages (a list of thirty would run off the screen), scrolled to the
+        // chosen one.
         Tracked(l.d, l.text, 17 * k, l.P(kX0 + 12, 228), g_stageSide == 0 ? kInk : kInkMuted, "COUNTRY", 0.16f);
-        for (int i = 0; i < ng; ++i) {
-            const float y = kListY + i * 56, mid = (y + 26) * k;
+        constexpr float kCountryH = 44;
+        const int countriesShown = std::max(1, static_cast<int>((kListH + 4) / (kCountryH + 4)));
+        g_countryTop = std::clamp(g_countryTop, std::max(0, g_collection - countriesShown + 1),
+                                  std::max(0, std::min(g_collection, ng - countriesShown)));
+        for (int i = g_countryTop; i < std::min(ng, g_countryTop + countriesShown); ++i) {
+            const float y = kListY + (i - g_countryTop) * (kCountryH + 4), mid = (y + kCountryH * 0.5f) * k;
             const bool on = i == g_collection;
-            const bool hot = ImGui::IsMouseHoveringRect(l.P(kX0, y), l.P(kX0 + 260, y + 52), false);
+            const bool hot = ImGui::IsMouseHoveringRect(l.P(kX0, y), l.P(kX0 + 260, y + kCountryH), false);
             if (hot && click) collection = i, g_stageSide = 0;
-            if (on) Plate(l.d, l.P(kX0, y), 260 * k, 52 * k, 10 * k, g_stageSide == 0 ? kSelect : kSelectIdle);
-            Marker(l.d, (kX0 + 10) * k, mid, 10 * k, 28 * k, on && g_stageSide == 0 ? 1.0f : 0.0f, k);
+            if (on) Plate(l.d, l.P(kX0, y), 260 * k, kCountryH * k, 10 * k, g_stageSide == 0 ? kSelect : kSelectIdle);
+            Marker(l.d, (kX0 + 10) * k, mid, 10 * k, 24 * k, on && g_stageSide == 0 ? 1.0f : 0.0f, k);
             int count = 0;
             for (const assets::Stage& st : catalog.stages) count += inGroup(st, i);
-            l.d->PushClipRect(l.P(kX0, y), l.P(kX0 + 214, y + 52), true);
-            Tracked(l.d, l.item, 22 * k, ImVec2((kX0 + 36) * k, mid - 11 * k), on ? kInk : kInkSecondary, groups[i].c_str(), 0.02f);
+            l.d->PushClipRect(l.P(kX0, y), l.P(kX0 + 214, y + kCountryH), true);
+            Tracked(l.d, l.item, 19 * k, ImVec2((kX0 + 36) * k, mid - 10 * k), on ? kInk : kInkSecondary, groups[i].c_str(), 0.02f);
             l.d->PopClipRect();
             const std::string cnt = std::to_string(count);
-            const float cw = Tracked(nullptr, l.text, 16 * k, ImVec2(), 0, cnt.c_str(), 0.08f);
-            Tracked(l.d, l.text, 16 * k, ImVec2((kX0 + 244) * k - cw, mid - 8 * k), kInkMuted, cnt.c_str(), 0.08f);
+            const float cw = Tracked(nullptr, l.text, 15 * k, ImVec2(), 0, cnt.c_str(), 0.08f);
+            Tracked(l.d, l.text, 15 * k, ImVec2((kX0 + 244) * k - cw, mid - 8 * k), kInkMuted, cnt.c_str(), 0.08f);
+        }
+        if (ng > countriesShown) {   // where the shown countries are in the list
+            const float top = kListY, h = countriesShown * (kCountryH + 4) - 4, x = kX0 + 266;
+            l.d->AddRectFilled(l.P(x, top), l.P(x + 3, top + h), kLine);
+            const float a = top + h * g_countryTop / ng, b = top + h * std::min(ng, g_countryTop + countriesShown) / ng;
+            l.d->AddRectFilled(l.P(x, a), l.P(x + 3, b), kInkSecondary);
         }
 
         // The stages, scrolled to the selected one
@@ -1051,7 +1106,7 @@ void WeatherPage(const ImGuiLayer& ui, const assets::Catalog& catalog, app::Sett
     from.options = {"STAGE DEFAULT"};
     if (st)
         for (size_t i = 0; i < st->weathers.size(); ++i) {
-            from.options.push_back(Upper(st->weathers[i]));
+            from.options.push_back(Upper(st->weatherTitles[i]));
             if (!_stricmp(st->weathers[i].c_str(), s.weather.c_str())) base = static_cast<int>(i) + 1;
         }
     from.at = &base;

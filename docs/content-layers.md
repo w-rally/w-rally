@@ -125,7 +125,11 @@ removed; `--overrides` stays for development.
   `tools/rbr-tracks/make_table.py` writes it (`--regroup` rewrites one): a map whose id is another's plus `_ii`,
   `_reverse`, `_reversed` or `_rev` is a stage of that one's track - 344 maps, 248 tracks, 95 with several stages -
   and takes the names, lengths, surfaces (0 tarmac, 1 gravel, 2 snow) and countries from the table's CSV export.
-  Quick rally lists a country's stages under their tracks, the tracks by name.
+  Quick rally lists a country's stages under their tracks, the tracks by name. A stage is a ROUTE: RBR's files of a
+  time of day (`track-42_M`, `track-42_O`) are inside it, and the weather picks one - each of TrackSettings.ini's
+  sections is driven on the file it names (`42O_M_heavyrain_heavycloud`: `track-42_O`, in the morning), so the menu
+  offers the time of day, then that time's weathers ("Heavy rain, heavy clouds"). `not_stages: [4]` lists the maps that
+  are no stage (4: RBR's main menu backdrop): never a track.
 - **Cars:** `cars/<id>/rbr/<file>` ↔ `Cars/<folder>/<file>`. `Cars.ini`'s name and the slot table fill an in-memory
   `car.yaml`.
 - **`physics.rbz` is RBR's alone, kept for compatibility, and only the mapping opens it.** Nothing else in the game

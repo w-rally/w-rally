@@ -1274,7 +1274,9 @@ std::vector<std::string> QuickArgs(const Settings& s, const assets::Catalog& cat
     if (!physics) return error = car->name + " has no physics a physics module drives", std::vector<std::string>{};
     // The stage from its track item, the car's model on disk (resolved through its versions), its physics (the variant
     // chosen, its base, the first module that drives it) and the setup as VFS paths (docs/content-layers.md).
-    std::vector<std::string> a = {"W-Rally", s.rbrPath, st->ngg, "--stage", st->stage, "--track", st->track + "@" + st->version,
+    // The stage's file of the weather's time of day (42O_M_...: track-42_O): its gameplay, and its .ngg or .lbs.
+    const assets::StageTime& when = st->TimeOf(s.weather);
+    std::vector<std::string> a = {"W-Rally", s.rbrPath, when.ngg, "--stage", when.stage, "--track", st->track + "@" + st->version,
                                   "--sgc", car->sgc, "--car-item", car->id + "@" + car->version, "--car", physics->folder, "--physics-base", physics->base,
                                   "--physics", physics->modules.front(), "--damage", std::to_string(std::min(s.damage, 3u)),
                                   "--out", (UserDir() / "drive.phr").string()};
@@ -1443,7 +1445,8 @@ int Menus(Shell& sh, std::string note, bool intro)
         }
         o.stageTitle = catalog.FindStage(sh.settings.stage)->title;
         o.carName = catalog.FindCar(sh.settings.car)->name;
-        o.weatherName = sh.settings.weatherCustom ? "custom weather" : sh.settings.weather.empty() ? "stage default" : sh.settings.weather;
+        o.weatherName = sh.settings.weatherCustom ? "custom weather" : sh.settings.weather.empty() ? "stage default"
+                                                                       : assets::WeatherTitle(sh.settings.weather);
         {   // the loading screen's line: the country, the surface, the length (as the register knows the track)
             const assets::Stage* st = catalog.FindStage(sh.settings.stage);
             std::string facts;

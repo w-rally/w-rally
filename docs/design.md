@@ -870,7 +870,9 @@ Each phase ends with a game you can drive. phys-drive works on day one, and ever
     (`fr_joux_verte`), its stages (`joux_verte`, `joux_verte_ii`; `rbr-tracks.yaml`, content-layers §3), and the time
     of day a weather of a stage. One `.ngg` holds a track's stages (NGG design 3.4b): Wallaby collapses the times of
     day that drive the same and lists the RBR stage names each stage answers to (NGGA); the catalog offers a stage once
-    for all of them, and the game asks the renderer for its stage by name (`loadSceneVariant`). Nothing is guessed at
+    for all of them, and the game asks the renderer for its stage by name (`loadSceneVariant`). The catalog offers a
+    route once; the weather chosen (its time of day first) says which of RBR's time-of-day files the run drives and
+    which name the `.ngg` is asked by. Nothing is guessed at
     load: which names a stage answers to is written in the file.
 
 ## 11. Open questions
