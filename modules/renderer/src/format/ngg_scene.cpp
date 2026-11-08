@@ -136,9 +136,14 @@ std::string Write(const SceneData& s, std::vector<uint8_t>& out)
         p.clear();
         const VariantChunkHeader vh{1, static_cast<uint32_t>(s.variants.size()), sizeof(VariantRecord), 0};
         Put(p, &vh, sizeof vh);
-        for (const std::string& name : s.variants) {
+        for (size_t k = 0; k < s.variants.size(); ++k) {
             VariantRecord r{};
-            std::memcpy(r.name, name.data(), name.size());
+            std::memcpy(r.name, s.variants[k].data(), s.variants[k].size());
+            if (k < s.variantHasSpawn.size() && s.variantHasSpawn[k] && k < s.variantSpawns.size()) {
+                r.flags |= kVariantHasSpawn;
+                std::memcpy(r.spawnPosition, s.variantSpawns[k].position, sizeof r.spawnPosition);
+                std::memcpy(r.spawnFacing, s.variantSpawns[k].facing, sizeof r.spawnFacing);
+            }
             Put(p, &r, sizeof r);
         }
         Chunk(o, ChunkVariants(), p);
@@ -238,14 +243,19 @@ std::string Read(const void* bytes, size_t n, SceneData& out)
             VariantChunkHeader vh{};
             if (size < sizeof vh) return "NGGR is truncated";
             std::memcpy(&vh, d, sizeof vh);
-            if (vh.version != 1 || vh.recordSize < sizeof(VariantRecord) || vh.count > kMaxVariants ||
+            if (vh.version != 1 || vh.recordSize < kVariantRecordV1Bytes || vh.count > kMaxVariants ||
                 sizeof vh + uint64_t(vh.count) * vh.recordSize > size)
                 return "NGGR is not version 1 or is truncated";
             for (uint32_t k = 0; k < vh.count; ++k) {
                 VariantRecord r{};
-                std::memcpy(&r, d + sizeof vh + size_t(k) * vh.recordSize, sizeof r);
+                std::memcpy(&r, d + sizeof vh + size_t(k) * vh.recordSize, std::min<size_t>(vh.recordSize, sizeof r));
                 r.name[sizeof r.name - 1] = 0;
                 out.variants.push_back(r.name);
+                const bool has = (r.flags & kVariantHasSpawn) != 0 && vh.recordSize >= sizeof r;
+                out.variantHasSpawn.push_back(has ? 1 : 0);
+                SpawnPoint sp{};
+                if (has) std::memcpy(sp.position, r.spawnPosition, sizeof sp.position), std::memcpy(sp.facing, r.spawnFacing, sizeof sp.facing);
+                out.variantSpawns.push_back(sp);
             }
         } else if (f == ChunkVariantMasks()) {
             uint32_t count = 0;

@@ -247,6 +247,7 @@ std::vector<char> WithVariants(const std::vector<char>& ngg, const std::vector<c
     std::vector<char> b = ngg;
     while (b.size() % 4) b.push_back(0);
     PutU32(b, 'N' | 'G' << 8 | 'G' << 16 | uint32_t('R') << 24);
+    // 32-byte records, the first layout (no car start): the loader must still read them as the prefix.
     PutU32(b, uint32_t(16 + 32 * names.size()));
     PutU32(b, 1), PutU32(b, uint32_t(names.size())), PutU32(b, 32), PutU32(b, 0);
     for (const char* n : names) {

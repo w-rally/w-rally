@@ -275,6 +275,7 @@ inline uint32_t ChunkObjectKeys()  { return FourCC('N','G','G','K'); }
 // textures (weather and wetness are dynamic) - both come from the MAIN variant, the first record.
 //
 // 'NGGR' - VariantChunkHeader, then `count` VariantRecord of `recordSize` bytes. The first is the main variant.
+//          recordSize >= 32: a reader takes the prefix it knows, and the fields past a shorter record are zero.
 // 'NGGQ' - parallel to NGGO: uint32 count, then uint32 mask[count]; bit v set = the object is in variant v.
 // Both OPTIONAL: without NGGR the file is one variant; without NGGQ every object is in every variant. At most 32
 // variants. A loader asked for a variant draws the objects whose bit is set and treats the rest as removed
@@ -292,11 +293,17 @@ struct VariantRecord
                             // file also holds a reversed stage of another map number. NUL-terminated, unique ignoring
                             // case. A loader matches the game's stage name first ("track-45_N"), a bare letter only
                             // when one name alone ends in it.
-    uint32_t flags;         // 0
+    uint32_t flags;         // kVariantHasSpawn
     uint32_t reserved[3];
+    // Where the car starts in THIS variant (as NGGS: position, then facing). A reversed stage starts where the other
+    // ends, so the start is per variant; NGGS keeps the main one's, for a reader that knows no variants.
+    float    spawnPosition[3];
+    float    spawnFacing[3];
 };
+constexpr uint32_t kVariantHasSpawn = 1u << 0;
+constexpr uint32_t kVariantRecordV1Bytes = 32;   // the first records had no start: read as the prefix, no spawn
 static_assert(sizeof(VariantChunkHeader) == 16, "VariantChunkHeader layout - keep Wallaby's NggWriter in step");
-static_assert(sizeof(VariantRecord) == 32,      "VariantRecord layout - keep Wallaby's NggWriter in step");
+static_assert(sizeof(VariantRecord) == 56,      "VariantRecord layout - keep Wallaby's NggWriter in step");
 constexpr uint32_t kMaxVariants = 32;
 
 inline uint32_t ChunkVariants()     { return FourCC('N','G','G','R'); }

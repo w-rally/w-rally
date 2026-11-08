@@ -55,7 +55,10 @@ std::string Compare(const ngg::SceneData& a, const ngg::SceneData& b)
     if (a.objectKeys != b.objectKeys) return "the object keys";
     if (!SameVec(a.weather, b.weather)) return "the weather presets";
     if (a.tagNames != b.tagNames || a.plants != b.plants) return "the plants";
-    if (a.variants != b.variants || a.variantMasks != b.variantMasks) return "the stage variants";
+    if (a.variants != b.variants || a.variantMasks != b.variantMasks || a.variantHasSpawn != b.variantHasSpawn)
+        return "the stage variants";
+    for (size_t k = 0; k < a.variantSpawns.size() && k < b.variantSpawns.size(); ++k)
+        if (std::memcmp(&a.variantSpawns[k], &b.variantSpawns[k], sizeof(ngg::SpawnPoint))) return "a stage variant's car start";
     return "";
 }
 
@@ -97,6 +100,9 @@ ngg::SceneData MadeUp()
     // in 42_M, the glass only in 45_N.
     s.variants = {"42_M", "45_N"};
     s.variantMasks = {3, 1, 2};
+    // Each its own start: the reversed stage starts where the other ends.
+    s.variantHasSpawn = {1, 1};
+    s.variantSpawns = {{{1, 2, 3}, {0, 0, 1}}, {{900, 5, -40}, {0, 0, -1}}};
     // Two 4x4 DXT1 textures: a header and one block each.
     for (const char* name : {"ground.dds", "leaf.dds"}) {
         std::vector<uint8_t> dds(128 + 8, 0);

@@ -3872,7 +3872,7 @@ void Scene::ApplyVariant(const uint8_t* variants, size_t variantBytes, const uin
     VariantChunkHeader h = {};
     if (variantBytes < sizeof(h)) { Log("scene: NGGR truncated - every object drawn"); return; }
     memcpy(&h, variants, sizeof(h));
-    if (h.version != 1 || h.recordSize < sizeof(VariantRecord) || h.count == 0 || h.count > kMaxVariants ||
+    if (h.version != 1 || h.recordSize < kVariantRecordV1Bytes || h.count == 0 || h.count > kMaxVariants ||
         variantBytes < sizeof(h) + (size_t)h.count * h.recordSize)
     {
         Log("scene: NGGR version %u, %u variant(s) of %u bytes in %zu - not understood, every object drawn",
@@ -3882,7 +3882,7 @@ void Scene::ApplyVariant(const uint8_t* variants, size_t variantBytes, const uin
     for (uint32_t v = 0; v < h.count; ++v)
     {
         VariantRecord r = {};
-        memcpy(&r, variants + sizeof(h) + (size_t)v * h.recordSize, sizeof(r));
+        memcpy(&r, variants + sizeof(h) + (size_t)v * h.recordSize, (std::min)((size_t)h.recordSize, sizeof(r)));
         r.name[sizeof(r.name) - 1] = 0;
         m_variantNames.push_back(r.name);
     }
