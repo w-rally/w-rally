@@ -416,8 +416,8 @@ QuickChoice QuickPage(const ImGuiLayer& ui, const assets::Catalog& catalog, app:
 
 int g_stageSide = 1;          // 0 the countries, 1 the stages
 int g_collection = 0;         // the country: 0 all, then the register's countries, then the stages of none known
-int g_stageAt = -1;           // in the collection's list (-1: the chosen stage's)
-int g_stageTop = 0;           // the first row shown
+int g_stageAt = -1;           // in the collection's list of stages (-1: the chosen stage's)
+int g_stageTop = 0;           // the first ROW shown (a track's name is a row too)
 float g_stagePlate = -1;
 
 void StagePage(const ImGuiLayer& ui, const assets::Catalog& catalog, app::Settings& s, int width, int height,
@@ -444,10 +444,41 @@ void StagePage(const ImGuiLayer& ui, const assets::Catalog& catalog, app::Settin
     if (KeyD()) g_stageSide = 1;
     const int dir = KeyW() ? -1 : KeyS() ? +1 : 0;
     if (dir && g_stageSide == 0 && g_collection + dir >= 0 && g_collection + dir < ng) g_collection += dir, g_stageAt = -1;
+    // The country's stages grouped under their TRACK (a place: Joux Verte, its stages Joux Verte and Joux Verte II),
+    // the tracks by name, a track's stages in its own order (its main one first).
+    auto trackName = [&](const assets::Stage& st) {
+        const assets::TrackInfo* t = catalog.trackRegister.Find(st.map);
+        return t && !t->trackName.empty() ? t->trackName : !st.track.empty() ? st.track : st.title;
+    };
     std::vector<const assets::Stage*> list;
     for (const assets::Stage& st : catalog.stages)
         if (inGroup(st, g_collection)) list.push_back(&st);
+    std::stable_sort(list.begin(), list.end(), [&](const assets::Stage* a, const assets::Stage* b) {
+        const std::string ta = Upper(trackName(*a)), tb = Upper(trackName(*b));
+        if (ta != tb) return ta < tb;
+        if (a->track != b->track) return a->track < b->track;
+        return a->trackOrder < b->trackOrder;
+    });
     const int n = static_cast<int>(list.size());
+    // The rows: a track's name above its stages. rowOf: a stage's row.
+    struct ListRow {
+        int stage = -1;           // into `list`, -1 for a track's name
+        std::string name;         // the track's
+        int stages = 0;           // the track's, in this list
+    };
+    std::vector<ListRow> rows;
+    std::vector<int> rowOf(n);
+    int trackRow = -1;
+    for (int i = 0; i < n; ++i) {
+        if (i == 0 || list[i]->track != list[i - 1]->track || trackName(*list[i]) != trackName(*list[i - 1])) {
+            trackRow = static_cast<int>(rows.size());
+            rows.push_back({-1, trackName(*list[i]), 0});
+        }
+        ++rows[trackRow].stages;
+        rowOf[i] = static_cast<int>(rows.size());
+        rows.push_back({i, "", 0});
+    }
+    const int nr = static_cast<int>(rows.size());
     if (g_stageAt < 0 || g_stageAt >= n) {   // (-1: the chosen stage's place in the list, else its first)
         g_stageAt = 0;
         for (int i = 0; i < n; ++i)
@@ -455,19 +486,43 @@ void StagePage(const ImGuiLayer& ui, const assets::Catalog& catalog, app::Settin
     }
     // A stage chosen: back to Quick rally - taken after the page is drawn (the list's selection holds until then).
     int chosen = -1;
-    // The rows shown: as many as fit above the facts' plate (at 816); PgUp / PgDn a page of them.
+    // The rows shown: as many as fit above the facts' plate (at 816) - a stage's 64 high, a track's name 34; PgUp /
+    // PgDn a page of stages.
     constexpr int kShown = 8;
-    constexpr float kListY = 268, kRowH = 64, kColX = kX0 + 288, kColW = 420;
+    constexpr float kListY = 268, kRowH = 64, kHeadH = 34, kColX = kX0 + 288, kColW = 420;
+    constexpr float kListH = kShown * (kRowH + 4) - 4;
+    auto rowH = [&](int r) { return rows[r].stage < 0 ? kHeadH : kRowH; };
+    // The rows from `top` that fit, and a row's y (relative to the list's top; -1 past the end shown).
+    auto fits = [&](int top) {
+        int last = top;
+        for (float y = 0; last < nr && y + rowH(last) <= kListH; ++last) y += rowH(last) + 4;
+        return last;   // one past the last shown
+    };
     if (dir && g_stageSide == 1) g_stageAt = std::clamp(g_stageAt + dir, 0, std::max(0, n - 1));
     if (const int page = ImGui::IsKeyPressed(ImGuiKey_PageUp) ? -kShown : ImGui::IsKeyPressed(ImGuiKey_PageDown) ? kShown : 0; page && n)
-        g_stageSide = 1, g_stageAt = std::clamp(g_stageAt + page, 0, n - 1), g_stageTop = std::clamp(g_stageTop + page, 0, std::max(0, n - kShown));
+        g_stageSide = 1, g_stageAt = std::clamp(g_stageAt + page, 0, n - 1);
     if (KeyEnter()) {
         if (g_stageSide == 0) g_stageSide = 1;
         else chosen = g_stageAt;
     }
     int collection = g_collection;   // a country clicked: from the next frame
 
-    g_stageTop = std::clamp(g_stageTop, std::max(0, g_stageAt - kShown + 1), std::max(0, std::min(g_stageAt, n - kShown)));
+    // Scrolled so the selected stage shows, with its track's name when that is just above it.
+    if (n) {
+        const int sel = rowOf[g_stageAt];
+        const int head = sel > 0 && rows[sel - 1].stage < 0 ? sel - 1 : sel;
+        if (head < g_stageTop) g_stageTop = head;
+        while (g_stageTop < sel && fits(g_stageTop) <= sel) ++g_stageTop;
+        while (g_stageTop > 0 && fits(g_stageTop - 1) >= nr) --g_stageTop;   // (no empty space left at the end)
+    } else {
+        g_stageTop = 0;
+    }
+    const int shownEnd = n ? fits(g_stageTop) : 0;
+    auto rowY = [&](int r) {
+        float y = kListY;
+        for (int i = g_stageTop; i < r; ++i) y += rowH(i) + 4;
+        return y;
+    };
     FullScreen("Stage", ui, width, height, [&](const Look& l) {
         const float k = l.k;
         Backdrop(l.d, l.W, l.H, k, kSurfaceBase, video, true);
@@ -499,19 +554,32 @@ void StagePage(const ImGuiLayer& ui, const assets::Catalog& catalog, app::Settin
         // The stages, scrolled to the selected one
         Tracked(l.d, l.text, 17 * k, l.P(kColX + 12, 228), g_stageSide == 1 ? kInk : kInkMuted,
                 (std::string("STAGES \xC2\xB7 ") + std::to_string(n)).c_str(), 0.16f);
-        if (n > kShown) {   // (the page keys by the list they move: the footer is full)
+        if (shownEnd - g_stageTop < nr) {   // (the page keys by the list they move: the footer is full)
             const char* pages = "PGUP PGDN: PAGE";
             const float pw = Tracked(nullptr, l.text, 13 * k, ImVec2(), 0, pages, 0.16f);
             Tracked(l.d, l.text, 13 * k, ImVec2((kColX + kColW) * k - pw, 230 * k), kInkMuted, pages, 0.16f);
         }
         if (n) {
-            const float target = kListY + (g_stageAt - g_stageTop) * (kRowH + 4);
+            const float target = rowY(rowOf[g_stageAt]);
             g_stagePlate = g_stagePlate < 0 ? target : g_stagePlate + (target - g_stagePlate) * ease;
             Plate(l.d, l.P(kColX, g_stagePlate), kColW * k, kRowH * k, 12 * k, g_stageSide == 1 ? kSelect : kSelectIdle);
         }
-        for (int i = g_stageTop; i < std::min(n, g_stageTop + kShown); ++i) {
+        for (int r = g_stageTop; r < shownEnd; ++r) {
+            const float y = rowY(r);
+            if (rows[r].stage < 0) {   // a track's name, and how many of its stages are here
+                const std::string head = Upper(rows[r].name);
+                l.d->PushClipRect(l.P(kColX, y), l.P(kColX + kColW - 90, y + kHeadH), true);
+                Tracked(l.d, l.text, 15 * k, l.P(kColX + 12, y + kHeadH - 22), kInkSecondary, head.c_str(), 0.16f);
+                l.d->PopClipRect();
+                const std::string cnt = rows[r].stages == 1 ? "1 STAGE" : std::to_string(rows[r].stages) + " STAGES";
+                const float cw = Tracked(nullptr, l.text, 13 * k, ImVec2(), 0, cnt.c_str(), 0.16f);
+                Tracked(l.d, l.text, 13 * k, ImVec2((kColX + kColW - 24) * k - cw, (y + kHeadH - 21) * k), kInkMuted, cnt.c_str(), 0.16f);
+                l.d->AddRectFilled(l.P(kColX + 12, y + kHeadH - 2), l.P(kColX + kColW - 24, y + kHeadH - 1), kLine);
+                continue;
+            }
+            const int i = rows[r].stage;
             const assets::Stage& st = *list[i];
-            const float y = kListY + (i - g_stageTop) * (kRowH + 4), mid = (y + kRowH * 0.5f) * k;
+            const float mid = (y + kRowH * 0.5f) * k;
             const bool on = i == g_stageAt;
             const bool hot = ImGui::IsMouseHoveringRect(l.P(kColX, y), l.P(kColX + kColW, y + kRowH), false);
             if (hot && moved) g_stageAt = i, g_stageSide = 1;
@@ -530,10 +598,10 @@ void StagePage(const ImGuiLayer& ui, const assets::Catalog& catalog, app::Settin
                 Tracked(l.d, l.text, 13 * k, ImVec2((kColX + kColW - 24) * k - cw, mid - 7 * k), kSignal, "CHOSEN", 0.16f);
             }
         }
-        if (n > kShown) {   // where the shown rows are in the list
-            const float top = kListY, h = kShown * (kRowH + 4) - 4, x = kColX + kColW + 10;
+        if (shownEnd - g_stageTop < nr) {   // where the shown rows are in the list
+            const float top = kListY, h = kListH, x = kColX + kColW + 10;
             l.d->AddRectFilled(l.P(x, top), l.P(x + 3, top + h), kLine);
-            const float a = top + h * g_stageTop / n, b = top + h * std::min(n, g_stageTop + kShown) / n;
+            const float a = top + h * g_stageTop / nr, b = top + h * shownEnd / nr;
             l.d->AddRectFilled(l.P(x, a), l.P(x + 3, b), kInkSecondary);
         }
 
@@ -547,8 +615,8 @@ void StagePage(const ImGuiLayer& ui, const assets::Catalog& catalog, app::Settin
             const std::string map = st.map >= 0 ? std::to_string(st.map) : "-";
             const std::string length = track && track->lengthKm > 0 ? Fmt("%.1f KM", track->lengthKm) : "-";
             const std::pair<const char*, std::string> facts[4] = {
-                {"SURFACE", track && !track->surface.empty() ? Upper(track->surface) : "-"}, {"LENGTH", length}, {"MAP", map},
-                {"FILE", Upper(FileName(st.ngg))}};
+                {"TRACK", Upper(trackName(st))}, {"SURFACE", track && !track->surface.empty() ? Upper(track->surface) : "-"},
+                {"LENGTH", length}, {"MAP", map}};
             for (const auto& [label, value] : facts) {
                 Tracked(l.d, l.text, 13 * k, l.P(x, y + 16), kInkMuted, label, 0.16f);
                 l.d->PushClipRect(l.P(x, y), l.P(kX0 + 660, y + 80), true);

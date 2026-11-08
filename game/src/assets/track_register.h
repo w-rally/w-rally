@@ -30,14 +30,15 @@ struct Stage;
 
 struct TrackInfo {
     int map = -1;
-    std::string name;               // "" unknown (the menus show the stage's file name)
+    std::string name;               // the stage's: "Joux Verte II"; "" unknown (the menus show the stage's file name)
+    std::string trackName;          // its track's, the place: "Joux Verte"; "" unknown (then the stage's name)
     std::string country;            // "" unknown
     std::string surface;            // "gravel", "tarmac", "snow"
     float lengthKm = 0;             // 0 unknown
     // Its splash picture (assets/splash.h): a path relative to the RBR folder, or an http(s) URL the server serves it
     // at ("" none). Tracks.ini's SplashScreen for a community track; the server's list (the original stages); its json.
     std::string splash;
-    std::string from;               // the layers that said something: "RBR", "RBR + server", "RBR + track.yaml (downloaded)"
+    std::string from;               // the layers that said something: "RBR", "RBR + rbr-tracks.yaml", "... + track.yaml (downloaded)"
     std::string error;              // its json's, if it could not be read ("" none)
 };
 

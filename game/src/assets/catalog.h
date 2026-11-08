@@ -40,6 +40,7 @@ struct Stage {
     int map = -1;
     std::string track, version;         // its track item: id and version (fr_joux_verte, rbr)
     std::string trackStage;             // its stage of the track (rbr-tracks.yaml: "joux_verte_ii"), "" none
+    int trackOrder = 0;                 // its place among the track's stages (the table's order, its main one first)
     // The RBR stages it is, itself first: a map's times of day (_M _N _E _O) that its .ngg made one stage (NGGA) - they
     // drive the same, and W-Rally makes the time of day as weather. One for a stage no .ngg collapsed.
     std::vector<std::string> times;

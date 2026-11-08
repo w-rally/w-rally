@@ -79,22 +79,46 @@ void TrackRegister::Build(const vfs::Vfs& content, const std::vector<Stage>& sta
                 if (*s.splash) t.splash = s.splash;
                 t.from += " + server";
             }
+        // 2b. the track table (rbr-tracks.yaml, from the onlineracing.cz tracks table): the stage's name, length and
+        // surface, its track's name and country - in the track.yaml the VFS made of RBR's files, its "stages"
+        bool tableStage = false;   // the table named this stage (its length and surface are its own, not the track's)
+        if (const auto rbr = content.Open({vfs::Kind::Track, st.track, "", "rbr"})) {
+            const formats::Json& j = rbr->Manifest();
+            bool& said = tableStage;
+            if (const formats::Json* listed = j.Get("stages"); listed && listed->type == formats::Json::Array)
+                for (const formats::Json& s : listed->items)
+                    if (static_cast<int>(s.Num("rbr", -1)) == st.map) {
+                        t.name = s.Str("name", t.name);
+                        t.surface = s.Str("surface", t.surface);
+                        t.lengthKm = static_cast<float>(s.Num("length_km", t.lengthKm));
+                        said = s.Get("name") != nullptr;
+                    }
+            t.trackName = j.Str("name", t.trackName);
+            t.country = j.Str("country", t.country);
+            if (said || j.Get("name")) t.from += " + rbr-tracks.yaml";
+        }
         // 3. track.yaml: the track's newest version's (one the VFS made of RBR's files is no manifest of its own)
         if (const auto item = content.Open({vfs::Kind::Track, st.track, "", st.version}))
             if (const std::string source = item->Source(vfs::ManifestName(vfs::Kind::Track)); !source.empty() && source != "rbr") {
                 const std::string file = item->ManifestFile();
                 const formats::Json& j = item->Manifest();
                 if (j.type == formats::Json::Object) {
-                    t.name = j.Str("name", t.name);
+                    // A track.yaml speaks for the TRACK: its name is the place's (and the stage's, when nothing named
+                    // the stage); its surface and length are a stage's only where the table gave the stage none.
+                    t.trackName = j.Str("name", t.trackName);
+                    if (t.name.empty()) t.name = j.Str("name", t.name);
                     t.country = j.Str("country", t.country);
-                    t.surface = j.Str("surface", t.surface);
-                    t.lengthKm = static_cast<float>(j.Num("length_km", t.lengthKm));
+                    if (!tableStage) {
+                        t.surface = j.Str("surface", t.surface);
+                        t.lengthKm = static_cast<float>(j.Num("length_km", t.lengthKm));
+                    }
                     t.splash = j.Str("splash", t.splash);
                     t.from += " + " + file + " (" + source + " " + item->Ref().version + ")";
                 } else {
                     t.error = file + " (" + source + " " + item->Ref().version + "): not an object";
                 }
             }
+        if (t.trackName.empty()) t.trackName = t.name;
         m_tracks.push_back(std::move(t));
     }
 }

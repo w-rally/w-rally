@@ -96,6 +96,26 @@ int main(int argc, char** argv)
     }
     if (collapsed) std::printf("%zu stages stand for several times of day\n", collapsed);
 
+    // The names the track table gives (rbr-tracks.yaml, from the onlineracing.cz table): a stage's own, its track's (the
+    // place), its country, length and surface - and the menus' title is the stage's name.
+    size_t named = 0;
+    for (const wrally::assets::Stage& st : c.stages)
+        if (const wrally::assets::TrackInfo* t = c.trackRegister.Find(st.map); t && t->from.find("rbr-tracks.yaml") != std::string::npos) {
+            ++named;
+            if (t->name.empty() || t->trackName.empty() || st.title.compare(0, t->name.size(), t->name))
+                return Fail(st.stage + ": named by the table, but its title is \"" + st.title + "\"");
+        }
+    std::printf("%zu stages named by rbr-tracks.yaml\n", named);
+    if (const wrally::assets::Stage* jv = Find(c, "track-45_N")) {
+        const wrally::assets::TrackInfo* t = c.trackRegister.Find(45);
+        if (!t || t->name != "Joux Verte II" || t->trackName != "Joux Verte" || t->country != "France" || t->surface != "tarmac" ||
+            t->lengthKm < 7.7f || t->lengthKm > 7.9f || jv->track != "fr_joux_verte")
+            return Fail("track-45_N is not Joux Verte II of the track Joux Verte (France, tarmac, 7.8 km): " +
+                        (t ? t->name + " / " + t->trackName + " / " + t->country + " / " + t->surface : std::string("not registered")));
+        std::printf("track-45_N: %s, a stage of %s (%s, %s, %.1f km)\n", t->name.c_str(), t->trackName.c_str(), t->country.c_str(),
+                    t->surface.c_str(), t->lengthKm);
+    }
+
     // No encrypted stage offered for import (it would fail when picked, and must not be imported anyway).
     for (const wrally::assets::Stage& st : c.stages)
         if (st.imported && wrally::formats::LbsEncryptedVersion(st.ngg)) return Fail(st.stage + ": encrypted, but offered");

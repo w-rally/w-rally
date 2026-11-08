@@ -1,20 +1,32 @@
 """rbr-tracks.yaml from the onlineracing.cz tracks table (docs/content-layers.md 3): the W-Rally tracks, each with its
-STAGES - every RBR map number the table knows, to its track and its stage id.
+name and country and its STAGES - every RBR map number the table knows, with its stage id, name, length and surface.
 
     python make_table.py <rbr_ct_tracks.csv> <rbr-tracks.yaml> [--rbr <RBR folder>]
-    python make_table.py --regroup <rbr-tracks.yaml>      rewrite a table (either form) with the stages grouped
+    python make_table.py --regroup <rbr-tracks.yaml>      rewrite a table (any of its forms) with the stages grouped
 
-A track is a place: its id <country>_<stagename>. Its stages are the RBR maps driven there - RBR's reversed stages ("X
+A track is a place: its id <country>_<place>. Its stages are the RBR maps driven there - RBR's reversed stages ("X
 II", decided 2026-11-08) are the same track as X: Joux Verte (42) and Joux Verte II (45) are fr_joux_verte with the stages
 joux_verte and joux_verte_ii. A map is grouped under another when its id is the other's plus _ii, _reverse, _reversed or
 _rev (or _ii_a: 70, Prospect Ridge II A), or the other's _i plus _ii; the chain is followed to its root, whose id names
-the track. A stage id is the map's own id without its country.
+the track and whose name and country are the track's. A stage id is the map's own id without its country.
 
-The CSV is the table's export with its header (stage_id, ingame_stage_id, name, ..., country_ENG, ...): the map is
-ingame_stage_id. The country is ISO 3166-1 alpha-2 (the table's English name mapped, its spellings as they are); one
-with no real country (Montekland, Rally school, Neverwhere) is "xx", ISO's code for private use. The name is a slug: ASCII,
-lowercase, a-z 0-9 and _, a release number at its end dropped ("Bergheim v1.1": bergheim). Two maps with the same id:
-the later ones get _<map>.
+    fr_joux_verte:
+      name: "Joux Verte"
+      country: "France"
+      42:
+        id: joux_verte
+        name: "Joux Verte"
+        length_km: 7.9
+        surface: tarmac
+      45:
+        ...
+
+The CSV is the table's export with its header (stage_id, ingame_stage_id, name, length, ..., country_ENG, ...,
+surface, ...): the map is ingame_stage_id; surface 0 tarmac, 1 gravel, 2 snow. The country code is ISO 3166-1 alpha-2
+(the table's English name mapped); one with no real country (Montekland, Rally school, Neverwhere) is "xx", ISO's code
+for private use. The id's name is a slug: ASCII, lowercase, a-z 0-9 and _, a release number at its end dropped
+("Bergheim v1.1": bergheim). Two maps with the same id: the later ones get _<map>. The names shown are the table's, its
+country names' spellings corrected (COUNTRY).
 
 --rbr: the folder's Tracks.ini names checked against the table's, and the maps it has that the table does not - printed,
 nothing changed (where the folder's number is another track, the table wins: decided 2026-11-05).
@@ -33,6 +45,9 @@ CC = {'Argentina': 'ar', 'Australia': 'au', 'Austria': 'at', 'Brasil': 'br', 'Cz
       'Poland': 'pl', 'Portugal': 'pt', 'San Marino': 'sm', 'Slovakia': 'sk', 'Slovenia': 'si', 'Spain': 'es',
       'Sweeden': 'se', 'Swiss': 'ch', 'Switzerland': 'ch', 'USA': 'us', 'Ukraine': 'ua',
       'Montekland': 'xx', 'Neverwhere': 'xx', 'Rally School': 'xx', 'Rally school': 'xx'}
+# The table's country names as shown: its spellings corrected.
+COUNTRY = {'Itally': 'Italy', 'Sweeden': 'Sweden', 'Swiss': 'Switzerland', 'Brasil': 'Brazil', 'Rally school': 'Rally School'}
+SURFACE = {'0': 'tarmac', '1': 'gravel', '2': 'snow'}
 # The table's names corrected: RBR's own spelling.
 FIX = {60: 'Fraizer Wells II'}
 
@@ -58,9 +73,10 @@ def tracks_ini_names(rbr):
 SUFFIXES = ('_ii_a', '_ii', '_reversed', '_reverse', '_rev')
 
 
-def group(ids):
-    """{map: id} -> {track id: [(map, stage id)]}, the tracks in the order of their first map."""
-    by_id = {i: m for m, i in ids.items()}
+def group(maps):
+    """{map: {'id': ..., ...}} -> {track id: [map, ...]}, the track's own stage first, the tracks in the order of their
+    first map."""
+    by_id = {s['id']: m for m, s in maps.items()}
 
     def base(i):
         for suf in SUFFIXES:
@@ -73,50 +89,90 @@ def group(ids):
         return None
 
     tracks = {}
-    for m in sorted(ids):
-        root = ids[m]
+    for m in sorted(maps):
+        root = maps[m]['id']
         seen = {root}
         while base(root) and base(root) not in seen:
             root = base(root)
             seen.add(root)
-        stage = ids[m].split('_', 1)[1] if '_' in ids[m] else ids[m]
-        tracks.setdefault(root, []).append((m, stage))
+        tracks.setdefault(root, []).append(m)
     # the track's own stage (the root) first - it is the track's main stage - then the others by map number
-    for t, stages in tracks.items():
-        stages.sort(key=lambda ms: (ids[ms[0]] != t, ms[0]))
-    return dict(sorted(tracks.items(), key=lambda kv: min(m for m, _ in kv[1])))
+    for t, ms in tracks.items():
+        ms.sort(key=lambda m: (maps[m]['id'] != t, m))
+    return dict(sorted(tracks.items(), key=lambda kv: min(kv[1])))
+
+
+def unquote(v):
+    v = v.strip()
+    if len(v) >= 2 and v[0] == v[-1] == '"':
+        return v[1:-1].replace('\\"', '"').replace('\\\\', '\\')
+    return v
 
 
 def read_table(path):
-    """A table of either form: "41: cz_test" lines, or tracks with their stages."""
-    ids, track = {}, None
+    """A table of any of its forms -> {map: {'id', 'name', 'length_km', 'surface', 'country'}}: "41: cz_test" lines,
+    tracks with "<map>: <stage id>", or tracks with their fields and stages with theirs."""
+    maps, track, fields, stage = {}, None, {}, None
     for line in open(path, encoding='utf-8'):
-        text = line.split('#')[0].rstrip()
-        if not text.strip():
+        text = line.rstrip('\n')
+        if not text.strip() or text.lstrip().startswith('#'):
             continue
-        indented = text[0] in ' \t'
+        indent = len(text) - len(text.lstrip(' '))
         key, _, value = text.strip().partition(':')
-        key, value = key.strip(), value.strip()
-        if not indented and key.isdigit():          # the old form
-            ids[int(key)] = value
-        elif not indented:                           # a track
-            track = key
-        elif track and key.isdigit():               # one of its stages: the map's id is <country>_<stage>
-            ids[int(key)] = track.split('_', 1)[0] + '_' + value
-    return ids
+        key, value = key.strip(), unquote(value)
+        country = lambda: track.split('_', 1)[0]
+        if indent == 0 and key.isdigit():                        # the oldest form: a map, its track
+            maps[int(key)] = {'id': value}
+            track = stage = None
+        elif indent == 0:                                         # a track
+            track, fields, stage = key, {}, None
+        elif indent == 2 and track and key.isdigit():           # one of its stages
+            stage = int(key)
+            maps[stage] = {'id': country() + '_' + value} if value else {}
+            maps[stage].update({'country': fields.get('country', '')})
+        elif indent == 2 and track:                               # the track's own field
+            fields[key] = value
+            for m, s in maps.items():                             # (fields come before the stages, but in case)
+                if s.get('_track') == track and key == 'country':
+                    s['country'] = value
+        elif indent == 4 and stage is not None:                  # the stage's field
+            maps[stage][key] = country() + '_' + value if key == 'id' else value
+        if stage is not None and stage in maps:
+            maps[stage]['_track'] = track
+    for s in maps.values():
+        s.pop('_track', None)
+    return maps
 
 
-def write(path, ids):
-    tracks = group(ids)
+def quoted(s):
+    return '"' + s.replace('\\', '\\\\').replace('"', '\\"') + '"'
+
+
+def write(path, maps):
+    tracks = group(maps)
     with open(path, 'w', encoding='utf-8', newline='\n') as f:
-        f.write('# W-Rally track id (<country>_<place>): its stages, RBR map number: stage id - tools/rbr-tracks/make_table.py\n')
-        f.write('# RBR\'s reversed stages are stages of the same track (docs/content-layers.md 3).\n')
-        for t, stages in tracks.items():
+        f.write('# W-Rally tracks (<country>_<place>): a name, a country, and its stages - each an RBR map number with its stage\n')
+        f.write('# id, name, length and surface. RBR\'s reversed stages are stages of the same track (docs/content-layers.md 3).\n')
+        f.write('# Written by tools/rbr-tracks/make_table.py from the onlineracing.cz tracks table.\n')
+        for t, ms in tracks.items():
+            root = maps[ms[0]]
             f.write(f'{t}:\n')
-            for m, st in stages:
-                f.write(f'  {m}: {st}\n')
+            if root.get('name'):
+                f.write(f'  name: {quoted(root["name"])}\n')
+            if root.get('country'):
+                f.write(f'  country: {quoted(root["country"])}\n')
+            for m in ms:
+                s = maps[m]
+                f.write(f'  {m}:\n')
+                f.write(f'    id: {s["id"].split("_", 1)[1] if "_" in s["id"] else s["id"]}\n')
+                if s.get('name'):
+                    f.write(f'    name: {quoted(s["name"])}\n')
+                if s.get('length_km'):
+                    f.write(f'    length_km: {s["length_km"]}\n')
+                if s.get('surface'):
+                    f.write(f'    surface: {s["surface"]}\n')
     several = sum(1 for s in tracks.values() if len(s) > 1)
-    print(f'{len(ids)} maps, {len(tracks)} tracks ({several} with more than one stage) to {path}')
+    print(f'{len(maps)} maps, {len(tracks)} tracks ({several} with more than one stage) to {path}')
 
 
 def main():
@@ -128,8 +184,7 @@ def main():
     a = ap.parse_args()
 
     if a.regroup:
-        ids = read_table(a.regroup)
-        write(a.regroup, ids)
+        write(a.regroup, read_table(a.regroup))
         return
     if not a.csv or not a.out:
         ap.error('a CSV and an output, or --regroup')
@@ -137,35 +192,46 @@ def main():
     table = {}
     for r in csv.DictReader(open(a.csv, encoding='utf-8')):
         m = int(r['ingame_stage_id'])
-        table[m] = (FIX.get(m, r['name'].strip()), r['country_ENG'].strip())
+        table[m] = r
+        r['name'] = FIX.get(m, r['name'].strip())
+        r['country_ENG'] = r['country_ENG'].strip()
 
-    ids = {}
-    for m, (name, country) in sorted(table.items()):
+    maps = {}
+    for m, r in sorted(table.items()):
+        country = r['country_ENG']
         if country not in CC:
-            print(f'map {m} {name}: country "{country}" has no code - left out', file=sys.stderr)
+            print(f'map {m} {r["name"]}: country "{country}" has no code - left out', file=sys.stderr)
             continue
-        ids[m] = CC[country] + '_' + slug(name)
+        s = {'id': CC[country] + '_' + slug(r['name']), 'name': r['name'], 'country': COUNTRY.get(country, country)}
+        try:
+            if float(r['length']) > 0:
+                s['length_km'] = f'{float(r["length"]):g}'
+        except ValueError:
+            pass
+        if r.get('surface') in SURFACE:
+            s['surface'] = SURFACE[r['surface']]
+        maps[m] = s
     shared = collections.defaultdict(list)
-    for m, i in sorted(ids.items()):
-        shared[i].append(m)
-    for i, maps in shared.items():
-        for m in maps[1:]:
-            ids[m] = f'{i}_{m}'
-            print(f'map {m}: {i} is map {maps[0]}\'s too - {ids[m]}', file=sys.stderr)
+    for m, s in sorted(maps.items()):
+        shared[s['id']].append(m)
+    for i, ms in shared.items():
+        for m in ms[1:]:
+            maps[m]['id'] = f'{i}_{m}'
+            print(f'map {m}: {i} is map {ms[0]}\'s too - {maps[m]["id"]}', file=sys.stderr)
 
-    write(a.out, ids)
+    write(a.out, maps)
 
     if a.rbr:
         local = tracks_ini_names(a.rbr)
         here = set()
         for f in os.listdir(os.path.join(a.rbr, 'Maps')):
-            m = re.match(r'track-(\d+)[_.].*\.(trk|lbs)$', f, re.I)
-            if m:
-                here.add(int(m.group(1)))
-        for m in sorted(here & set(ids)):
-            if m in local and not slug(local[m]).startswith(slug(table[m][0])) and not slug(table[m][0]).startswith(slug(local[m])):
-                print(f'map {m}: {a.rbr} has "{local[m]}", the table "{table[m][0]}" ({ids[m]})')
-        missing = sorted(here - set(ids))
+            mm = re.match(r'track-(\d+)[_.].*\.(trk|lbs)$', f, re.I)
+            if mm:
+                here.add(int(mm.group(1)))
+        for m in sorted(here & set(maps)):
+            if m in local and not slug(local[m]).startswith(slug(table[m]['name'])) and not slug(table[m]['name']).startswith(slug(local[m])):
+                print(f'map {m}: {a.rbr} has "{local[m]}", the table "{table[m]["name"]}" ({maps[m]["id"]})')
+        missing = sorted(here - set(maps))
         print(f'{len(missing)} maps in {a.rbr} the table does not know (rbr_<n>): ' +
               ', '.join(f'{m}' + (f' "{local[m]}"' if m in local else '') for m in missing))
 

@@ -94,14 +94,27 @@ removed; `--overrides` stays for development.
 **Mapped** — the RBR layer answers W-Rally paths for RBR's items, all at version `rbr`:
 
 - **Tracks:** `rbr-tracks.yaml` (shipped in layer 2, a newer one downloadable into layer 1) groups RBR's maps into
-  tracks: each track id, then its stages, an RBR map number to a stage id each, the track's own stage first (its main
-  one):
+  tracks: each track id with its name and country, then its stages, an RBR map number each with its stage id, name,
+  length and surface, the track's own stage first (its main one). The names are what the menus show (the track
+  register takes them before RBR's `Tracks.ini`, which has none for RBR's own stages):
 
   ```yaml
   fr_joux_verte:
-    42: joux_verte
-    45: joux_verte_ii
+    name: "Joux Verte"
+    country: "France"
+    42:
+      id: joux_verte
+      name: "Joux Verte"
+      length_km: 7.9
+      surface: tarmac
+    45:
+      id: joux_verte_ii
+      name: "Joux Verte II"
+      length_km: 7.8
+      surface: tarmac
   ```
+
+  The shorter forms are read too: `42: joux_verte` (a stage by its id alone) under a track.
 
   Then `tracks/fr_joux_verte/rbr/track-42_M.trk` ↔ `Maps/track-42_M.trk` and `.../track-45_N.trk` ↔
   `Maps/track-45_N.trk`, and so on for every map's files (`.lbs`, `.trk`, `.col`, `.dls`, `.ini`, textures), keeping
@@ -110,7 +123,9 @@ removed; `--overrides` stays for development.
   still read: each map its own track. The map number lives on only in this table and in `track.yaml`'s `rbr` and
   `stages`, for compatibility (old replays, `TrackSettings.ini`'s sections, RBR's own track files).
   `tools/rbr-tracks/make_table.py` writes it (`--regroup` rewrites one): a map whose id is another's plus `_ii`,
-  `_reverse`, `_reversed` or `_rev` is a stage of that one's track - 344 maps, 248 tracks, 95 with several stages.
+  `_reverse`, `_reversed` or `_rev` is a stage of that one's track - 344 maps, 248 tracks, 95 with several stages -
+  and takes the names, lengths, surfaces (0 tarmac, 1 gravel, 2 snow) and countries from the table's CSV export.
+  Quick rally lists a country's stages under their tracks, the tracks by name.
 - **Cars:** `cars/<id>/rbr/<file>` ↔ `Cars/<folder>/<file>`. `Cars.ini`'s name and the slot table fill an in-memory
   `car.yaml`.
 - **`physics.rbz` is RBR's alone, kept for compatibility, and only the mapping opens it.** Nothing else in the game

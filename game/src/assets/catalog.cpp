@@ -295,6 +295,10 @@ std::string Catalog::Scan(const app::Settings& s, std::shared_ptr<const vfs::Vfs
             st.map = rules::StageMap(variant);
             st.track = item->Ref().id, st.version = item->Ref().version;
             st.trackStage = v.StageOfMap(st.map);
+            {
+                const std::vector<int> maps = v.MapsOfTrack(t.id);
+                st.trackOrder = static_cast<int>(std::find(maps.begin(), maps.end(), st.map) - maps.begin());
+            }
             st.times = {variant};
             st.weathers = stageWeathers(st.map, variant.back());
             // Drawn by: the track's own .ngg, an .ngg folder's, else its .lbs imported.

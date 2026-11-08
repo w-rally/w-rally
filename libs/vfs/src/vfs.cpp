@@ -507,8 +507,10 @@ void Vfs::ReadRbr()
     struct Entry {
         std::string track, stage;
         size_t order = 0;     // the table's: a track's first map is its main stage
+        std::string fields;   // the stage's name, length_km, surface as JSON members (", \"name\": ..."), "" none
     };
     std::map<int, Entry> table;
+    std::map<std::string, std::string> trackFields;   // a track's name and country, as JSON members
     std::string tableName = "rbr-tracks.yaml";
     auto tableFile = FindPlain(tableName);
     if (!tableFile) tableFile = FindPlain(tableName = "rbr-tracks.json");
@@ -517,22 +519,43 @@ void Vfs::ReadRbr()
         ReadResolved(*tableFile, bytes);
         try {
             const formats::Json j = formats::ParseData(std::string(bytes.begin(), bytes.end()), tableName);
-            auto put = [&](const std::string& mapText, const std::string& track, const std::string& stage) {
+            auto put = [&](const std::string& mapText, const std::string& track, const std::string& stage,
+                           const std::string& fields = "") {
                 const int map = std::atoi(mapText.c_str());
                 if (map <= 0 || std::to_string(map) != mapText) return void(m_log += tableName + ": \"" + mapText + "\" is not a map number\n");
                 if (!ValidId(track) || !ValidId(stage))
                     return void(m_log += tableName + ": map " + mapText + ": \"" + track + "\" / \"" + stage + "\" is not an id\n");
                 if (table.count(map))
                     return void(m_log += tableName + ": map " + mapText + " is " + table[map].track + "'s already, not " + track + "'s too\n");
-                table[map] = {track, stage, table.size()};
+                table[map] = {track, stage, table.size(), fields};
+            };
+            // Names and countries are shown; a length is a number, a surface one of RBR's words.
+            auto member = [](const formats::Json& o, const char* key, bool number) -> std::string {
+                const formats::Json* m = o.Get(key);
+                if (!m || m->type == formats::Json::Object || m->type == formats::Json::Array) return "";
+                if (number) {
+                    const double n = o.Num(key, -1);
+                    if (n <= 0) return "";
+                    char b[32];
+                    std::snprintf(b, sizeof b, "%g", n);
+                    return std::string(", ") + Quoted(key) + ": " + b;
+                }
+                return m->text.empty() ? "" : std::string(", ") + Quoted(key) + ": " + Quoted(m->text);
             };
             for (const auto& [key, value] : j.members) {
                 if (value.type == formats::Json::String) {                  // "41: cz_ploskovice"
                     const size_t us = value.text.find('_');
                     put(key, value.text, us == std::string::npos ? value.text : value.text.substr(us + 1));
-                } else if (value.type == formats::Json::Object) {           // a track and its stages
-                    for (const auto& [map, stage] : value.members)
-                        put(map, key, stage.type == formats::Json::String ? stage.text : "");
+                } else if (value.type == formats::Json::Object) {           // a track, its name, its stages
+                    trackFields[key] = member(value, "name", false) + member(value, "country", false);
+                    for (const auto& [map, stage] : value.members) {
+                        if (map == "name" || map == "country") continue;
+                        if (stage.type == formats::Json::Object)                // its id, name, length, surface
+                            put(map, key, stage.Str("id"), member(stage, "name", false) + member(stage, "length_km", true) +
+                                                           member(stage, "surface", false));
+                        else
+                            put(map, key, stage.type == formats::Json::String ? stage.text : "");
+                    }
                 } else {
                     m_log += tableName + ": " + key + ": neither a track id nor a track's stages\n";
                 }
@@ -568,6 +591,7 @@ void Vfs::ReadRbr()
         std::string id;
         size_t order;
         std::pair<fs::path, std::string> files;
+        std::string fields;
     };
     std::map<std::string, std::vector<Stage>> tracks;
     std::vector<std::string> trackOrder;
@@ -589,7 +613,7 @@ void Vfs::ReadRbr()
         if (t == table.end()) m_log += "rbr: map " + std::to_string(map) + " is in no " + tableName + ": " + id + "\n";
         if (!tracks.count(id)) trackOrder.push_back(id);
         tracks[id].push_back({map, t != table.end() ? t->second.stage : id, t != table.end() ? t->second.order : SIZE_MAX,
-                              probe.maps[0]});
+                              probe.maps[0], t != table.end() ? t->second.fields : ""});
     }
     for (const std::string& id : trackOrder) {
         std::vector<Stage>& stages = tracks[id];
@@ -602,11 +626,13 @@ void Vfs::ReadRbr()
             ix.mapTrack[st.map] = id;
             ix.mapStage[st.map] = st.id;
             ix.trackMaps[id].push_back(st.map);
-            list += std::string(list.empty() ? "" : ", ") + "{\"id\": " + Quoted(st.id) + ", \"rbr\": " + std::to_string(st.map) + "}";
+            list += std::string(list.empty() ? "" : ", ") + "{\"id\": " + Quoted(st.id) + ", \"rbr\": " + std::to_string(st.map) +
+                    st.fields + "}";
         }
         ix.trackMap[id] = stages[0].map;
+        const auto tf = trackFields.find(id);
         v->manifestText = "{\"id\": " + Quoted(id) + ", \"version\": \"rbr\", \"rbr\": " + std::to_string(stages[0].map) +
-                          ", \"stages\": [" + list + "]}";
+                          (tf != trackFields.end() ? tf->second : "") + ", \"stages\": [" + list + "]}";
         addRbr(Kind::Track, "", id, std::move(v));
     }
 
