@@ -73,6 +73,9 @@ std::string Write(const SceneData& s, std::vector<uint8_t>& out)
     if (s.variants.size() > kMaxVariants) return "more than 32 stage variants";
     for (const std::string& name : s.variants)
         if (name.empty() || name.size() >= sizeof(VariantRecord::name)) return "a stage variant's name is empty or over 15 bytes";
+    for (const auto& a : s.variantAliases)
+        if (a.first >= s.variants.size() || a.second.empty() || a.second.size() >= sizeof(VariantAlias::name))
+            return "a stage variant alias names no variant, or is empty or over 31 bytes";
     if (!s.variantMasks.empty() && s.variantMasks.size() != s.objects.size())
         return "variant masks: " + std::to_string(s.variantMasks.size()) + " for " + std::to_string(s.objects.size()) + " objects";
 
@@ -80,7 +83,8 @@ std::string Write(const SceneData& s, std::vector<uint8_t>& out)
     const bool spawn = s.hasSpawn;
     const uint32_t chunks = 6 + (spawn ? 1 : 0) + (s.weather.empty() ? 0 : 1) + (s.objectKeys.empty() ? 0 : 1) +
                             (s.tagNames.empty() ? 0 : 1) + (s.plants.empty() ? 0 : 1) +
-                            (s.variants.empty() ? 0 : 1) + (s.variantMasks.empty() ? 0 : 1);
+                            (s.variants.empty() ? 0 : 1) + (s.variantMasks.empty() ? 0 : 1) +
+                            (s.variantAliases.empty() ? 0 : 1);
     const FileHeader fh{kMagic, kFormatCurrent, chunks, 0};
     Put(o, &fh, sizeof fh);
 
@@ -154,6 +158,18 @@ std::string Write(const SceneData& s, std::vector<uint8_t>& out)
         PutU32(p, static_cast<uint32_t>(s.variantMasks.size()));
         Put(p, s.variantMasks.data(), s.variantMasks.size() * 4);
         Chunk(o, ChunkVariantMasks(), p);
+    }
+    if (!s.variantAliases.empty()) {
+        p.clear();
+        const VariantAliasHeader ah{1, static_cast<uint32_t>(s.variantAliases.size()), sizeof(VariantAlias), 0};
+        Put(p, &ah, sizeof ah);
+        for (const auto& a : s.variantAliases) {
+            VariantAlias r{};
+            r.variant = a.first;
+            std::memcpy(r.name, a.second.data(), a.second.size());
+            Put(p, &r, sizeof r);
+        }
+        Chunk(o, ChunkVariantAliases(), p);
     }
     out.swap(o);
     return "";
@@ -260,6 +276,18 @@ std::string Read(const void* bytes, size_t n, SceneData& out)
                 std::array<float, 3> off{};
                 if (vh.recordSize >= sizeof r) std::memcpy(off.data(), r.offset, sizeof r.offset);
                 out.variantOffsets.push_back(off);
+            }
+        } else if (f == ChunkVariantAliases()) {
+            VariantAliasHeader ah{};
+            if (size < sizeof ah) return "NGGA truncated";
+            std::memcpy(&ah, d, sizeof ah);
+            if (ah.version != 1 || ah.recordSize < sizeof(VariantAlias) || size < sizeof ah + size_t(ah.count) * ah.recordSize)
+                return "NGGA not understood";
+            for (uint32_t k = 0; k < ah.count; ++k) {
+                VariantAlias r{};
+                std::memcpy(&r, d + sizeof ah + size_t(k) * ah.recordSize, sizeof r);
+                r.name[sizeof r.name - 1] = 0;
+                out.variantAliases.emplace_back(r.variant, r.name);
             }
         } else if (f == ChunkVariantMasks()) {
             uint32_t count = 0;

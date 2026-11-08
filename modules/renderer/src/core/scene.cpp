@@ -3866,7 +3866,8 @@ bool Scene::Load(ID3D12Device* dev, ID3D12CommandQueue* queue, const wchar_t* pa
 // The stage variants (NGGR, NGGQ; ngg_format.h): which of the file's objects the requested variant has. The others
 // are marked removed rather than dropped, so object indices - which NGGK, NGGP and the editor's handles all are - stay
 // the file's. Done right after the objects are made: culling bounds, plants and the ray tracer all read `removed`.
-void Scene::ApplyVariant(const uint8_t* variants, size_t variantBytes, const uint8_t* masks, size_t maskBytes)
+void Scene::ApplyVariant(const uint8_t* variants, size_t variantBytes, const uint8_t* masks, size_t maskBytes,
+                         const uint8_t* aliases, size_t aliasBytes)
 {
     m_variantOffset[0] = m_variantOffset[1] = m_variantOffset[2] = 0.0f;
     if (!variants) return;
@@ -3888,30 +3889,28 @@ void Scene::ApplyVariant(const uint8_t* variants, size_t variantBytes, const uin
         m_variantNames.push_back(r.name);
     }
 
-    // The request: a stage name ("track-45_N"), the name without "track-" ("45_N"), or RBR's letter ("N"). Names are
-    // letters for one map's variants and map-qualified ("42_M", "45_N") when a file also holds a REVERSED stage (Joux
-    // Verte 42 is 45 driven the other way), so the full name is tried first, and a bare letter only picks a variant
-    // when exactly one name ends in it.
-    auto strip = [](std::string s) {
-        if (s.size() > 6 && _strnicmp(s.c_str(), "track-", 6) == 0) s = s.substr(6);
-        return s;
-    };
-    const std::string want = strip(m_variantRequest);
-    const size_t us = want.rfind('_');
-    const std::string letter = us == std::string::npos ? want : want.substr(us + 1);
+    // The request, matched EXACTLY (ignoring case): a variant's name ("45"), then the names NGGA lists for it - RBR's
+    // stage names of the siblings the converter collapsed into it ("track-45_N", "track-45_O"). Nothing is guessed
+    // here; which names a stage answers to is the converter's decision, written in the file.
+    const std::string& want = m_variantRequest;
     int chosen = -1;
     for (uint32_t v = 0; v < h.count && chosen < 0 && !want.empty(); ++v)
-        if (_stricmp(strip(m_variantNames[v]).c_str(), want.c_str()) == 0) chosen = (int)v;
-    if (chosen < 0 && !letter.empty())
+        if (_stricmp(m_variantNames[v].c_str(), want.c_str()) == 0) chosen = (int)v;
+    if (chosen < 0 && !want.empty() && aliases)
     {
-        auto lastPart = [](const std::string& nm) {
-            const size_t u = nm.rfind('_');
-            return u == std::string::npos ? nm : nm.substr(u + 1);
-        };
-        int hit = -1, hits = 0;
-        for (uint32_t v = 0; v < h.count; ++v)
-            if (_stricmp(lastPart(m_variantNames[v]).c_str(), letter.c_str()) == 0) { hit = (int)v; ++hits; }
-        if (hits == 1) chosen = hit;     // two would be ambiguous: "N" in a file holding 42_N and 45_N
+        VariantAliasHeader ah = {};
+        if (aliasBytes >= sizeof(ah)) memcpy(&ah, aliases, sizeof(ah));
+        if (ah.version != 1 || ah.recordSize < sizeof(VariantAlias) || aliasBytes < sizeof(ah) + (size_t)ah.count * ah.recordSize)
+            Log("scene: NGGA version %u, %u alias(es) of %u bytes in %zu - not understood, ignored", ah.version, ah.count,
+                ah.recordSize, aliasBytes);
+        else
+            for (uint32_t k = 0; k < ah.count && chosen < 0; ++k)
+            {
+                VariantAlias a = {};
+                memcpy(&a, aliases + sizeof(ah) + (size_t)k * ah.recordSize, sizeof(a));
+                a.name[sizeof(a.name) - 1] = 0;
+                if (a.variant < h.count && _stricmp(a.name, want.c_str()) == 0) chosen = (int)a.variant;
+            }
     }
     const bool found = want.empty() || chosen >= 0;
     if (chosen < 0) chosen = 0;
@@ -3997,6 +3996,7 @@ bool Scene::LoadFromMemory(ID3D12Device* dev, ID3D12CommandQueue* queue,
     const uint8_t* plants = nullptr;  size_t plantBytes = 0;
     const uint8_t* variants = nullptr; size_t variantBytes = 0;
     const uint8_t* masks = nullptr;    size_t maskBytes = 0;
+    const uint8_t* aliases = nullptr;  size_t aliasBytes = 0;
 
     size_t off = sizeof(FileHeader);
     for (uint32_t i = 0; i < fh->chunkCount; ++i)
@@ -4031,6 +4031,8 @@ bool Scene::LoadFromMemory(ID3D12Device* dev, ID3D12CommandQueue* queue,
         { variants = payload; variantBytes = ch->byteSize; }
         else if (ch->fourcc == ChunkVariantMasks())
         { masks = payload; maskBytes = ch->byteSize; }
+        else if (ch->fourcc == ChunkVariantAliases())
+        { aliases = payload; aliasBytes = ch->byteSize; }
         // Unknown chunks are skipped on purpose - that is what makes the format
         // forward-compatible.
 
@@ -4154,7 +4156,7 @@ bool Scene::LoadFromMemory(ID3D12Device* dev, ID3D12CommandQueue* queue,
         }
     }
 
-    ApplyVariant(variants, variantBytes, masks, maskBytes);
+    ApplyVariant(variants, variantBytes, masks, maskBytes, aliases, aliasBytes);
 
     // A variant in another frame (VariantRecord::offset): its world is the file's moved, so everything below reads
     // moved vertices - the boxes, the plants, the ray tracer's meshes and the upload all start from this copy.

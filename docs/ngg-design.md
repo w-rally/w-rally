@@ -1343,6 +1343,19 @@ main variant's frame and the loader moves a copy of the vertices, the bounds and
 offset before anything reads them. `editor-api-41` checks an object moves by exactly the offset; Wallaby's
 `WRendererCheck` does it on the real 51/55 file.
 
+**Revised (the user, 2026-11-08): a variant is a STAGE, and the renderer guesses nothing.** RBR's `_M _N _E _O` are
+times of day with the light baked in; W-Rally lights live and picks the time of day as weather. So Wallaby collapses
+siblings that draw the same and are the same physics into ONE stage (its `StagePlan`, measured over `<RBR>\Maps`: every
+time-of-day pair of RBR's own maps is one stage except where RBR's data really differs -- a reversed stage's `_O`
+that kept the original stage's plants, a wrong fence file, another build of 61), and only a stage that differs is a
+variant. A reversed stage always is. Variants are named by map number (`42`, `45`; `125_O` for a sibling kept apart)
+and the new optional **NGGA** chunk lists the other names each answers to -- RBR's stage names of the siblings
+collapsed into it (`track-42_M`, `track-42_O`). `loadSceneVariant` matches the request EXACTLY (ignoring case)
+against the names and then NGGA; the earlier rules -- strip `track-`, a bare letter when unambiguous -- are gone,
+because which names a stage answers to is the converter's decision and is written in the file. The game passes its
+stage name (`track-42_O`) and the file resolves it. Interface unchanged (19). `editor-api-41` checks an alias picks
+its stage, a name only LIKE a variant's does not, and a letter is not a name; `ngg-roundtrip` carries NGGA.
+
 ### 3.5 Format sketch
 
 Chunked, GPU-ready, little-endian, memory-mappable, every chunk independently skippable so a version bump never

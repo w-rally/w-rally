@@ -58,6 +58,7 @@ std::string Compare(const ngg::SceneData& a, const ngg::SceneData& b)
     if (a.variants != b.variants || a.variantMasks != b.variantMasks || a.variantHasSpawn != b.variantHasSpawn)
         return "the stage variants";
     if (a.variantOffsets != b.variantOffsets) return "a stage variant's offset";
+    if (a.variantAliases != b.variantAliases) return "a stage variant's aliases";
     for (size_t k = 0; k < a.variantSpawns.size() && k < b.variantSpawns.size(); ++k)
         if (std::memcmp(&a.variantSpawns[k], &b.variantSpawns[k], sizeof(ngg::SpawnPoint))) return "a stage variant's car start";
     return "";
@@ -106,6 +107,8 @@ ngg::SceneData MadeUp()
     s.variantSpawns = {{{1, 2, 3}, {0, 0, 1}}, {{900, 5, -40}, {0, 0, -1}}};
     // and the reversed stage built at another origin (RBR's 55 is 51 moved)
     s.variantOffsets = {{0, 0, 0}, {-1193.0f, 664.25f, 1793.5f}};
+    // and the RBR stage names each answers to (siblings collapsed into one stage)
+    s.variantAliases = {{0, "track-42_M"}, {0, "track-42_O"}, {1, "track-45_N"}, {1, "track-45_O"}};
     // Two 4x4 DXT1 textures: a header and one block each.
     for (const char* name : {"ground.dds", "leaf.dds"}) {
         std::vector<uint8_t> dds(128 + 8, 0);

@@ -21,6 +21,7 @@
 #include <fstream>
 #include <iterator>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "wrally/iface/renderer.h"
@@ -242,7 +243,8 @@ std::vector<uint8_t> Atlas(uint32_t& size, uint32_t& columns, uint32_t& rows)
 void PutU32(std::vector<char>& b, uint32_t v) { b.insert(b.end(), reinterpret_cast<char*>(&v), reinterpret_cast<char*>(&v) + 4); }
 
 std::vector<char> WithVariants(const std::vector<char>& ngg, const std::vector<const char*>& names,
-                               const std::vector<uint32_t>& masks, const std::vector<V3>& offsets = {})
+                               const std::vector<uint32_t>& masks, const std::vector<V3>& offsets = {},
+                               const std::vector<std::pair<uint32_t, const char*>>& aliases = {})
 {
     // 32-byte records, the first layout, unless offsets are given: then the whole 68-byte VariantRecord.
     const uint32_t rec = offsets.empty() ? 32u : 68u;
@@ -261,9 +263,20 @@ std::vector<char> WithVariants(const std::vector<char>& ngg, const std::vector<c
     PutU32(b, uint32_t(4 + 4 * masks.size()));
     PutU32(b, uint32_t(masks.size()));
     for (uint32_t m : masks) PutU32(b, m);
+    if (!aliases.empty()) {   // NGGA: the stage names a variant answers to
+        PutU32(b, 'N' | 'G' << 8 | 'G' << 16 | uint32_t('A') << 24);
+        PutU32(b, uint32_t(16 + 36 * aliases.size()));
+        PutU32(b, 1), PutU32(b, uint32_t(aliases.size())), PutU32(b, 36), PutU32(b, 0);
+        for (const auto& a : aliases) {
+            char r[32] = {};
+            std::memcpy(r, a.second, std::strlen(a.second));
+            PutU32(b, a.first);
+            b.insert(b.end(), r, r + 32);
+        }
+    }
     uint32_t chunks = 0;
     std::memcpy(&chunks, b.data() + 8, 4);
-    chunks += 2;
+    chunks += aliases.empty() ? 2 : 3;
     std::memcpy(b.data() + 8, &chunks, 4);
     return b;
 }
@@ -303,8 +316,8 @@ void CheckVariants(Rig& rig, const std::vector<char>& ngg)
           "variants: another variant's object cannot be shown", "object %u", onlyO);
     Check(rig.Render(), "variants: M renders");
 
-    got = load("track-41_O");
-    Check(got == inO, "variants: a stage name picks its variant (track-41_O)", "%u (O has %u)", got, inO);
+    got = load("o");
+    Check(got == inO, "variants: a variant's name picks it, ignoring case (o)", "%u (O has %u)", got, inO);
     edit.setObjectVisible(rig.r, onlyO, 0);
     const uint32_t hid = edit.visibleObjectCount(rig.r);
     edit.setObjectVisible(rig.r, onlyO, 1);
@@ -323,30 +336,45 @@ void CheckVariants(Rig& rig, const std::vector<char>& ngg)
     Check(edit.visibleObjectCount(rig.r) == inM, "variants: loadScene draws a variant file's main one", "%u",
           edit.visibleObjectCount(rig.r));
 
-    // A reversed stage in the same file (Joux Verte 42 is 45 driven the other way): names are map-qualified, the
-    // game's full stage name picks one, and a bare letter both end in picks neither.
-    const std::vector<char> rev = WithVariants(ngg, {"41_M", "45_M"}, masks);
-    TakeLog();
-    api.loadSceneVariant(rig.r, rev.data(), rev.size(), "track-45_M", &s);
+    // Nothing is guessed: a name the file does not list - RBR's stage name of a variant named "O" - is not that variant.
+    got = load("track-41_O");
     log = TakeLog();
-    Check(edit.visibleObjectCount(rig.r) == inO && log.find("variant 45_M") != std::string::npos,
-          "variants: a reversed stage's full name picks it (track-45_M)", "%u", edit.visibleObjectCount(rig.r));
-    api.loadSceneVariant(rig.r, rev.data(), rev.size(), "M", &s);
-    log = TakeLog();
-    Check(edit.visibleObjectCount(rig.r) == inM && log.find("not in this file") != std::string::npos,
-          "variants: an ambiguous letter draws the main one, and says so", "%u", edit.visibleObjectCount(rig.r));
+    Check(got == inM && log.find("not in this file") != std::string::npos,
+          "variants: a name only LIKE a variant's is not matched (track-41_O)", "%u", got);
+
+    // A map's stages as the converter writes them (Wallaby StagePlan): named by map number, each answering to RBR's
+    // stage names of the siblings collapsed into it (NGGA). Joux Verte: 42 with 42_M and 42_O, 45 with 45_N and 45_O.
+    const std::vector<char> rev = WithVariants(ngg, {"41", "45"}, masks, {},
+        {{0, "track-41_M"}, {0, "track-41_O"}, {1, "track-45_N"}, {1, "track-45_O"}});
+    auto loadRev = [&](const char* variant) -> uint32_t {
+        TakeLog();
+        api.loadSceneVariant(rig.r, rev.data(), rev.size(), variant, &s);
+        log = TakeLog();
+        return edit.visibleObjectCount(rig.r);
+    };
+    got = loadRev("track-45_O");
+    Check(got == inO && log.find("variant 45 of 2") != std::string::npos, "variants: an alias picks its stage (track-45_O)",
+          "%u (45 has %u)", got, inO);
+    got = loadRev("TRACK-41_o");
+    Check(got == inM && log.find("not in this file") == std::string::npos, "variants: so does another, ignoring case",
+          "%u", got);
+    got = loadRev("45");
+    Check(got == inO, "variants: and the stage's own name", "%u", got);
+    got = loadRev("N");
+    Check(got == inM && log.find("not in this file") != std::string::npos,
+          "variants: a letter is not a name - the main one, and it says so", "%u", got);
 
     // A reversed stage built at another origin (RBR's 55 is 51 moved): its world is the file's moved by the offset.
     // Object 0 is in both variants; its box must move by exactly that, and the scene's bounds with it.
     const V3 off{-1193.0f, 664.25f, 1793.5f};
-    const std::vector<char> shifted = WithVariants(ngg, {"41_M", "45_M"}, masks, {V3{0, 0, 0}, off});
+    const std::vector<char> shifted = WithVariants(ngg, {"41", "45"}, masks, {V3{0, 0, 0}, off});
     V3 lo0, hi0, lo1, hi1;
     float sb0[3], sB0[3], sb1[3], sB1[3];
-    api.loadSceneVariant(rig.r, shifted.data(), shifted.size(), "track-41_M", &s);
+    api.loadSceneVariant(rig.r, shifted.data(), shifted.size(), "41", &s);
     Bounds(rig, 0, lo0, hi0);
     api.sceneBounds(rig.r, s, sb0, sB0);
     TakeLog();
-    api.loadSceneVariant(rig.r, shifted.data(), shifted.size(), "track-45_M", &s);
+    api.loadSceneVariant(rig.r, shifted.data(), shifted.size(), "45", &s);
     log = TakeLog();
     Bounds(rig, 0, lo1, hi1);
     api.sceneBounds(rig.r, s, sb1, sB1);

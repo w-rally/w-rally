@@ -43,6 +43,7 @@ struct SceneData {
     std::vector<SpawnPoint> variantSpawns;   // parallel to variants (zero where it has none)
     std::vector<std::array<float, 3>> variantOffsets;   // parallel to variants: its world relative to the file's
     std::vector<uint32_t> variantMasks;      // NGGQ, parallel to objects; empty: every object in every variant
+    std::vector<std::pair<uint32_t, std::string>> variantAliases;   // NGGA: (variant index, a name it answers to)
 };
 
 // The scene as .ngg bytes. Returns "" or what is inconsistent (an index past the vertices, an object past the

@@ -418,8 +418,9 @@ struct RendererApi {
     Status (WRALLY_CALL* editApi)(Renderer*, uint32_t editVer, const RendererEditApi** out);
 
     // loadScene, drawing one of the file's stage variants (ngg_format.h, NGGR/NGGQ: one .ngg for a map whose stage RBR
-    // ships as _M/_N/_E/_O, and reversed stages of other map numbers). `variant`: the stage's name ("track-41_M"), or
-    // RBR's letter ("M") when only one of the file's variants ends in it; null or empty for the file's main variant. A file without variants loads as loadScene; one that lacks the variant
+    // ships as _M/_N/_E/_O, and reversed stages of other map numbers). `variant`: a variant's name ("45") or one of the
+    // names the file lists for it (NGGA: RBR's stage names, "track-45_N"), matched exactly ignoring case; null or
+    // empty for the file's main variant. A file without variants loads as loadScene; one that lacks the variant
     // asked for draws its main one and says so in the log. The variant's absent objects are not drawn, cast nothing
     // and are not traced; object indices and keys stay the file's.
     Status (WRALLY_CALL* loadSceneVariant)(Renderer*, const void* ngg, uint64_t bytes, const char* variant,

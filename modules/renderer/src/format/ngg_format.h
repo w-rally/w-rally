@@ -268,11 +268,15 @@ inline uint32_t ChunkSpawn()       { return FourCC('N','G','G','S'); }
 // OPTIONAL: without it nothing is linked.
 inline uint32_t ChunkObjectKeys()  { return FourCC('N','G','G','K'); }
 
-// STAGE VARIANTS (design 3.4b) - one file for a map whose stage RBR ships as several .lbs (_M, _N, _E, _O).
-// Measured over 57 variant pairs: the drawn terrain is the same triangles and the objects mostly match, so the
-// geometry is stored once and a variant is only WHICH OBJECTS it has. What else RBR varied is not carried: its
-// baked vertex colour (W-Rally lights dynamically; only light mode 0 reads it) and its darkened overcast/wet
-// textures (weather and wetness are dynamic) - both come from the MAIN variant, the first record.
+// STAGE VARIANTS (design 3.4b) - one file for a map's STAGES: RBR's reversed stages (Joux Verte 45 is 42 driven the
+// other way), and a sibling of the map that is really another stage. RBR shipped each time of day as its own .lbs
+// (_M, _N, _E, _O) with the light baked in; W-Rally lights the stage live and picks the time of day as weather, so the
+// converter COLLAPSES siblings that draw the same and are the same physics into one stage (Wallaby StagePlan) and the
+// file lists the names they answered to as that stage's aliases (NGGA). Measured over 57 sibling pairs: the drawn
+// terrain is the same triangles and the objects mostly match, so the geometry is stored once and a variant is only
+// WHICH OBJECTS it has. What else RBR varied is not carried: its baked vertex colour (W-Rally lights dynamically; only
+// light mode 0 reads it) and its darkened overcast/wet textures (weather and wetness are dynamic) - both come from the
+// MAIN variant, the first record.
 //
 // 'NGGR' - VariantChunkHeader, then `count` VariantRecord of `recordSize` bytes. The first is the main variant.
 //          recordSize >= 32: a reader takes the prefix it knows, and the fields past a shorter record are zero.
@@ -280,6 +284,8 @@ inline uint32_t ChunkObjectKeys()  { return FourCC('N','G','G','K'); }
 // Both OPTIONAL: without NGGR the file is one variant; without NGGQ every object is in every variant. At most 32
 // variants. A loader asked for a variant draws the objects whose bit is set and treats the rest as removed
 // (Scene::SetVariant); asked for none, or for one the file lacks, it draws the main variant and says so.
+// A request is matched EXACTLY (ignoring case) against the variant names and then the aliases: nothing is guessed at
+// load - which names a stage answers to is the converter's decision, written down.
 struct VariantChunkHeader
 {
     uint32_t version;       // 1
@@ -289,10 +295,8 @@ struct VariantChunkHeader
 };
 struct VariantRecord
 {
-    char     name[16];      // RBR's letter ("M", "O") for one map's variants; map-qualified ("42_M", "45_N") when the
-                            // file also holds a reversed stage of another map number. NUL-terminated, unique ignoring
-                            // case. A loader matches the game's stage name first ("track-45_N"), a bare letter only
-                            // when one name alone ends in it.
+    char     name[16];      // the stage: its map number ("42", "45"), map and letter ("125_O") for a sibling that is
+                            // really another stage. NUL-terminated, unique ignoring case with every alias.
     uint32_t flags;         // kVariantHasSpawn
     uint32_t reserved[3];
     // Where the car starts in THIS variant (as NGGS: position, then facing). A reversed stage starts where the other
@@ -314,6 +318,24 @@ constexpr uint32_t kMaxVariants = 32;
 
 inline uint32_t ChunkVariants()     { return FourCC('N','G','G','R'); }
 inline uint32_t ChunkVariantMasks() { return FourCC('N','G','G','Q'); }
+
+// 'NGGA' - VariantAliasHeader, then `count` VariantAlias of `recordSize` bytes: the other names a variant answers to -
+// RBR's stage names of the siblings collapsed into it ("track-42_M", "track-42_O"). OPTIONAL; with NGGR only.
+struct VariantAliasHeader
+{
+    uint32_t version;       // 1
+    uint32_t count;
+    uint32_t recordSize;    // sizeof(VariantAlias)
+    uint32_t reserved;
+};
+struct VariantAlias
+{
+    uint32_t variant;       // index into NGGR
+    char     name[32];      // NUL-terminated; unique ignoring case with the variant names and the other aliases
+};
+static_assert(sizeof(VariantAliasHeader) == 16, "VariantAliasHeader layout - keep Wallaby's NggWriter in step");
+static_assert(sizeof(VariantAlias) == 36,       "VariantAlias layout - keep Wallaby's NggWriter in step");
+inline uint32_t ChunkVariantAliases() { return FourCC('N','G','G','A'); }
 
 // PLANTS - the trees, bushes and grass of the alpha-tested geometry, and what each is.
 // Written by Wallaby (Plants.cs). OPTIONAL: without them the renderer finds plants

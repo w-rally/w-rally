@@ -776,7 +776,8 @@ private:
     // Clears all per-stage state. Called at the top of Load, because loading a
     // second track must replace the first rather than accumulate onto it.
     void ResetScene();
-    void ApplyVariant(const uint8_t* variants, size_t variantBytes, const uint8_t* masks, size_t maskBytes);
+    void ApplyVariant(const uint8_t* variants, size_t variantBytes, const uint8_t* masks, size_t maskBytes,
+                      const uint8_t* aliases, size_t aliasBytes);
     std::vector<int32_t> m_objectKeys;   // NGGK, parallel to the file's objects
     std::string              m_variantRequest;   // SetVariant: applies at the next load
     std::string              m_variant;          // what the last load drew
