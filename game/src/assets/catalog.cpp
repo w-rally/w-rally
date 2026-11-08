@@ -86,6 +86,42 @@ std::vector<std::string> NggWeathers(const fs::path& ngg)
     return names;
 }
 
+// The stages an .ngg holds (NGGR), each with the names it answers to (NGGA: RBR's stage names of the times of day the
+// converter made one stage): {name, alias...} a stage, the file's order. Empty: one stage, or no .ngg.
+std::vector<std::vector<std::string>> NggStages(const fs::path& ngg)
+{
+    std::vector<std::vector<std::string>> out;
+    std::ifstream f(ngg, std::ios::binary);
+    uint32_t header[4] = {};
+    if (!f.read(reinterpret_cast<char*>(header), sizeof header) || std::memcmp(header, "NGG0", 4)) return out;
+    std::vector<std::pair<uint32_t, std::string>> aliases;
+    for (uint32_t i = 0; i < header[2]; ++i) {
+        uint32_t chunk[2] = {};
+        if (!f.read(reinterpret_cast<char*>(chunk), sizeof chunk)) break;
+        const std::streamoff next = static_cast<std::streamoff>(f.tellg()) + chunk[1] + (4 - chunk[1] % 4) % 4;
+        const bool names = !std::memcmp(chunk, "NGGR", 4), alias = !std::memcmp(chunk, "NGGA", 4);
+        uint32_t h[4] = {};   // version 1, count, record size, reserved
+        if ((names || alias) && f.read(reinterpret_cast<char*>(h), sizeof h) && h[0] == 1) {
+            std::vector<char> record(h[2]);
+            for (uint32_t r = 0; r < h[1] && h[2] >= (names ? 16u : 36u) && f.read(record.data(), h[2]); ++r)
+                if (names) {
+                    record[15] = 0;
+                    out.push_back({record.data()});
+                } else {
+                    uint32_t v = 0;
+                    std::memcpy(&v, record.data(), 4);
+                    record[35] = 0;
+                    aliases.emplace_back(v, record.data() + 4);
+                }
+        }
+        f.clear();
+        f.seekg(next);
+    }
+    for (const auto& [v, name] : aliases)
+        if (v < out.size()) out[v].push_back(name);
+    return out;
+}
+
 } // namespace
 
 const char* SlotPhysics(int slot)
@@ -249,29 +285,58 @@ std::string Catalog::Scan(const app::Settings& s, std::shared_ptr<const vfs::Vfs
                 variants.push_back(stem);
         }
         std::sort(variants.begin(), variants.end());
+        // A track is a place; its maps its stages (rbr-tracks.yaml: Joux Verte's 42 and its reverse 45). An .ngg may
+        // be the stage's, the track's, or a map's.
+        std::vector<std::string> trackNggs = {t.id};
+        for (const int m : v.MapsOfTrack(t.id)) trackNggs.push_back("track-" + std::to_string(m));
         for (const std::string& variant : variants) {
             Stage st;
             st.stage = variant;
             st.map = rules::StageMap(variant);
             st.track = item->Ref().id, st.version = item->Ref().version;
+            st.trackStage = v.StageOfMap(st.map);
+            st.times = {variant};
             st.weathers = stageWeathers(st.map, variant.back());
             // Drawn by: the track's own .ngg, an .ngg folder's, else its .lbs imported.
             const std::string mapNgg = "track-" + std::to_string(st.map);
+            std::vector<std::string> names = {variant, mapNgg};
+            for (const std::string& n : trackNggs)
+                if (std::find(names.begin(), names.end(), n) == names.end()) names.push_back(n);
             fs::path ngg;
-            for (const std::string& name : {variant, t.id, mapNgg})
+            for (const std::string& name : names)
                 if (const std::string d = disk(*item, name + ".ngg"); !d.empty()) {
                     ngg = d, st.source = item->Source(name + ".ngg");
                     break;
                 }
             if (ngg.empty())
-                for (const std::string& name : {Lower(variant), mapNgg})
-                    if (const auto it = folderNggs.find(name); it != folderNggs.end()) {
+                for (const std::string& name : names)
+                    if (const auto it = folderNggs.find(Lower(name)); it != folderNggs.end()) {
                         ngg = it->second, st.source = "ngg folder";
                         break;
                     }
             if (!ngg.empty()) {
                 st.ngg = ngg.string();
-                st.title = title(variant, ngg.filename().string());
+                // A map's .ngg names its stages and the RBR stages each is (Wallaby collapses times of day that drive
+                // the same): a time of day another stage stands for is no stage of its own; one that stands for others
+                // has their weathers too.
+                bool folded = false;
+                for (const std::vector<std::string>& listed : NggStages(ngg)) {
+                    const auto me = std::find_if(listed.begin() + 1, listed.end(), [&](const std::string& a) {
+                        return !_stricmp(a.c_str(), variant.c_str());
+                    });
+                    if (me == listed.end()) continue;
+                    if (me != listed.begin() + 1) folded = true;
+                    else st.times.assign(listed.begin() + 1, listed.end());
+                    break;
+                }
+                if (folded) continue;
+                if (st.times.size() > 1) {
+                    st.weathers.clear();
+                    for (const std::string& time : st.times)
+                        for (const std::string& w : stageWeathers(rules::StageMap(time), time.back()))
+                            if (std::find(st.weathers.begin(), st.weathers.end(), w) == st.weathers.end()) st.weathers.push_back(w);
+                }
+                st.title = st.times.size() > 1 ? variant + "  -  " + ngg.filename().string() : title(variant, ngg.filename().string());
                 // The .ngg's own presets, when it has some: those of this stage's time of day if any are named so,
                 // else all of them.
                 if (const std::vector<std::string> drawn = NggWeathers(ngg); !drawn.empty()) {
@@ -342,7 +407,8 @@ std::string Catalog::Scan(const app::Settings& s, std::shared_ptr<const vfs::Vfs
     trackRegister.Build(v, stages);
     for (Stage& st : stages)
         if (const TrackInfo* t = trackRegister.Find(st.map); t && !t->name.empty()) {
-            const char* tod = TimeOfDay(st.stage.size() >= 2 ? st.stage.back() : ' ');
+            // (no time of day for a stage that is all of its map's: the time of day is its weather)
+            const char* tod = st.times.size() > 1 ? "" : TimeOfDay(st.stage.size() >= 2 ? st.stage.back() : ' ');
             st.title = t->name + (tod[0] ? std::string(" (") + tod + ")" : "");
         }
     std::sort(cars.begin(), cars.end(), [](const Car& a, const Car& b) { return Lower(a.name) < Lower(b.name); });
@@ -420,6 +486,13 @@ const Stage* Catalog::FindStage(const std::string& key) const
 {
     for (const Stage& s : stages)
         if (s.key == key) return &s;
+    // A key kept before its .ngg made times of day one stage ("...|track-42_O"): the stage that stands for it.
+    const size_t bar = key.rfind('|');
+    if (bar != std::string::npos)
+        for (const Stage& s : stages)
+            if (s.ngg == key.substr(0, bar))
+                for (const std::string& t : s.times)
+                    if (!_stricmp(t.c_str(), key.c_str() + bar + 1)) return &s;
     return nullptr;
 }
 

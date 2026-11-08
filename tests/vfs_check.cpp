@@ -112,6 +112,7 @@ void MadeUp(const fs::path& root)
     Write(rbr / "Maps/track-41_M.lbs", "lbs 41 rbr");
     Write(rbr / "Maps/track-41_M_textures.rbz", "tex 41");
     Write(rbr / "Maps/track-12_O.trk", "trk 12, in no Tracks.ini");
+    Write(rbr / "Maps/track-45_N.trk", "trk 45, 41 reversed");
     Write(rbr / "Cars/Cars.ini", "[Car05]\nFileName = \"Cars\\Impreza03\\imp.sgc\"\nCarName = \"Subaru Impreza 2003\"\n");
     Write(rbr / "Cars/Impreza03/imp.sgc", "sgc rbr");
     Write(rbr / "Cars/Impreza03/textures/body.dds", "body rbr");
@@ -123,8 +124,9 @@ void MadeUp(const fs::path& root)
                                    {"Physics/s_i2003/common.lsp", "i2003 common"},
                                    {"Physics/s_i2003/setups/d_gravel.lsp", "i2003 gravel setup"}});
 
-    // W-Rally: the track table (map 41 named, 4 not), a track of its own, a car version (an older car.json).
-    Write(wr / "rbr-tracks.yaml", "# map: track id\n41: cz_test\n77: BadId\n");
+    // W-Rally: the track table (map 41 and its reverse 45 one track, 4 not named; 77 in the older one-a-line form), a
+    // track of its own, a car version (an older car.json).
+    Write(wr / "rbr-tracks.yaml", "# track: its stages\ncz_test:\n  41: test\n  45: test_ii\n77: BadId\n");
     Write(wr / "tracks/fr_own/1.0.0/track.yaml", "id: fr_own\nversion: 1.0.0\n");
     Write(wr / "tracks/fr_own/1.0.0/a.trk", "a 1.0.0");
     Write(wr / "tracks/fr_own/1.0.0/b.trk", "b 1.0.0");
@@ -200,6 +202,17 @@ void MadeUp(const fs::path& root)
 
     // RBR's tracks: the table's id, else rbr_<n>; a map's files only, never another map's sharing its first digits
     Check(vfs.TrackOfMap(41) == "cz_test" && vfs.MapOfTrack("cz_test") == 41 && vfs.TrackOfMap(4) == "rbr_4", "map table");
+    // a reversed stage is a stage of the same track: one item, both maps' files, the main map the table's first
+    Check(vfs.TrackOfMap(45) == "cz_test" && vfs.MapsOfTrack("cz_test") == std::vector<int>{41, 45} &&
+              vfs.StageOfMap(41) == "test" && vfs.StageOfMap(45) == "test_ii" && vfs.StageOfMap(4) == "rbr_4",
+          "a track's stages: " + vfs.StageOfMap(41) + ", " + vfs.StageOfMap(45));
+    Check(Text(vfs, "tracks/cz_test/rbr/track-45_N.trk") == "trk 45, 41 reversed", "the reversed stage's file in the track");
+    {
+        const auto rt = vfs.Open({Kind::Track, "cz_test", "", "rbr"});
+        const wrally::formats::Json* st = rt ? rt->Manifest().Get("stages") : nullptr;
+        Check(st && st->items.size() == 2 && st->items[1].Str("id") == "test_ii" && st->items[1].Num("rbr") == 45,
+              "track.yaml lists its stages");
+    }
     Check(Text(vfs, "tracks/cz_test/rbr/track-41_M.trk") == "trk 41 rbr", "RBR track file by its item path");
     const auto t4 = vfs.Open({Kind::Track, "rbr_4"});
     Check(t4 && Joined(t4->Files()) == "track-4_E.trk,track.yaml", "map 4's files: " + (t4 ? Joined(t4->Files()) : ""));

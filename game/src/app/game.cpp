@@ -537,7 +537,9 @@ StageEnd RunStage(Shell& sh, const Options& given, bool fromMenu, std::string& e
     const int startView = std::getenv("NGG_DEBUG_VIEW") ? std::atoi(std::getenv("NGG_DEBUG_VIEW")) : 0;
     renderer.SetDebugView(startView);
     if (imported) renderer.SetLegacyProfile(legacyProfile);   // (the renderer keeps it from stage to stage)
-    const iface::SceneHandle scene = renderer.LoadScene(bytes.data(), bytes.size());
+    // The stage's own of a map's .ngg (its stages, NGGR: Joux Verte's 42 and its reverse 45 in one file): asked for by
+    // the stage's name, which the file lists (NGGA). A file of one stage ignores it.
+    const iface::SceneHandle scene = renderer.LoadScene(bytes.data(), bytes.size(), o.stage.c_str());
     if (rendererLog) std::printf("%s", renderer.TakeLog().c_str());
     if (!scene) return fail("renderer: " + renderer.Error());
     bytes.clear();

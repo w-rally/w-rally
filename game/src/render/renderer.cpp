@@ -100,11 +100,12 @@ template <class H> H Made(Status s, H h, const iface::RendererApi* api, iface::R
 
 } // namespace
 
-iface::SceneHandle Renderer::LoadScene(const void* ngg, uint64_t bytes)
+iface::SceneHandle Renderer::LoadScene(const void* ngg, uint64_t bytes, const char* stage)
 {
     if (!m_instance) return 0;
     iface::SceneHandle h = 0;
-    const Status s = m_api->loadScene(m_instance, ngg, bytes, &h);
+    const Status s = stage && *stage ? m_api->loadSceneVariant(m_instance, ngg, bytes, stage, &h)
+                                     : m_api->loadScene(m_instance, ngg, bytes, &h);
     return Made(s, h, m_api, m_instance, m->error);
 }
 

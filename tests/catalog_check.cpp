@@ -2,7 +2,9 @@
 // hold - every RBR stage, the ones no .ngg draws imported from their .lbs with their weathers drawn, but no protected
 // (encrypted) one, and the TrackSettings.ini weathers of a map under 10 found under their two-digit names ("04E_...");
 // every slot car with RBR's physics (its variant "rbr") a module reading rbr-lsp 1 drives, as the default. A car with
-// more physics than RBR's (a download's) is listed with them.
+// more physics than RBR's (a download's) is listed with them. A map's .ngg holding its stages (NGGR/NGGA): each of its
+// stages offered once, standing for the times of day the file made one - none of those offered again - with all their
+// weathers, and in the track of the map's place (rbr-tracks.yaml: a reversed stage is a stage of the same track).
 //
 //   catalog-check <RBR folder> [<.ngg folders>]
 //
@@ -77,6 +79,23 @@ int main(int argc, char** argv)
     std::printf("%zu stages: %zu from .ngg files, %zu imported from .lbs; %zu with drawn weathers; %zu protected (encrypted, "
                 "not offered); %zu cars\n", c.stages.size(), c.stages.size() - imported, imported, drawn,
                 c.protectedStages.size(), c.cars.size());
+    // Stages a map's .ngg made of several times of day: offered once, the others not at all.
+    size_t collapsed = 0;
+    for (const wrally::assets::Stage& st : c.stages) {
+        if (st.times.size() < 2) continue;
+        ++collapsed;
+        for (size_t i = 1; i < st.times.size(); ++i)
+            for (const wrally::assets::Stage& other : c.stages)
+                if (other.ngg == st.ngg && !_stricmp(other.stage.c_str(), st.times[i].c_str()))
+                    return Fail(st.times[i] + ": offered on its own, and as a time of day of " + st.stage);
+        std::string times;
+        for (const std::string& t : st.times) times += (times.empty() ? "" : ", ") + t;
+        std::printf("%s (track %s, stage %s): one stage for %s, %zu weathers%s\n", st.stage.c_str(), st.track.c_str(),
+                    st.trackStage.c_str(), times.c_str(), st.weathers.size(), st.weathersDrawn ? " drawn" : "");
+        if (c.FindStage(st.ngg + "|" + st.times[1]) != &st) return Fail(st.times[1] + ": a kept choice does not find " + st.stage);
+    }
+    if (collapsed) std::printf("%zu stages stand for several times of day\n", collapsed);
+
     // No encrypted stage offered for import (it would fail when picked, and must not be imported anyway).
     for (const wrally::assets::Stage& st : c.stages)
         if (st.imported && wrally::formats::LbsEncryptedVersion(st.ngg)) return Fail(st.stage + ": encrypted, but offered");

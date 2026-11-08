@@ -17,8 +17,9 @@
 //
 // The RBR folder is never written. It is reached two ways:
 //   mapped  its items at version "rbr": the maps of Maps/Tracks.ini, and those with a track-<n>_<X>.trk in Maps it does
-//           not list, as tracks (ids from rbr-tracks.yaml or .json, else rbr_<n>; the map's files Maps/track-<n>_* and
-//           track-<n>.* inside the track), the folders of Cars with an
+//           not list, as tracks (rbr-tracks.yaml or .json groups maps into tracks - a reversed stage is a stage of the
+//           same track - else each map is rbr_<n>; every map's files Maps/track-<n>_* and track-<n>.* inside its
+//           track, the track.yaml's "stages" listing them), the folders of Cars with an
 //           .sgc as cars (id: the folder's name as a slug), each car's physics as the variant "rbr" (its loose
 //           Cars/<folder>/physics/, else its Cars.ini slot's folder in physics.rbz) and physics.rbz's Physics/ as the
 //           base "rbr". Their manifests are made in memory. physics.rbz is opened here and nowhere else.
@@ -124,9 +125,13 @@ public:
     // absolute path as it is (the command line's, for development - FileHost reads those directly). "" stays "".
     std::string VfsPath(const std::filesystem::path& file) const;
 
-    // The RBR mapping: an RBR map's track id ("" none), and a track's map number (-1 none).
+    // The RBR mapping. A track is a place and its stages the RBR maps driven there (rbr-tracks.yaml: Joux Verte's 42
+    // and its reverse 45 are both fr_joux_verte). A map's track id ("" none); a track's main map, its first stage's
+    // (-1 none); all its maps, the main one first; a map's stage id within its track ("joux_verte_ii"; "" none).
     std::string TrackOfMap(int map) const;
     int MapOfTrack(std::string_view id) const;
+    std::vector<int> MapsOfTrack(std::string_view id) const;
+    std::string StageOfMap(int map) const;
     // An RBR car's folder under Cars ("" not an RBR car).
     std::string RbrCarFolder(std::string_view id) const;
 

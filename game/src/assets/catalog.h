@@ -36,9 +36,13 @@ namespace wrally::assets {
 struct Stage {
     std::string key;                    // ngg path '|' stage: what Settings keeps
     std::string ngg;                    // the .ngg file, or the .lbs of an imported stage
-    std::string stage;                  // track-41_M
+    std::string stage;                  // track-41_M: its gameplay files, and the name its .ngg is asked for it by
     int map = -1;
-    std::string track, version;         // its track item: id and version (rbr_41, rbr)
+    std::string track, version;         // its track item: id and version (fr_joux_verte, rbr)
+    std::string trackStage;             // its stage of the track (rbr-tracks.yaml: "joux_verte_ii"), "" none
+    // The RBR stages it is, itself first: a map's times of day (_M _N _E _O) that its .ngg made one stage (NGGA) - they
+    // drive the same, and W-Rally makes the time of day as weather. One for a stage no .ngg collapsed.
+    std::vector<std::string> times;
     std::string source;                 // where its .ngg (or .lbs) is: "downloaded", "w-rally", "rbr", "ngg folder"
     std::string title;                  // for the menu
     // Its weathers: the .ngg's own presets (NGGW) when it carries some - what the sky is drawn from - else the

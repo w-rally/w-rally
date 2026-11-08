@@ -865,6 +865,14 @@ Each phase ends with a game you can drive. phys-drive works on day one, and ever
     stands. The cost is Wallaby following `kRendererInterfaceVer`, which it meets by generating its bindings from
     the header.
 
+12. **A track is a place; its stages are the routes driven there** (2026-11-08). RBR numbered each route a map, its
+    reverse another (Joux Verte 42, Joux Verte II 45) and each time of day a file. W-Rally: one track
+    (`fr_joux_verte`), its stages (`joux_verte`, `joux_verte_ii`; `rbr-tracks.yaml`, content-layers §3), and the time
+    of day a weather of a stage. One `.ngg` holds a track's stages (NGG design 3.4b): Wallaby collapses the times of
+    day that drive the same and lists the RBR stage names each stage answers to (NGGA); the catalog offers a stage once
+    for all of them, and the game asks the renderer for its stage by name (`loadSceneVariant`). Nothing is guessed at
+    load: which names a stage answers to is written in the file.
+
 ## 11. Open questions
 
 - **First own content for a standalone release.** Deferred by decision 7. Revisit after phase 9: Wallaby-authored,

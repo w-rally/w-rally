@@ -27,8 +27,11 @@ with, and an update must not take them away.
 
 An id is a lowercase slug of `a-z`, `0-9` and `_`, never a bare number:
 
-- a **track**: `<country>_<stagename>` — the ISO 3166-1 alpha-2 code and the stage's name: `cz_ploskovice`,
-  `fr_col_de_turini`. One track is one stage; its times of day and weathers are conditions of it, not other tracks.
+- a **track**: `<country>_<place>` — the ISO 3166-1 alpha-2 code and the place's name: `cz_ploskovice`,
+  `fr_joux_verte`. A track is a PLACE and holds its **stages** (each a slug unique in the track): the routes driven
+  there — Joux Verte and its reverse, Joux Verte II, are two stages of `fr_joux_verte` (decided 2026-11-08). A stage's
+  times of day and weathers are conditions of it, not other stages: RBR's `_M _N _E _O` that drive the same are one
+  stage (Wallaby collapses them, the `.ngg` lists them; NGG design 3.4b).
 - a **car**: its folder name, as RBR's are (`s_i2003`, `i20_r5`).
 - a **physics variant**: a slug unique within its car (`rbr`, `wphysics_gravel`).
 - a **physics base**: what every car of a format shares, tyres and global defs (`rbr`).
@@ -44,7 +47,8 @@ cars/<car-id>/
         physics.yaml
         common.lsp, <surface>.lsp, ..., setups/*.lsp
 tracks/<track-id>/<version>/
-    track.yaml                         id, version, base, name, country, surface, length, conditions, rbr map number
+    track.yaml                         id, version, base, name, country, surface, length, conditions, rbr map number,
+                                       stages (each: id, rbr map number)
     <track-id>.ngg, ...
 physics/<base-id>/<version>/           a physics base: tyres, global defs
 video/menu.mp4                         W-Rally's own files that are no item, as today
@@ -89,12 +93,24 @@ removed; `--overrides` stays for development.
 
 **Mapped** — the RBR layer answers W-Rally paths for RBR's items, all at version `rbr`:
 
-- **Tracks:** `rbr-tracks.yaml` (shipped in layer 2, a newer one downloadable into layer 1) is written by hand and
-  maps each RBR map number to a track id: `41: cz_ploskovice`, one a line. Then `tracks/<id>/rbr/track-41_M.trk` ↔
-  `Maps/track-41_M.trk`, and so on for the map's files (`.lbs`, `.trk`, `.col`, `.dls`, `.ini`, textures), keeping
-  RBR's file names inside the track's folder. A map the table does not know is offered as `rbr_<n>` until it is
-  added. The map number lives on only in this table and in `track.yaml`'s `rbr` field, for compatibility (old
-  replays, `TrackSettings.ini`'s sections, RBR's own track files).
+- **Tracks:** `rbr-tracks.yaml` (shipped in layer 2, a newer one downloadable into layer 1) groups RBR's maps into
+  tracks: each track id, then its stages, an RBR map number to a stage id each, the track's own stage first (its main
+  one):
+
+  ```yaml
+  fr_joux_verte:
+    42: joux_verte
+    45: joux_verte_ii
+  ```
+
+  Then `tracks/fr_joux_verte/rbr/track-42_M.trk` ↔ `Maps/track-42_M.trk` and `.../track-45_N.trk` ↔
+  `Maps/track-45_N.trk`, and so on for every map's files (`.lbs`, `.trk`, `.col`, `.dls`, `.ini`, textures), keeping
+  RBR's file names inside the track's folder; the in-memory `track.yaml` lists the stages. A map the table does not
+  know is offered as `rbr_<n>` until it is added. The older form, a map to a track a line (`41: cz_ploskovice`), is
+  still read: each map its own track. The map number lives on only in this table and in `track.yaml`'s `rbr` and
+  `stages`, for compatibility (old replays, `TrackSettings.ini`'s sections, RBR's own track files).
+  `tools/rbr-tracks/make_table.py` writes it (`--regroup` rewrites one): a map whose id is another's plus `_ii`,
+  `_reverse`, `_reversed` or `_rev` is a stage of that one's track - 344 maps, 248 tracks, 95 with several stages.
 - **Cars:** `cars/<id>/rbr/<file>` ↔ `Cars/<folder>/<file>`. `Cars.ini`'s name and the slot table fill an in-memory
   `car.yaml`.
 - **`physics.rbz` is RBR's alone, kept for compatibility, and only the mapping opens it.** Nothing else in the game

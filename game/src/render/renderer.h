@@ -34,7 +34,9 @@ public:
     std::string TakeLog();
     std::string ModuleName() const;
 
-    iface::SceneHandle LoadScene(const void* ngg, uint64_t bytes);   // 0 on failure (Error())
+    // 0 on failure (Error()). `stage`: the stage to draw of a .ngg holding a map's stages (NGGR; the game's stage name,
+    // "track-45_N", which the file's NGGA resolves); null or "" for the file's main one.
+    iface::SceneHandle LoadScene(const void* ngg, uint64_t bytes, const char* stage = nullptr);
     iface::TextureHandle CreateTexture(const void* dds, uint64_t bytes);
     iface::TextureHandle CreateTextureData(const void* dds, uint64_t bytes);   // a normal or ORM map: no sRGB decode
     iface::TextureHandle CreateTextureRgba(const void* rgba, uint32_t width, uint32_t height);

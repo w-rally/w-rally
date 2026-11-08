@@ -1,7 +1,14 @@
-"""rbr-tracks.yaml from the onlineracing.cz tracks table (docs/content-layers.md 3): every RBR map number the table knows
-to its W-Rally track id, <country>_<stagename>.
+"""rbr-tracks.yaml from the onlineracing.cz tracks table (docs/content-layers.md 3): the W-Rally tracks, each with its
+STAGES - every RBR map number the table knows, to its track and its stage id.
 
     python make_table.py <rbr_ct_tracks.csv> <rbr-tracks.yaml> [--rbr <RBR folder>]
+    python make_table.py --regroup <rbr-tracks.yaml>      rewrite a table (either form) with the stages grouped
+
+A track is a place: its id <country>_<stagename>. Its stages are the RBR maps driven there - RBR's reversed stages ("X
+II", decided 2026-11-08) are the same track as X: Joux Verte (42) and Joux Verte II (45) are fr_joux_verte with the stages
+joux_verte and joux_verte_ii. A map is grouped under another when its id is the other's plus _ii, _reverse, _reversed or
+_rev (or _ii_a: 70, Prospect Ridge II A), or the other's _i plus _ii; the chain is followed to its root, whose id names
+the track. A stage id is the map's own id without its country.
 
 The CSV is the table's export with its header (stage_id, ingame_stage_id, name, ..., country_ENG, ...): the map is
 ingame_stage_id. The country is ISO 3166-1 alpha-2 (the table's English name mapped, its spellings as they are); one
@@ -48,12 +55,84 @@ def tracks_ini_names(rbr):
     return names
 
 
+SUFFIXES = ('_ii_a', '_ii', '_reversed', '_reverse', '_rev')
+
+
+def group(ids):
+    """{map: id} -> {track id: [(map, stage id)]}, the tracks in the order of their first map."""
+    by_id = {i: m for m, i in ids.items()}
+
+    def base(i):
+        for suf in SUFFIXES:
+            if i.endswith(suf):
+                b = i[:-len(suf)]
+                if b in by_id:
+                    return b
+                if suf == '_ii' and b + '_i' in by_id:   # Junior Wheels I and II
+                    return b + '_i'
+        return None
+
+    tracks = {}
+    for m in sorted(ids):
+        root = ids[m]
+        seen = {root}
+        while base(root) and base(root) not in seen:
+            root = base(root)
+            seen.add(root)
+        stage = ids[m].split('_', 1)[1] if '_' in ids[m] else ids[m]
+        tracks.setdefault(root, []).append((m, stage))
+    # the track's own stage (the root) first - it is the track's main stage - then the others by map number
+    for t, stages in tracks.items():
+        stages.sort(key=lambda ms: (ids[ms[0]] != t, ms[0]))
+    return dict(sorted(tracks.items(), key=lambda kv: min(m for m, _ in kv[1])))
+
+
+def read_table(path):
+    """A table of either form: "41: cz_test" lines, or tracks with their stages."""
+    ids, track = {}, None
+    for line in open(path, encoding='utf-8'):
+        text = line.split('#')[0].rstrip()
+        if not text.strip():
+            continue
+        indented = text[0] in ' \t'
+        key, _, value = text.strip().partition(':')
+        key, value = key.strip(), value.strip()
+        if not indented and key.isdigit():          # the old form
+            ids[int(key)] = value
+        elif not indented:                           # a track
+            track = key
+        elif track and key.isdigit():               # one of its stages: the map's id is <country>_<stage>
+            ids[int(key)] = track.split('_', 1)[0] + '_' + value
+    return ids
+
+
+def write(path, ids):
+    tracks = group(ids)
+    with open(path, 'w', encoding='utf-8', newline='\n') as f:
+        f.write('# W-Rally track id (<country>_<place>): its stages, RBR map number: stage id - tools/rbr-tracks/make_table.py\n')
+        f.write('# RBR\'s reversed stages are stages of the same track (docs/content-layers.md 3).\n')
+        for t, stages in tracks.items():
+            f.write(f'{t}:\n')
+            for m, st in stages:
+                f.write(f'  {m}: {st}\n')
+    several = sum(1 for s in tracks.values() if len(s) > 1)
+    print(f'{len(ids)} maps, {len(tracks)} tracks ({several} with more than one stage) to {path}')
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument('csv')
-    ap.add_argument('out')
+    ap.add_argument('csv', nargs='?')
+    ap.add_argument('out', nargs='?')
     ap.add_argument('--rbr')
+    ap.add_argument('--regroup', metavar='YAML')
     a = ap.parse_args()
+
+    if a.regroup:
+        ids = read_table(a.regroup)
+        write(a.regroup, ids)
+        return
+    if not a.csv or not a.out:
+        ap.error('a CSV and an output, or --regroup')
 
     table = {}
     for r in csv.DictReader(open(a.csv, encoding='utf-8')):
@@ -74,11 +153,7 @@ def main():
             ids[m] = f'{i}_{m}'
             print(f'map {m}: {i} is map {maps[0]}\'s too - {ids[m]}', file=sys.stderr)
 
-    with open(a.out, 'w', encoding='utf-8', newline='\n') as f:
-        f.write('# RBR map number: W-Rally track id (<country>_<stage name>) - tools/rbr-tracks/make_table.py\n')
-        for m in sorted(ids):
-            f.write(f'{m}: {ids[m]}\n')
-    print(f'{len(ids)} tracks to {a.out}')
+    write(a.out, ids)
 
     if a.rbr:
         local = tracks_ini_names(a.rbr)

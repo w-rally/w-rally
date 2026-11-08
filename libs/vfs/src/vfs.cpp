@@ -240,8 +240,11 @@ struct Item::Version {
     enum Type { Folder, Maps, Rbz } type = Folder;
     std::string version;
     std::string base;            // the manifest's base, "" none
-    fs::path dir;                // Folder: the version's folder; Maps: the folder with the map's files
-    std::string prefix;          // Maps: "track-41"; Rbz: the members' prefix, "physics/s_i2003/" (lowercase)
+    fs::path dir;                // Folder: the version's folder
+    std::string prefix;          // Rbz: the members' prefix, "physics/s_i2003/" (lowercase)
+    // Maps: each of the track's maps, the folder with its files and its prefix ("track-41"): a track is a place, its
+    // stages RBR's maps driven there (Joux Verte: track-42 and its reverse, track-45).
+    std::vector<std::pair<fs::path, std::string>> maps;
     std::string source;          // the layer's name, "rbr"
     std::string manifestText;    // made in memory ("" the folder's own file)
     std::string manifestFile;    // the folder's own file's name ("car.yaml", "car.json"), "" none
@@ -252,7 +255,9 @@ struct Vfs::Index {
     std::map<std::string, std::vector<std::unique_ptr<Item::Version>>> items;   // Key() -> versions, newest first
     std::map<std::string, std::string> rbz;                                     // physics.rbz: lowercase name -> bytes
     std::map<int, std::string> mapTrack;
-    std::map<std::string, int> trackMap;
+    std::map<std::string, int> trackMap;                   // a track's main map (its first stage's)
+    std::map<std::string, std::vector<int>> trackMaps;     // all its maps, the main one first
+    std::map<int, std::string> mapStage;                   // a map's stage id within its track
     std::map<std::string, std::string> carFolder;
 };
 
@@ -269,9 +274,10 @@ std::optional<Resolved> OwnFile(const Version& v, const std::string& rel, const 
         if (IsFile(v.dir / P(rel))) return Resolved{v.dir / P(rel), nullptr, v.source};
         break;
     case Version::Maps:
-        if (lower.find('/') == std::string::npos &&
-            (StartsWith(lower, v.prefix + "_") || StartsWith(lower, v.prefix + ".")) && IsFile(v.dir / P(rel)))
-            return Resolved{v.dir / P(rel), nullptr, v.source};
+        if (lower.find('/') == std::string::npos)
+            for (const auto& [dir, prefix] : v.maps)
+                if ((StartsWith(lower, prefix + "_") || StartsWith(lower, prefix + ".")) && IsFile(dir / P(rel)))
+                    return Resolved{dir / P(rel), nullptr, v.source};
         break;
     case Version::Rbz:
         if (const auto it = rbz.find(v.prefix + lower); it != rbz.end()) return Resolved{{}, &it->second, v.source};
@@ -292,11 +298,12 @@ void OwnList(const Version& v, const std::string& relDir, const std::map<std::st
         break;
     case Version::Maps:
         if (!relDir.empty()) break;
-        for (const auto& e : fs::directory_iterator(v.dir, ec)) {
-            const std::string n = Lower(U8(e.path().filename()));
-            if (e.is_regular_file() && (StartsWith(n, v.prefix + "_") || StartsWith(n, v.prefix + ".")))
-                out.insert(U8(e.path().filename()));
-        }
+        for (const auto& [dir, prefix] : v.maps)
+            for (const auto& e : fs::directory_iterator(dir, ec)) {
+                const std::string n = Lower(U8(e.path().filename()));
+                if (e.is_regular_file() && (StartsWith(n, prefix + "_") || StartsWith(n, prefix + ".")))
+                    out.insert(U8(e.path().filename()));
+            }
         break;
     case Version::Rbz: {
         const std::string p = v.prefix + (relDir.empty() ? "" : Lower(relDir) + "/");
@@ -490,8 +497,18 @@ void Vfs::ReadRbr()
         addRbr(Kind::PhysicsBase, "", "rbr", std::move(v));
     }
 
-    // Tracks: Tracks.ini's maps, their ids from rbr-tracks.yaml ("41: cz_ploskovice"), else the older rbr-tracks.json.
-    std::map<int, std::string> table;
+    // Tracks: Tracks.ini's maps, their tracks and stages from rbr-tracks.yaml, else the older rbr-tracks.json. A track is
+    // a place and its stages the RBR maps driven there:
+    //     fr_joux_verte:
+    //       42: joux_verte
+    //       45: joux_verte_ii
+    // The older form, a map to a track a line ("41: cz_ploskovice"), is still read: each map its own track, its stage
+    // id the track's without the country.
+    struct Entry {
+        std::string track, stage;
+        size_t order = 0;     // the table's: a track's first map is its main stage
+    };
+    std::map<int, Entry> table;
     std::string tableName = "rbr-tracks.yaml";
     auto tableFile = FindPlain(tableName);
     if (!tableFile) tableFile = FindPlain(tableName = "rbr-tracks.json");
@@ -500,11 +517,25 @@ void Vfs::ReadRbr()
         ReadResolved(*tableFile, bytes);
         try {
             const formats::Json j = formats::ParseData(std::string(bytes.begin(), bytes.end()), tableName);
-            for (const auto& [map, id] : j.members) {
-                const std::string slug = id.text;
-                if (id.type != formats::Json::String || !ValidId(slug))
-                    m_log += tableName + ": map " + map + ": \"" + slug + "\" is not an id\n";
-                else table[std::atoi(map.c_str())] = slug;
+            auto put = [&](const std::string& mapText, const std::string& track, const std::string& stage) {
+                const int map = std::atoi(mapText.c_str());
+                if (map <= 0 || std::to_string(map) != mapText) return void(m_log += tableName + ": \"" + mapText + "\" is not a map number\n");
+                if (!ValidId(track) || !ValidId(stage))
+                    return void(m_log += tableName + ": map " + mapText + ": \"" + track + "\" / \"" + stage + "\" is not an id\n");
+                if (table.count(map))
+                    return void(m_log += tableName + ": map " + mapText + " is " + table[map].track + "'s already, not " + track + "'s too\n");
+                table[map] = {track, stage, table.size()};
+            };
+            for (const auto& [key, value] : j.members) {
+                if (value.type == formats::Json::String) {                  // "41: cz_ploskovice"
+                    const size_t us = value.text.find('_');
+                    put(key, value.text, us == std::string::npos ? value.text : value.text.substr(us + 1));
+                } else if (value.type == formats::Json::Object) {           // a track and its stages
+                    for (const auto& [map, stage] : value.members)
+                        put(map, key, stage.type == formats::Json::String ? stage.text : "");
+                } else {
+                    m_log += tableName + ": " + key + ": neither a track id nor a track's stages\n";
+                }
             }
         } catch (const std::exception& e) {
             m_log += tableName + ": " + e.what() + "\n";
@@ -531,29 +562,51 @@ void Vfs::ReadRbr()
             if (!listed.count(map) && found.insert(map).second) bases.push_back("Maps/track-" + std::to_string(map));
         }
     }
+    // Each map with files here goes to its track; a track is made once all its maps are known.
+    struct Stage {
+        int map;
+        std::string id;
+        size_t order;
+        std::pair<fs::path, std::string> files;
+    };
+    std::map<std::string, std::vector<Stage>> tracks;
+    std::vector<std::string> trackOrder;
+    std::set<int> seen;
     for (const std::string& base : bases) {
         const size_t slash = base.find_last_of('/');
         const std::string file = Lower(slash == std::string::npos ? base : base.substr(slash + 1));
         if (!StartsWith(file, "track-")) continue;
         const int map = std::atoi(file.c_str() + 6);
-        if (ix.mapTrack.count(map)) continue;   // (listed twice)
+        if (!seen.insert(map).second) continue;   // (listed twice)
+        Version probe;
+        probe.type = Version::Maps;
+        probe.maps = {{m_rbr / P(slash == std::string::npos ? "" : base.substr(0, slash)), file}};
+        std::set<std::string> files;
+        OwnList(probe, "", ix.rbz, files);
+        if (files.empty()) continue;   // listed, but no file of it here
+        const auto t = table.find(map);
+        const std::string id = t != table.end() ? t->second.track : "rbr_" + std::to_string(map);
+        if (t == table.end()) m_log += "rbr: map " + std::to_string(map) + " is in no " + tableName + ": " + id + "\n";
+        if (!tracks.count(id)) trackOrder.push_back(id);
+        tracks[id].push_back({map, t != table.end() ? t->second.stage : id, t != table.end() ? t->second.order : SIZE_MAX,
+                              probe.maps[0]});
+    }
+    for (const std::string& id : trackOrder) {
+        std::vector<Stage>& stages = tracks[id];
+        std::stable_sort(stages.begin(), stages.end(), [](const Stage& a, const Stage& b) { return a.order < b.order; });
         auto v = std::make_unique<Version>();
         v->type = Version::Maps;
-        v->dir = m_rbr / P(slash == std::string::npos ? "" : base.substr(0, slash));
-        v->prefix = file;
-        std::set<std::string> files;
-        OwnList(*v, "", ix.rbz, files);
-        if (files.empty()) continue;   // listed, but no file of it here
-        std::string id = table.count(map) ? table[map] : "rbr_" + std::to_string(map);
-        if (ix.trackMap.count(id)) {
-            m_log += "rbr: maps " + std::to_string(ix.trackMap[id]) + " and " + std::to_string(map) + " both " + id +
-                     " in " + tableName + "; map " + std::to_string(map) + " is rbr_" + std::to_string(map) + "\n";
-            id = "rbr_" + std::to_string(map);
+        std::string list;
+        for (const Stage& st : stages) {
+            v->maps.push_back(st.files);
+            ix.mapTrack[st.map] = id;
+            ix.mapStage[st.map] = st.id;
+            ix.trackMaps[id].push_back(st.map);
+            list += std::string(list.empty() ? "" : ", ") + "{\"id\": " + Quoted(st.id) + ", \"rbr\": " + std::to_string(st.map) + "}";
         }
-        if (!table.count(map)) m_log += "rbr: map " + std::to_string(map) + " is in no " + tableName + ": " + id + "\n";
-        ix.mapTrack[map] = id;
-        ix.trackMap[id] = map;
-        v->manifestText = "{\"id\": " + Quoted(id) + ", \"version\": \"rbr\", \"rbr\": " + std::to_string(map) + "}";
+        ix.trackMap[id] = stages[0].map;
+        v->manifestText = "{\"id\": " + Quoted(id) + ", \"version\": \"rbr\", \"rbr\": " + std::to_string(stages[0].map) +
+                          ", \"stages\": [" + list + "]}";
         addRbr(Kind::Track, "", id, std::move(v));
     }
 
@@ -806,6 +859,18 @@ int Vfs::MapOfTrack(std::string_view id) const
 {
     const auto it = m_index->trackMap.find(Lower(id));
     return it == m_index->trackMap.end() ? -1 : it->second;
+}
+
+std::vector<int> Vfs::MapsOfTrack(std::string_view id) const
+{
+    const auto it = m_index->trackMaps.find(Lower(id));
+    return it == m_index->trackMaps.end() ? std::vector<int>{} : it->second;
+}
+
+std::string Vfs::StageOfMap(int map) const
+{
+    const auto it = m_index->mapStage.find(map);
+    return it == m_index->mapStage.end() ? "" : it->second;
 }
 
 std::string Vfs::RbrCarFolder(std::string_view id) const
