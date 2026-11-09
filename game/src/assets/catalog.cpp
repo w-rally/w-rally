@@ -391,7 +391,7 @@ std::string Catalog::Scan(const app::Settings& s, std::shared_ptr<const vfs::Vfs
             if (st.times.empty()) continue;
             const StageTime& main = st.times.front();
             st.stage = main.stage, st.ngg = main.ngg, st.source = main.source, st.imported = main.imported;
-            st.title = st.stage + "  -  " + (main.imported ? std::string("imported from .lbs") : fs::path(main.ngg).filename().string());
+            st.title = st.stage;   // (what it is - imported or W-Rally's own - the menus' SD / HD badge says)
 
             // Its weathers: the main .ngg's presets when it carries some, else the map's sections - each driven on
             // the file it names (42O_M_...: the _O one), else on its time of day's (42O_M_ with no _O: the _M), else

@@ -40,8 +40,23 @@ struct Row {
     float min = 0, max = 1, step = 0.1f;
     std::string (*format)(float) = nullptr;
     bool off = false;                       // shown, not changeable
+    int badge = 0;                          // Open: beside the value - 1 SD (an RBR stage imported), 2 HD (an .ngg)
     float y = 0, h = 0;                     // where it is (px at 1080p)
 };
+
+// A stage's quality badge, its right edge at `right`, its middle on `mid`: HD (an .ngg: W-Rally's own) filled in ink,
+// SD (an RBR stage imported from its .lbs) outlined. Returns its width. (d null: measured only.)
+float Badge(ImDrawList* d, ImFont* f, float k, float right, float mid, bool hd, float alpha = 1)
+{
+    const char* t = hd ? "HD" : "SD";
+    const float size = 13 * k, tw = Tracked(nullptr, f, size, ImVec2(), 0, t, 0.12f), w = tw + 14 * k, h = 20 * k;
+    if (!d) return w;
+    const ImVec2 a(right - w, mid - h * 0.5f), b(right, mid + h * 0.5f);
+    if (hd) d->AddRectFilled(a, b, Alpha(kInk, alpha), 2 * k);
+    else d->AddRect(a, b, Alpha(kLineStrong, alpha), 2 * k, 0, std::max(1.0f, 1.5f * k));
+    Tracked(d, f, size, ImVec2(a.x + 7 * k, mid - size * 0.55f), Alpha(hd ? kSurfaceBase : kInkSecondary, alpha), t, 0.12f);
+    return w;
+}
 
 // A list's selection: the selected row, the plate eased to it, how selected each row looks.
 struct List {
@@ -199,6 +214,7 @@ int Rows(const Look& l, std::vector<Row>& rows, List& list, float y0, float w, f
             const float sw = Tracked(nullptr, l.item, 22 * k, ImVec2(), 0, r.shown.c_str(), 0.02f);
             const float sy = r.sub.empty() ? mid - 11 * k : mid - 20 * k;
             Tracked(l.d, l.item, 22 * k, ImVec2(right - sw, sy), Alpha(kInk, fade), r.shown.c_str(), 0.02f);
+            if (r.badge) Badge(l.d, l.text, k, right - sw - 12 * k, sy + 11 * k, r.badge == 2, fade);
             if (!r.sub.empty()) {
                 const float bw = Tracked(nullptr, l.text, 14 * k, ImVec2(), 0, r.sub.c_str(), 0.16f);
                 Tracked(l.d, l.text, 14 * k, ImVec2(right - bw, mid + 8 * k), r.subSignal ? kSignal : kInkMuted, r.sub.c_str(), 0.16f);
@@ -305,7 +321,8 @@ QuickChoice QuickPage(const ImGuiLayer& ui, const assets::Catalog& catalog, app:
     Row& stage = rows[0];
     stage.kind = Row::Open, stage.label = "STAGE";
     stage.shown = st ? Upper(st->title) : "NO STAGES";
-    stage.sub = st ? (st->imported ? "RBR STAGE" : ".NGG STAGE") + std::string(st->map >= 0 ? " \xC2\xB7 MAP " + std::to_string(st->map) : "") : "SEE SETTINGS";
+    stage.sub = st ? "" : "SEE SETTINGS";
+    stage.badge = st ? (st->imported ? 1 : 2) : 0;
     stage.help = "Enter opens the stages: a collection first, then its stages.";
     Row& carRow = rows[1];
     carRow.kind = Row::Open, carRow.label = "CAR";
@@ -486,7 +503,12 @@ void StagePage(const ImGuiLayer& ui, const assets::Catalog& catalog, app::Settin
     // The keys that change the country first: the list is the new country's from this frame on.
     if (KeyA()) g_stageSide = 0;
     if (KeyD()) g_stageSide = 1;
-    const int dir = KeyW() ? -1 : KeyS() ? +1 : 0;
+    // The mouse wheel steps the list it is over (down: the next), as W / S the side that has the keys.
+    const ImGuiIO& wheelIo = ImGui::GetIO();
+    const int wheel = wheelIo.MouseWheel < 0 ? +1 : wheelIo.MouseWheel > 0 ? -1 : 0;
+    const bool overCountries = wheelIo.MousePos.x < (kX0 + 276) * std::min(height / 1080.0f, width / 1280.0f);
+    if (wheel) g_stageSide = overCountries ? 0 : 1;
+    const int dir = KeyW() ? -1 : KeyS() ? +1 : wheel;
     if (dir && g_stageSide == 0 && g_collection + dir >= 0 && g_collection + dir < ng) g_collection += dir, g_stageAt = -1;
     // The country's stages grouped under their TRACK (a place: Joux Verte, its stages Joux Verte and Joux Verte II),
     // the tracks by name, a track's stages in its own order (its main one first).
@@ -640,17 +662,21 @@ void StagePage(const ImGuiLayer& ui, const assets::Catalog& catalog, app::Settin
             if (hot && moved) g_stageAt = i, g_stageSide = 1;
             if (hot && click) chosen = i;
             Marker(l.d, (kColX + 12) * k, mid, 12 * k, 34 * k, on && g_stageSide == 1 ? 1.0f : 0.0f, k);
-            l.d->PushClipRect(l.P(kColX, y), l.P(kColX + kColW - (st.key == s.stage ? 100 : 20), y + kRowH), true);
+            // Its badge at the right (CHOSEN under it when it is the one), the name clipped short of it.
+            const float bw = Badge(nullptr, l.text, k, 0, 0, false);
+            const float bx = (kColX + kColW - 24) * k;
+            l.d->PushClipRect(l.P(kColX, y), ImVec2(bx - bw - 12 * k, (y + kRowH) * k), true);
             Tracked(l.d, l.item, 22 * k, ImVec2((kColX + 40) * k, mid - 20 * k), on ? kInk : kInkSecondary, Upper(st.title).c_str(), 0.02f);
             l.d->PopClipRect();
+            Badge(l.d, l.text, k, bx, mid - 9 * k, !st.imported);
             const assets::TrackInfo* track = catalog.trackRegister.Find(st.map);
-            std::string facts = countryOf(st).empty() ? std::string(st.imported ? "RBR" : ".NGG") : countryOf(st);
-            if (track && !track->surface.empty()) facts += " \xC2\xB7 " + Upper(track->surface);
-            facts += " \xC2\xB7 " + std::to_string(st.weathers.size()) + " WEATHERS";
+            std::string facts = countryOf(st);
+            if (track && !track->surface.empty()) facts += (facts.empty() ? "" : " \xC2\xB7 ") + Upper(track->surface);
+            facts += (facts.empty() ? "" : " \xC2\xB7 ") + std::to_string(st.weathers.size()) + " WEATHERS";
             Tracked(l.d, l.text, 14 * l.k, ImVec2((kColX + 40) * k, mid + 8 * k), kInkMuted, facts.c_str(), 0.16f);
             if (st.key == s.stage) {
                 const float cw = Tracked(nullptr, l.text, 13 * k, ImVec2(), 0, "CHOSEN", 0.16f);
-                Tracked(l.d, l.text, 13 * k, ImVec2((kColX + kColW - 24) * k - cw, mid - 7 * k), kSignal, "CHOSEN", 0.16f);
+                Tracked(l.d, l.text, 13 * k, ImVec2(bx - cw, mid + 9 * k), kSignal, "CHOSEN", 0.16f);
             }
         }
         if (shownEnd - g_stageTop < nr) {   // where the shown rows are in the list
@@ -667,11 +693,11 @@ void StagePage(const ImGuiLayer& ui, const assets::Catalog& catalog, app::Settin
             Plate(l.d, l.P(kX0, y), 680 * k, 80 * k, 12 * k, kSurfaceRaised);
             float x = kX0 + 24;
             const assets::TrackInfo* track = catalog.trackRegister.Find(st.map);
-            const std::string map = st.map >= 0 ? std::to_string(st.map) : "-";
             const std::string length = track && track->lengthKm > 0 ? Fmt("%.1f KM", track->lengthKm) : "-";
-            const std::pair<const char*, std::string> facts[4] = {
+            const std::pair<const char*, std::string> facts[3] = {
                 {"TRACK", Upper(trackName(st))}, {"SURFACE", track && !track->surface.empty() ? Upper(track->surface) : "-"},
-                {"LENGTH", length}, {"MAP", map}};
+                {"LENGTH", length}};
+            Badge(l.d, l.text, k, (kX0 + 680 - 36) * k, (y + 40) * k, !st.imported);   // (SD or HD at its right)
             for (const auto& [label, value] : facts) {
                 Tracked(l.d, l.text, 13 * k, l.P(x, y + 16), kInkMuted, label, 0.16f);
                 l.d->PushClipRect(l.P(x, y), l.P(kX0 + 660, y + 80), true);
