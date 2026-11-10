@@ -1,12 +1,13 @@
 #include "gtao.h"
 #include "log.h"
+#include "shaders.h"
 
 #include <cassert>
 #include <string.h>
+#include <string>
 #include <vector>
 
 #include "XeGTAO.h"         // third_party/xegtao: GTAOConstants, GTAOSettings, GTAOUpdateConstants
-#include "xegtao_src.h"     // the same file and XeGTAO.hlsli as bytes (modules/renderer/CMakeLists.txt)
 
 using Microsoft::WRL::ComPtr;
 
@@ -24,86 +25,7 @@ struct GtaoCB
 static_assert(sizeof(XeGTAO::GTAOConstants) % 16 == 0, "GTAOConstants must be whole float4s");
 static_assert(sizeof(GtaoCB) % 16 == 0, "GtaoCB must be whole float4s");
 
-// Our entry points, after XeGTAO.h and before XeGTAO.hlsli (Record builds the whole source). They are Intel's sample
-// ones (third_party/xegtao/vaGTAO.hlsl) with this renderer's inputs: the prepass's normal and the frame's noise.
-const char* const kGtaoRegsSrc = R"HLSL(
-cbuffer GtaoCB : register(b0)
-{
-    GTAOConstants g_GTAOConsts;
-    float4        gViewRow[3];     // the view's rotation, row-vector convention: world -> view = mul(n, (float3x3)V)
-};
-SamplerState g_samplerPointClamp : register(s0);
-)HLSL";
 
-const char* const kGtaoMainSrc = R"HLSL(
-// pass 1 (XeGTAO_PrefilterDepths16x16): the reverse-Z depth -> view-space depth, 5 MIPs
-Texture2D<float>        g_srcRawDepth         : register(t0);
-RWTexture2D<lpfloat>    g_outWorkingDepthMIP0 : register(u0);
-RWTexture2D<lpfloat>    g_outWorkingDepthMIP1 : register(u1);
-RWTexture2D<lpfloat>    g_outWorkingDepthMIP2 : register(u2);
-RWTexture2D<lpfloat>    g_outWorkingDepthMIP3 : register(u3);
-RWTexture2D<lpfloat>    g_outWorkingDepthMIP4 : register(u4);
-// pass 2 (XeGTAO_MainPass)
-Texture2D<lpfloat>      g_srcWorkingDepth     : register(t0);
-Texture2D<float4>       g_srcNormal           : register(t1);   // the prepass's: world space, R8G8B8A8_SNORM
-RWTexture2D<uint>       g_outWorkingAOTerm    : register(u0);
-RWTexture2D<unorm float> g_outWorkingEdges    : register(u1);
-// pass 3 (XeGTAO_Denoise, one pass: the last)
-Texture2D<uint>         g_srcWorkingAOTerm    : register(t0);
-Texture2D<lpfloat>      g_srcWorkingEdges     : register(t1);
-RWTexture2D<uint>       g_outFinalAOTerm      : register(u0);
-
-// The prepass's world normal in XeGTAO's view space. The sky (cleared to 0) and anything degenerate face the camera.
-lpfloat3 LoadNormal(int2 pos)
-{
-    const float3 w = g_srcNormal.Load(int3(pos, 0)).xyz;
-    if (dot(w, w) < 0.25) return lpfloat3(0, 0, -1);
-    const float3 v = float3(dot(w, float3(gViewRow[0].x, gViewRow[1].x, gViewRow[2].x)),
-                            dot(w, float3(gViewRow[0].y, gViewRow[1].y, gViewRow[2].y)),
-                            dot(w, float3(gViewRow[0].z, gViewRow[1].z, gViewRow[2].z)));
-    return (lpfloat3)normalize(v);
-}
-
-// Hilbert curve driving R2 (vaGTAO.hlsl's), the index walking with the frame: 0 when the noise stands still.
-lpfloat2 SpatioTemporalNoise(uint2 pixCoord, uint temporalIndex)
-{
-    uint index = HilbertIndex(pixCoord.x % 64, pixCoord.y % 64);
-    index += 288 * (temporalIndex % 64);
-    return lpfloat2(frac(0.5 + index * float2(0.75487766624669276005, 0.5698402909980532659114)));
-}
-
-[numthreads(8, 8, 1)]
-void CSPrefilterDepths16x16(uint2 dispatchThreadID : SV_DispatchThreadID, uint2 groupThreadID : SV_GroupThreadID)
-{
-    XeGTAO_PrefilterDepths16x16(dispatchThreadID, groupThreadID, g_GTAOConsts, g_srcRawDepth, g_samplerPointClamp,
-                                g_outWorkingDepthMIP0, g_outWorkingDepthMIP1, g_outWorkingDepthMIP2,
-                                g_outWorkingDepthMIP3, g_outWorkingDepthMIP4);
-}
-
-[numthreads(XE_GTAO_NUMTHREADS_X, XE_GTAO_NUMTHREADS_Y, 1)]
-void CSGTAO(const uint2 pixCoord : SV_DispatchThreadID)
-{
-    XeGTAO_MainPass(pixCoord, GTAO_SLICES, GTAO_STEPS, SpatioTemporalNoise(pixCoord, g_GTAOConsts.NoiseIndex),
-                    LoadNormal(pixCoord), g_GTAOConsts, g_srcWorkingDepth, g_samplerPointClamp,
-                    g_outWorkingAOTerm, g_outWorkingEdges);
-}
-
-[numthreads(XE_GTAO_NUMTHREADS_X, XE_GTAO_NUMTHREADS_Y, 1)]
-void CSDenoisePass(const uint2 dispatchThreadID : SV_DispatchThreadID)
-{
-    const uint2 pixCoordBase = dispatchThreadID * uint2(2, 1);
-    XeGTAO_Denoise(pixCoordBase, g_GTAOConsts, g_srcWorkingAOTerm, g_srcWorkingEdges, g_samplerPointClamp,
-                   g_outFinalAOTerm, false);
-}
-
-[numthreads(XE_GTAO_NUMTHREADS_X, XE_GTAO_NUMTHREADS_Y, 1)]
-void CSDenoiseLastPass(const uint2 dispatchThreadID : SV_DispatchThreadID)
-{
-    const uint2 pixCoordBase = dispatchThreadID * uint2(2, 1);   // two horizontal pixels a thread
-    XeGTAO_Denoise(pixCoordBase, g_GTAOConsts, g_srcWorkingAOTerm, g_srcWorkingEdges, g_samplerPointClamp,
-                   g_outFinalAOTerm, true);
-}
-)HLSL";
 
 // XeGTAO's quality levels (vaGTAO.hlsl CSGTAOLow..Ultra): slices, steps per slice.
 const int kSlices[4] = { 1, 2, 3, 9 };
@@ -150,7 +72,7 @@ ComPtr<ID3D12Resource> MakeTarget(ID3D12Device* dev, DXGI_FORMAT format, UINT wi
 bool Gtao::Create(ID3D12Device* dev, ID3D12CommandQueue* queue)
 {
     if (!dev) return false;
-    if (!m_dxc.Load())
+    if (!ShaderModel6Available())
     {
         Log("gtao: no shader compiler - no screen-space AO");
         return false;
@@ -188,29 +110,18 @@ bool Gtao::Create(ID3D12Device* dev, ID3D12CommandQueue* queue)
         return false;
     }
 
-    // The source: our defines, XeGTAO.h, our registers, XeGTAO.hlsli without its include of XeGTAO.h (it is above),
-    // our entry points. FP32 depths (see gtao.h), which XeGTAO supports only at full precision.
-    std::string hlsli(reinterpret_cast<const char*>(kXeGtaoHlsli));
-    const std::string inc = "#include \"XeGTAO.h\"";
-    const size_t at = hlsli.find(inc);
-    if (at != std::string::npos) hlsli.replace(at, inc.size(), "");
-    // VA_SATURATE is Intel's framework's (vaShaderCore.h), which XeGTAO.hlsli uses unasked.
-    // XE_GTAO_USE_DEFAULT_CONSTANTS 0: the thin-occluder compensation is ours to set (SetThinOccluders).
-    m_source = std::string("#define XE_GTAO_FP32_DEPTHS 1\n#define XE_GTAO_USE_HALF_FLOAT_PRECISION 0\n"
-                           "#define XE_GTAO_USE_DEFAULT_CONSTANTS 0\n#define VA_SATURATE saturate\n") +
-               reinterpret_cast<const char*>(kXeGtaoH) + kGtaoRegsSrc + hlsli + kGtaoMainSrc;
-
-    auto pso = [&](const wchar_t* entry, const char* name, ComPtr<ID3D12PipelineState>& out) {
-        ComPtr<ID3DBlob> cs = m_dxc.Compile(m_source, entry, L"cs_6_0", name, { L"-DGTAO_SLICES=1", L"-DGTAO_STEPS=2" });
+    // gtao.hlsl: our defines, XeGTAO.h, our registers, XeGTAO.hlsli, our entry points. FP32 depths (see gtao.h), which
+    // XeGTAO supports only at full precision.
+    auto pso = [&](const char* entry, ComPtr<ID3D12PipelineState>& out) {
+        ComPtr<ID3DBlob> cs = LoadShader("gtao.hlsl", entry, "cs_6_0", { "-DGTAO_SLICES=1", "-DGTAO_STEPS=2" });
         if (!cs) return false;
         D3D12_COMPUTE_PIPELINE_STATE_DESC pd = {};
         pd.pRootSignature = m_rootSig.Get();
         pd.CS = { cs->GetBufferPointer(), cs->GetBufferSize() };
         return SUCCEEDED(dev->CreateComputePipelineState(&pd, IID_PPV_ARGS(&out)));
     };
-    if (!pso(L"CSPrefilterDepths16x16", "ngg_gtao_prefilter", m_psoPrefilter) ||
-        !pso(L"CSDenoisePass", "ngg_gtao_denoise", m_psoDenoiseMid) ||
-        !pso(L"CSDenoiseLastPass", "ngg_gtao_denoise_last", m_psoDenoise))
+    if (!pso("CSPrefilterDepths16x16", m_psoPrefilter) || !pso("CSDenoisePass", m_psoDenoiseMid) ||
+        !pso("CSDenoiseLastPass", m_psoDenoise))
     {
         Log("gtao: the passes did not compile - no screen-space AO");
         m_psoPrefilter.Reset();
@@ -316,12 +227,10 @@ void Gtao::Record(ID3D12GraphicsCommandList* list, ID3D12Resource* depth, ID3D12
     ComPtr<ID3D12PipelineState>& main = m_psoMain[dn][q];
     if (!main && !m_mainFailed[dn][q])
     {
-        wchar_t slices[32], steps[32];
-        swprintf_s(slices, L"-DGTAO_SLICES=%d", kSlices[q]);
-        swprintf_s(steps, L"-DGTAO_STEPS=%d", kSteps[q]);
-        std::vector<const wchar_t*> defs = { slices, steps };
-        if (dn) defs.push_back(L"-DXE_GTAO_GENERATE_NORMALS_INPLACE=1");
-        ComPtr<ID3DBlob> cs = m_dxc.Compile(m_source, L"CSGTAO", L"cs_6_0", "ngg_gtao_main", defs);
+        std::vector<std::string> defs = { "-DGTAO_SLICES=" + std::to_string(kSlices[q]),
+                                          "-DGTAO_STEPS=" + std::to_string(kSteps[q]) };
+        if (dn) defs.push_back("-DXE_GTAO_GENERATE_NORMALS_INPLACE=1");
+        ComPtr<ID3DBlob> cs = LoadShader("gtao.hlsl", "CSGTAO", "cs_6_0", defs);
         D3D12_COMPUTE_PIPELINE_STATE_DESC pd = {};
         pd.pRootSignature = m_rootSig.Get();
         if (cs) pd.CS = { cs->GetBufferPointer(), cs->GetBufferSize() };

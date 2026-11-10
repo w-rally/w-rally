@@ -58,7 +58,7 @@ struct LightDesc
     LightLobe lobes[kMaxLobes];
 };
 
-// One light as the GPU reads it (kLightsHlsl's Light), 208 bytes.
+// One light as the GPU reads it (shaders/lights.hlsli's Light), 208 bytes.
 struct GpuLight
 {
     float    pos[3];    float invRange2;   // 1 / range^2
@@ -69,7 +69,7 @@ struct GpuLight
     float    lobeA[LightDesc::kMaxLobes][4];   // candela, 1/tan(half-width), 1/tan(half-height), sharpness / 2
     float    lobeB[LightDesc::kMaxLobes][4];   // tan(yaw), tan(pitch)
 };
-static_assert(sizeof(GpuLight) == 208, "GpuLight - keep kLightsHlsl in step");
+static_assert(sizeof(GpuLight) == 208, "GpuLight - keep shaders/lights.hlsli in step");
 
 class Lights
 {
@@ -139,11 +139,6 @@ private:
     float     m_shadowVP[kShadowSlots][16] = {};
     float     m_shadowInfo[kShadowSlots][4] = {};
 };
-
-// HLSL shared by the scene pass and the ray tracer: the Light struct, the three buffers (gLights, gClusters,
-// gLightIndex) at the registers the includer #defines as NGG_LIGHTS_T0/T1/T2, the cluster lookup and a light's
-// irradiance, read by index.
-extern const char* kLightsHlsl;
 
 } // namespace core
 } // namespace ngg

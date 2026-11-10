@@ -15,7 +15,7 @@
 // Hence the third axis.
 //
 // SAME INTEGRAL, not an approximation of it: each froxel calls AtmScatter, the
-// one implementation the sky and the environment map use (atmosphere_hlsl.h).
+// one implementation the sky and the environment map use (shaders/atmosphere.hlsli).
 // What changes is only where it is evaluated, not how: the same 8x3
 // quadrature the per-pixel march used, so the march survives as an exact
 // reference and any difference between the two is the table's own error.

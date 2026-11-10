@@ -1,5 +1,7 @@
 #include "module/ui.h"
 
+#include "core/shaders.h"
+
 #include <d3dcompiler.h>
 
 #include <algorithm>
@@ -11,31 +13,12 @@ namespace wrally::render {
 
 namespace {
 
-const char kShader[] = R"(
-cbuffer Screen : register(b0) { float2 scale; float2 offset; };   // pixels -> clip: p * scale + offset
-Texture2D tex : register(t0);
-SamplerState samp : register(s0);
-struct VsIn { float2 pos : POSITION; float2 uv : TEXCOORD; float4 colour : COLOR; };
-struct PsIn { float4 pos : SV_Position; float2 uv : TEXCOORD; float4 colour : COLOR; };
-PsIn VSMain(VsIn v)
-{
-    PsIn o;
-    o.pos = float4(v.pos * scale + offset, 0, 1);
-    o.uv = v.uv;
-    o.colour = v.colour;
-    return o;
-}
-float4 PSMain(PsIn i) : SV_Target { return i.colour * tex.Sample(samp, i.uv); }
-)";
-
+// ui.hlsl (modules/renderer/shaders), at FXC's optimisation level 3.
 bool Compile(const char* entry, const char* target, ComPtr<ID3DBlob>& out, std::string& error)
 {
-    ComPtr<ID3DBlob> errors;
-    if (SUCCEEDED(D3DCompile(kShader, sizeof kShader - 1, "wrally_ui", nullptr, nullptr, entry, target,
-                             D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, &out, &errors)))
-        return true;
-    error = std::string("ui: shader ") + entry + ": " +
-            (errors ? std::string(static_cast<const char*>(errors->GetBufferPointer()), errors->GetBufferSize()) : "?");
+    out = ngg::core::LoadShader("ui.hlsl", entry, target, { "-O3" });
+    if (out) return true;
+    error = std::string("ui: shader ") + entry + " did not compile (the log has why)";
     return false;
 }
 

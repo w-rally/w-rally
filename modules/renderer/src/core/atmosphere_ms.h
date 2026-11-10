@@ -23,7 +23,7 @@
 // Scene's environment and aerial passes: whoever owns an instance updates it
 // when dirty, and two owners with the same inputs hold the same table.
 //
-// Consumed inside the ONE AtmScatter (atmosphere_hlsl.h), as gAtmMs at
+// Consumed inside the ONE AtmScatter (shaders/atmosphere.hlsli), as gAtmMs at
 // register t0 space1, so the sky, the environment map, the irradiance map and
 // aerial perspective all gain it together. Every root signature that compiles
 // AtmScatter binds it with MsSrvRange() + MsSampler().
