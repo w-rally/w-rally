@@ -199,6 +199,13 @@ void OpenPipelineCache(ID3D12Device* dev, const std::string& dir)
         Log("pipelines: no cache while NGG_SHADER_DIR compiles the shaders");
         return;
     }
+    // PIX's capturer (NGG_PIX) wraps the device: the runtime refuses the library as another driver's, and a capture
+    // should record the pipelines' real creation anyway.
+    if (GetModuleHandleW(L"WinPixGpuCapturer.dll"))
+    {
+        Log("pipelines: no cache under PIX");
+        return;
+    }
     D3D12_FEATURE_DATA_SHADER_CACHE sc = {};
     ComPtr<ID3D12Device1> d1;
     if (FAILED(dev->CheckFeatureSupport(D3D12_FEATURE_SHADER_CACHE, &sc, sizeof sc)) ||
