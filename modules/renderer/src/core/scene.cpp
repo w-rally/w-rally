@@ -17,6 +17,7 @@
 #include <algorithm>
 #include <atomic>
 #include <thread>
+#include <chrono>
 #include <unordered_map>
 #include <array>
 
@@ -2751,6 +2752,73 @@ bool Scene::LoadFromMemory(ID3D12Device* dev, ID3D12CommandQueue* queue,
     if (!UploadTextures(dev, queue, texs, texBytes))
         return false;
 
+    if (!EnsurePipelines(dev, rtvFormat)) return false;
+
+    if (!CreateDepth(dev, width, height))
+        return false;
+
+    // Not fatal: without the table the scene pass marches per pixel, exactly
+    // as it did before the table existed.
+    if (!m_aerialLut.Ready() && !m_aerialLut.Create(dev))
+        Log("scene: aerial table unavailable - aerial perspective will march per pixel");
+    if (!m_lightsReady && !(m_lightsReady = m_lights.Create(dev)))
+        Log("scene: local light buffers unavailable - no local lights");
+    if (!m_ms.Ready() && !m_ms.Create(dev))
+        Log("scene: multiple-scattering table unavailable - single scattering");
+    if (!m_ownEnv.Ready() && !m_ownEnv.Create(dev))
+        Log("scene: environment unavailable - no ambient specular, sky ambient marches per pixel");
+    if (!m_reflProbe.Ready() && !m_reflProbe.Create(dev))
+        Log("scene: reflection probe unavailable - the car reflects the sky alone");
+
+    // No path here on purpose: this loads from bytes, and the caller may have no
+    // file at all. Load() logs the name before calling in.
+    Log("scene: loaded %u verts, %u indices (%u tris), %u objects",
+           sh->vertexCount, sh->indexCount, sh->indexCount / 3,
+           (unsigned)m_objects.size());
+    return true;
+}
+
+// ---------------------------------------------------------------------------
+// The scene's pipelines: its root signature and the 48 pipeline states of every pass, independent of what is loaded
+// - the HDR format and the materials' LOD bias (in the root signature's samplers) decide them. Made together and in
+// parallel (PipelineBatch), on a thread of their own from start-up on (PreparePipelines) so the first load finds them
+// made, and again at a load only when the bias changed (an upscaler since). docs/ngg-design.md 5.0x, 9b item 31.
+// ---------------------------------------------------------------------------
+void Scene::PreparePipelines(ID3D12Device* dev, DXGI_FORMAT rtvFormat)
+{
+    if (!dev || (m_pipeBuilt && m_pipeFormat == rtvFormat && m_pipeBias == m_mipBias)) return;
+    m_pipeFormat = rtvFormat;
+    m_pipeBias = m_mipBias;
+    m_pipeBuilt = true;
+    // A build already under way (another bias - an upscaler set since start-up) finishes first: this one follows it.
+    ComPtr<ID3D12Device> keep(dev);
+    m_pipeThread = std::thread([this, keep, rtvFormat, bias = m_mipBias, before = std::move(m_pipeThread)]() mutable {
+        if (before.joinable()) before.join();
+        m_pipeOk = CreatePipelines(keep.Get(), rtvFormat, bias);
+    });
+}
+
+bool Scene::EnsurePipelines(ID3D12Device* dev, DXGI_FORMAT rtvFormat)
+{
+    if (m_pipeThread.joinable())
+    {
+        const auto t0 = std::chrono::steady_clock::now();
+        m_pipeThread.join();
+        const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+        if (ms >= 1.0) Log("scene: waited %.0f ms for its pipelines (made since start-up)", ms);
+    }
+    if (m_pipeBuilt && m_pipeFormat == rtvFormat && m_pipeBias == m_mipBias) return m_pipeOk;
+    m_pipeFormat = rtvFormat;
+    m_pipeBias = m_mipBias;
+    m_pipeBuilt = true;
+    m_pipeOk = CreatePipelines(dev, rtvFormat, m_mipBias);
+    return m_pipeOk;
+}
+
+bool Scene::CreatePipelines(ID3D12Device* dev, DXGI_FORMAT rtvFormat, float mipBias)
+{
+    PipelineBatch batch(dev);
+
     // --- root signature: one inline constant buffer, nothing else ----------
     D3D12_DESCRIPTOR_RANGE srvRange = {};
     srvRange.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
@@ -2917,7 +2985,7 @@ bool Scene::LoadFromMemory(ID3D12Device* dev, ID3D12CommandQueue* queue,
         samp[i].Filter = D3D12_FILTER_ANISOTROPIC;
         samp[i].MaxAnisotropy = 8;
         samp[i].MaxLOD = D3D12_FLOAT32_MAX;
-        samp[i].MipLODBias = m_mipBias;
+        samp[i].MipLODBias = mipBias;
         samp[i].AddressU = samp[i].AddressV = samp[i].AddressW = D3D12_TEXTURE_ADDRESS_MODE_WRAP;
         samp[i].ShaderRegister = i;
         samp[i].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
@@ -3086,11 +3154,7 @@ bool Scene::LoadFromMemory(ID3D12Device* dev, ID3D12CommandQueue* queue,
         pso.BlendState.RenderTarget[i].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
 
     pso.PS = { psAlpha->GetBufferPointer(), psAlpha->GetBufferSize() };
-    if (FAILED(CreatePipeline(dev, &pso, IID_PPV_ARGS(&m_psoAlphaTest))))
-    {
-        Log("scene: alpha-test PSO creation failed");
-        return false;
-    }
+    batch.Add(pso, &m_psoAlphaTest, "scene: alpha-test PSO creation failed");   // fatal: checked after Run
     pso.PS = { ps->GetBufferPointer(), ps->GetBufferSize() };
 
     // --- prepass PSOs: depth + geometric normal, nothing else ---------------
@@ -3104,19 +3168,17 @@ bool Scene::LoadFromMemory(ID3D12Device* dev, ID3D12CommandQueue* queue,
             pp.RTVFormats[2] = kPlantFormat;
             pp.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_GREATER;
             pp.PS = { psPre->GetBufferPointer(), psPre->GetBufferSize() };
-            if (FAILED(CreatePipeline(dev, &pp, IID_PPV_ARGS(&m_psoPrepass))))
-                Log("scene: prepass PSO creation failed");
+            batch.Add(pp, &m_psoPrepass, "scene: prepass PSO creation failed");
             pp.PS = { psPreAlpha->GetBufferPointer(), psPreAlpha->GetBufferSize() };
-            if (FAILED(CreatePipeline(dev, &pp, IID_PPV_ARGS(&m_psoPrepassAlpha))))
-                Log("scene: alpha-test prepass PSO creation failed");
+            batch.Add(pp, &m_psoPrepassAlpha, "scene: alpha-test prepass PSO creation failed");
             for (int alpha = 0; alpha < 2; ++alpha)
                 for (int c = 0; c < 2; ++c)
                 {
                     pp.PS = alpha ? D3D12_SHADER_BYTECODE{ psPreAlpha->GetBufferPointer(), psPreAlpha->GetBufferSize() }
                                   : D3D12_SHADER_BYTECODE{ psPre->GetBufferPointer(), psPre->GetBufferSize() };
                     pp.RasterizerState.CullMode = c ? D3D12_CULL_MODE_FRONT : D3D12_CULL_MODE_BACK;
-                    if (FAILED(CreatePipeline(dev, &pp, IID_PPV_ARGS(&m_psoCulled[1][alpha][c]))))
-                        Log("scene: culled prepass PSO creation failed - drawn two-sided");
+                    batch.Add(pp, &m_psoCulled[1][alpha][c],
+                              "scene: culled prepass PSO creation failed - drawn two-sided");
                 }
         }
         else
@@ -3138,8 +3200,8 @@ bool Scene::LoadFromMemory(ID3D12Device* dev, ID3D12CommandQueue* queue,
         for (int c = 0; c < 3; ++c)
         {
             gp.RasterizerState.CullMode = culls[c];
-            if (FAILED(CreatePipeline(dev, &gp, IID_PPV_ARGS(&m_psoPrepassGlass[c]))))
-                Log("scene: the glass's prepass PSO creation failed - moving glass reprojected as what is behind it");
+            batch.Add(gp, &m_psoPrepassGlass[c],
+                      "scene: the glass's prepass PSO creation failed - moving glass reprojected as what is behind it");
         }
     }
 
@@ -3163,8 +3225,7 @@ bool Scene::LoadFromMemory(ID3D12Device* dev, ID3D12CommandQueue* queue,
         sp.RasterizerState.DepthBias = 40;
         sp.RasterizerState.SlopeScaledDepthBias = 2.0f;
         sp.PS = { nullptr, 0 };
-        if (FAILED(CreatePipeline(dev, &sp, IID_PPV_ARGS(&m_psoShadow))))
-            Log("scene: shadow PSO creation failed - shadows disabled");
+        batch.Add(sp, &m_psoShadow, "scene: shadow PSO creation failed - shadows disabled");
 
         // Alpha-tested casters must be two-sided: a foliage card culled by
         // winding casts nothing at all. But that removes the protection
@@ -3184,8 +3245,7 @@ bool Scene::LoadFromMemory(ID3D12Device* dev, ID3D12CommandQueue* queue,
         sp.RasterizerState.SlopeScaledDepthBias = 4.0f;
         if (psShadowAlpha)
             sp.PS = { psShadowAlpha->GetBufferPointer(), psShadowAlpha->GetBufferSize() };
-        if (FAILED(CreatePipeline(dev, &sp, IID_PPV_ARGS(&m_psoShadowAlpha))))
-            Log("scene: alpha-test shadow PSO creation failed");
+        batch.Add(sp, &m_psoShadowAlpha, "scene: alpha-test shadow PSO creation failed");
 
         // The local lights' maps (RenderLocalShadows): a perspective from the lamp, conventional depth. Both faces -
         // the Garage's floor and a stage's ground are single-sided sheets, and the car's panels are not closed - with
@@ -3201,21 +3261,16 @@ bool Scene::LoadFromMemory(ID3D12Device* dev, ID3D12CommandQueue* queue,
         sp.RasterizerState.DepthBias = 0;
         sp.RasterizerState.SlopeScaledDepthBias = 1.5f;
         sp.RasterizerState.DepthBiasClamp = 0.0f;
-        if (FAILED(CreatePipeline(dev, &sp, IID_PPV_ARGS(&m_psoLocalShadow))))
-            Log("scene: local-light shadow PSO creation failed - local lights unshadowed without RT");
+        batch.Add(sp, &m_psoLocalShadow,
+                  "scene: local-light shadow PSO creation failed - local lights unshadowed without RT");
         if (psFlagAlpha)
         {
             sp.PS = { psFlagAlpha->GetBufferPointer(), psFlagAlpha->GetBufferSize() };
-            if (FAILED(CreatePipeline(dev, &sp, IID_PPV_ARGS(&m_psoLocalShadowAlpha))))
-                Log("scene: alpha-test local-light shadow PSO creation failed");
+            batch.Add(sp, &m_psoLocalShadowAlpha, "scene: alpha-test local-light shadow PSO creation failed");
         }
     }
 
-    if (FAILED(CreatePipeline(dev, &pso, IID_PPV_ARGS(&m_pso))))
-    {
-        Log("scene: pipeline state creation failed");
-        return false;
-    }
+    batch.Add(pso, &m_pso, "scene: pipeline state creation failed");   // fatal: checked after Run
     // The one-sided materials (all but kMaterialTwoSided): their back faces
     // culled: the meshes' front faces are clockwise on screen, D3D's own
     // convention (CULL_BACK), and a mirroring transform turns that round
@@ -3229,8 +3284,7 @@ bool Scene::LoadFromMemory(ID3D12Device* dev, ID3D12CommandQueue* queue,
             D3D12_GRAPHICS_PIPELINE_STATE_DESC cp = pso;
             if (alpha) cp.PS = { psAlpha->GetBufferPointer(), psAlpha->GetBufferSize() };
             cp.RasterizerState.CullMode = c ? D3D12_CULL_MODE_FRONT : D3D12_CULL_MODE_BACK;
-            if (FAILED(CreatePipeline(dev, &cp, IID_PPV_ARGS(&m_psoCulled[0][alpha][c]))))
-                Log("scene: culled PSO creation failed - drawn two-sided");
+            batch.Add(cp, &m_psoCulled[0][alpha][c], "scene: culled PSO creation failed - drawn two-sided");
         }
 
     // THE DEFERRED LOCAL LIGHTS (PSDeferredLights): the opaque world's pipelines again with the surface's three targets
@@ -3242,18 +3296,17 @@ bool Scene::LoadFromMemory(ID3D12Device* dev, ID3D12CommandQueue* queue,
         D3D12_GRAPHICS_PIPELINE_STATE_DESC gp = pso;
         gp.NumRenderTargets = 3;
         for (int k = 0; k < 2; ++k) gp.RTVFormats[1 + k] = kGbufFormats[k];
-        bool ok = true;
         gp.PS = { psG->GetBufferPointer(), psG->GetBufferSize() };
-        ok = ok && SUCCEEDED(CreatePipeline(dev, &gp, IID_PPV_ARGS(&m_psoG)));
+        batch.Add(gp, &m_psoG);
         gp.PS = { psAlphaG->GetBufferPointer(), psAlphaG->GetBufferSize() };
-        ok = ok && SUCCEEDED(CreatePipeline(dev, &gp, IID_PPV_ARGS(&m_psoAlphaTestG)));
+        batch.Add(gp, &m_psoAlphaTestG);
         for (int alpha = 0; alpha < 2; ++alpha)
             for (int c = 0; c < 2; ++c)
             {
                 gp.PS = alpha ? D3D12_SHADER_BYTECODE{ psAlphaG->GetBufferPointer(), psAlphaG->GetBufferSize() }
                               : D3D12_SHADER_BYTECODE{ psG->GetBufferPointer(), psG->GetBufferSize() };
                 gp.RasterizerState.CullMode = c ? D3D12_CULL_MODE_FRONT : D3D12_CULL_MODE_BACK;
-                ok = ok && SUCCEEDED(CreatePipeline(dev, &gp, IID_PPV_ARGS(&m_psoCulledG[alpha][c])));
+                batch.Add(gp, &m_psoCulledG[alpha][c]);
             }
 
         D3D12_GRAPHICS_PIPELINE_STATE_DESC dp = pso;
@@ -3277,18 +3330,21 @@ bool Scene::LoadFromMemory(ID3D12Device* dev, ID3D12CommandQueue* queue,
         dp.BlendState.IndependentBlendEnable = TRUE;
         dp.BlendState.RenderTarget[1] = D3D12_RENDER_TARGET_BLEND_DESC{};
         dp.BlendState.RenderTarget[1].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
-        ok = ok && SUCCEEDED(CreatePipeline(dev, &dp, IID_PPV_ARGS(&m_psoDeferred)));
-        m_deferredReady = ok;
+        batch.Add(dp, &m_psoDeferred);
+        m_deferredReady = true;   // provisionally: settled by the pipelines made (after Run)
     }
 
     // The reflection focus's opaque pipelines with its reflection rays (m_psoRefl, ReflOpen): forward and deferred,
     // two-sided, back- and front-culled - as m_pso / m_psoCulled and m_psoG / m_psoCulledG are.
     m_rayQuery = false;
+    ComPtr<ID3DBlob> psR, psRG;   // (out here: the batch reads their bytes when it runs)
+    bool reflWanted = false;
     if (rayQuery && dxil)
     {
-        ComPtr<ID3DBlob> psR = compile("PSMain", false, kOpaque, false, true);
-        ComPtr<ID3DBlob> psRG = m_deferredReady ? compile("PSMain", false, kOpaque, true, true) : nullptr;
-        bool ok = psR != nullptr && (psRG != nullptr || !m_deferredReady);
+        psR = compile("PSMain", false, kOpaque, false, true);
+        psRG = m_deferredReady ? compile("PSMain", false, kOpaque, true, true) : nullptr;
+        const bool ok = psR != nullptr && (psRG != nullptr || !m_deferredReady);
+        reflWanted = true;
         const D3D12_CULL_MODE culls[3] = { D3D12_CULL_MODE_NONE, D3D12_CULL_MODE_BACK, D3D12_CULL_MODE_FRONT };
         for (int kind = 0; kind < 2 && ok; ++kind)
         {
@@ -3301,14 +3357,14 @@ bool Scene::LoadFromMemory(ID3D12Device* dev, ID3D12CommandQueue* queue,
                 for (int k = 0; k < 2; ++k) rp.RTVFormats[1 + k] = kGbufFormats[k];
             }
             rp.PS = { b->GetBufferPointer(), b->GetBufferSize() };
-            for (int c = 0; c < 3 && ok; ++c)
+            for (int c = 0; c < 3; ++c)
             {
                 rp.RasterizerState.CullMode = culls[c];
-                ok = SUCCEEDED(CreatePipeline(dev, &rp, IID_PPV_ARGS(&m_psoRefl[kind][c])));
+                m_psoRefl[kind][c].Reset();
+                batch.Add(rp, &m_psoRefl[kind][c]);
             }
         }
-        m_rayQuery = ok;
-        Log("scene: the car's reflection rays (pixel shader 6.5) %s", ok ? "ready" : "failed - its reflections unoccluded");
+        m_rayQuery = ok;   // provisionally, as m_deferredReady
     }
 
     // Foliage after a prepass: the depth is final, so the main pass tests it and does NOT write it - which lets the
@@ -3332,13 +3388,11 @@ bool Scene::LoadFromMemory(ID3D12Device* dev, ID3D12CommandQueue* queue,
             for (int c = 0; c < 3; ++c)
             {
                 kp.RasterizerState.CullMode = culls[c];
-                if (FAILED(CreatePipeline(dev, &kp, IID_PPV_ARGS(&m_psoAlphaKept[kind][c]))))
-                    Log("scene: alpha-test PSO over the prepass's depth failed - the depth-writing one instead");
+                batch.Add(kp, &m_psoAlphaKept[kind][c],
+                          "scene: alpha-test PSO over the prepass's depth failed - the depth-writing one instead");
             }
         }
     }
-    if (!m_deferredReady)
-        Log("scene: the deferred local lights' pipelines failed - the lights shaded in the main pass");
 
     // The blended materials (glass): over everything opaque, PREMULTIPLIED (the shader scales the tint's light by its
     // coverage and leaves the reflection whole), tested against the opaque depth but not writing it - what is behind
@@ -3359,32 +3413,34 @@ bool Scene::LoadFromMemory(ID3D12Device* dev, ID3D12CommandQueue* queue,
         for (int c = 0; c < 3; ++c)
         {
             bp.RasterizerState.CullMode = culls[c];
-            if (FAILED(CreatePipeline(dev, &bp, IID_PPV_ARGS(&m_psoBlend[c]))))
-                Log("scene: blend PSO creation failed - glass not drawn");
+            batch.Add(bp, &m_psoBlend[c], "scene: blend PSO creation failed - glass not drawn");
         }
     }
 
-    if (!CreateDepth(dev, width, height))
-        return false;
-
-    // Not fatal: without the table the scene pass marches per pixel, exactly
-    // as it did before the table existed.
-    if (!m_aerialLut.Ready() && !m_aerialLut.Create(dev))
-        Log("scene: aerial table unavailable - aerial perspective will march per pixel");
-    if (!m_lightsReady && !(m_lightsReady = m_lights.Create(dev)))
-        Log("scene: local light buffers unavailable - no local lights");
-    if (!m_ms.Ready() && !m_ms.Create(dev))
-        Log("scene: multiple-scattering table unavailable - single scattering");
-    if (!m_ownEnv.Ready() && !m_ownEnv.Create(dev))
-        Log("scene: environment unavailable - no ambient specular, sky ambient marches per pixel");
-    if (!m_reflProbe.Ready() && !m_reflProbe.Create(dev))
-        Log("scene: reflection probe unavailable - the car reflects the sky alone");
-
-    // No path here on purpose: this loads from bytes, and the caller may have no
-    // file at all. Load() logs the name before calling in.
-    Log("scene: loaded %u verts, %u indices (%u tris), %u objects",
-           sh->vertexCount, sh->indexCount, sh->indexCount / 3,
-           (unsigned)m_objects.size());
+    // All of them at once (PipelineBatch), then what their success decides.
+    batch.Run("the scene's");
+    if (!m_pso || !m_psoAlphaTest) return false;
+    if (m_deferredReady)
+    {
+        bool ok = m_psoG && m_psoAlphaTestG && m_psoDeferred;
+        for (int alpha = 0; alpha < 2; ++alpha)
+            for (int c = 0; c < 2; ++c) ok = ok && m_psoCulledG[alpha][c];
+        m_deferredReady = ok;
+    }
+    if (!m_deferredReady)
+    {
+        // Without the deferred pass its foliage-after-prepass and reflection variants are not used either.
+        for (int c = 0; c < 3; ++c) m_psoAlphaKept[1][c].Reset(), m_psoRefl[1][c].Reset();
+        Log("scene: the deferred local lights' pipelines failed - the lights shaded in the main pass");
+    }
+    if (reflWanted)
+    {
+        bool ok = m_rayQuery;
+        for (int kind = 0; kind < (m_deferredReady ? 2 : 1); ++kind)
+            for (int c = 0; c < 3; ++c) ok = ok && m_psoRefl[kind][c];
+        m_rayQuery = ok;
+        Log("scene: the car's reflection rays (pixel shader 6.5) %s", ok ? "ready" : "failed - its reflections unoccluded");
+    }
     return true;
 }
 
