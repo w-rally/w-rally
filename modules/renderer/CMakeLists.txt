@@ -7,8 +7,8 @@
 # compiles nothing; NGG_SHADER_DIR=<this folder>/shaders compiles from the files at run time instead (core/shaders.h),
 # for which dxcompiler.dll / dxil.dll are still copied beside the module in the build tree (not installed).
 add_library(ngg-core STATIC src/core/device.cpp src/core/aerial.cpp src/core/renderer.cpp src/core/atmosphere_ms.cpp
-            src/core/shader_compiler.cpp src/core/shaders.cpp src/core/env.cpp src/core/log.cpp src/core/mipgen.cpp
-            src/core/post.cpp src/core/rt.cpp
+            src/core/shader_compiler.cpp src/core/shaders.cpp src/core/pipeline_cache.cpp src/core/env.cpp
+            src/core/log.cpp src/core/mipgen.cpp src/core/post.cpp src/core/rt.cpp
             src/core/scene.cpp src/core/shadow.cpp src/core/sky.cpp src/core/weather.cpp
             src/core/astronomy.cpp src/core/lights.cpp src/core/fsr.cpp src/core/dlss.cpp src/core/gtao.cpp
             src/core/visibility.cpp src/core/probe.cpp src/core/models.cpp)

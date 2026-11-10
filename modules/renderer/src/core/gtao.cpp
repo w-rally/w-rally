@@ -1,5 +1,6 @@
 #include "gtao.h"
 #include "log.h"
+#include "pipeline_cache.h"
 #include "shaders.h"
 
 #include <cassert>
@@ -104,7 +105,7 @@ bool Gtao::Create(ID3D12Device* dev, ID3D12CommandQueue* queue)
     rs.pStaticSamplers = &samp;
     ComPtr<ID3DBlob> sig, err;
     if (FAILED(D3D12SerializeRootSignature(&rs, D3D_ROOT_SIGNATURE_VERSION_1, &sig, &err)) ||
-        FAILED(dev->CreateRootSignature(0, sig->GetBufferPointer(), sig->GetBufferSize(), IID_PPV_ARGS(&m_rootSig))))
+        FAILED(CreateRootSignature(dev, 0, sig->GetBufferPointer(), sig->GetBufferSize(), IID_PPV_ARGS(&m_rootSig))))
     {
         Log("gtao: root signature: %s", err ? (const char*)err->GetBufferPointer() : "?");
         return false;
@@ -118,7 +119,7 @@ bool Gtao::Create(ID3D12Device* dev, ID3D12CommandQueue* queue)
         D3D12_COMPUTE_PIPELINE_STATE_DESC pd = {};
         pd.pRootSignature = m_rootSig.Get();
         pd.CS = { cs->GetBufferPointer(), cs->GetBufferSize() };
-        return SUCCEEDED(dev->CreateComputePipelineState(&pd, IID_PPV_ARGS(&out)));
+        return SUCCEEDED(CreatePipeline(dev, &pd, IID_PPV_ARGS(&out)));
     };
     if (!pso("CSPrefilterDepths16x16", m_psoPrefilter) || !pso("CSDenoisePass", m_psoDenoiseMid) ||
         !pso("CSDenoiseLastPass", m_psoDenoise))
@@ -234,7 +235,7 @@ void Gtao::Record(ID3D12GraphicsCommandList* list, ID3D12Resource* depth, ID3D12
         D3D12_COMPUTE_PIPELINE_STATE_DESC pd = {};
         pd.pRootSignature = m_rootSig.Get();
         if (cs) pd.CS = { cs->GetBufferPointer(), cs->GetBufferSize() };
-        if (!cs || FAILED(dev->CreateComputePipelineState(&pd, IID_PPV_ARGS(&main))))
+        if (!cs || FAILED(CreatePipeline(dev, &pd, IID_PPV_ARGS(&main))))
         {
             Log("gtao: the quality %d pass did not compile", q);
             m_mainFailed[dn][q] = true;

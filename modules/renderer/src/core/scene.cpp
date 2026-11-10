@@ -1,5 +1,6 @@
 #include "scene.h"
 #include "log.h"
+#include "pipeline_cache.h"
 #include "shaders.h"
 #include "mipgen.h"
 #include "shadow.h"
@@ -2960,7 +2961,7 @@ bool Scene::LoadFromMemory(ID3D12Device* dev, ID3D12CommandQueue* queue,
         Log("scene: root signature: %s", err ? (const char*)err->GetBufferPointer() : "?");
         return false;
     }
-    if (FAILED(dev->CreateRootSignature(0, sig->GetBufferPointer(), sig->GetBufferSize(),
+    if (FAILED(CreateRootSignature(dev, 0, sig->GetBufferPointer(), sig->GetBufferSize(),
                                         IID_PPV_ARGS(&m_rootSig))))
         return false;
 
@@ -3085,7 +3086,7 @@ bool Scene::LoadFromMemory(ID3D12Device* dev, ID3D12CommandQueue* queue,
         pso.BlendState.RenderTarget[i].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
 
     pso.PS = { psAlpha->GetBufferPointer(), psAlpha->GetBufferSize() };
-    if (FAILED(dev->CreateGraphicsPipelineState(&pso, IID_PPV_ARGS(&m_psoAlphaTest))))
+    if (FAILED(CreatePipeline(dev, &pso, IID_PPV_ARGS(&m_psoAlphaTest))))
     {
         Log("scene: alpha-test PSO creation failed");
         return false;
@@ -3103,10 +3104,10 @@ bool Scene::LoadFromMemory(ID3D12Device* dev, ID3D12CommandQueue* queue,
             pp.RTVFormats[2] = kPlantFormat;
             pp.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_GREATER;
             pp.PS = { psPre->GetBufferPointer(), psPre->GetBufferSize() };
-            if (FAILED(dev->CreateGraphicsPipelineState(&pp, IID_PPV_ARGS(&m_psoPrepass))))
+            if (FAILED(CreatePipeline(dev, &pp, IID_PPV_ARGS(&m_psoPrepass))))
                 Log("scene: prepass PSO creation failed");
             pp.PS = { psPreAlpha->GetBufferPointer(), psPreAlpha->GetBufferSize() };
-            if (FAILED(dev->CreateGraphicsPipelineState(&pp, IID_PPV_ARGS(&m_psoPrepassAlpha))))
+            if (FAILED(CreatePipeline(dev, &pp, IID_PPV_ARGS(&m_psoPrepassAlpha))))
                 Log("scene: alpha-test prepass PSO creation failed");
             for (int alpha = 0; alpha < 2; ++alpha)
                 for (int c = 0; c < 2; ++c)
@@ -3114,7 +3115,7 @@ bool Scene::LoadFromMemory(ID3D12Device* dev, ID3D12CommandQueue* queue,
                     pp.PS = alpha ? D3D12_SHADER_BYTECODE{ psPreAlpha->GetBufferPointer(), psPreAlpha->GetBufferSize() }
                                   : D3D12_SHADER_BYTECODE{ psPre->GetBufferPointer(), psPre->GetBufferSize() };
                     pp.RasterizerState.CullMode = c ? D3D12_CULL_MODE_FRONT : D3D12_CULL_MODE_BACK;
-                    if (FAILED(dev->CreateGraphicsPipelineState(&pp, IID_PPV_ARGS(&m_psoCulled[1][alpha][c]))))
+                    if (FAILED(CreatePipeline(dev, &pp, IID_PPV_ARGS(&m_psoCulled[1][alpha][c]))))
                         Log("scene: culled prepass PSO creation failed - drawn two-sided");
                 }
         }
@@ -3137,7 +3138,7 @@ bool Scene::LoadFromMemory(ID3D12Device* dev, ID3D12CommandQueue* queue,
         for (int c = 0; c < 3; ++c)
         {
             gp.RasterizerState.CullMode = culls[c];
-            if (FAILED(dev->CreateGraphicsPipelineState(&gp, IID_PPV_ARGS(&m_psoPrepassGlass[c]))))
+            if (FAILED(CreatePipeline(dev, &gp, IID_PPV_ARGS(&m_psoPrepassGlass[c]))))
                 Log("scene: the glass's prepass PSO creation failed - moving glass reprojected as what is behind it");
         }
     }
@@ -3162,7 +3163,7 @@ bool Scene::LoadFromMemory(ID3D12Device* dev, ID3D12CommandQueue* queue,
         sp.RasterizerState.DepthBias = 40;
         sp.RasterizerState.SlopeScaledDepthBias = 2.0f;
         sp.PS = { nullptr, 0 };
-        if (FAILED(dev->CreateGraphicsPipelineState(&sp, IID_PPV_ARGS(&m_psoShadow))))
+        if (FAILED(CreatePipeline(dev, &sp, IID_PPV_ARGS(&m_psoShadow))))
             Log("scene: shadow PSO creation failed - shadows disabled");
 
         // Alpha-tested casters must be two-sided: a foliage card culled by
@@ -3183,7 +3184,7 @@ bool Scene::LoadFromMemory(ID3D12Device* dev, ID3D12CommandQueue* queue,
         sp.RasterizerState.SlopeScaledDepthBias = 4.0f;
         if (psShadowAlpha)
             sp.PS = { psShadowAlpha->GetBufferPointer(), psShadowAlpha->GetBufferSize() };
-        if (FAILED(dev->CreateGraphicsPipelineState(&sp, IID_PPV_ARGS(&m_psoShadowAlpha))))
+        if (FAILED(CreatePipeline(dev, &sp, IID_PPV_ARGS(&m_psoShadowAlpha))))
             Log("scene: alpha-test shadow PSO creation failed");
 
         // The local lights' maps (RenderLocalShadows): a perspective from the lamp, conventional depth. Both faces -
@@ -3200,17 +3201,17 @@ bool Scene::LoadFromMemory(ID3D12Device* dev, ID3D12CommandQueue* queue,
         sp.RasterizerState.DepthBias = 0;
         sp.RasterizerState.SlopeScaledDepthBias = 1.5f;
         sp.RasterizerState.DepthBiasClamp = 0.0f;
-        if (FAILED(dev->CreateGraphicsPipelineState(&sp, IID_PPV_ARGS(&m_psoLocalShadow))))
+        if (FAILED(CreatePipeline(dev, &sp, IID_PPV_ARGS(&m_psoLocalShadow))))
             Log("scene: local-light shadow PSO creation failed - local lights unshadowed without RT");
         if (psFlagAlpha)
         {
             sp.PS = { psFlagAlpha->GetBufferPointer(), psFlagAlpha->GetBufferSize() };
-            if (FAILED(dev->CreateGraphicsPipelineState(&sp, IID_PPV_ARGS(&m_psoLocalShadowAlpha))))
+            if (FAILED(CreatePipeline(dev, &sp, IID_PPV_ARGS(&m_psoLocalShadowAlpha))))
                 Log("scene: alpha-test local-light shadow PSO creation failed");
         }
     }
 
-    if (FAILED(dev->CreateGraphicsPipelineState(&pso, IID_PPV_ARGS(&m_pso))))
+    if (FAILED(CreatePipeline(dev, &pso, IID_PPV_ARGS(&m_pso))))
     {
         Log("scene: pipeline state creation failed");
         return false;
@@ -3228,7 +3229,7 @@ bool Scene::LoadFromMemory(ID3D12Device* dev, ID3D12CommandQueue* queue,
             D3D12_GRAPHICS_PIPELINE_STATE_DESC cp = pso;
             if (alpha) cp.PS = { psAlpha->GetBufferPointer(), psAlpha->GetBufferSize() };
             cp.RasterizerState.CullMode = c ? D3D12_CULL_MODE_FRONT : D3D12_CULL_MODE_BACK;
-            if (FAILED(dev->CreateGraphicsPipelineState(&cp, IID_PPV_ARGS(&m_psoCulled[0][alpha][c]))))
+            if (FAILED(CreatePipeline(dev, &cp, IID_PPV_ARGS(&m_psoCulled[0][alpha][c]))))
                 Log("scene: culled PSO creation failed - drawn two-sided");
         }
 
@@ -3243,16 +3244,16 @@ bool Scene::LoadFromMemory(ID3D12Device* dev, ID3D12CommandQueue* queue,
         for (int k = 0; k < 2; ++k) gp.RTVFormats[1 + k] = kGbufFormats[k];
         bool ok = true;
         gp.PS = { psG->GetBufferPointer(), psG->GetBufferSize() };
-        ok = ok && SUCCEEDED(dev->CreateGraphicsPipelineState(&gp, IID_PPV_ARGS(&m_psoG)));
+        ok = ok && SUCCEEDED(CreatePipeline(dev, &gp, IID_PPV_ARGS(&m_psoG)));
         gp.PS = { psAlphaG->GetBufferPointer(), psAlphaG->GetBufferSize() };
-        ok = ok && SUCCEEDED(dev->CreateGraphicsPipelineState(&gp, IID_PPV_ARGS(&m_psoAlphaTestG)));
+        ok = ok && SUCCEEDED(CreatePipeline(dev, &gp, IID_PPV_ARGS(&m_psoAlphaTestG)));
         for (int alpha = 0; alpha < 2; ++alpha)
             for (int c = 0; c < 2; ++c)
             {
                 gp.PS = alpha ? D3D12_SHADER_BYTECODE{ psAlphaG->GetBufferPointer(), psAlphaG->GetBufferSize() }
                               : D3D12_SHADER_BYTECODE{ psG->GetBufferPointer(), psG->GetBufferSize() };
                 gp.RasterizerState.CullMode = c ? D3D12_CULL_MODE_FRONT : D3D12_CULL_MODE_BACK;
-                ok = ok && SUCCEEDED(dev->CreateGraphicsPipelineState(&gp, IID_PPV_ARGS(&m_psoCulledG[alpha][c])));
+                ok = ok && SUCCEEDED(CreatePipeline(dev, &gp, IID_PPV_ARGS(&m_psoCulledG[alpha][c])));
             }
 
         D3D12_GRAPHICS_PIPELINE_STATE_DESC dp = pso;
@@ -3276,7 +3277,7 @@ bool Scene::LoadFromMemory(ID3D12Device* dev, ID3D12CommandQueue* queue,
         dp.BlendState.IndependentBlendEnable = TRUE;
         dp.BlendState.RenderTarget[1] = D3D12_RENDER_TARGET_BLEND_DESC{};
         dp.BlendState.RenderTarget[1].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
-        ok = ok && SUCCEEDED(dev->CreateGraphicsPipelineState(&dp, IID_PPV_ARGS(&m_psoDeferred)));
+        ok = ok && SUCCEEDED(CreatePipeline(dev, &dp, IID_PPV_ARGS(&m_psoDeferred)));
         m_deferredReady = ok;
     }
 
@@ -3303,7 +3304,7 @@ bool Scene::LoadFromMemory(ID3D12Device* dev, ID3D12CommandQueue* queue,
             for (int c = 0; c < 3 && ok; ++c)
             {
                 rp.RasterizerState.CullMode = culls[c];
-                ok = SUCCEEDED(dev->CreateGraphicsPipelineState(&rp, IID_PPV_ARGS(&m_psoRefl[kind][c])));
+                ok = SUCCEEDED(CreatePipeline(dev, &rp, IID_PPV_ARGS(&m_psoRefl[kind][c])));
             }
         }
         m_rayQuery = ok;
@@ -3331,7 +3332,7 @@ bool Scene::LoadFromMemory(ID3D12Device* dev, ID3D12CommandQueue* queue,
             for (int c = 0; c < 3; ++c)
             {
                 kp.RasterizerState.CullMode = culls[c];
-                if (FAILED(dev->CreateGraphicsPipelineState(&kp, IID_PPV_ARGS(&m_psoAlphaKept[kind][c]))))
+                if (FAILED(CreatePipeline(dev, &kp, IID_PPV_ARGS(&m_psoAlphaKept[kind][c]))))
                     Log("scene: alpha-test PSO over the prepass's depth failed - the depth-writing one instead");
             }
         }
@@ -3358,7 +3359,7 @@ bool Scene::LoadFromMemory(ID3D12Device* dev, ID3D12CommandQueue* queue,
         for (int c = 0; c < 3; ++c)
         {
             bp.RasterizerState.CullMode = culls[c];
-            if (FAILED(dev->CreateGraphicsPipelineState(&bp, IID_PPV_ARGS(&m_psoBlend[c]))))
+            if (FAILED(CreatePipeline(dev, &bp, IID_PPV_ARGS(&m_psoBlend[c]))))
                 Log("scene: blend PSO creation failed - glass not drawn");
         }
     }
@@ -3888,7 +3889,7 @@ bool Scene::CreateSelectionPipeline(ID3D12Device* dev, DXGI_FORMAT outputFormat)
         Log("selection: root signature: %s", err ? (const char*)err->GetBufferPointer() : "?");
         return false;
     }
-    if (FAILED(dev->CreateRootSignature(0, sig->GetBufferPointer(), sig->GetBufferSize(),
+    if (FAILED(CreateRootSignature(dev, 0, sig->GetBufferPointer(), sig->GetBufferSize(),
                                         IID_PPV_ARGS(&m_selRootSig))))
         return false;
 
@@ -3942,7 +3943,7 @@ bool Scene::CreateSelectionPipeline(ID3D12Device* dev, DXGI_FORMAT outputFormat)
     for (UINT i = 0; i < 8; ++i)
         pso.BlendState.RenderTarget[i].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
 
-    if (FAILED(dev->CreateGraphicsPipelineState(&pso, IID_PPV_ARGS(&m_psoSelVisible))))
+    if (FAILED(CreatePipeline(dev, &pso, IID_PPV_ARGS(&m_psoSelVisible))))
     {
         Log("selection: visible-pass PSO creation failed");
         return false;
@@ -3963,7 +3964,7 @@ bool Scene::CreateSelectionPipeline(ID3D12Device* dev, DXGI_FORMAT outputFormat)
     pso.BlendState.RenderTarget[0].SrcBlendAlpha = D3D12_BLEND_ONE;
     pso.BlendState.RenderTarget[0].DestBlendAlpha = D3D12_BLEND_ZERO;
     pso.BlendState.RenderTarget[0].BlendOpAlpha = D3D12_BLEND_OP_ADD;
-    if (FAILED(dev->CreateGraphicsPipelineState(&pso, IID_PPV_ARGS(&m_psoSelOccluded))))
+    if (FAILED(CreatePipeline(dev, &pso, IID_PPV_ARGS(&m_psoSelOccluded))))
     {
         Log("selection: occluded-pass PSO creation failed");
         return false;
@@ -4011,7 +4012,7 @@ bool Scene::CreateSelectionPipeline(ID3D12Device* dev, DXGI_FORMAT outputFormat)
             Log("labels: root signature: %s", lerr ? (const char*)lerr->GetBufferPointer() : "?");
             return false;
         }
-        if (FAILED(dev->CreateRootSignature(0, lsig->GetBufferPointer(), lsig->GetBufferSize(),
+        if (FAILED(CreateRootSignature(dev, 0, lsig->GetBufferPointer(), lsig->GetBufferSize(),
                                             IID_PPV_ARGS(&m_labelRootSig))))
             return false;
 
@@ -4045,21 +4046,21 @@ bool Scene::CreateSelectionPipeline(ID3D12Device* dev, DXGI_FORMAT outputFormat)
         // Depth comes from the ANCHOR, which every vertex of the quad carries, so
         // a label is occluded exactly when the point it names is.
         lp2.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_LESS;
-        if (FAILED(dev->CreateGraphicsPipelineState(&lp2, IID_PPV_ARGS(&m_psoLabelOccluded))))
+        if (FAILED(CreatePipeline(dev, &lp2, IID_PPV_ARGS(&m_psoLabelOccluded))))
         {
             Log("labels: occluded PSO creation failed");
             return false;
         }
 
         lp2.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_GREATER_EQUAL;
-        if (FAILED(dev->CreateGraphicsPipelineState(&lp2, IID_PPV_ARGS(&m_psoLabel))))
+        if (FAILED(CreatePipeline(dev, &lp2, IID_PPV_ARGS(&m_psoLabel))))
         {
             Log("labels: visible PSO creation failed");
             return false;
         }
 
         lp2.DepthStencilState.DepthEnable = FALSE;
-        if (FAILED(dev->CreateGraphicsPipelineState(&lp2, IID_PPV_ARGS(&m_psoLabelNoDepth))))
+        if (FAILED(CreatePipeline(dev, &lp2, IID_PPV_ARGS(&m_psoLabelNoDepth))))
         {
             Log("labels: no-depth PSO creation failed");
             return false;
@@ -4093,14 +4094,14 @@ bool Scene::CreateSelectionPipeline(ID3D12Device* dev, DXGI_FORMAT outputFormat)
         ov.RasterizerState.DepthBias = 0;
         ov.RasterizerState.SlopeScaledDepthBias = 0.0f;
         ov.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_LESS;
-        if (FAILED(dev->CreateGraphicsPipelineState(&ov, IID_PPV_ARGS(&m_psoOvOccluded))))
+        if (FAILED(CreatePipeline(dev, &ov, IID_PPV_ARGS(&m_psoOvOccluded))))
         {
             Log("overlay: occluded-pass PSO creation failed");
             return false;
         }
 
         ov.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_GREATER_EQUAL;
-        if (FAILED(dev->CreateGraphicsPipelineState(&ov, IID_PPV_ARGS(&m_psoOvVisible))))
+        if (FAILED(CreatePipeline(dev, &ov, IID_PPV_ARGS(&m_psoOvVisible))))
         {
             Log("overlay: visible-pass PSO creation failed");
             return false;
@@ -4109,7 +4110,7 @@ bool Scene::CreateSelectionPipeline(ID3D12Device* dev, DXGI_FORMAT outputFormat)
         // Always on top. Manipulator handles want this: a gizmo you cannot grab
         // because the thing you are dragging is in front of it is not a gizmo.
         ov.DepthStencilState.DepthEnable = FALSE;
-        if (FAILED(dev->CreateGraphicsPipelineState(&ov, IID_PPV_ARGS(&m_psoOvNoDepth))))
+        if (FAILED(CreatePipeline(dev, &ov, IID_PPV_ARGS(&m_psoOvNoDepth))))
         {
             Log("overlay: no-depth PSO creation failed");
             return false;

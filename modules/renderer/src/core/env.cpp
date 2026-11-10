@@ -1,5 +1,6 @@
 #include "env.h"
 #include "log.h"
+#include "pipeline_cache.h"
 #include "shaders.h"
 
 #include <d3dcompiler.h>
@@ -112,7 +113,7 @@ bool Environment::Create(ID3D12Device* dev)
         Log("env: root signature: %s", err ? (const char*)err->GetBufferPointer() : "?");
         return false;
     }
-    if (FAILED(dev->CreateRootSignature(0, sig->GetBufferPointer(), sig->GetBufferSize(),
+    if (FAILED(CreateRootSignature(dev, 0, sig->GetBufferPointer(), sig->GetBufferSize(),
                                         IID_PPV_ARGS(&m_rootSig))))
         return false;
 
@@ -139,19 +140,19 @@ bool Environment::Create(ID3D12Device* dev)
     pd.SampleDesc.Count = 1;
 
     pd.PS = { psSky->GetBufferPointer(), psSky->GetBufferSize() };
-    if (FAILED(dev->CreateGraphicsPipelineState(&pd, IID_PPV_ARGS(&m_psoSky))))
+    if (FAILED(CreatePipeline(dev, &pd, IID_PPV_ARGS(&m_psoSky))))
     {
         Log("env: sky pipeline creation failed");
         return false;
     }
     pd.PS = { psDown->GetBufferPointer(), psDown->GetBufferSize() };
-    if (FAILED(dev->CreateGraphicsPipelineState(&pd, IID_PPV_ARGS(&m_psoDown))))
+    if (FAILED(CreatePipeline(dev, &pd, IID_PPV_ARGS(&m_psoDown))))
     {
         Log("env: downsample pipeline creation failed");
         return false;
     }
     pd.PS = { psIrr->GetBufferPointer(), psIrr->GetBufferSize() };
-    if (FAILED(dev->CreateGraphicsPipelineState(&pd, IID_PPV_ARGS(&m_psoIrr))))
+    if (FAILED(CreatePipeline(dev, &pd, IID_PPV_ARGS(&m_psoIrr))))
     {
         Log("env: irradiance pipeline creation failed");
         return false;

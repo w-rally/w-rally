@@ -1,5 +1,6 @@
 #include "aerial.h"
 #include "log.h"
+#include "pipeline_cache.h"
 #include "shaders.h"
 
 #include <d3dcompiler.h>
@@ -137,7 +138,7 @@ bool AerialLut::Create(ID3D12Device* dev)
         Log("aerial: root signature: %s", err ? (const char*)err->GetBufferPointer() : "?");
         return false;
     }
-    if (FAILED(dev->CreateRootSignature(0, sig->GetBufferPointer(), sig->GetBufferSize(),
+    if (FAILED(CreateRootSignature(dev, 0, sig->GetBufferPointer(), sig->GetBufferSize(),
                                         IID_PPV_ARGS(&m_rootSig))))
         return false;
 
@@ -148,7 +149,7 @@ bool AerialLut::Create(ID3D12Device* dev)
     D3D12_COMPUTE_PIPELINE_STATE_DESC pd = {};
     pd.pRootSignature = m_rootSig.Get();
     pd.CS = { cs->GetBufferPointer(), cs->GetBufferSize() };
-    if (FAILED(dev->CreateComputePipelineState(&pd, IID_PPV_ARGS(&m_pso))))
+    if (FAILED(CreatePipeline(dev, &pd, IID_PPV_ARGS(&m_pso))))
     {
         Log("aerial: pipeline creation failed");
         return false;

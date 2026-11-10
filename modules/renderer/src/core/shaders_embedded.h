@@ -13,7 +13,7 @@ namespace embedded {
 
 struct Shader
 {
-    const char*          key;     // "scene.hlsl PSMain ps_6_0 -HV 2018 -DALPHA_TEST=1": shaders.txt's line, one space apart
+    const char*          key;     // shaders.txt's line, one space apart: "scene.hlsl PSMain ps_6_0 -HV 2018 -DBLEND=1"
     const unsigned char* data;    // DXIL (signed) or DXBC, 16-byte aligned
     uint32_t             size;
 };

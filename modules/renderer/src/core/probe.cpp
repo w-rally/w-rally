@@ -1,5 +1,6 @@
 #include "probe.h"
 #include "log.h"
+#include "pipeline_cache.h"
 #include "shaders.h"
 
 #include <d3dcompiler.h>
@@ -152,16 +153,16 @@ bool ReflectionProbe::Create(ID3D12Device* dev)
     rs.pStaticSamplers = &samp;
     ComPtr<ID3DBlob> sig, err;
     if (FAILED(D3D12SerializeRootSignature(&rs, D3D_ROOT_SIGNATURE_VERSION_1, &sig, &err)) ||
-        FAILED(dev->CreateRootSignature(0, sig->GetBufferPointer(), sig->GetBufferSize(), IID_PPV_ARGS(&m_rootSig))))
+        FAILED(CreateRootSignature(dev, 0, sig->GetBufferPointer(), sig->GetBufferSize(), IID_PPV_ARGS(&m_rootSig))))
         return false;
     ComPtr<ID3DBlob> resolve = CompileCs("CSResolve"), down = CompileCs("CSDown");
     if (!resolve || !down) return false;
     D3D12_COMPUTE_PIPELINE_STATE_DESC cp = {};
     cp.pRootSignature = m_rootSig.Get();
     cp.CS = { down->GetBufferPointer(), down->GetBufferSize() };
-    if (FAILED(dev->CreateComputePipelineState(&cp, IID_PPV_ARGS(&m_psoDown)))) return false;
+    if (FAILED(CreatePipeline(dev, &cp, IID_PPV_ARGS(&m_psoDown)))) return false;
     cp.CS = { resolve->GetBufferPointer(), resolve->GetBufferSize() };
-    return SUCCEEDED(dev->CreateComputePipelineState(&cp, IID_PPV_ARGS(&m_psoResolve)));
+    return SUCCEEDED(CreatePipeline(dev, &cp, IID_PPV_ARGS(&m_psoResolve)));
 }
 
 void ReflectionProbe::FaceView(int face, const float c[3], float v[16])

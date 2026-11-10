@@ -1,5 +1,6 @@
 #include "module/ui.h"
 
+#include "core/pipeline_cache.h"
 #include "core/shaders.h"
 
 #include <d3dcompiler.h>
@@ -83,7 +84,8 @@ bool UiPass::Create(ngg::core::Device& dev, DXGI_FORMAT target, std::string& err
     rs.Flags = D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT;
     ComPtr<ID3DBlob> blob, errors;
     if (FAILED(D3D12SerializeRootSignature(&rs, D3D_ROOT_SIGNATURE_VERSION_1, &blob, &errors)) ||
-        FAILED(device->CreateRootSignature(0, blob->GetBufferPointer(), blob->GetBufferSize(), IID_PPV_ARGS(&m_root))))
+        FAILED(ngg::core::CreateRootSignature(device, 0, blob->GetBufferPointer(), blob->GetBufferSize(),
+                                              IID_PPV_ARGS(&m_root))))
         return error = "ui: root signature", false;
 
     ComPtr<ID3DBlob> vs, ps;
@@ -116,7 +118,8 @@ bool UiPass::Create(ngg::core::Device& dev, DXGI_FORMAT target, std::string& err
     pd.NumRenderTargets = 1;
     pd.RTVFormats[0] = target;
     pd.SampleDesc.Count = 1;
-    if (FAILED(device->CreateGraphicsPipelineState(&pd, IID_PPV_ARGS(&m_pso)))) return error = "ui: pipeline state", false;
+    if (FAILED(ngg::core::CreatePipeline(device, &pd, IID_PPV_ARGS(&m_pso))))
+        return error = "ui: pipeline state", false;
 
     D3D12_DESCRIPTOR_HEAP_DESC hd = {};
     hd.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;

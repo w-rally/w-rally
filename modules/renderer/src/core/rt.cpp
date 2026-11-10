@@ -1,5 +1,6 @@
 #include "rt.h"
 #include "log.h"
+#include "pipeline_cache.h"
 #include "shaders.h"
 
 #include <string>
@@ -289,7 +290,7 @@ bool Rt::Create(Device& dev)
         Log("rt: root signature: %s", err ? (const char*)err->GetBufferPointer() : "?");
         return false;
     }
-    if (FAILED(dev.device->CreateRootSignature(0, sig->GetBufferPointer(), sig->GetBufferSize(),
+    if (FAILED(CreateRootSignature(dev.device, 0, sig->GetBufferPointer(), sig->GetBufferSize(),
                                                IID_PPV_ARGS(&m_rootSig))))
         return false;
 
@@ -299,7 +300,7 @@ bool Rt::Create(Device& dev)
     D3D12_COMPUTE_PIPELINE_STATE_DESC pd = {};
     pd.pRootSignature = m_rootSig.Get();
     pd.CS = { cs->GetBufferPointer(), cs->GetBufferSize() };
-    if (FAILED(dev.device->CreateComputePipelineState(&pd, IID_PPV_ARGS(&m_pso))))
+    if (FAILED(CreatePipeline(dev.device, &pd, IID_PPV_ARGS(&m_pso))))
     {
         Log("rt: compute pipeline creation failed - the DXIL was probably rejected");
         return false;
@@ -309,7 +310,7 @@ bool Rt::Create(Device& dev)
     if (aocs)
     {
         pd.CS = { aocs->GetBufferPointer(), aocs->GetBufferSize() };
-        if (FAILED(dev.device->CreateComputePipelineState(&pd, IID_PPV_ARGS(&m_psoAo))))
+        if (FAILED(CreatePipeline(dev.device, &pd, IID_PPV_ARGS(&m_psoAo))))
             Log("rt: AO pipeline creation failed - shadows still work, AO does not");
     }
 
@@ -321,7 +322,7 @@ bool Rt::Create(Device& dev)
     if (lcs)
     {
         pd.CS = { lcs->GetBufferPointer(), lcs->GetBufferSize() };
-        if (FAILED(dev.device->CreateComputePipelineState(&pd, IID_PPV_ARGS(&m_psoLights))))
+        if (FAILED(CreatePipeline(dev.device, &pd, IID_PPV_ARGS(&m_psoLights))))
             m_psoLights.Reset();
     }
     if (!m_psoLights) Log("rt: local-light pipeline creation failed - local lights go unshadowed");
@@ -361,7 +362,7 @@ bool Rt::Create(Device& dev)
         drs.pParameters = dp;
         ComPtr<ID3DBlob> dsig, derr;
         if (FAILED(D3D12SerializeRootSignature(&drs, D3D_ROOT_SIGNATURE_VERSION_1, &dsig, &derr)) ||
-            FAILED(dev.device->CreateRootSignature(0, dsig->GetBufferPointer(), dsig->GetBufferSize(),
+            FAILED(CreateRootSignature(dev.device, 0, dsig->GetBufferPointer(), dsig->GetBufferSize(),
                                                    IID_PPV_ARGS(&m_denoiseRootSig))))
         {
             Log("rt: denoise root signature failed");
@@ -372,7 +373,7 @@ bool Rt::Create(Device& dev)
         D3D12_COMPUTE_PIPELINE_STATE_DESC dpd = {};
         dpd.pRootSignature = m_denoiseRootSig.Get();
         dpd.CS = { dcs->GetBufferPointer(), dcs->GetBufferSize() };
-        if (FAILED(dev.device->CreateComputePipelineState(&dpd, IID_PPV_ARGS(&m_psoDenoise))))
+        if (FAILED(CreatePipeline(dev.device, &dpd, IID_PPV_ARGS(&m_psoDenoise))))
         {
             Log("rt: denoise pipeline creation failed");
             return false;
@@ -383,7 +384,7 @@ bool Rt::Create(Device& dev)
         if (wcs)
         {
             dpd.CS = { wcs->GetBufferPointer(), wcs->GetBufferSize() };
-            if (FAILED(dev.device->CreateComputePipelineState(&dpd, IID_PPV_ARGS(&m_psoAoWide))))
+            if (FAILED(CreatePipeline(dev.device, &dpd, IID_PPV_ARGS(&m_psoAoWide))))
                 m_psoAoWide.Reset();
         }
         if (!m_psoAoWide) Log("rt: AO wide pass pipeline creation failed - the AO goes unwidened");

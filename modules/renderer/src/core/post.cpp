@@ -1,5 +1,6 @@
 #include "post.h"
 #include "log.h"
+#include "pipeline_cache.h"
 #include "shaders.h"
 
 #include <d3dcompiler.h>
@@ -200,7 +201,7 @@ bool PostFx::CreatePasses(ID3D12Device* dev, DXGI_FORMAT outputFormat)
         Log("post: root signature: %s", err ? (const char*)err->GetBufferPointer() : "?");
         return false;
     }
-    if (FAILED(dev->CreateRootSignature(0, sig->GetBufferPointer(), sig->GetBufferSize(),
+    if (FAILED(CreateRootSignature(dev, 0, sig->GetBufferPointer(), sig->GetBufferSize(),
                                         IID_PPV_ARGS(&m_rootSig))))
         return false;
 
@@ -230,7 +231,7 @@ bool PostFx::CreatePasses(ID3D12Device* dev, DXGI_FORMAT outputFormat)
     pd.RTVFormats[1] = kSettledFormat;
     pd.BlendState.RenderTarget[1].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
     pd.BlendState.IndependentBlendEnable = TRUE;
-    const bool taaPso = SUCCEEDED(dev->CreateGraphicsPipelineState(&pd, IID_PPV_ARGS(&m_psoTaa)));
+    const bool taaPso = SUCCEEDED(CreatePipeline(dev, &pd, IID_PPV_ARGS(&m_psoTaa)));
     pd.NumRenderTargets = 1;
     pd.RTVFormats[1] = DXGI_FORMAT_UNKNOWN;
     pd.BlendState.IndependentBlendEnable = FALSE;
@@ -242,7 +243,7 @@ bool PostFx::CreatePasses(ID3D12Device* dev, DXGI_FORMAT outputFormat)
 
     pd.PS = { psTone->GetBufferPointer(), psTone->GetBufferSize() };
     pd.RTVFormats[0] = outputFormat;
-    if (FAILED(dev->CreateGraphicsPipelineState(&pd, IID_PPV_ARGS(&m_psoTonemap))))
+    if (FAILED(CreatePipeline(dev, &pd, IID_PPV_ARGS(&m_psoTonemap))))
     {
         Log("post: tonemap pipeline creation failed");
         return false;
@@ -253,7 +254,7 @@ bool PostFx::CreatePasses(ID3D12Device* dev, DXGI_FORMAT outputFormat)
     pd.RTVFormats[0] = kUpMotionFormat;
     pd.RTVFormats[1] = kUpReactiveFormat;
     pd.BlendState.RenderTarget[1].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
-    if (FAILED(dev->CreateGraphicsPipelineState(&pd, IID_PPV_ARGS(&m_psoUpIn))))
+    if (FAILED(CreatePipeline(dev, &pd, IID_PPV_ARGS(&m_psoUpIn))))
     {
         Log("post: upscaler inputs pipeline creation failed");
         return false;
@@ -301,7 +302,7 @@ bool PostFx::CreateMetering(ID3D12Device* dev)
         Log("post: meter root signature: %s", err ? (const char*)err->GetBufferPointer() : "?");
         return false;
     }
-    if (FAILED(dev->CreateRootSignature(0, sig->GetBufferPointer(), sig->GetBufferSize(),
+    if (FAILED(CreateRootSignature(dev, 0, sig->GetBufferPointer(), sig->GetBufferSize(),
                                         IID_PPV_ARGS(&m_meterRootSig))))
         return false;
 
@@ -312,9 +313,9 @@ bool PostFx::CreateMetering(ID3D12Device* dev)
     D3D12_COMPUTE_PIPELINE_STATE_DESC cd = {};
     cd.pRootSignature = m_meterRootSig.Get();
     cd.CS = { csHist->GetBufferPointer(), csHist->GetBufferSize() };
-    if (FAILED(dev->CreateComputePipelineState(&cd, IID_PPV_ARGS(&m_psoHistogram)))) return false;
+    if (FAILED(CreatePipeline(dev, &cd, IID_PPV_ARGS(&m_psoHistogram)))) return false;
     cd.CS = { csAdapt->GetBufferPointer(), csAdapt->GetBufferSize() };
-    if (FAILED(dev->CreateComputePipelineState(&cd, IID_PPV_ARGS(&m_psoAdapt)))) return false;
+    if (FAILED(CreatePipeline(dev, &cd, IID_PPV_ARGS(&m_psoAdapt)))) return false;
 
     // Both buffers start zeroed - committed resources are - which is exactly
     // the state each needs: an empty histogram, and a state whose valid flag

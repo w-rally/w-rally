@@ -1,5 +1,6 @@
 #include "atmosphere_ms.h"
 #include "log.h"
+#include "pipeline_cache.h"
 #include "shaders.h"
 
 #include <d3dcompiler.h>
@@ -102,7 +103,7 @@ bool AtmosphereMs::Create(ID3D12Device* dev)
 
     ComPtr<ID3DBlob> sig, err;
     if (FAILED(D3D12SerializeRootSignature(&rs, D3D_ROOT_SIGNATURE_VERSION_1, &sig, &err)) ||
-        FAILED(dev->CreateRootSignature(0, sig->GetBufferPointer(), sig->GetBufferSize(),
+        FAILED(CreateRootSignature(dev, 0, sig->GetBufferPointer(), sig->GetBufferSize(),
                                         IID_PPV_ARGS(&m_rootSig))))
     {
         Log("atmosphere-ms: root signature failed");
@@ -114,7 +115,7 @@ bool AtmosphereMs::Create(ID3D12Device* dev)
     D3D12_COMPUTE_PIPELINE_STATE_DESC pd = {};
     pd.pRootSignature = m_rootSig.Get();
     pd.CS = { cs->GetBufferPointer(), cs->GetBufferSize() };
-    if (FAILED(dev->CreateComputePipelineState(&pd, IID_PPV_ARGS(&m_pso))))
+    if (FAILED(CreatePipeline(dev, &pd, IID_PPV_ARGS(&m_pso))))
     {
         Log("atmosphere-ms: pipeline creation failed");
         return false;

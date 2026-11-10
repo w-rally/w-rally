@@ -1,5 +1,6 @@
 #include "sky.h"
 #include "log.h"
+#include "pipeline_cache.h"
 #include "shaders.h"
 
 #include <d3dcompiler.h>
@@ -84,7 +85,7 @@ bool Sky::Create(ID3D12Device* dev, DXGI_FORMAT rtvFormat)
         Log("sky: root signature: %s", err ? (const char*)err->GetBufferPointer() : "?");
         return false;
     }
-    if (FAILED(dev->CreateRootSignature(0, sig->GetBufferPointer(), sig->GetBufferSize(),
+    if (FAILED(CreateRootSignature(dev, 0, sig->GetBufferPointer(), sig->GetBufferSize(),
                                         IID_PPV_ARGS(&m_rootSig))))
         return false;
 
@@ -109,7 +110,7 @@ bool Sky::Create(ID3D12Device* dev, DXGI_FORMAT rtvFormat)
     pd.DSVFormat = DXGI_FORMAT_UNKNOWN;
     pd.SampleDesc.Count = 1;
 
-    if (FAILED(dev->CreateGraphicsPipelineState(&pd, IID_PPV_ARGS(&m_pso))))
+    if (FAILED(CreatePipeline(dev, &pd, IID_PPV_ARGS(&m_pso))))
     {
         Log("sky: pipeline state creation failed");
         return false;

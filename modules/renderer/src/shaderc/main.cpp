@@ -202,7 +202,8 @@ int main(int argc, char** argv)
     for (size_t i = 0; i < entries.size(); ++i)
         src += "    { \"" + entries[i].key + "\", s" + std::to_string(i) + ", sizeof s" + std::to_string(i) + " },\n";
     char tail[160];
-    std::snprintf(tail, sizeof tail, "};\nconst size_t kShaderCount = %zu;\nconst uint64_t kShaderSetHash = 0x%016llxull;\n",
+    std::snprintf(tail, sizeof tail,
+                  "};\nconst size_t kShaderCount = %zu;\nconst uint64_t kShaderSetHash = 0x%016llxull;\n",
                   entries.size(), (unsigned long long)hash);
     src += tail;
     src += "\n} // namespace embedded\n} // namespace core\n} // namespace ngg\n";

@@ -1,5 +1,6 @@
 #include "renderer.h"
 #include "log.h"
+#include "pipeline_cache.h"
 #include "shaders.h"
 
 #include <math.h>
@@ -119,6 +120,8 @@ bool Renderer::Load(Device& dev, const wchar_t* path)
     const bool ok = m_scene.Load(dev.device.Get(), dev.queue.Get(), path,
                                  PostFx::kHdrFormat, m_renderWidth, m_renderHeight);
     LogShaderStats("the scene's");
+    LogPipelineStats("the scene's");
+    SavePipelineCache();
     m_rtRevision = 0xFFFFFFFFu;          // rebuilt on the next frame
     m_post.ResetHistory();
     return ok;
@@ -129,6 +132,8 @@ bool Renderer::LoadFromMemory(Device& dev, const void* data, size_t bytes)
     const bool ok = m_scene.LoadFromMemory(dev.device.Get(), dev.queue.Get(), data, bytes,
                                            PostFx::kHdrFormat, m_renderWidth, m_renderHeight);
     LogShaderStats("the scene's");
+    LogPipelineStats("the scene's");
+    SavePipelineCache();
     m_rtRevision = 0xFFFFFFFFu;
     m_post.ResetHistory();
     return ok;
