@@ -131,7 +131,9 @@ public:
     //
     // Public because the shader carries mirrored #defines and the static_asserts
     // tying the two together sit at file scope in scene.cpp.
-    enum { kDrawSingleStage = 1u << 8, kDrawNormalMap = 1u << 9 };
+    // kDrawModel: an instanced model's material (its prepass keeps its own normal, not a card's plane);
+    // kDrawHashedAlpha: its alpha edge dithered about the cutoff (kMaterialFoliage).
+    enum { kDrawSingleStage = 1u << 8, kDrawNormalMap = 1u << 9, kDrawModel = 1u << 10, kDrawHashedAlpha = 1u << 11 };
 
     // One material's five texture slots, in NGGM order: baseColour, detail,
     // normal, orm, emissive. Contiguous in the SRV heap, so a single descriptor
@@ -669,6 +671,51 @@ public:
     // TLAS instance masks: every instance has kRtMaskAll's bits; the reflection focus's also kRtMaskFocus.
     static constexpr uint32_t kRtMaskAll = 0x01, kRtMaskFocus = 0x02;
 
+    // ---- instanced models (NGGD / NGGE, ngg_format.h; NGG design 5.0w) ----------
+    //
+    // A model's LOD meshes live in the dynamic pool (one mesh per submesh, so the ray tracer's BLAS per mesh is a BLAS
+    // per model submesh), its materials in the scene's table. Its placements are drawn with GPU instancing: per pass
+    // and view (the camera; each shadow cascade) the placements are culled on the CPU - a grid of cells first, then per
+    // placement - and the survivors' transforms go into a per-frame instance stream, one batch per model LOD, each
+    // batch one DrawIndexedInstanced per submesh. A placement in a LOD's crossfade band is in both LODs' batches,
+    // dithered to its share.
+    //
+    // PLACEMENT HANDLES are 0-based indices into the table as loaded (NGGE order) then as added; removing leaves a
+    // tombstone, as RemoveInstance does, so a handle an editor holds stays valid.
+    struct PlacementDesc
+    {
+        uint32_t model = 0;                  // into the loaded library
+        uint32_t plant = 0xFFFFFFFFu;        // the plant it replaces (load only; an edit cannot change which cards draw)
+        float    position[3] = { 0, 0, 0 };  // the model's base, in the scene's space (the drawn variant's)
+        float    yaw = 0.0f;
+        float    scaleXZ = 1.0f, scaleY = 1.0f;
+        uint32_t tint = 0xFFFFFFFFu;
+    };
+    uint32_t ModelCount() const { return (uint32_t)m_models.size(); }
+    const char* ModelName(uint32_t model) const { return model < m_models.size() ? m_models[model].name.c_str() : nullptr; }
+    uint32_t PlacementCount() const { return (uint32_t)m_placements.size(); }       // with the removed
+    uint32_t LivePlacementCount() const;
+    bool GetPlacement(uint32_t index, PlacementDesc* out) const;
+    // Edits in BATCHES: one call for many placements (a brush stroke, a selection dragged), the cells rebuilt once.
+    // Add: `out` gets the new handles (count of them). Set: each index gets its desc (its model may change). Remove:
+    // tombstones. All false (and nothing changed) if any index or model is out of range.
+    bool AddPlacements(const PlacementDesc* descs, uint32_t count, uint32_t* out);
+    bool SetPlacements(const uint32_t* indices, const PlacementDesc* descs, uint32_t count);
+    bool RemovePlacements(const uint32_t* indices, uint32_t count);
+    // What the last frame drew of them: placements visible (main view), instances per LOD (crossfades counted in
+    // both), the billboards among them, the shadow casters' instances (all cascades), the cull's CPU time.
+    struct ModelStats
+    {
+        uint32_t placements = 0, visible = 0, fading = 0;
+        uint32_t perLod[4] = { 0, 0, 0, 0 };   // LOD 0..2, 3 = the billboard (whichever index it has)
+        uint32_t shadowInstances = 0, draws = 0;
+        double   cullMs = 0.0;
+    };
+    const ModelStats& LastModelStats() const { return m_modelStats; }
+    // Once per frame, before any pass: the instance stream starts over (the frame is synchronous, so last frame's
+    // has been consumed) and last frame's statistics are logged every few seconds.
+    void BeginFrame(ID3D12Device* dev);
+
     // The weather presets the FILE carries (NGGW, design 5.0q) - the only ones
     // a competition should use. Empty for a file converted before the chunk
     // existed. The first is the track's default.
@@ -856,8 +903,81 @@ private:
     bool                     m_deferredReady = false;
     UINT                     m_dsvStride = 0;                   // the read-only depth view is the DSV heap's second
     // A pass's opaque draws in the order they are drawn (RecordPass: the solid, then the alpha-tested, each near to
-    // far); kept to reuse its storage.
-    struct DrawOrder { bool alphaTest; float d2; const DrawItem* item; };
+    // far); kept to reuse its storage. A model batch's draws carry their instances (`inst`, `instCount`); the rest
+    // draw the stream's identity instance.
+    struct DrawOrder { bool alphaTest; float d2; const DrawItem* item; const D3D12_VERTEX_BUFFER_VIEW* inst = nullptr;
+                       uint32_t instCount = 1; };
+
+    // --- instanced models (see the public half) ---
+    struct ModelSub { uint32_t mesh = 0, material = 0, fadeMaterial = 0; bool alpha = false; };
+    struct ModelLodRt { std::vector<ModelSub> subs; float maxDist = 0.0f; bool billboard = false; };
+    struct ModelDef
+    {
+        std::string name;
+        std::vector<ModelLodRt> lods;
+        float bmin[3] = {}, bmax[3] = {};
+        float fade = 0.0f;
+        uint32_t rtLod = 0;
+    };
+    struct PlacementRt
+    {
+        PlacementDesc d;
+        bool  removed = false;
+        float cols[3][4] = {};                 // the transform as three rows of p' = A p + t (the instance stream's)
+        float bmin[3] = {}, bmax[3] = {};      // world box
+        float centre[3] = {};
+    };
+    // The per-instance record of the instance stream (slot 1, PER_INSTANCE_DATA): VSIn's INST0..3.
+    struct InstanceRec { float c[3][4]; uint32_t tint; float fade; uint32_t flags; uint32_t pad; };
+    // One view's culled batches: per (model, LOD, solid or crossfading) a run of the stream.
+    struct ModelBatch
+    {
+        uint32_t model, lod;
+        bool     fading;
+        uint32_t count;
+        D3D12_VERTEX_BUFFER_VIEW vbv;
+    };
+    struct ModelCell { float bmin[3], bmax[3]; float reach; std::vector<uint32_t> items; };
+    std::vector<ModelDef>    m_models;
+    std::vector<PlacementRt> m_placements;
+    std::vector<ModelCell>   m_modelCells;
+    bool                     m_modelCellsDirty = false;
+    float                    m_modelLodScale = 1.0f;     // NGG_MODEL_LOD_SCALE
+    uint32_t                 m_replacedPlants = 0, m_replacedTris = 0;
+    ModelStats               m_modelStats, m_modelStatsBuild;
+    uint64_t                 m_modelFrame = 0;
+    // The instance stream: an upload buffer written as views are culled; the frame's first record (offset 0) is the
+    // identity every non-instanced draw uses. Grown by a new buffer (the old kept to the frame's end).
+    Microsoft::WRL::ComPtr<ID3D12Resource>              m_instBuf;
+    std::vector<Microsoft::WRL::ComPtr<ID3D12Resource>> m_instRetired;
+    uint8_t*                 m_instMapped = nullptr;
+    size_t                   m_instCap = 0, m_instUsed = 0;
+    D3D12_VERTEX_BUFFER_VIEW m_instIdentity = {};
+    std::vector<ModelBatch>  m_mainBatches;              // the camera's, culled by the prepass (or the main pass)
+    bool                     m_mainBatchesValid = false;
+    std::vector<DrawItem>    m_modelDrawItems;           // per pass: a DrawItem per batch submesh
+    std::vector<std::pair<uint64_t, InstanceRec>> m_cullScratch;
+    bool LoadModels(ID3D12Device* dev, const uint8_t* models, size_t modelBytes, const uint8_t* placements,
+                    size_t placementBytes, uint32_t fileMaterials, std::vector<uint32_t>& replacedPlants);
+    void EnsureInstanceStream(ID3D12Device* dev);
+    // The ray tracer's instances of the placements (a TLAS instance per placement and submesh of its ray-traced
+    // LOD), kept until a placement changes: DescribeRt runs every frame the car moves.
+    mutable std::vector<RtInstanceDesc> m_rtModelInstances;
+    mutable std::vector<uint64_t>       m_rtModelMeshes;
+    mutable bool                        m_rtModelInstancesDirty = true;
+    mutable uint32_t                    m_rtModelGen = 0xFFFFFFFFu;
+    std::vector<DrawOrder>              m_shadowOrder;      // a cascade's model draws (RenderShadows)
+    void PlacementTransform(PlacementRt& p) const;
+    void RebuildModelCells();
+    bool InstanceAlloc(ID3D12Device* dev, size_t records, uint8_t*& cpu, D3D12_GPU_VIRTUAL_ADDRESS& gpu);
+    // Culls the placements against `planes` from `eye` (LODs and fades by the distance from `lodEye`; a shadow view
+    // takes the camera's), writes the survivors to the stream and returns its batches.
+    void CullModels(ID3D12Device* dev, const float planes[6][4], const float eye[3], bool shadow,
+                    std::vector<ModelBatch>& out);
+    // The DrawItems of `batches` for a pass: one per batch submesh; `fadeSolid` - a crossfading batch's opaque submesh
+    // through its alpha-tested twin, which dithers.
+    void ModelDrawItems(const std::vector<ModelBatch>& batches, std::vector<DrawOrder>& order, bool shadow);
+    void DescribeModelsRt(std::vector<uint64_t>& meshes, std::vector<RtInstanceDesc>& instances) const;
     std::vector<DrawOrder>   m_drawOrder;
     UINT                     m_prepassRtvStride = 0;
     bool                     m_prepassThisFrame = false;

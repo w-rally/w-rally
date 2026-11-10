@@ -49,7 +49,71 @@ struct Cursor {
     bool U32(uint32_t& v) { return Get(&v, 4); }
 };
 
+template <class T> void PutVec(std::vector<uint8_t>& o, const std::vector<T>& v)
+{
+    if (!v.empty()) Put(o, v.data(), v.size() * sizeof(T));
+}
+
 } // namespace
+
+uint32_t PlantCount(const std::vector<uint8_t>& plants)
+{
+    if (plants.size() < sizeof(PlantTableHeader)) return 0;
+    PlantTableHeader h;
+    std::memcpy(&h, plants.data(), sizeof h);
+    return h.plantCount;
+}
+
+std::string CheckModels(const ModelLibrary& m, size_t textureCount)
+{
+    for (size_t i = 0; i < m.materials.size(); ++i) {
+        const Material& t = m.materials[i];
+        for (uint32_t slot : {t.baseColour, t.detail, t.normal, t.orm, t.emissive})
+            if (!SlotOk(slot, textureCount)) return "model material " + std::to_string(i) + " names texture " + std::to_string(slot);
+    }
+    for (size_t i = 0; i < m.submeshes.size(); ++i) {
+        const ModelSubmesh& s = m.submeshes[i];
+        const std::string at = "model submesh " + std::to_string(i);
+        if (s.material >= m.materials.size()) return at + " has no material " + std::to_string(s.material);
+        if (s.indexCount == 0 || s.indexCount % 3) return at + ": not whole triangles";
+        if (uint64_t(s.firstIndex) + s.indexCount > m.indices.size()) return at + " runs past the indices";
+        if (s.vertexCount == 0 || uint64_t(s.firstVertex) + s.vertexCount > m.vertices.size()) return at + " runs past the vertices";
+        for (uint32_t k = s.firstIndex; k < s.firstIndex + s.indexCount; ++k)
+            if (m.indices[k] >= s.vertexCount) return at + ": index " + std::to_string(k) + " past its vertices";
+    }
+    for (size_t i = 0; i < m.lods.size(); ++i) {
+        const ModelLod& l = m.lods[i];
+        if (l.submeshCount == 0 || uint64_t(l.firstSubmesh) + l.submeshCount > m.submeshes.size())
+            return "model LOD " + std::to_string(i) + ": its submeshes run past them";
+        if (!(l.maxDistance > 0.0f)) return "model LOD " + std::to_string(i) + ": no distance";
+    }
+    for (size_t i = 0; i < m.models.size(); ++i) {
+        const ModelRecord& r = m.models[i];
+        const std::string at = "model " + std::to_string(i);
+        if (!std::memchr(r.name, 0, sizeof r.name) || !r.name[0]) return at + ": its name is empty or not terminated";
+        for (size_t j = 0; j < i; ++j)
+            if (!std::strcmp(m.models[j].name, r.name)) return at + ": the name " + r.name + " twice";
+        if (r.lodCount == 0 || uint64_t(r.firstLod) + r.lodCount > m.lods.size()) return at + ": its LODs run past them";
+        for (uint32_t k = 1; k < r.lodCount; ++k)
+            if (!(m.lods[r.firstLod + k].maxDistance > m.lods[r.firstLod + k - 1].maxDistance))
+                return at + ": its LOD distances do not increase";
+        if (r.rtLod >= r.lodCount || (m.lods[r.firstLod + r.rtLod].flags & kModelLodBillboard))
+            return at + ": its ray-traced LOD is past its LODs or a billboard";
+        if (r.fadeWidth < 0.0f) return at + ": a negative fade";
+    }
+    return "";
+}
+
+std::string CheckPlacements(const std::vector<Placement>& p, size_t modelCount, uint32_t plantCount)
+{
+    for (size_t i = 0; i < p.size(); ++i) {
+        if (p[i].model >= modelCount) return "placement " + std::to_string(i) + " names no model " + std::to_string(p[i].model);
+        if (plantCount != kNoPlant && p[i].plant != kNoPlant && p[i].plant >= plantCount)
+            return "placement " + std::to_string(i) + " replaces no plant " + std::to_string(p[i].plant);
+        if (!(p[i].scaleXZ > 0.0f) || !(p[i].scaleY > 0.0f)) return "placement " + std::to_string(i) + " has no size";
+    }
+    return "";
+}
 
 std::string Write(const SceneData& s, std::vector<uint8_t>& out)
 {
@@ -78,13 +142,19 @@ std::string Write(const SceneData& s, std::vector<uint8_t>& out)
             return "a stage variant alias names no variant, or is empty or over 31 bytes";
     if (!s.variantMasks.empty() && s.variantMasks.size() != s.objects.size())
         return "variant masks: " + std::to_string(s.variantMasks.size()) + " for " + std::to_string(s.objects.size()) + " objects";
+    if (std::string e = CheckModels(s.models, s.textures.size()); !e.empty()) return e;
+    if (!s.placements.empty() && s.models.empty()) return "placements without a model library";
+    if (std::string e = CheckPlacements(s.placements, s.models.models.size(), s.plants.empty() ? 0u : PlantCount(s.plants));
+        !e.empty())
+        return e;
 
     std::vector<uint8_t> o;
     const bool spawn = s.hasSpawn;
     const uint32_t chunks = 6 + (spawn ? 1 : 0) + (s.weather.empty() ? 0 : 1) + (s.objectKeys.empty() ? 0 : 1) +
                             (s.tagNames.empty() ? 0 : 1) + (s.plants.empty() ? 0 : 1) +
                             (s.variants.empty() ? 0 : 1) + (s.variantMasks.empty() ? 0 : 1) +
-                            (s.variantAliases.empty() ? 0 : 1);
+                            (s.variantAliases.empty() ? 0 : 1) + (s.models.empty() ? 0 : 1) +
+                            (s.placements.empty() ? 0 : 1);
     const FileHeader fh{kMagic, kFormatCurrent, chunks, 0};
     Put(o, &fh, sizeof fh);
 
@@ -170,6 +240,27 @@ std::string Write(const SceneData& s, std::vector<uint8_t>& out)
             Put(p, &r, sizeof r);
         }
         Chunk(o, ChunkVariantAliases(), p);
+    }
+    if (!s.models.empty()) {
+        const ModelLibrary& m = s.models;
+        const ModelChunkHeader mh{kModelVersion, uint32_t(m.models.size()), uint32_t(m.lods.size()), uint32_t(m.submeshes.size()),
+                                  uint32_t(m.materials.size()), uint32_t(m.vertices.size()), uint32_t(m.indices.size()), 0};
+        p.clear();
+        Put(p, &mh, sizeof mh);
+        PutVec(p, m.models);
+        PutVec(p, m.lods);
+        PutVec(p, m.submeshes);
+        PutVec(p, m.materials);
+        PutVec(p, m.vertices);
+        PutVec(p, m.indices);
+        Chunk(o, ChunkModels(), p);
+    }
+    if (!s.placements.empty()) {
+        const PlacementChunkHeader ph{kPlacementVersion, uint32_t(s.placements.size()), sizeof(Placement), 0};
+        p.clear();
+        Put(p, &ph, sizeof ph);
+        PutVec(p, s.placements);
+        Chunk(o, ChunkPlacements(), p);
     }
     out.swap(o);
     return "";
@@ -294,6 +385,40 @@ std::string Read(const void* bytes, size_t n, SceneData& out)
             if (size < 4 || (std::memcpy(&count, d, 4), 4 + uint64_t(count) * 4 > size)) return "NGGQ is truncated";
             out.variantMasks.resize(count);
             if (count) std::memcpy(out.variantMasks.data(), d + 4, size_t(count) * 4);
+        } else if (f == ChunkModels()) {
+            ModelChunkHeader mh{};
+            if (size < sizeof mh) return "NGGD is truncated";
+            std::memcpy(&mh, d, sizeof mh);
+            if (mh.version != kModelVersion)
+                return "NGGD version " + std::to_string(mh.version) + " (this reads " + std::to_string(kModelVersion) + ")";
+            const uint64_t need = sizeof mh + uint64_t(mh.modelCount) * sizeof(ModelRecord) + uint64_t(mh.lodCount) * sizeof(ModelLod) +
+                                  uint64_t(mh.submeshCount) * sizeof(ModelSubmesh) + uint64_t(mh.materialCount) * sizeof(Material) +
+                                  uint64_t(mh.vertexCount) * sizeof(Vertex) + uint64_t(mh.indexCount) * 4;
+            if (need != size) return "NGGD is " + std::to_string(size) + " bytes, its header says " + std::to_string(need);
+            size_t at = sizeof mh;
+            auto grab = [&](auto& v, uint32_t count) {
+                using T = typename std::decay_t<decltype(v)>::value_type;
+                v.resize(count);
+                if (count) std::memcpy(v.data(), d + at, size_t(count) * sizeof(T));
+                at += size_t(count) * sizeof(T);
+            };
+            ModelLibrary& m = out.models;
+            grab(m.models, mh.modelCount);
+            grab(m.lods, mh.lodCount);
+            grab(m.submeshes, mh.submeshCount);
+            grab(m.materials, mh.materialCount);
+            grab(m.vertices, mh.vertexCount);
+            grab(m.indices, mh.indexCount);
+        } else if (f == ChunkPlacements()) {
+            PlacementChunkHeader ph{};
+            if (size < sizeof ph) return "NGGE is truncated";
+            std::memcpy(&ph, d, sizeof ph);
+            if (ph.version != kPlacementVersion || ph.recordSize < sizeof(Placement) ||
+                sizeof ph + uint64_t(ph.count) * ph.recordSize > size)
+                return "NGGE is not version " + std::to_string(kPlacementVersion) + " or is truncated";
+            out.placements.resize(ph.count);
+            for (uint32_t k = 0; k < ph.count; ++k)
+                std::memcpy(&out.placements[k], d + sizeof ph + size_t(k) * ph.recordSize, sizeof(Placement));
         }
         // (an unknown chunk is skipped: that is what keeps the format open)
     }
@@ -305,6 +430,11 @@ std::string Read(const void* bytes, size_t n, SceneData& out)
     out.bakedScale = h.bakedScale;
     if (!out.objectKeys.empty() && out.objectKeys.size() != out.objects.size()) return "NGGK is not one key per object";
     if (!out.variantMasks.empty() && out.variantMasks.size() != out.objects.size()) return "NGGQ is not one mask per object";
+    if (std::string e = CheckModels(out.models, out.textures.size()); !e.empty()) return "NGGD: " + e;
+    if (!out.placements.empty() && out.models.empty()) return "NGGE without NGGD";
+    if (std::string e = CheckPlacements(out.placements, out.models.models.size(), out.plants.empty() ? 0u : PlantCount(out.plants));
+        !e.empty())
+        return "NGGE: " + e;
     return "";
 }
 

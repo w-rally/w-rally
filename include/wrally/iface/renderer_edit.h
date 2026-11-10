@@ -14,6 +14,11 @@
 // interface bumps do not move this one. Same rules as renderer.h otherwise -
 // one thread, POD, pack 4, nothing thrown across.
 //
+// PLACEMENTS (version 2) are the scene's instanced models placed in it (the .ngg's NGGE, ngg_format.h; NGG design
+// 5.0w): a handle per placement, the file's in its order and then the added ones, never renumbered - a removed one is a
+// tombstone, so the handles in an editor's undo stack stay good. They are edited in BATCHES, one call for many, which
+// is what keeps a brush stroke or a dragged selection to one rebuild of the renderer's culling cells.
+//
 // OBJECTS are the scene's draw objects by INDEX: the .ngg's NGGO order first,
 // then whatever createInstance added (instanceObjects says which). That is the
 // unit ngg-api's instance handles named. An object can be moved by this table,
@@ -34,7 +39,9 @@ namespace wrally::iface {
 
 // 1: objects, selection, overlay lines, labels, materials, light mode, cull,
 //    the pixel probe (ngg-api's editor calls, by object index).
-constexpr uint32_t kRendererEditVer = 1;
+// 2: instanced models and their placements: modelCount, modelName, placementCount, getPlacements, addPlacements,
+//    setPlacements, removePlacements, modelStats (EditPlacement, EditModelStats).
+constexpr uint32_t kRendererEditVer = 2;
 
 // Overlay and label flags (ngg-core's kOverlay*).
 constexpr uint32_t kEditNoDepth     = 1u << 0;   // lines and labels: drawn through the geometry (manipulators)
@@ -61,6 +68,37 @@ struct EditOverlayStats {
     uint32_t labelsVisible, labelsOccluded;
 };
 static_assert(sizeof(EditOverlayStats) == 24, "EditOverlayStats layout");
+
+// EditPlacement::flags (read only: what getPlacements says).
+constexpr uint32_t kEditPlacementRemoved = 1u << 0;   // a tombstone: removed, its handle kept
+constexpr uint32_t kEditNoPlant = 0xFFFFFFFFu;
+
+// One placement: a model upright at a point, turned about +y, scaled across and up (ngg_format.h Placement, the
+// transform there: p' = p * scale(scaleXZ, scaleY, scaleXZ) * yaw * translate(position)).
+struct EditPlacement {
+    uint32_t model;           // < modelCount
+    uint32_t flags;           // kEditPlacement* (getPlacements fills it; ignored in)
+    float    position[3];     // the model's base, in the scene's space
+    float    yaw;             // radians: the model's +x goes to (cos, 0, -sin)
+    float    scaleXZ, scaleY;
+    uint32_t tint;            // 0xAABBGGRR multiplying the base colour (linear, 255 = 1); 0xFFFFFFFF none
+    uint32_t plant;           // read only: the file's plant whose cards it replaces, kEditNoPlant none (an added one)
+};
+static_assert(sizeof(EditPlacement) == 40, "EditPlacement layout");
+
+// What the LAST frame drew of the models: the camera's view, an instance per placement and LOD (one crossfading
+// between two LODs is in both, and counted in `fading`), the shadow maps' instances over every cascade, the
+// instanced draws of every pass and the CPU time their culling took.
+struct EditModelStats {
+    uint32_t placements;      // live (not removed)
+    uint32_t visible;         // in the camera's view, within reach
+    uint32_t lod0, lod1, lod2, billboard;
+    uint32_t fading;
+    uint32_t shadowInstances;
+    uint32_t draws;
+    float    cullMs;
+};
+static_assert(sizeof(EditModelStats) == 40, "EditModelStats layout");
 
 #pragma pack(pop)
 
@@ -123,6 +161,21 @@ struct RendererEditApi {
     // ---- the pixel probe: the next frame logs that pixel's lighting terms by
     //      name (through the host's log), and whether anything was there.
     Status   (WRALLY_CALL* probePixel)(Renderer*, int32_t x, int32_t y);
+
+    // ---- instanced models and their placements (version 2). Every batch call checks the whole batch first and
+    //      changes nothing (ErrInvalidArg) if any handle or model is out of range or a scale is not positive.
+    uint32_t (WRALLY_CALL* modelCount)(Renderer*);
+    Status   (WRALLY_CALL* modelName)(Renderer*, uint32_t model, char* buf, uint32_t bytes);
+    uint32_t (WRALLY_CALL* placementCount)(Renderer*);   // handles 0 .. count-1, the removed included
+    // Placements [first, first + count): the removed ones with kEditPlacementRemoved.
+    Status   (WRALLY_CALL* getPlacements)(Renderer*, uint32_t first, uint32_t count, EditPlacement* out);
+    // New placements, drawn from the next frame; `outHandles` (count of them, may be null) gets their handles.
+    Status   (WRALLY_CALL* addPlacements)(Renderer*, const EditPlacement* in, uint32_t count, uint32_t* outHandles);
+    // Each handle gets its placement (its model may change; which plant it replaces cannot).
+    Status   (WRALLY_CALL* setPlacements)(Renderer*, const uint32_t* handles, const EditPlacement* in, uint32_t count);
+    // Removed (a removed handle stays removed: undo adds again). Removing a removed one is not an error.
+    Status   (WRALLY_CALL* removePlacements)(Renderer*, const uint32_t* handles, uint32_t count);
+    Status   (WRALLY_CALL* modelStats)(Renderer*, EditModelStats* out);
 };
 
 } // namespace wrally::iface

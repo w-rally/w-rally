@@ -398,10 +398,105 @@ void CheckVariants(Rig& rig, const std::vector<char>& ngg)
 
 } // namespace
 
+// The instanced models' placements (editor table 2) on a stage that has them (ngg-check --trees): the counts as the
+// file says, and every edit seen in what the next frame draws - a stub that took the calls and drew nothing new, or
+// kept drawing the removed, fails.
+void CheckModels(Rig& rig, const std::vector<char>& ngg)
+{
+    const RendererApi& api = *rig.api;
+    const RendererEditApi& edit = *rig.edit;
+    SceneHandle s = 0;
+    if (api.loadScene(rig.r, ngg.data(), ngg.size(), &s) != Status::Ok) return Check(false, "models: the stage loads");
+    TakeLog();
+    char name[64] = {};
+    const uint32_t n = edit.placementCount(rig.r);
+    Check(edit.modelCount(rig.r) == 1 && edit.modelName(rig.r, 0, name, sizeof name) == Status::Ok &&
+              !std::strcmp(name, "placeholder-conifer") && edit.modelName(rig.r, 1, name, sizeof name) == Status::ErrInvalidArg,
+          "models: the file's model, by name", "%u: %s", edit.modelCount(rig.r), name);
+    std::vector<EditPlacement> all(n);
+    Check(n > 1000 && edit.getPlacements(rig.r, 0, n, all.data()) == Status::Ok &&
+              edit.getPlacements(rig.r, n, 1, all.data()) == Status::ErrInvalidArg,
+          "models: its placements read back", "%u", n);
+    uint32_t replacing = 0;
+    for (const EditPlacement& p : all) replacing += p.plant != kEditNoPlant;
+    Check(replacing == n, "models: each replaces a plant", "%u of %u", replacing, n);
+
+    // Looking at the first one from 40 m.
+    const EditPlacement& p0 = all[0];
+    const V3 at = {p0.position[0], p0.position[1] + 4.0f, p0.position[2]};
+    rig.Aim({at.x + 40.0f, at.y + 6.0f, at.z}, at);
+    EditModelStats st{};
+    auto frame = [&] {
+        rig.Render();
+        rig.Render();   // (the second frame's statistics are the first's: they describe the last frame drawn)
+        edit.modelStats(rig.r, &st);
+    };
+    frame();
+    Check(st.placements == n && st.visible > 0 && st.draws > 0 && st.lod0 + st.lod1 > 0, "models: drawn, instanced",
+          "%u visible (LOD0 %u, LOD1 %u, billboard %u, %u fading), %u draws, %u shadow-map instances, cull %.3f ms",
+          st.visible, st.lod0, st.lod1, st.billboard, st.fading, st.draws, st.shadowInstances, st.cullMs);
+    Check(st.shadowInstances > 0, "models: and cast into the shadow maps", "%u", st.shadowInstances);
+
+    // Every one removed in one batch: nothing drawn.
+    std::vector<uint32_t> handles(n);
+    for (uint32_t i = 0; i < n; ++i) handles[i] = i;
+    Check(edit.removePlacements(rig.r, handles.data(), n) == Status::Ok, "models: all removed in one batch");
+    frame();
+    Check(st.placements == 0 && st.visible == 0 && st.draws == 0, "models: and none drawn", "%u visible", st.visible);
+    EditPlacement back{};
+    Check(edit.getPlacements(rig.r, 0, 1, &back) == Status::Ok && (back.flags & kEditPlacementRemoved),
+          "models: a removed handle reads as removed");
+
+    // Fifty added round the point the camera looks at, in one batch: their handles follow the file's.
+    std::vector<EditPlacement> ring(50);
+    for (uint32_t i = 0; i < ring.size(); ++i) {
+        EditPlacement& q = ring[i];
+        q = EditPlacement{};
+        const float a = 6.2831853f * float(i) / float(ring.size());
+        q.position[0] = p0.position[0] + 15.0f * std::cos(a), q.position[1] = p0.position[1];
+        q.position[2] = p0.position[2] + 15.0f * std::sin(a);
+        q.yaw = a, q.scaleXZ = 1.0f, q.scaleY = 1.2f, q.tint = 0xFFFFFFFFu;
+    }
+    std::vector<uint32_t> added(ring.size(), 0);
+    const Status addStatus = edit.addPlacements(rig.r, ring.data(), uint32_t(ring.size()), added.data());
+    Check(addStatus == Status::Ok && added[0] == n &&
+              added.back() == n + ring.size() - 1 && edit.placementCount(rig.r) == n + ring.size(),
+          "models: fifty added in one batch", "handles %u..%u", added[0], added.back());
+    frame();
+    Check(st.placements == ring.size() && st.visible > 0 && st.visible <= ring.size(), "models: and drawn",
+          "%u of %u visible", st.visible, uint32_t(ring.size()));
+    const uint32_t ringVisible = st.visible;
+
+    // Moved 20 km away in one batch: none drawn; one brought back: it alone.
+    std::vector<EditPlacement> away = ring;
+    for (EditPlacement& q : away) q.position[0] += 20000.0f;
+    Check(edit.setPlacements(rig.r, added.data(), away.data(), uint32_t(away.size())) == Status::Ok, "models: moved in one batch");
+    frame();
+    Check(st.visible == 0, "models: moved out of reach, none drawn", "%u", st.visible);
+    // The one nearest the camera (on the ring's +x side, a = 0).
+    Check(edit.setPlacements(rig.r, &added[0], &ring[0], 1) == Status::Ok, "models: one moved back");
+    frame();
+    Check(st.visible == 1, "models: and drawn alone", "%u (the ring drew %u)", st.visible, ringVisible);
+
+    // A bad batch changes nothing.
+    EditPlacement bad = ring[0];
+    bad.model = 7;
+    Check(edit.addPlacements(rig.r, &bad, 1, nullptr) == Status::ErrInvalidArg && edit.placementCount(rig.r) == n + ring.size(),
+          "models: a batch naming no model is refused whole");
+    bad.model = 0, bad.scaleY = 0.0f;
+    const uint32_t two[2] = {added[1], added[2]};
+    const EditPlacement pair[2] = {ring[1], bad};
+    Check(edit.setPlacements(rig.r, two, pair, 2) == Status::ErrInvalidArg, "models: a batch with no size is refused whole");
+    frame();
+    Check(st.visible == 1, "models: and nothing in it was applied", "%u", st.visible);
+    const uint32_t past = n + uint32_t(ring.size());
+    Check(edit.removePlacements(rig.r, &past, 1) == Status::ErrInvalidArg, "models: a handle past the end is refused");
+}
+
 int main(int argc, char** argv)
 {
     if (argc < 3) {
-        std::printf("usage: editor-api-check <WRenderer.dll> <stage.ngg>\n");
+        std::printf("usage: editor-api-check <WRenderer.dll> <stage.ngg> [<stage with models.ngg>]\n");
         return 2;
     }
     std::ifstream f(argv[2], std::ios::binary);
@@ -816,6 +911,15 @@ int main(int argc, char** argv)
     }
 
     CheckVariants(rig, ngg);
+    Check(edit->modelCount(rig.r) == 0 && edit->placementCount(rig.r) == 0 &&
+              edit->addPlacements(rig.r, nullptr, 0, nullptr) == Status::Ok,
+          "a stage without models: none, and an empty batch is fine");
+    if (argc > 3) {
+        std::ifstream mf(argv[3], std::ios::binary);
+        const std::vector<char> withModels((std::istreambuf_iterator<char>(mf)), std::istreambuf_iterator<char>());
+        if (withModels.empty()) Check(false, "models: the stage with models reads", "%s", argv[3]);
+        else CheckModels(rig, withModels);
+    }
 
     // ---- switches
     Check(edit->lightModeName(0) && edit->lightModeName(1) && !edit->lightModeName(2), "light modes are named, then null",

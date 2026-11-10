@@ -227,6 +227,14 @@ environment → prepass → sun visibility (RT or cascades) → AO → sky → s
   `kRendererEditVer`, so the two tables move separately. CTest `editor-api-41` (`tests/editor_api.cpp`) is
   ngg-preview's self-test ported to it, and it fails against a stub: planted breaks of the move, the selection and the
   layer mapping each turn it red.
+- **Instanced models** (2026-11-09, NGG design 5.0w; vegetation plan workstream 2): a `.ngg` can carry a model
+  library (`NGGD`: LOD meshes, v3 materials, switch distances, a far billboard) and a placement table (`NGGE`: model,
+  position, yaw, scale, tint, the NGGP plant it replaces), which the renderer draws with GPU instancing - culled per
+  view on the CPU, LODs crossfaded by dither, foliage with hashed alpha, a BLAS per model mesh and a TLAS instance per
+  placement - and the replaced plants' cards are not drawn. No game interface change: the file says it all. The
+  editor table's **version 2** adds placements, edited in batches (`addPlacements`, `setPlacements`,
+  `removePlacements`), and the last frame's model statistics. CTests `instancing-41` (stage 41 with a placeholder
+  tree in place of every tree card, the renderer's counts) and `editor-api-41` (the edits, seen in the frames drawn).
 
 ### 3.2 New work inside the renderer
 

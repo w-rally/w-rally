@@ -129,6 +129,7 @@ const uint32_t kMaterialTwoSided  = 1u << 1;   // no back-face culling
 // covers what is behind, while its reflection stays whole. It writes no depth,
 // casts no shadow and is not in the ray-traced scene (NGG design 5.0u).
 const uint32_t kMaterialBlend     = 1u << 3;
+// 1u << 4 is kMaterialFoliage, with the instanced models below.
 
 // 'NGGM' - materials. METALLIC-ROUGHNESS, v3.
 //
@@ -473,5 +474,133 @@ constexpr WeatherRecord DefaultWeatherRecord()
 inline uint32_t ChunkWeather()     { return FourCC('N','G','G','W'); }
 
 static_assert(sizeof(Object) == 16,   "Object layout");
+
+// ---------------------------------------------------------------------------
+// INSTANCED MODELS (vegetation plan, workstream 2; NGG design 5.0w). A MODEL is a mesh drawn many times: a species of
+// tree, a bush, a rock. The file holds each once, in a library (NGGD), and a placement table (NGGE) puts them in the
+// world; the renderer draws every placement of a model's level of detail in one instanced draw, culls them per
+// placement and switches the levels by distance. They are what replaces RBR's crossed-card plants (NGGP): a placement
+// names the plant it replaces, and the loader then drops that plant's cards from the static geometry.
+//
+// Both OPTIONAL and independently skippable: a reader that knows neither draws the file's cards as before. Both start
+// with a version; a reader refuses a version it does not know (and draws the cards), it never guesses.
+//
+// MODEL SPACE: +y up, the origin at the model's BASE (where a trunk meets the ground), metres. The placement's
+// position is that base in the file's space.
+//
+// 'NGGD' - the model library, laid out as
+//     ModelChunkHeader
+//     ModelRecord  [modelCount]
+//     ModelLod     [lodCount]       a model's LODs are lods[firstLod .. firstLod + lodCount), nearest first
+//     ModelSubmesh [submeshCount]   a LOD's are submeshes[firstSubmesh .. + submeshCount), one material each
+//     Material     [materialCount]  v3 materials (64 bytes, as NGGM); their texture slots index the file's NGGT
+//     Vertex       [vertexCount]    the file's own 44-byte vertex (NGGV), in model space
+//     uint32       index[indexCount]   relative to the submesh's firstVertex
+// Every array is the struct's exact size, so the chunk is (header) + the sum, and a reader can check it whole.
+constexpr uint32_t kModelVersion = 1;
+
+// ModelLod::flags
+// The far BILLBOARD: a quad in the model's x-y plane (x across, y up from the base, z = 0) that the renderer turns
+// about the placement's up axis to face the camera (and the sun, in the shadow maps). Its texture is a picture of the
+// model baked by the producer (workstream 4), so the switch to it is the model seen from afar. Never ray traced.
+constexpr uint32_t kModelLodBillboard = 1u << 0;
+
+// Material flag (NGGM and NGGD): FOLIAGE - leaves, needles, a bush's sprigs. Implies kMaterialAlphaTest and
+// kMaterialTwoSided (a reader ORs them in), lit with light through the leaves (wrap and transmission), and its alpha
+// edge DITHERED about alphaCutoff per pixel (hashed alpha) so the renderer's temporal filter resolves soft leaf edges
+// that a hard cutoff would alias. There is no MSAA to give alpha-to-coverage anything to cover.
+constexpr uint32_t kMaterialFoliage = 1u << 4;
+
+#pragma pack(push, 4)
+struct ModelChunkHeader
+{
+    uint32_t version;         // kModelVersion
+    uint32_t modelCount;
+    uint32_t lodCount;
+    uint32_t submeshCount;
+    uint32_t materialCount;
+    uint32_t vertexCount;
+    uint32_t indexCount;
+    uint32_t reserved;        // 0
+};
+
+struct ModelRecord
+{
+    char     name[32];        // UTF-8, NUL-terminated, unique in the file: "spruce-a", "beech-b"
+    uint32_t firstLod;
+    uint32_t lodCount;        // >= 1
+    float    bboxMin[3];      // model space, over every LOD but the billboard
+    float    bboxMax[3];
+    // The CROSSFADE: over the last fadeWidth metres before a LOD's maxDistance, the LOD and the next are both drawn,
+    // each dithered to its share (the pixels one keeps, the other drops), so the switch never pops. After the last
+    // LOD the model dithers out to nothing the same way. 0: hard switches.
+    float    fadeWidth;
+    // The LOD the ray tracer's acceleration structure is built from (a BLAS per submesh), for every placement at any
+    // distance: one shape per model keeps the TLAS fixed while the camera moves. Not a billboard.
+    uint32_t rtLod;
+    uint32_t flags;           // 0 (none yet)
+    uint32_t reserved;        // 0
+};
+
+struct ModelLod
+{
+    uint32_t firstSubmesh;
+    uint32_t submeshCount;    // >= 1
+    // Drawn while the camera is nearer than this (metres, for the model at scale 1; a placement's distances scale with
+    // its vertical scale, so a tree twice as tall switches twice as far). Increasing along a model's LODs; the last
+    // one's is how far the model is drawn at all.
+    float    maxDistance;
+    uint32_t flags;           // kModelLodBillboard
+};
+
+struct ModelSubmesh
+{
+    uint32_t material;        // into the chunk's own Material array
+    uint32_t firstIndex;      // into the chunk's index array
+    uint32_t indexCount;      // whole triangles
+    uint32_t firstVertex;     // into the chunk's vertex array; the indices count from it
+    uint32_t vertexCount;
+};
+
+// 'NGGE' - PlacementChunkHeader, then `count` Placement records of `recordSize` bytes (>= 40: a newer, longer record
+// keeps the prefix this reader knows).
+struct PlacementChunkHeader
+{
+    uint32_t version;         // kPlacementVersion
+    uint32_t count;
+    uint32_t recordSize;      // sizeof(Placement)
+    uint32_t reserved;        // 0
+};
+
+// One model in the world. Its transform, ROW vectors as everywhere in .ngg (p' = p * M):
+//     M = scale(scaleXZ, scaleY, scaleXZ) * yaw * translate(position)
+//     yaw: x' = x cos(yaw) + z sin(yaw),  z' = -x sin(yaw) + z cos(yaw)   (the model's +x goes to (cos, 0, -sin))
+// Upright on purpose: a plant on a slope still grows up, and the fit from a card plant (base, turn, height, footprint)
+// is exactly these numbers. A general matrix waits for a producer that needs one (a recordSize grows then).
+struct Placement
+{
+    uint32_t model;           // into NGGD's models
+    uint32_t plant;           // the NGGP plant whose cards it REPLACES (they are not drawn), kNoPlant for none
+    float    position[3];     // the model's base, in the file's space (variant offsets apply, as to every vertex)
+    float    yaw;             // radians, see above
+    float    scaleXZ;         // across: footprint over the model's
+    float    scaleY;          // up: height over the model's
+    uint32_t tint;            // 0xAABBGGRR, multiplies the base colour (rgb); 0xFFFFFFFF none
+    uint32_t variants;        // bit v: drawn in stage variant v (NGGR); 0xFFFFFFFF in every one
+};
+#pragma pack(pop)
+
+constexpr uint32_t kPlacementVersion = 1;
+constexpr uint32_t kNoPlant = 0xFFFFFFFFu;
+
+static_assert(sizeof(ModelChunkHeader) == 32,     "ModelChunkHeader layout - keep Wallaby's NggWriter in step");
+static_assert(sizeof(ModelRecord) == 80,          "ModelRecord layout - keep Wallaby's NggWriter in step");
+static_assert(sizeof(ModelLod) == 16,             "ModelLod layout - keep Wallaby's NggWriter in step");
+static_assert(sizeof(ModelSubmesh) == 20,         "ModelSubmesh layout - keep Wallaby's NggWriter in step");
+static_assert(sizeof(PlacementChunkHeader) == 16, "PlacementChunkHeader layout - keep Wallaby's NggWriter in step");
+static_assert(sizeof(Placement) == 40,            "Placement layout - keep Wallaby's NggWriter in step");
+
+inline uint32_t ChunkModels()      { return FourCC('N','G','G','D'); }
+inline uint32_t ChunkPlacements()  { return FourCC('N','G','G','E'); }
 
 } // namespace ngg

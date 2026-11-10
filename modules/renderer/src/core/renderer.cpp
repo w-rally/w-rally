@@ -276,6 +276,7 @@ void Renderer::RecordFrame(Device& dev, D3D12_CPU_DESCRIPTOR_HANDLE outRtv,
     m_rtActive = false;
     m_vis = Visibility();
     m_scene.ResetLocalShadows();   // (drawn by the cascades' provider only)
+    m_scene.BeginFrame(dev.device.Get());   // the models' instance stream starts over
     m_scene.SetReflectionTlas(0);
     ID3D12Resource* motion = nullptr;
     if (m_scene.Ready())

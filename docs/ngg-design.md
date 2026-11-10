@@ -1388,6 +1388,10 @@ NGGS  skeletons   bones + bind poses for animated/skinned objects (car and props
 NGGX  provenance  per-object source block type/subtype, for debugging and the diff harness
 ```
 
+**As built** (2026-11-09) the instanced models are two optional chunks of their own, `NGGD` (the model library) and
+`NGGE` (the placements), laid out in `ngg_format.h` and described in 5.0w; `NGGP` became the PLANT table (the
+vegetation's plants, `ngg_format.h`), so lights will take another tag.
+
 `NGGP` and `NGGS` exist from v1 even though nothing writes much into them yet — reserving them costs nothing and
 retrofitting a chunk that the runtime, converter and editor all need is expensive.
 
@@ -2944,6 +2948,102 @@ and this shading stack sensibly. All fast CTests pass at interface 4.
 - Drying: wetness is a step today (dry, damp, wet), with no time in it.
 - Snow cover, and the cloud shapes (item 29).
 
+### 5.0w Instanced models - the replacement for the card vegetation (2026-11-09, in W-Rally)
+
+Vegetation plan workstream 2 (Wallaby `docs/vegetation-plan.md`): the format and the renderer for **models placed
+many times**, which is what replaces RBR's ~25k crossed-card plants per stage (Cote d'Arbroz, map 41: 3,743 trees,
+16,087 bushes, 5,317 grass). Until now a model existed only as the runtime API (`createModel`, what a car is), every
+draw was `DrawIndexedInstanced(n, 1, ...)`, and there was no level of detail.
+
+**The format** (`ngg_format.h`, both chunks optional and versioned; a reader without them draws the cards):
+- `NGGD`, the **model library**: a header with the counts, then models (name, LOD range, model-space box, crossfade
+  width, the ray-traced LOD), LODs (submesh range, `maxDistance`, `kModelLodBillboard`), submeshes (material, index
+  and vertex range), v3 materials (their texture slots index the file's `NGGT`), the vertices in the file's own
+  44-byte form and the indices. Model space: +y up, origin at the base.
+- `NGGE`, the **placements**: model, the `NGGP` plant it replaces (`kNoPlant` none), position, yaw, scale across and
+  up, tint, a variant mask. Upright on purpose: a plant on a slope grows up, and the fit from a card plant is exactly
+  these numbers. `recordSize` lets a later record grow (a full matrix, when a producer needs one).
+- `kMaterialFoliage` (bit 4): alpha-tested, two-sided, lit with the transmission and wrap terms (5.0, "black
+  foliage"), its alpha edge hashed.
+- `ngg_scene` (the format library) reads and writes them structured and checks them whole on both sides
+  (`CheckModels`, `CheckPlacements`); `ngg-check` round-trips a made-up model and the stage-41 file.
+
+**The renderer** (`core/models.cpp`, hooks in `scene.cpp`):
+- A model's submeshes go into the **dynamic pool** (one mesh each), its materials into the scene's table, each
+  opaque one with an alpha-tested **twin** whose cutoff nothing reaches - so a crossfading opaque submesh can dither
+  without giving every opaque pipeline a `clip()` and losing the terrain's early depth test.
+- **The instance stream:** the root signature was at its 64 DWORDs, so the transforms come as a second vertex
+  stream (slot 1, per instance, 64 bytes: three rows of `p' = A p + t`, tint, fade, flags), in **every** scene
+  pipeline. A draw that is not a model's takes the stream's identity record, and its vertex goes through VSMain's
+  old path untouched (the branch is on the record's flag). Normals by the cofactors of A, right under a squash.
+- **Culling on the CPU, per view:** placements binned in 64 m cells (box and reach per cell), then per placement the
+  frustum and the distance; the LOD by distance from the camera (scaled by the placement's height and
+  `NGG_MODEL_LOD_SCALE`), the survivors counting-sorted into one batch per (model, LOD, crossfading) and written
+  straight into an upload buffer; each batch is one `DrawIndexedInstanced` per submesh. The camera's view is culled
+  once for the prepass and the main pass; each cascade culls its own (the camera's LODs, no crossfade, billboards
+  turned to the sun). The local lamps' shadow maps and the car's reflection probe do not draw models yet.
+- **Crossfade:** over the last `fadeWidth` before a LOD's distance a placement is in both batches, one with `fade =
+  t` (drops the pixels whose dither is under t), the next with `-t` (keeps exactly those): every pixel drawn once.
+  The dither is interleaved gradient noise on the pixel, the same in the prepass and the main pass (their depths must
+  agree); TAA's jitter moves it. After the last LOD the model dithers out the same way.
+- **The far billboard:** a quad the VS turns about the placement's up axis to face the camera; its picture is the
+  producer's (workstream 4 bakes it from the model).
+- **Foliage:** hashed alpha - the cutoff dithered by another pattern, which TAA resolves into soft leaf edges. There
+  is no MSAA for alpha-to-coverage to cover. A model's prepass keeps its own normals (`kDrawModel`): its leaves are
+  geometry, so they shadow one another in the ray tracer instead of skipping their own card as RBR's plants do.
+- **Ray tracing:** a BLAS per submesh of each model's ray-traced LOD (one shape per model at every distance keeps the
+  TLAS fixed while the camera moves), a TLAS instance per placement and submesh, cached between edits - `DescribeRt`
+  runs every frame the car moves (its ~119 parts bump the geometry revision), so the placements must cost a copy, not
+  a search.
+- **The replaced plants' cards:** their triangles are made degenerate in the index buffer at load (the plant table
+  says which), so object ranges, plant parts and triangle numbers stay the file's; `BuildRtMesh` leaves them out, and
+  an object left with none is removed.
+- **The editor** (`renderer_edit.h` version 2): placements by handle, added, set and removed in batches, the cells
+  rebuilt once per batch; the last frame's statistics (`modelStats`).
+
+**Measured on stage 41** (the 780M, RBR's recorded run replayed in lock-step, `--step 0.0333`, 16,000 ticks, 3,300
+frames, TAA and vsync off, the GPU frame; alternating runs):
+
+| stage 41 | GPU frame | ray tracing | main pass |
+|---|---|---|---|
+| RBR's tree cards (the file as it was) | 26.9-28.8 ms | 8.8-9.1 ms | 4.5-5.6 ms |
+| placeholder trees, LOD1 ray traced (the default) | 31.5-32.9 ms | 12.6-12.7 ms | 4.9-5.1 ms |
+| placeholder trees, LOD0 ray traced | 36.3-37.9 ms | 15.4-16.3 ms | 5.1-5.6 ms |
+| LOD0 with the needles made OPAQUE (experiment) | 28.0-28.2 ms | 11.0 ms | 4.0-4.2 ms |
+
+- **No cost to a file without models:** HEAD's `WRenderer.dll` and this one, behind the same game, the original file:
+  28.8 / 28.8 ms and 28.8 / 28.8 ms, the same pass medians. (The main checkout's build read 19-22 ms: its
+  `W-Rally.ini` sets another time of day and car - compare builds beside the same settings file.)
+- **Drawing the trees is cheap:** in a typical view (the renderer's log) 341 placements in view, 18 at LOD0, 130 at
+  LOD1, 208 billboards, 30 crossfading: 20 instanced draws, ~8k triangles against the stage's 400k+. The main pass
+  moves by a few tenths of a ms. The cull: 0.03 ms of CPU for the camera, 0.34 ms with the four cascades (2,982
+  shadow-map instances).
+- **Ray tracing them is not**, and the experiment says why: the same 142-triangle trees cost +2.2 ms of ray tracing
+  with opaque needles and +7.2 ms alpha-tested. The 7,486 TLAS instances and their triangles are the small part; the
+  any-hit tests as shadow and AO rays pass needle tier after needle tier are the large one (RBR's tree is 2 crossed
+  cards; the placeholder's LOD0 7 overlapping tiers, LOD1 4). A dense forest is where the frame drops - what the user
+  saw. So the placeholder's ray-traced shape is LOD1, and the open question is below.
+- The TLAS is rebuilt every frame the car moves (8,408 instances on stage 41 instead of 924); that runs on the
+  build list before the frame and is outside these timings.
+
+**The proof file:** `ngg-check --trees track-41.ngg --out <file>` puts a placeholder conifer generated in code (no
+RBR data: a trunk and needle tiers, textures made there; LOD0 142 triangles to 50 m, LOD1 40 to 150 m, a billboard to
+900 m, at scale 1, crossfading over 6 m, LOD1 ray traced - `--rt-lod 0` for LOD0) in place of each of the 3,743 tree-card plants, at its base,
+height and footprint, turned and tinted by its index. The renderer drops their 25,558 card triangles. CTests:
+`instancing-41` (the file round-trips, the renderer counts the model, 3 LODs, 3,743 placements and plants replaced),
+`editor-api-41` (the placement calls, each seen in the next frame's counts: all removed draws none, fifty added draw,
+moved away none, one moved back exactly one, a bad batch changes nothing; and the cascades draw instances).
+
+**Not done:**
+- **The ray-traced foliage's cost** (above) - the next decision. Options: a coarse ray-tracing proxy per model (the
+  format has `rtLod` for it, workstream 4 can bake one with fewer, denser layers); opaque leaves for the AO rays
+  only (AO needs no leaf-sharp occlusion); placements beyond some distance as opaque or out of the TLAS.
+- GPU culling (`ExecuteIndirect`): the CPU cull costs 0.03 ms (camera) / 0.34 ms (with the cascades), not worth the
+  machinery yet; with 25k placements (bushes too) it is the first thing to measure again.
+- Models in the lamps' shadow maps and in the car's reflection probe; a model's own `kMaterialBlend` (drawn opaque).
+- Per-LOD BLASes (the ray tracer has the one LOD), a billboard's normal map, and wind.
+- Bushes and grass, the real models (workstream 4) and the converter's placements (workstream 3).
+
 ### 5.1 Renderer implications
 
 A track at night wants hundreds of small emitters (street lamps, windows, marshal posts, spectator torches, car
@@ -4184,7 +4284,7 @@ Items parked deliberately, with the reason, so "later" does not become "lost".
 | 4 | **`.fnc` fences** | generated from a point list and *deformed* at runtime, so they need draw harvesting, not conversion (§4.1b). The long roadside fences are currently missing from our render | harvesting |
 | 5 | **Movable-mesh transforms** | correctness gap: they render at their authored position and no longer move when hit. Offset-reads are ruled out (§4.1a), so this needs draw harvesting + identity mapping | harvesting |
 | 6 | ~~Skybox~~ **DECIDED — not converted** | an analytic sky replaced it (§5.0). A painted skybox cannot respond to a moving sun, which is the point of the overhaul | done |
-| 7 | **Per-object transforms in `.ngg` (format v2)** - RENDERER SIDE DONE (5.0o): the BVH is per mesh with instance transforms, dragging is TLAS-only; the format field and the converter remain | movable meshes are baked, which is why they cannot move. Also wanted for GPU instancing of generated content (§7) | follows from 5 |
+| 7 | **Per-object transforms in `.ngg` (format v2)** - RENDERER SIDE DONE (5.0o): the BVH is per mesh with instance transforms, dragging is TLAS-only; INSTANCED MODELS DONE (5.0w: `NGGD` + `NGGE`, GPU instancing, LODs); a transform for the file's own movable objects and the converter remain | movable meshes are baked, which is why they cannot move. Also wanted for GPU instancing of generated content (§7) | follows from 5 |
 | 8 | ~~Road-chunk seams at distance~~ **EXPLAINED — §3.3b** | RBR's ground textures are 2048² atlases; the road's cell is bordered by luma-100 content and the gutter is ~2.25 texels. **Anisotropic tap spread** crossing the cell edge is the dominant term (confirmed: disabling aniso nearly removes it), sub-texel gutters at high mips the residual | closed — fix is item 9 |
 | 9 | ~~De-atlas the ground textures~~ **DONE — in `wallaby-cli`** | shipped by the converter session; `track-42.ngg` went from 29 to 74 textures and **the road seams are gone**, confirmed in the viewer. Closes item 8 for real | done |
 | 10 | ~~Object meshes carry a non-UV second UV set~~ **CURED renderer-side — `kMaterialSingleStage`, §3.3f** | the flag exists, the shader skips stage 1 entirely on it, and `MeasureSingleStage` sets it per object at load where the file does not. **And the isfinite() guard that was supposedly protecting this had never once fired** — see §3.3f | converter should set the flag; the fallback stands down when it does |

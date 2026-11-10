@@ -72,8 +72,19 @@ target_link_libraries(editor-api-check PRIVATE wrally-iface)
 target_compile_definitions(editor-api-check PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN _CRT_SECURE_NO_WARNINGS)
 target_compile_options(editor-api-check PRIVATE /W4 /permissive-)
 if(EXISTS ${WRALLY_TEST_NGG})
-    add_test(NAME editor-api-41 COMMAND editor-api-check ${WRALLY_BIN}/modules/renderer/WRenderer.dll ${WRALLY_TEST_NGG})
-    set_tests_properties(editor-api-41 PROPERTIES PASS_REGULAR_EXPRESSION "editor-api-check: all good" TIMEOUT 300)
+    # INSTANCED MODELS (NGG design 5.0w): a placeholder tree model (tools/ngg-check placeholder_tree.cpp) in place of
+    # every tree-card plant of stage 41 - written as NGGD + NGGE, read back the same, and loaded by the renderer, whose
+    # log must count the model, its LODs, the 3743 placements and the 3743 plants whose cards it dropped. The file is
+    # the next test's.
+    set(WRALLY_TEST_TREES ${CMAKE_BINARY_DIR}/tests-bin/track-41-trees.ngg)
+    add_test(NAME instancing-41 COMMAND ngg-check --trees ${WRALLY_TEST_NGG} --out ${WRALLY_TEST_TREES})
+    set_tests_properties(instancing-41 PROPERTIES FIXTURES_SETUP trees-41 TIMEOUT 300 PASS_REGULAR_EXPRESSION
+        "placeholder trees: 3743 placement.*read back the same.*scene: models - 1 model\\(s\\): 3 LODs, 5 submeshes, 184 triangles.*3743 placement\\(s\\) \\(0 in other variants\\), 3743 replace a plant.*scene: models replace 3743 plant\\(s\\): [1-9][0-9]* card triangle.*ngg-check: all good")
+    # The editor table on stage 41, and its placements (version 2) on the file with trees.
+    add_test(NAME editor-api-41 COMMAND editor-api-check ${WRALLY_BIN}/modules/renderer/WRenderer.dll ${WRALLY_TEST_NGG}
+             ${WRALLY_TEST_TREES})
+    set_tests_properties(editor-api-41 PROPERTIES PASS_REGULAR_EXPRESSION "editor-api-check: all good" TIMEOUT 300
+                         FIXTURES_REQUIRED trees-41)
 else()
     message(STATUS "editor-api-41 left out: no ${WRALLY_TEST_NGG}")
 endif()

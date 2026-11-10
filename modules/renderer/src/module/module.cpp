@@ -1006,12 +1006,92 @@ Status WRALLY_CALL EditProbePixel(Renderer* r, int32_t x, int32_t y)
     return Status::Ok;
 }
 
+uint32_t WRALLY_CALL EditModelCount(Renderer* r) { return r ? r->scene.ModelCount() : 0; }
+
+Status WRALLY_CALL EditModelName(Renderer* r, uint32_t model, char* buf, uint32_t bytes)
+{
+    const char* name = r ? r->scene.ModelName(model) : nullptr;
+    if (!name || !buf || !bytes) return Status::ErrInvalidArg;
+    std::snprintf(buf, bytes, "%s", name);
+    return Status::Ok;
+}
+
+uint32_t WRALLY_CALL EditPlacementCount(Renderer* r) { return r ? r->scene.PlacementCount() : 0; }
+
+ngg::core::Scene::PlacementDesc ToDesc(const EditPlacement& e)
+{
+    ngg::core::Scene::PlacementDesc d;
+    d.model = e.model;
+    std::memcpy(d.position, e.position, sizeof(d.position));
+    d.yaw = e.yaw;
+    d.scaleXZ = e.scaleXZ;
+    d.scaleY = e.scaleY;
+    d.tint = e.tint;
+    return d;
+}
+
+Status WRALLY_CALL EditGetPlacements(Renderer* r, uint32_t first, uint32_t count, EditPlacement* out)
+{
+    if (!r || (!out && count) || uint64_t(first) + count > r->scene.PlacementCount()) return Status::ErrInvalidArg;
+    for (uint32_t i = 0; i < count; ++i) {
+        ngg::core::Scene::PlacementDesc d;
+        EditPlacement& e = out[i];
+        e = EditPlacement{};
+        if (!r->scene.GetPlacement(first + i, &d)) {
+            e.flags = kEditPlacementRemoved;
+            e.plant = kEditNoPlant;
+            continue;
+        }
+        e.model = d.model;
+        std::memcpy(e.position, d.position, sizeof(e.position));
+        e.yaw = d.yaw, e.scaleXZ = d.scaleXZ, e.scaleY = d.scaleY, e.tint = d.tint, e.plant = d.plant;
+    }
+    return Status::Ok;
+}
+
+Status WRALLY_CALL EditAddPlacements(Renderer* r, const EditPlacement* in, uint32_t count, uint32_t* outHandles)
+{
+    if (!r || (!in && count)) return Status::ErrInvalidArg;
+    std::vector<ngg::core::Scene::PlacementDesc> d(count);
+    for (uint32_t i = 0; i < count; ++i) d[i] = ToDesc(in[i]);
+    return r->scene.AddPlacements(d.data(), count, outHandles) ? Status::Ok : Status::ErrInvalidArg;
+}
+
+Status WRALLY_CALL EditSetPlacements(Renderer* r, const uint32_t* handles, const EditPlacement* in, uint32_t count)
+{
+    if (!r || ((!in || !handles) && count)) return Status::ErrInvalidArg;
+    std::vector<ngg::core::Scene::PlacementDesc> d(count);
+    for (uint32_t i = 0; i < count; ++i) d[i] = ToDesc(in[i]);
+    return r->scene.SetPlacements(handles, d.data(), count) ? Status::Ok : Status::ErrInvalidArg;
+}
+
+Status WRALLY_CALL EditRemovePlacements(Renderer* r, const uint32_t* handles, uint32_t count)
+{
+    if (!r) return Status::ErrInvalidArg;
+    return r->scene.RemovePlacements(handles, count) ? Status::Ok : Status::ErrInvalidArg;
+}
+
+Status WRALLY_CALL EditModelStatsOf(Renderer* r, EditModelStats* out)
+{
+    if (!r || !out) return Status::ErrInvalidArg;
+    const ngg::core::Scene::ModelStats& m = r->scene.LastModelStats();
+    out->placements = m.placements;
+    out->visible = m.visible;
+    out->lod0 = m.perLod[0], out->lod1 = m.perLod[1], out->lod2 = m.perLod[2], out->billboard = m.perLod[3];
+    out->fading = m.fading;
+    out->shadowInstances = m.shadowInstances;
+    out->draws = m.draws;
+    out->cullMs = float(m.cullMs);
+    return Status::Ok;
+}
+
 const RendererEditApi kEditApi = {
     &EditObjectCount,     &EditVisibleObjectCount, &EditSetObjectVisible, &EditSetObjectTransform, &EditObjectBounds,
     &EditInstanceObjects, &EditFocusPoint,         &EditSetSelection,     &EditSetOverlayLines,    &EditClearOverlays,
     &EditSetFont,         &EditSetLabels,          &EditOverlayStatsOf,   &EditMaterialCount,      &EditGetMaterial,
     &EditSetMaterial,     &EditMaterialName,       &EditObjectMaterial,   &EditSetLightMode,       &EditLightModeName,
-    &EditSetCull,         &EditProbePixel};
+    &EditSetCull,         &EditProbePixel,         &EditModelCount,       &EditModelName,          &EditPlacementCount,
+    &EditGetPlacements,   &EditAddPlacements,      &EditSetPlacements,    &EditRemovePlacements,   &EditModelStatsOf};
 
 Status WRALLY_CALL EditApi(Renderer* r, uint32_t editVer, const RendererEditApi** out)
 {

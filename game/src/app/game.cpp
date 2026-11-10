@@ -715,9 +715,10 @@ StageEnd RunStage(Shell& sh, const Options& given, bool fromMenu, std::string& e
     const uint32_t shotEvery = std::getenv("PHYS_DRIVE_SHOTS") ? std::strtoul(std::getenv("PHYS_DRIVE_SHOTS"), nullptr, 0) : 0;
     uint32_t shotTick = 0;
     // PHYS_DRIVE_FRAMEMS: every drawn frame's whole GPU time (RenderStats::frameMs), its mean and median printed at the
-    // end - how a renderer setting is judged (design 5.4 N2c), from a replay under --step.
+    // end - how a renderer setting is judged (design 5.4 N2c), from a replay under --step. With it the main pass's and
+    // the ray tracing's medians (passMs, rtMs), so a difference can be put where it is.
     const bool frameMsLog = std::getenv("PHYS_DRIVE_FRAMEMS") != nullptr;
-    std::vector<float> frameMsSeen;
+    std::vector<float> frameMsSeen, passMsSeen, rtMsSeen;
     double mixCheck = 0, title = 0;
     // The session on its own thread from here on (session/sim_thread.h): in lockstep with the frames under --step, so
     // those runs stay the same frame for frame.
@@ -1127,7 +1128,11 @@ StageEnd RunStage(Shell& sh, const Options& given, bool fromMenu, std::string& e
         // PHYS_DRIVE_SHOTS=<n>: a capture every n ticks as well, for a replay looked at afterwards - the renderer's own
         // frame (captureFrame), which a covered or minimised window does not spoil. F2: the window as shown.
         if (frameMsLog && !paused)
-            if (const float ms = renderer.Stats().frameMs; ms > 0.0f) frameMsSeen.push_back(ms);
+            if (const iface::RenderStats& st = renderer.Stats(); st.frameMs > 0.0f) {
+                frameMsSeen.push_back(st.frameMs);
+                passMsSeen.push_back(st.passMs);
+                rtMsSeen.push_back(st.rtMs);
+            }
         const bool timedShot = shotEvery && !paused && snap.tick >= shotTick + shotEvery;
         if (timedShot) shotTick = snap.tick;
         const bool keyShot = shotKey(focused && keys.Down(Action::Screenshot));
@@ -1246,6 +1251,12 @@ StageEnd RunStage(Shell& sh, const Options& given, bool fromMenu, std::string& e
         for (float ms : v) sum += ms;
         std::nth_element(v.begin(), v.begin() + v.size() / 2, v.end());
         std::printf("gpu frame: mean %.2f ms, median %.2f ms over %zu frames\n", sum / v.size(), v[v.size() / 2], v.size());
+        auto median = [](std::vector<float> w) {
+            w.erase(w.begin(), w.begin() + 30);
+            std::nth_element(w.begin(), w.begin() + w.size() / 2, w.end());
+            return w[w.size() / 2];
+        };
+        std::printf("gpu parts: main pass median %.2f ms, ray tracing median %.2f ms\n", median(passMsSeen), median(rtMsSeen));
     }
     window.SetTitle(L"W-Rally");
     return end;

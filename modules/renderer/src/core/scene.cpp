@@ -173,6 +173,9 @@ cbuffer Camera : register(b0)
 // none of them, with no error either way.
 #define NGG_MAT_SINGLE_STAGE 256u
 #define NGG_MAT_NORMAL_MAP   512u
+// An instanced model's material (Scene::kDrawModel), and its alpha edge dithered (kDrawHashedAlpha: foliage).
+#define NGG_DRAW_MODEL       1024u
+#define NGG_DRAW_HASHED      2048u
 
 // --- microfacet specular, metallic-roughness ------------------------------
 // Value noise on the world's xz, for where puddles lie (design 5.0v): fixed to the ground, so a puddle stays put as the
@@ -606,14 +609,46 @@ SamplerState gSampClamp : register(s2);  // aniso 8, MaxLOD 1
 RWStructuredBuffer<float4> gProbe : register(u0);
 
 
-struct VSIn  { float3 pos : POSITION; float3 nrm : NORMAL; float2 uv0 : TEXCOORD0; float2 uv1 : TEXCOORD1; float4 col : COLOR0; };
+// INST0..3: the INSTANCE STREAM (input slot 1, one record per instance - Scene::InstanceRec): rows of p' = A p + t,
+// then tint (RGBA8), the crossfade (float bits) and flags (1 billboard, 2 a model). An object that is not a model's
+// draws the stream's identity record: its vertex goes through as it always did.
+struct VSIn  { float3 pos : POSITION; float3 nrm : NORMAL; float2 uv0 : TEXCOORD0; float2 uv1 : TEXCOORD1; float4 col : COLOR0;
+               float4 ic0 : INST0; float4 ic1 : INST1; float4 ic2 : INST2; uint4 ix : INST3; };
 struct VSOut { float4 pos : SV_Position; float3 nrm : NORMAL; float2 uv0 : TEXCOORD0; float2 uv1 : TEXCOORD1; float4 col : COLOR0; float3 wpos : TEXCOORD2; float3 prevWpos : TEXCOORD3;
               // A plant's card: its plant + 1, from uv1.x (SphericalFoliageNormals), else 0.
               nointerpolation uint plant : TEXCOORD4;
               // Its size: the plant's radius across, metres (uv1.y), else 0.
               nointerpolation float plantSize : TEXCOORD5;
               // What it casts (Plant::shadow): 0 all, 1 nothing (grass), 2 a lighter, softer shadow (a bush).
-              nointerpolation float plantShadow : TEXCOORD6; };
+              nointerpolation float plantShadow : TEXCOORD6;
+              // An instance's crossfade (FadeClip; 0 drawn whole) and its tint (1 none).
+              nointerpolation float fade : TEXCOORD7;
+              nointerpolation float3 tint : TEXCOORD8; };
+
+// THE CROSSFADE between a model's LODs (Scene::CullModels): a placement in the band is drawn by both, one with
+// fade = t (> 0: drops the pixels whose dither is under t), the next with -t (keeps exactly those) - so every pixel
+// is drawn once, by one of them, and the share moves from one to the other across the band. A fixed per-pixel
+// pattern (interleaved gradient noise), the same in the prepass and the main pass, whose depths must agree; the
+// TAA jitter moves it across the pixel frame to frame.
+float NggDither(float2 px)
+{
+    return frac(52.9829189 * frac(dot(floor(px), float2(0.06711056, 0.00583715))));
+}
+void FadeClip(float fade, float2 px)
+{
+    if (fade == 0.0) return;
+    const float h = NggDither(px);
+    if (fade > 0.0 ? (h < fade) : (h >= -fade)) discard;
+}
+// The alpha test's threshold. Foliage (NGG_DRAW_HASHED): dithered about the material's cutoff, a different pattern
+// from the crossfade's, so a leaf's soft alpha edge comes out as a stipple the temporal filter resolves.
+static const float kHashedSpread = 0.45;
+float AlphaCut(float cutoff, float2 px)
+{
+    if ((gMatFlags & NGG_DRAW_HASHED) == 0u) return cutoff;
+    const float h = NggDither(px.yx + float2(37.0, 11.0));
+    return cutoff + (h - 0.5) * kHashedSpread;
+}
 
 )" /* fifth split: MSVC 16380-byte literal limit, adjacent literals concatenate */ R"(
 // Leaves are not opaque lambertian sheets. Two cheap terms stand in for that:
@@ -660,20 +695,51 @@ float FoliageSelfShadow(float3 q, float3 L, float radius)
 VSOut VSMain(VSIn i)
 {
     VSOut o;
+    // An INSTANCED MODEL's vertex is in its model space: the instance places it (Scene::PlacementTransform). Every
+    // other draw has the identity record and skips this, so its vertices are exactly as they were.
+    float3 pos = i.pos, nrm = i.nrm;
+    const bool model = (i.ix.z & 2u) != 0u;
+    if (model)
+    {
+        const float3 t = float3(i.ic0.w, i.ic1.w, i.ic2.w);
+        if ((i.ix.z & 1u) != 0u)
+        {
+            // THE FAR BILLBOARD: its quad (x across, y up) turned about the up axis to face the camera - or, in a
+            // shadow map, the sun (RenderShadows puts the "camera" far towards it).
+            float3 f = gCamPos - t;
+            f.y = 0.0;
+            f = dot(f, f) > 1e-8 ? normalize(f) : float3(0.0, 0.0, 1.0);
+            const float sh = length(float3(i.ic0.x, i.ic1.x, i.ic2.x));
+            const float sv = length(float3(i.ic0.y, i.ic1.y, i.ic2.y));
+            pos = t + float3(f.z, 0.0, -f.x) * (i.pos.x * sh) + float3(0.0, i.pos.y * sv, 0.0) + f * (i.pos.z * sh);
+            // Facing the viewer, leaning up: a canopy seen from afar is lit from above more than from the side.
+            nrm = normalize(f + float3(0.0, 0.6, 0.0));
+        }
+        else
+        {
+            pos = float3(dot(i.ic0, float4(i.pos, 1.0)), dot(i.ic1, float4(i.pos, 1.0)), dot(i.ic2, float4(i.pos, 1.0)));
+            // The normal by the cofactors of A (its inverse transpose up to scale): right under a squash as well.
+            const float3 a = i.ic0.xyz, b = i.ic1.xyz, c = i.ic2.xyz;
+            const float3 n = float3(dot(cross(b, c), i.nrm), dot(cross(c, a), i.nrm), dot(cross(a, b), i.nrm));
+            nrm = dot(n, n) > 1e-20 ? normalize(n) : float3(0.0, 1.0, 0.0);
+        }
+    }
+    o.fade = asfloat(i.ix.y);
+    o.tint = float3(i.ix.x & 255u, (i.ix.x >> 8) & 255u, (i.ix.x >> 16) & 255u) / 255.0;
     // The object transform first: the vertex is in baked world space, this moves
     // it from where the file put it to where the editor wants it.
-    float3 placed = mul(float4(i.pos, 1.0), gObjectXform).xyz;
+    float3 placed = mul(float4(pos, 1.0), gObjectXform).xyz;
     float4 world = float4(placed + gWorldOffset, 1.0);
     o.pos = mul(mul(world, gView), gProj);
     o.wpos = world.xyz;
     // The same vertex under last frame's transform. Only the motion target
     // reads it; for an object that did not move it is this frame's position.
     o.prevWpos = (gObjectMoved != 0)
-               ? mul(float4(i.pos, 1.0), gPrevObjectXform).xyz + gWorldOffset
+               ? mul(float4(pos, 1.0), gPrevObjectXform).xyz + gWorldOffset
                : world.xyz;
     // Rotation only. Editor placements are rigid; a non-uniform scale would want
     // the inverse transpose, and that is the point at which to add one.
-    o.nrm = mul(i.nrm, (float3x3)gObjectXform);
+    o.nrm = mul(nrm, (float3x3)gObjectXform);
     o.uv0 = i.uv0;
     // RBR's OBJECT meshes carry a second UV set that is not UV data - on Joux
     // Verte every one of the 88,964 stage-1 uses of ObjectTexturePlateOpaque is
@@ -690,7 +756,7 @@ VSOut VSMain(VSIn i)
     // Meaningful only on a plant's vertex (VolumeNormal): its uv1 is free -
     // alpha-tested geometry never blends a second layer - and carries the
     // plant's index as a float, exact to 2^24.
-    o.plant = (VolumeNormal(i.nrm) && i.uv1.x >= 0.0 && i.uv1.x < 16777215.0) ? (uint)i.uv1.x + 1u : 0u;
+    o.plant = (!model && VolumeNormal(i.nrm) && i.uv1.x >= 0.0 && i.uv1.x < 16777215.0) ? (uint)i.uv1.x + 1u : 0u;
     const float packed = max(i.uv1.y, 0.0);
     o.plantShadow = o.plant != 0u ? floor(packed / kPlantShadowPack) : 0.0;
     o.plantSize = o.plant != 0u ? packed - o.plantShadow * kPlantShadowPack : 0.0;
@@ -803,8 +869,9 @@ struct PrepassOut
 PrepassOut PSPrepass(VSOut i, bool frontFace : SV_IsFrontFace)
 {
 #ifdef ALPHA_TEST
+    FadeClip(i.fade, i.pos.xy);
     float4 t0 = gTex0.Sample(gSamp, i.uv0);
-    clip(t0.a * i.col.a * gBaseColourFactor.a - gPbrB.y);
+    clip(t0.a * i.col.a * gBaseColourFactor.a - AlphaCut(gPbrB.y, i.pos.xy));
 #endif
     float3 N = normalize(i.nrm);
     if (!all(isfinite(N)) || dot(N, N) < 0.5) N = float3(0.0, 1.0, 0.0);
@@ -818,7 +885,9 @@ PrepassOut PSPrepass(VSOut i, bool frontFace : SV_IsFrontFace)
     // nearly in the card's own plane, where a ray-origin offset along it would
     // leave the ray on the card. The rays want the card's plane, towards the
     // camera, and w = 0.5 tells them the pixel is a plant's (rt.cpp SurfaceAt).
-    if (VolumeNormal(i.nrm))
+    // A model's leaves are real geometry: their own normal for the rays, and they shadow each other (no card skip).
+    if ((gMatFlags & NGG_DRAW_MODEL) != 0u) {}
+    else if (VolumeNormal(i.nrm))
     {
         float3 G = cross(ddy(i.wpos), ddx(i.wpos));
         G = dot(G, G) > 1e-20 ? normalize(G) : float3(0.0, 1.0, 0.0);
@@ -1053,7 +1122,8 @@ float4 Shade(VSOut i, bool frontFace, out GBufOut g)
     // vertex alpha is coverage here, not the terrain blend weight it is on
     // ground meshes. The threshold is the MATERIAL's now: 170/255 is only
     // RBR's default, and an authored texture has no reason to share it.
-    clip(t0.a * i.col.a * gBaseColourFactor.a - gPbrB.y);
+    FadeClip(i.fade, i.pos.xy);
+    clip(t0.a * i.col.a * gBaseColourFactor.a - AlphaCut(gPbrB.y, i.pos.xy));
 #endif
 #ifdef BLEND
     // Glass (kMaterialBlend): the same alpha is COVERAGE - how much of the tint lies over what is behind. The output
@@ -1066,7 +1136,7 @@ float4 Shade(VSOut i, bool frontFace, out GBufOut g)
     // object meshes - the same channel meaning two different things, which is
     // why the weight has to be zero here rather than merely small.
     float  weight = singleStage ? 0.0 : (t1.a * i.col.a);
-    float3 albedo = lerp(t0.rgb, t1.rgb, weight) * gBaseColourFactor.rgb;
+    float3 albedo = lerp(t0.rgb, t1.rgb, weight) * gBaseColourFactor.rgb * i.tint;
 
     // --- the rest of the material -----------------------------------------
     // Every map MULTIPLIES its factor rather than replacing it, which is glTF's
@@ -1818,6 +1888,10 @@ static_assert(Scene::kDrawSingleStage == 256u,
               "NGG_MAT_SINGLE_STAGE in the scene shader disagrees with kDrawSingleStage");
 static_assert(Scene::kDrawNormalMap == 512u,
               "NGG_MAT_NORMAL_MAP in the scene shader disagrees with kDrawNormalMap");
+static_assert(Scene::kDrawModel == 1024u && Scene::kDrawHashedAlpha == 2048u,
+              "NGG_DRAW_MODEL / NGG_DRAW_HASHED in the scene shader disagree with kDrawModel / kDrawHashedAlpha");
+static_assert((Scene::kDrawModel & 0xFFu) == 0 && (kMaterialFoliage & 0xFF00u) == 0,
+              "the runtime draw flags sit above the format's material flags");
 
 struct CameraCB
 {
@@ -1981,6 +2055,9 @@ bool Mirrors(const float* m)
     return m[0] * (m[5] * m[10] - m[6] * m[9]) - m[1] * (m[4] * m[10] - m[6] * m[8])
          + m[2] * (m[4] * m[9] - m[5] * m[8]) < 0.0f;
 }
+
+// Planes nothing is outside of: culling off (SetCull), for the models' cull, which still picks their LODs.
+const float kNoPlanes[6][4] = {};
 
 // Conservative: tests the AABB's positive vertex against each plane. Rejects
 // only what is definitely outside, which is what culling must do - a false
@@ -2369,6 +2446,46 @@ void Scene::DescribeRt(std::vector<uint64_t>& meshes, std::vector<RtInstanceDesc
             instances.push_back(d);
         }
     }
+    DescribeModelsRt(meshes, instances);
+}
+
+// The placements in the ray-traced scene: a BLAS per submesh of each model's ray-traced LOD (its dynamic mesh), a TLAS
+// instance per placement and submesh. Cached: DescribeRt runs every frame anything moves (the car), and these only
+// change with a placement edit or a load.
+void Scene::DescribeModelsRt(std::vector<uint64_t>& meshes, std::vector<RtInstanceDesc>& instances) const
+{
+    if (m_rtModelInstancesDirty || m_rtModelGen != m_rtGeneration)
+    {
+        m_rtModelInstances.clear();
+        m_rtModelMeshes.clear();
+        auto key = [&](uint32_t mesh) { return kRtDynamic | ((uint64_t)m_rtGeneration << 32) | mesh; };
+        auto live = [&](uint32_t mesh) { return mesh && mesh <= m_dynMeshes.size() && m_dynMeshes[mesh - 1].alive; };
+        for (const ModelDef& m : m_models)
+            for (const ModelSub& s : m.lods[m.rtLod].subs)
+                if (live(s.mesh)) m_rtModelMeshes.push_back(key(s.mesh));
+        for (const PlacementRt& p : m_placements)
+        {
+            if (p.removed) continue;
+            const ModelDef& m = m_models[p.d.model];
+            RtInstanceDesc d;
+            for (int r = 0; r < 3; ++r)          // row vectors: the transpose of the stream's rows, t in row 3
+                for (int c = 0; c < 3; ++c) d.xform[r * 4 + c] = p.cols[c][r];
+            for (int c = 0; c < 3; ++c) d.xform[12 + c] = p.cols[c][3];
+            memcpy(d.prevXform, d.xform, sizeof(d.xform));
+            for (const ModelSub& s : m.lods[m.rtLod].subs)
+            {
+                if (!live(s.mesh)) continue;
+                d.mesh = key(s.mesh);
+                d.material = s.material;
+                d.forceOpaque = !s.alpha;
+                m_rtModelInstances.push_back(d);
+            }
+        }
+        m_rtModelInstancesDirty = false;
+        m_rtModelGen = m_rtGeneration;
+    }
+    meshes.insert(meshes.end(), m_rtModelMeshes.begin(), m_rtModelMeshes.end());
+    instances.insert(instances.end(), m_rtModelInstances.begin(), m_rtModelInstances.end());
 }
 
 bool Scene::BuildRtMesh(uint64_t key, RtMeshData& out) const
@@ -2384,13 +2501,19 @@ bool Scene::BuildRtMesh(uint64_t key, RtMeshData& out) const
         const uint32_t* src = m_staticIndices.data() + o.firstIndex;
         const bool alphaTested = (o.matFlags & kMaterialAlphaTest) != 0;
         std::vector<uint32_t>& dst = alphaTested ? out.alpha : out.opaque;
-        dst.insert(dst.end(), src, src + o.indexCount);
-        if (alphaTested)
+        const size_t t0 = o.firstIndex / 3;
+        for (uint32_t k = 0; k + 2 < o.indexCount; k += 3)
         {
-            out.alphaMat.insert(out.alphaMat.end(), o.indexCount / 3, o.materialId);
-            const size_t t0 = o.firstIndex / 3;
-            for (size_t t = t0; t < t0 + o.indexCount / 3; ++t)
+            const uint32_t* tri = src + k;
+            // A replaced plant's card (degenerate: LoadFromMemory) is not in the ray-traced scene either.
+            if (tri[0] == tri[1] && tri[1] == tri[2]) continue;
+            dst.insert(dst.end(), tri, tri + 3);
+            if (alphaTested)
+            {
+                const size_t t = t0 + k / 3;
+                out.alphaMat.push_back(o.materialId);
                 out.alphaPlant.push_back(t < m_triPlant.size() ? m_triPlant[t] : 0xFFFFFFFFu);
+            }
         }
     };
 
@@ -3310,11 +3433,17 @@ void Scene::RenderShadows(ID3D12GraphicsCommandList* list,
     }
     if (timed) list->EndQuery(m_shadowTimer.Get(), D3D12_QUERY_TYPE_TIMESTAMP, 0);
 
+    // The camera, for the models' LODs (a cascade draws the one the camera sees) and their billboards, which face
+    // the sun here: the "camera" of the shadow constants is put far off towards it (VSMain's billboard turn).
+    float eye[3] = {};
+    CameraPosFromView(view, eye);
+    std::vector<ModelBatch> shadowBatches;
     for (int c = 0; c < ShadowMaps::kCascades; ++c)
     {
         // One constant buffer per cascade: the vertex shader is the scene's own
         // VSMain, so "render from the light" is just a different view/proj.
         CameraCB cb = {};
+        for (int k = 0; k < 3; ++k) cb.camPos[k] = eye[k] + toward[k] * 1.0e4f;
         memcpy(cb.view, m_shadows->LightViewProj(c), sizeof(cb.view));
         // Identity projection - the light view-proj is already combined above.
         memset(cb.proj, 0, sizeof(cb.proj));
@@ -3337,6 +3466,8 @@ void Scene::RenderShadows(ID3D12GraphicsCommandList* list,
         list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
         list->IASetVertexBuffers(0, 1, &m_vbv);
         list->IASetIndexBuffer(&m_ibv);
+        EnsureInstanceStream(dev);
+        list->IASetVertexBuffers(1, 1, &m_instIdentity);   // the instance stream's identity (VSMain's INST0..3)
 
         if (m_srvHeap)
         {
@@ -3387,6 +3518,37 @@ void Scene::RenderShadows(ID3D12GraphicsCommandList* list,
             BindGeometry(list, o.meshId != 0, geomState,
                          o.meshId ? m_dynVbv : m_vbv, o.meshId ? m_dynIbv : m_ibv);
             list->DrawIndexedInstanced(o.indexCount, 1, o.firstIndex, o.baseVertex, 0);
+        }
+        // The models this cascade sees: their instances, drawn instanced (no crossfade - one LOD each).
+        CullModels(dev, m_cull ? cplanes : kNoPlanes, eye, true, shadowBatches);
+        if (!shadowBatches.empty())
+        {
+            static const float kIdentity[16] = { 1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1 };
+            BindObjectXform(list, kIdentity, true, xformState);
+            m_shadowOrder.clear();
+            ModelDrawItems(shadowBatches, m_shadowOrder, true);
+            for (const DrawOrder& d : m_shadowOrder)
+            {
+                const DrawItem& o = *d.item;
+                const bool wantAlpha = d.alphaTest;
+                if (wantAlpha && !m_psoShadowAlpha) continue;
+                if (wantAlpha != alphaBound)
+                {
+                    list->SetPipelineState(wantAlpha ? m_psoShadowAlpha.Get() : m_psoShadow.Get());
+                    alphaBound = wantAlpha;
+                }
+                if (wantAlpha && m_srvHeap)
+                {
+                    D3D12_GPU_DESCRIPTOR_HANDLE h = m_srvHeap->GetGPUDescriptorHandleForHeapStart();
+                    h.ptr += (UINT64)o.materialId * kMaterialSrvCount * m_srvStride;
+                    list->SetGraphicsRootDescriptorTable(1, h);
+                }
+                BindGeometry(list, true, geomState, m_dynVbv, m_dynIbv);
+                list->IASetVertexBuffers(1, 1, d.inst);
+                list->DrawIndexedInstanced(o.indexCount, d.instCount, o.firstIndex, o.baseVertex, 0);
+                ++m_modelStatsBuild.draws;
+            }
+            list->IASetVertexBuffers(1, 1, &m_instIdentity);
         }
         m_shadowCB[c] = cbRes;      // must outlive GPU execution
     }
@@ -3520,6 +3682,8 @@ void Scene::RenderLocalShadows(ID3D12GraphicsCommandList* list, float aoShare)
         list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
         list->IASetVertexBuffers(0, 1, &m_vbv);
         list->IASetIndexBuffer(&m_ibv);
+        EnsureInstanceStream(dev);
+        list->IASetVertexBuffers(1, 1, &m_instIdentity);   // (the models cast no lamp's shadow yet)
         if (m_srvHeap)
         {
             ID3D12DescriptorHeap* heaps[] = { m_srvHeap.Get() };
@@ -3997,6 +4161,8 @@ bool Scene::LoadFromMemory(ID3D12Device* dev, ID3D12CommandQueue* queue,
     const uint8_t* variants = nullptr; size_t variantBytes = 0;
     const uint8_t* masks = nullptr;    size_t maskBytes = 0;
     const uint8_t* aliases = nullptr;  size_t aliasBytes = 0;
+    const uint8_t* modelLib = nullptr; size_t modelLibBytes = 0;
+    const uint8_t* placed = nullptr;   size_t placedBytes = 0;
 
     size_t off = sizeof(FileHeader);
     for (uint32_t i = 0; i < fh->chunkCount; ++i)
@@ -4033,6 +4199,10 @@ bool Scene::LoadFromMemory(ID3D12Device* dev, ID3D12CommandQueue* queue,
         { masks = payload; maskBytes = ch->byteSize; }
         else if (ch->fourcc == ChunkVariantAliases())
         { aliases = payload; aliasBytes = ch->byteSize; }
+        else if (ch->fourcc == ChunkModels())
+        { modelLib = payload; modelLibBytes = ch->byteSize; }
+        else if (ch->fourcc == ChunkPlacements())
+        { placed = payload; placedBytes = ch->byteSize; }
         // Unknown chunks are skipped on purpose - that is what makes the format
         // forward-compatible.
 
@@ -4101,6 +4271,8 @@ bool Scene::LoadFromMemory(ID3D12Device* dev, ID3D12CommandQueue* queue,
             s.tex[0] = m.baseColour; s.tex[1] = m.detail; s.tex[2] = m.normal;
             s.tex[3] = m.orm;        s.tex[4] = m.emissive;
             s.flags  = m.flags;
+            // Foliage (kMaterialFoliage) is alpha-tested and two-sided by definition, its edge hashed.
+            if (m.flags & kMaterialFoliage) s.flags |= kMaterialAlphaTest | kMaterialTwoSided | kDrawHashedAlpha;
             // DERIVED, never stored: a material with no detail map has no
             // second layer, and saying it twice is how a file starts
             // contradicting itself.
@@ -4158,6 +4330,11 @@ bool Scene::LoadFromMemory(ID3D12Device* dev, ID3D12CommandQueue* queue,
 
     ApplyVariant(variants, variantBytes, masks, maskBytes, aliases, aliasBytes);
 
+    // The instanced models and their placements (NGGD / NGGE): their materials join the table, their meshes the
+    // dynamic pool. The plants they replace leave the static geometry below, once the plant table is read.
+    std::vector<uint32_t> replacedPlants;
+    LoadModels(dev, modelLib, modelLibBytes, placed, placedBytes, (uint32_t)(matBytes / sizeof(Material)), replacedPlants);
+
     // A variant in another frame (VariantRecord::offset): its world is the file's moved, so everything below reads
     // moved vertices - the boxes, the plants, the ray tracer's meshes and the upload all start from this copy.
     std::vector<Vertex> movedVerts;
@@ -4213,8 +4390,10 @@ bool Scene::LoadFromMemory(ID3D12Device* dev, ID3D12CommandQueue* queue,
     // where one did); only a file without them gets the renderer's own guess - and not an
     // automatic legacy import (kSceneFlagLegacyImport): its cards are the legacy profile's,
     // and the guess is wrong there (RBR's vegetation block also holds people, cars, fences).
+    bool plantsFromFile = false;
     if (idx && sh->indexCount && sh->vertexCount &&
-        !ReadPlants(tagNames, tagNameBytes, plants, plantBytes, sh->indexCount, (sh->flags & kSceneFlagLegacyImport) != 0) &&
+        !(plantsFromFile = ReadPlants(tagNames, tagNameBytes, plants, plantBytes, sh->indexCount,
+                                      (sh->flags & kSceneFlagLegacyImport) != 0)) &&
         !(sh->flags & kSceneFlagLegacyImport))
         FindPlants(reinterpret_cast<const Vertex*>(verts), sh->vertexCount, idx, sh->indexCount);
     else if (moved)
@@ -4225,6 +4404,46 @@ bool Scene::LoadFromMemory(ID3D12Device* dev, ID3D12CommandQueue* queue,
         if (o.measuredSolid)
             for (uint32_t t = o.firstIndex / 3; t < (o.firstIndex + o.indexCount) / 3 && t < m_triPlant.size(); ++t)
                 m_triPlant[t] = 0xFFFFFFFFu;
+
+    // THE PLANTS A MODEL REPLACES (a placement's NGGP plant): their cards leave the static geometry. Each of their
+    // triangles is made DEGENERATE in the index buffer (its three indices its first), which the rasteriser drops for
+    // the cost of three vertices and the ray tracer's meshes leave out (BuildRtMesh) - so the objects' index ranges,
+    // the plant parts and the triangle numbering all stay the file's. An object left with no triangle is removed. Only
+    // against the file's own plant table: a placement's plant is an index into it.
+    std::vector<uint32_t> keptIndices;
+    if (!replacedPlants.empty() && idx && sh->indexCount)
+    {
+        if (!plantsFromFile)
+            Log("scene: %zu placement(s) replace plants, but the file has no plant table - their cards stay",
+                replacedPlants.size());
+        else
+        {
+            std::vector<uint8_t> drop(m_plants.size(), 0);
+            for (uint32_t pl : replacedPlants)
+                if (pl < drop.size()) drop[pl] = 1, ++m_replacedPlants;
+            keptIndices.assign(reinterpret_cast<const uint32_t*>(idx), reinterpret_cast<const uint32_t*>(idx) + sh->indexCount);
+            for (size_t t = 0; t < m_triPlant.size(); ++t)
+            {
+                const uint32_t pl = m_triPlant[t];
+                if (pl >= drop.size() || !drop[pl]) continue;
+                keptIndices[3 * t + 1] = keptIndices[3 * t + 2] = keptIndices[3 * t];
+                m_triPlant[t] = 0xFFFFFFFFu;
+                ++m_replacedTris;
+            }
+            size_t emptied = 0;
+            for (DrawItem& o : m_objects)
+            {
+                if (o.meshId || o.removed || !o.indexCount || (uint64_t)o.firstIndex + o.indexCount > keptIndices.size()) continue;
+                bool any = false;
+                for (uint32_t j = o.firstIndex; j < o.firstIndex + o.indexCount && !any; j += 3)
+                    any = !(keptIndices[j] == keptIndices[j + 1] && keptIndices[j] == keptIndices[j + 2]);
+                if (!any) o.removed = true, o.visible = false, ++emptied;
+            }
+            idx = reinterpret_cast<const uint8_t*>(keptIndices.data());
+            Log("scene: models replace %u plant(s): %u card triangle(s) not drawn, %zu object(s) left empty and removed",
+                m_replacedPlants, m_replacedTris, emptied);
+        }
+    }
 
     std::vector<Vertex> fixed;
     const uint8_t* vertexSource = verts;
@@ -4671,6 +4890,11 @@ bool Scene::LoadFromMemory(ID3D12Device* dev, ID3D12CommandQueue* queue,
         { "TEXCOORD", 0, DXGI_FORMAT_R32G32_FLOAT,    0, 24, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
         { "TEXCOORD", 1, DXGI_FORMAT_R32G32_FLOAT,    0, 32, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
         { "COLOR",    0, DXGI_FORMAT_R8G8B8A8_UNORM,  0, 40, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
+        // The instance stream (Scene::InstanceRec): every scene pipeline takes it, a non-instanced draw its identity.
+        { "INST",     0, DXGI_FORMAT_R32G32B32A32_FLOAT, 1,  0, D3D12_INPUT_CLASSIFICATION_PER_INSTANCE_DATA, 1 },
+        { "INST",     1, DXGI_FORMAT_R32G32B32A32_FLOAT, 1, 16, D3D12_INPUT_CLASSIFICATION_PER_INSTANCE_DATA, 1 },
+        { "INST",     2, DXGI_FORMAT_R32G32B32A32_FLOAT, 1, 32, D3D12_INPUT_CLASSIFICATION_PER_INSTANCE_DATA, 1 },
+        { "INST",     3, DXGI_FORMAT_R32G32B32A32_UINT,  1, 48, D3D12_INPUT_CLASSIFICATION_PER_INSTANCE_DATA, 1 },
     };
 
     D3D12_GRAPHICS_PIPELINE_STATE_DESC pso = {};
@@ -6892,6 +7116,13 @@ void Scene::RecordPass(ID3D12GraphicsCommandList* list, D3D12_CPU_DESCRIPTOR_HAN
     list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     list->IASetVertexBuffers(0, 1, &m_vbv);
     list->IASetIndexBuffer(&m_ibv);
+    {
+        ID3D12Device* d = nullptr;
+        list->GetDevice(IID_PPV_ARGS(&d));
+        EnsureInstanceStream(d);
+        if (d) d->Release();
+    }
+    list->IASetVertexBuffers(1, 1, &m_instIdentity);   // the instance stream's identity (VSMain's INST0..3)
 
     if (m_srvHeap)
     {
@@ -7213,7 +7444,9 @@ void Scene::RecordPass(ID3D12GraphicsCommandList* list, D3D12_CPU_DESCRIPTOR_HAN
     auto movedOf = [](const DrawItem& o) {
         return (!o.identity || !o.prevIdentity) && (o.dynamic || memcmp(o.prevXform, o.xform, sizeof(o.xform)) != 0);
     };
-    auto draw = [&](const DrawItem& o, ID3D12PipelineState* want, bool refl = false) {
+    D3D12_GPU_VIRTUAL_ADDRESS instBound = m_instIdentity.BufferLocation;
+    auto draw = [&](const DrawItem& o, ID3D12PipelineState* want, bool refl = false,
+                    const D3D12_VERTEX_BUFFER_VIEW* inst = nullptr, uint32_t instCount = 1) {
         if (want != bound)
         {
             list->SetPipelineState(want);
@@ -7246,7 +7479,14 @@ void Scene::RecordPass(ID3D12GraphicsCommandList* list, D3D12_CPU_DESCRIPTOR_HAN
         BindObjectXform(list, o.xform, o.identity, xformState);
         BindGeometry(list, o.meshId != 0, geomState,
                      o.meshId ? m_dynVbv : m_vbv, o.meshId ? m_dynIbv : m_ibv);
-        list->DrawIndexedInstanced(o.indexCount, 1, o.firstIndex, o.baseVertex, 0);
+        // A model batch's instances, or the identity every other draw takes.
+        const D3D12_VERTEX_BUFFER_VIEW* iv = inst ? inst : &m_instIdentity;
+        if (iv->BufferLocation != instBound)
+        {
+            list->IASetVertexBuffers(1, 1, iv);
+            instBound = iv->BufferLocation;
+        }
+        list->DrawIndexedInstanced(o.indexCount, instCount, o.firstIndex, o.baseVertex, 0);
     };
     // THE CUBE PROBE's faces this frame (probe.h): the world around the car, drawn with these pipelines and lit as this
     // pass lights it, less what belongs to the main camera's pixels - the ray-traced sun visibility and AO, the local
@@ -7425,6 +7665,17 @@ void Scene::RecordPass(ID3D12GraphicsCommandList* list, D3D12_CPU_DESCRIPTOR_HAN
         }
         m_drawOrder.push_back({ (matFlags & kMaterialAlphaTest) != 0, d2, &o });
     }
+    // THE INSTANCED MODELS: culled once for the camera (by the prepass, or by this pass without one), a draw per batch
+    // submesh in the same order - the solid near to far by their LOD's nearest distance, the leaves after.
+    if (prepass || !m_prepassThisFrame || !m_mainBatchesValid)
+    {
+        ID3D12Device* d = nullptr;
+        list->GetDevice(IID_PPV_ARGS(&d));
+        CullModels(d, m_cull ? planes : kNoPlanes, camPos, false, m_mainBatches);
+        if (d) d->Release();
+        m_mainBatchesValid = true;
+    }
+    ModelDrawItems(m_mainBatches, m_drawOrder, false);
     std::sort(m_drawOrder.begin(), m_drawOrder.end(), [](const DrawOrder& a, const DrawOrder& b) {
         return a.alphaTest != b.alphaTest ? b.alphaTest : a.d2 < b.d2;
     });
@@ -7459,7 +7710,8 @@ void Scene::RecordPass(ID3D12GraphicsCommandList* list, D3D12_CPU_DESCRIPTOR_HAN
             if (ID3D12PipelineState* r = m_psoRefl[deferred ? 1 : 0][cull].Get())
                 want = r, refl = true;
         }
-        draw(o, want, refl);
+        draw(o, want, refl, d.inst, d.instCount);
+        if (d.inst) ++m_modelStatsBuild.draws;
     }
 
     // The deferred local lights, over the opaque world and under the glass: the surface's targets and the depth to

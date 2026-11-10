@@ -5,6 +5,10 @@
 //                                  the renderer loads the original and the rewrite
 //   ngg-check --lbs <file.lbs> [--surface dry|damp|wet] [--out <file.ngg>]
 //                                  W-Rally's legacy importer: the .lbs to an .ngg, read back, loaded by the renderer
+//   ngg-check --trees <file.ngg> [--out <file.ngg>]
+//                                  a placeholder tree model (placeholder_tree.h) in place of every tree-card plant:
+//                                  written, read back the same, loaded by the renderer, which reports its models,
+//                                  placements and the replaced plants (the CTest checks the counts)
 //
 // "the renderer" is WRenderer.dll (bin/modules/renderer) on a hidden window - its own loader, not this library's
 // reader, so a writer and the renderer that disagree fail here. Prints "ngg-check: all good" at the end, or the first
@@ -22,6 +26,7 @@
 #include <filesystem>
 
 #include "assets/legacy_stage.h"
+#include "placeholder_tree.h"
 #include "ngg_scene.h"
 #include "render/renderer.h"
 
@@ -59,6 +64,11 @@ std::string Compare(const ngg::SceneData& a, const ngg::SceneData& b)
         return "the stage variants";
     if (a.variantOffsets != b.variantOffsets) return "a stage variant's offset";
     if (a.variantAliases != b.variantAliases) return "a stage variant's aliases";
+    if (!SameVec(a.models.models, b.models.models) || !SameVec(a.models.lods, b.models.lods) ||
+        !SameVec(a.models.submeshes, b.models.submeshes) || !SameVec(a.models.materials, b.models.materials) ||
+        !SameVec(a.models.vertices, b.models.vertices) || !SameVec(a.models.indices, b.models.indices))
+        return "the model library";
+    if (!SameVec(a.placements, b.placements)) return "the placements";
     for (size_t k = 0; k < a.variantSpawns.size() && k < b.variantSpawns.size(); ++k)
         if (std::memcmp(&a.variantSpawns[k], &b.variantSpawns[k], sizeof(ngg::SpawnPoint))) return "a stage variant's car start";
     return "";
@@ -127,6 +137,31 @@ ngg::SceneData MadeUp()
     std::snprintf(w.name, sizeof w.name, "41M_crisp_clear");
     w.sunDirection[1] = -1, w.sunIntensity = 22, w.turbidity = 2, w.exposure = 1;
     s.weather = {w};
+    // An instanced model (NGGD): a two-LOD marker, a triangle near and a billboard far, placed twice (NGGE) - once in
+    // each stage variant.
+    ngg::ModelLibrary& lib = s.models;
+    lib.materials = {leaf, ground};
+    for (int k = 0; k < 4; ++k) {
+        ngg::Vertex v{};
+        v.pos[0] = float(k & 1), v.pos[1] = float(k >> 1) * 2.0f;
+        v.normal[2] = 1.0f;
+        v.uv0[0] = float(k & 1), v.uv0[1] = float(k >> 1);
+        v.colour = 0xFFFFFFFFu;
+        lib.vertices.push_back(v);
+    }
+    lib.indices = {0, 1, 2, 0, 2, 1};
+    lib.submeshes = {{1, 0, 3, 0, 3}, {0, 3, 3, 1, 3}};
+    lib.lods = {{0, 1, 40.0f, 0}, {1, 1, 400.0f, ngg::kModelLodBillboard}};
+    ngg::ModelRecord m{};
+    std::snprintf(m.name, sizeof m.name, "marker");
+    m.lodCount = 2, m.bboxMax[0] = 1, m.bboxMax[1] = 2, m.fadeWidth = 4;
+    lib.models = {m};
+    ngg::Placement p{};
+    p.model = 0, p.plant = ngg::kNoPlant, p.position[0] = 5, p.yaw = 0.5f, p.scaleXZ = 1, p.scaleY = 1.5f, p.tint = 0xFFFFFFFFu;
+    p.variants = 1;
+    s.placements = {p};
+    p.position[2] = 8, p.variants = 2, p.tint = 0xFF80C0FFu;
+    s.placements.push_back(p);
     return s;
 }
 
@@ -141,6 +176,7 @@ struct Gpu {
     HWND window = nullptr;
     wrally::render::Renderer renderer;
     std::string error;
+    std::string log;   // the renderer's log of the last Load
 
     Gpu()
     {
@@ -162,7 +198,7 @@ struct Gpu {
     {
         if (!error.empty()) return "the renderer: " + error;
         const wrally::iface::SceneHandle scene = renderer.LoadScene(bytes.data(), bytes.size());
-        renderer.TakeLog();
+        log = renderer.TakeLog();
         if (!scene) return "the renderer refused it: " + renderer.Error();
         uint32_t keyed = 0, keys = 0;
         renderer.Api()->sceneKeyStats(renderer.Instance(), scene, &keyed, &keys);
@@ -206,6 +242,40 @@ int main(int argc, char** argv)
         if (const std::string out = Arg(argc, argv, "--out"); !out.empty()) {
             std::ofstream(out, std::ios::binary).write(reinterpret_cast<const char*>(imp.ngg.data()), std::streamsize(imp.ngg.size()));
             std::printf("written %s (%zu bytes)\n", out.c_str(), imp.ngg.size());
+        }
+        std::printf("ngg-check: all good\n");
+        return 0;
+    }
+
+    if (const std::string in = Arg(argc, argv, "--trees"); !in.empty()) {
+        const std::vector<uint8_t> bytes = ReadFile(in);
+        ngg::SceneData s;
+        if (std::string e = ngg::Read(bytes.data(), bytes.size(), s); !e.empty()) return Fail(in + ": " + e);
+        PlaceholderReport rep;
+        const std::string rtLodArg = Arg(argc, argv, "--rt-lod");
+        if (std::string e = AddPlaceholderTrees(s, rep, rtLodArg.empty() ? 1u : uint32_t(std::atoi(rtLodArg.c_str()))); !e.empty())
+            return Fail(in + ": " + e);
+        std::printf("placeholder trees: %u placement(s) replacing tree-card plants (%u too small, skipped), %.1f-%.1f m tall; "
+                    "LOD triangles", rep.placements, rep.skipped, rep.minHeight, rep.maxHeight);
+        for (uint32_t t : rep.trianglesPerLod) std::printf(" %u", t);
+        std::printf("\n");
+        std::vector<uint8_t> out;
+        if (std::string e = RoundTrip(s, out); !e.empty()) return Fail("with trees: " + e);
+        std::printf("with trees: written, read back the same (%zu bytes)\n", out.size());
+        if (gpu.error.empty()) {
+            if (std::string e = gpu.Load(out, s); !e.empty()) return Fail("with trees: " + e);
+            // What the renderer says it loaded: the models' and the replaced plants' lines.
+            size_t at = 0;
+            while (at < gpu.log.size()) {
+                const size_t end = gpu.log.find('\n', at);
+                const std::string line = gpu.log.substr(at, end == std::string::npos ? std::string::npos : end - at);
+                if (line.find("scene: models") != std::string::npos) std::printf("renderer: %s\n", line.c_str());
+                at = end == std::string::npos ? gpu.log.size() : end + 1;
+            }
+        }
+        if (const std::string o = Arg(argc, argv, "--out"); !o.empty()) {
+            std::ofstream(o, std::ios::binary).write(reinterpret_cast<const char*>(out.data()), std::streamsize(out.size()));
+            std::printf("written %s\n", o.c_str());
         }
         std::printf("ngg-check: all good\n");
         return 0;
