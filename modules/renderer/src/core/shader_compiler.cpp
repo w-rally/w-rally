@@ -34,7 +34,9 @@ HMODULE LoadBeside(const wchar_t* name)
 
 HMODULE LoadFrom(const wchar_t* dir, const wchar_t* name)
 {
-    std::wstring p(dir);
+    // An absolute path: LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR refuses a relative one.
+    wchar_t full[MAX_PATH];
+    std::wstring p(GetFullPathNameW(dir, MAX_PATH, full, nullptr) ? full : dir);
     if (!p.empty() && p.back() != L'\\' && p.back() != L'/') p += L'\\';
     p += name;
     return LoadLibraryExW(p.c_str(), nullptr, LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_DEFAULT_DIRS);
@@ -54,6 +56,10 @@ bool ShaderBytecodeSigned(const void* data, size_t size)
 bool ShaderCompiler::LoadDxc(const wchar_t* dir)
 {
     if (m_createInstance) return true;
+    // dxil.dll FIRST, from the same place: dxcompiler.dll loads it by bare name, and that search would take whichever
+    // comes first on PATH (under MSBuild the Windows SDK's - another validator, other bytes). Already loaded, it is
+    // the one found.
+    m_dxilSigner = GetModuleHandleW(L"dxil.dll") || (dir ? LoadFrom(dir, L"dxil.dll") : LoadBeside(L"dxil.dll"));
     m_dll = dir ? LoadFrom(dir, L"dxcompiler.dll") : LoadBeside(L"dxcompiler.dll");
     if (!m_dll) return false;
     m_createInstance = (void*)GetProcAddress(m_dll, "DxcCreateInstance");
@@ -63,8 +69,6 @@ bool ShaderCompiler::LoadDxc(const wchar_t* dir)
         m_dll = nullptr;
         return false;
     }
-    // dxcompiler.dll loads dxil.dll by name when it signs; loaded here first from the same place, it is found.
-    m_dxilSigner = GetModuleHandleW(L"dxil.dll") || (dir ? LoadFrom(dir, L"dxil.dll") : LoadBeside(L"dxil.dll"));
     return true;
 }
 

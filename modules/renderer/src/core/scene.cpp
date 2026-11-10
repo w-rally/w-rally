@@ -3024,7 +3024,7 @@ bool Scene::LoadFromMemory(ID3D12Device* dev, ID3D12CommandQueue* queue,
         compileAll();
     }
     if (!vs || !ps || !psAlpha || !psBlend) return false;
-    Log("scene: shaders compiled with %s", dxil ? "DXC (shader model 6.0)" : "FXC (shader model 5.1)");
+    Log("scene: shaders %s", dxil ? "DXIL (shader model 6.0)" : "DXBC (FXC, shader model 5.1)");
 
     // NGG_DUMP_PS=<path>: the opaque pixel shader for offline analysis - what Radeon GPU Analyzer needs to compile the
     // pipeline for a given GPU (registers, occupancy, ISA): the PS and VS blobs (DXIL, or DXBC from the fallback), the

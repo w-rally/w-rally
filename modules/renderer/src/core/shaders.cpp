@@ -1,10 +1,13 @@
 #include "shaders.h"
 #include "shader_compiler.h"
+#include "shaders_embedded.h"
 #include "log.h"
 
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <algorithm>
+#include <set>
 #include <mutex>
 #include <vector>
 
@@ -32,15 +35,58 @@ std::wstring Widen(const std::string& s)
     return w;
 }
 
+// A blob over the DLL's own bytes (the embedded shaders): no copy, nothing to free.
+class StaticBlob final : public ID3DBlob
+{
+public:
+    StaticBlob(const void* p, size_t n) : m_p(p), m_n(n) {}
+    HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid, void** out) override
+    {
+        if (!out) return E_POINTER;
+        if (riid == __uuidof(IUnknown) || riid == __uuidof(ID3D10Blob))
+        {
+            *out = static_cast<ID3DBlob*>(this);
+            AddRef();
+            return S_OK;
+        }
+        *out = nullptr;
+        return E_NOINTERFACE;
+    }
+    ULONG STDMETHODCALLTYPE AddRef() override { return InterlockedIncrement(&m_refs); }
+    ULONG STDMETHODCALLTYPE Release() override
+    {
+        const ULONG r = InterlockedDecrement(&m_refs);
+        if (!r) delete this;
+        return r;
+    }
+    LPVOID STDMETHODCALLTYPE GetBufferPointer() override { return const_cast<void*>(m_p); }
+    SIZE_T STDMETHODCALLTYPE GetBufferSize() override { return m_n; }
+
+private:
+    const void* m_p;
+    size_t      m_n;
+    ULONG       m_refs = 1;
+};
+
+const embedded::Shader* FindEmbedded(const std::string& key)
+{
+    const embedded::Shader* end = embedded::kShaders + embedded::kShaderCount;
+    const embedded::Shader* it = std::lower_bound(embedded::kShaders, end, key,
+        [](const embedded::Shader& s, const std::string& k) { return std::strcmp(s.key, k.c_str()) < 0; });
+    return it != end && key == it->key ? it : nullptr;
+}
+
 struct Library
 {
     std::mutex     lock;
     bool           init = false;
+    bool           runtime = false;   // NGG_SHADER_DIR: compiled from the files, not the DLL's
     std::wstring   dir;               // the shader files, with a trailing slash
     ShaderCompiler compiler;
     bool           dxcTried = false;
     int            count = 0, failed = 0;
     double         ms = 0;
+    std::set<std::string> unlisted;   // asked for at run time, not in shaders.txt (said once each)
 
     void Init()
     {
@@ -48,11 +94,12 @@ struct Library
         init = true;
         if (const char* d = std::getenv("NGG_SHADER_DIR"); d && *d)
         {
+            runtime = true;
             dir = Widen(d);
             Log("shaders: compiled at run time from %s (NGG_SHADER_DIR)", d);
         }
         else
-            dir = Widen(NGG_SHADER_SRC_DIR);
+            dir = Widen(NGG_SHADER_SRC_DIR);   // only for NGG_DUMP_PS's source, where the build's folder still is
         if (!dir.empty() && dir.back() != L'\\' && dir.back() != L'/') dir += L'\\';
     }
     bool Dxc()
@@ -114,6 +161,26 @@ ComPtr<ID3DBlob> LoadShader(const char* file, const char* entry, const char* pro
     std::string key = std::string(file) + " " + entry + " " + profile;
     for (const std::string& a : args) key += " " + a;
 
+    if (!lib.runtime)
+    {
+        // The build's (ngg-shaderc): looked up, not compiled.
+        const double t0 = NowMs();
+        const embedded::Shader* s = FindEmbedded(key);
+        lib.ms += NowMs() - t0;
+        ++lib.count;
+        if (!s)
+        {
+            ++lib.failed;
+            Log("shader %s: not in shaders.txt, so not in this build - list it there", key.c_str());
+            return nullptr;
+        }
+        ComPtr<ID3DBlob> out;
+        out.Attach(new StaticBlob(s->data, s->size));
+        Dump(key, out.Get());
+        return out;
+    }
+    if (!FindEmbedded(key) && lib.unlisted.insert(key).second)
+        Log("shaders: %s is not in shaders.txt - a shipped build would not have it", key.c_str());
     if (IsSm6(profile) && !lib.Dxc())
     {
         Log("shader %s: shader model 6 needs dxcompiler.dll", key.c_str());
@@ -142,7 +209,7 @@ bool ShaderModel6Available()
     Library& lib = Lib();
     std::lock_guard<std::mutex> hold(lib.lock);
     lib.Init();
-    return lib.Dxc();
+    return !lib.runtime || lib.Dxc();   // the build's DXIL, or a compiler for it
 }
 
 std::string FlattenedShaderSource(const char* file)
@@ -198,8 +265,8 @@ void LogShaderStats(const char* when)
     Library& lib = Lib();
     std::lock_guard<std::mutex> hold(lib.lock);
     if (!lib.count) return;
-    Log("shaders: %d compiled at run time%s in %.0f ms (%s)", lib.count,
-        lib.failed ? " (some FAILED)" : "", lib.ms, when);
+    Log("shaders: %d %s%s in %.1f ms (%s)", lib.count, lib.runtime ? "compiled at run time" : "precompiled (the DLL's)",
+        lib.failed ? ", some FAILED" : "", lib.ms, when);
     lib.count = lib.failed = 0;
     lib.ms = 0;
 }

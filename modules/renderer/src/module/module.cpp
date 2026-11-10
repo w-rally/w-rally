@@ -13,6 +13,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstring>
 #include <memory>
@@ -27,6 +28,7 @@
 #include "post.h"
 #include "renderer.h"
 #include "scene.h"
+#include "shaders.h"
 #include "sky.h"
 #include "weather.h"
 #include "wrally/iface/renderer.h"
@@ -1131,6 +1133,7 @@ WRALLY_EXPORT Status WRALLY_CALL InitWInterface(uint32_t gameVersion, const Stru
     if (!input.window || !input.width || !input.height) return Status::ErrInvalidArg;
     if (g_logHost.log) return Status::ErrNotSupported;   // one renderer per process (ngg-core's log sink is global)
     try {
+        const auto start = std::chrono::steady_clock::now();
         auto r = std::make_unique<Renderer>();
         r->host = input.host;
         r->hwnd = static_cast<HWND>(input.window);
@@ -1170,7 +1173,9 @@ WRALLY_EXPORT Status WRALLY_CALL InitWInterface(uint32_t gameVersion, const Stru
         if (const char* gd = std::getenv("NGG_GTAO_DENOISE")) r->core.ScreenSpaceAo().SetDenoisePasses(std::atoi(gd));
         if (const char* lm = std::getenv("NGG_LIGHT_MODE")) r->scene.SetLightMode(std::atoi(lm));
         if (const char* lp = std::getenv("NGG_LEGACY_PROFILE")) r->scene.SetLegacyProfile(std::atoi(lp));
-        ngg::core::Log("wrenderer: %ux%u ready", input.width, input.height);
+        ngg::core::LogShaderStats("start-up");
+        ngg::core::Log("wrenderer: %ux%u ready in %.0f ms", input.width, input.height,
+                       std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count());
 
         output.info = {};
         std::snprintf(output.info.id, sizeof output.info.id, "wrenderer");
