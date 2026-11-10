@@ -3044,6 +3044,84 @@ moved away none, one moved back exactly one, a bad batch changes nothing; and th
 - Per-LOD BLASes (the ray tracer has the one LOD), a billboard's normal map, and wind.
 - Bushes and grass, the real models (workstream 4) and the converter's placements (workstream 3).
 
+### 5.0x Shaders and the pipeline cache (2026-11-10, in W-Rally)
+
+The HLSL left the C++ string literals for files, is compiled at build time into `WRenderer.dll`, and every pipeline
+state goes through one cache-aware function. Before: 49 shaders compiled at every start (FXC through `D3DCompile`,
+DXC through `dxcompiler.dll` loaded at run time), no cache of any kind.
+
+**Layout** - `modules/renderer/shaders/`:
+
+| file | what | compiler |
+|---|---|---|
+| `scene.hlsl` | the scene pass: prepass, main (opaque / alpha-tested / blended / G-buffer / reflection rays), shadow and lamp maps, deferred local lights | DXC 6.0 / 6.5, `-HV 2018`; FXC 5.1 fallback in the run-time compile only |
+| `select.hlsl` | the editor's selection, labels, overlay lines | FXC 5.1 |
+| `sky.hlsl`, `env.hlsl`, `aerial.hlsl`, `atmosphere_ms.hlsl`, `probe.hlsl` | the sky, environment probe, aerial volume, multiple-scattering LUT, reflection probe | FXC 5.1 |
+| `post.hlsl`, `meter.hlsl` | TAA, tonemap, upscaler inputs; exposure | FXC 5.1 |
+| `rt_trace/ao/lights/denoise/ao_wide.hlsl` | ray-traced visibility (RayQuery) | DXC 6.5 |
+| `gtao.hlsl` | XeGTAO with our registers and entry points; includes `third_party/xegtao` unchanged | DXC 6.0 |
+| `ui.hlsl` | the game's UI pass | FXC 5.0 `-O3` |
+| `atmosphere.hlsli`, `lights.hlsli`, `rt_common.hlsli`, `brdf.hlsli` | shared: the one atmosphere model (§5.0), the local lights' records and clusters, the RT common part, the scene's GGX / specular AA / G-buffer roughness packing | - |
+
+FXC stays where it was used: porting the 5.1 shaders to DXC changes their code, so it is not free (the brief's
+condition); the build runs FXC through `d3dcompiler_47` as `fxc.exe` would. **`shaders.txt` lists every shader the
+renderer loads** - `<file> <entry> <profile> [arguments]`, 58 lines: the scene's 16 variants, the 8 XeGTAO horizon
+searches (4 qualities x 2 normal sources), `NGG_LIGHTS_REF`'s two references. The line is the key the C++ asks by:
+`LoadShader("scene.hlsl", "PSMain", "ps_6_0", { "-HV", "2018", "-DALPHA_TEST=1" })` (`core/shaders.h`).
+
+**The move was pure**, proven twice: all 58 distinct shaders dumped from the literal build and from the file build
+are byte-identical (`NGG_SHADER_DUMP=<dir>`), and the swap-chain shots (TAA off, `PHYS_DRIVE_STEP`, track 42 RT,
+cascades + XeGTAO, the FXC fallback, FSR Quality, the showroom) match wherever the base matches itself run to run
+(a few early frames and the showroom vary between two base runs too).
+
+**Build** - `ngg-shaderc` (`src/shaderc`) compiles `shaders.txt` with `core/shader_compiler.cpp`, the same code and
+arguments as the run-time compile, in parallel (1 s for all 58), into `build/modules/renderer/generated/
+ngg_shaders.cpp`: byte arrays and a sorted table (`shaders_embedded.h`) plus a hash of the whole set; ~750 KB in
+the DLL. DXC is the vendored one (`third_party/dxc`), so the CI needs nothing new; it signs with the dxil.dll beside
+it and the build fails on unsigned DXIL. One trap found: `dxcompiler.dll` loads `dxil.dll` by bare name, and under
+MSBuild the Windows SDK's came first on PATH - another validator, slightly different containers. `dxil.dll` is now
+loaded first, from our folder. The build hash (`WRENDERER_BUILD_HASH`) covers the shaders.
+
+**Run time** - `LoadShader` hands out the DLL's bytes; the shipped game needs neither `dxcompiler.dll` nor
+`dxil.dll` (ray tracing included - checked from a `cmake --install` tree without them), so the installer no longer
+ships them. **Development:** `NGG_SHADER_DIR=<repo>/modules/renderer/shaders` compiles from the files at run time
+as before (an edit needs a restart, no rebuild; the log names any shader `shaders.txt` does not list - a shipped
+build would not have it). Hot reload (a key) is not built. `NGG_DUMP_PS` (RGA) writes the blobs as before and
+`scene.hlsl` with its includes written out; `NGG_PIX` captures replay as before.
+
+**The pipeline cache** - `CreatePipeline` / `CreateRootSignature` (`core/pipeline_cache.h`) replace the device calls
+at all 47 sites: 72 pipelines, 24 at start-up and 48 at each scene load. Each is named by a hash of its whole
+description (shader bytes, every state field, the root signature's serialised bytes) and kept in an
+`ID3D12PipelineLibrary` in `UserDir()/cache/wrenderer/pipelines.bin`, keyed by vendor / device / subsystem /
+revision (not the LUID: new every boot), the user-mode driver version and the shader set's hash, plus a hash of the
+file's bytes. Any mismatch, damage, or a library the runtime refuses, and it is deleted and built again. Written
+after start-up, after a scene load and at the end. Off with `NGG_PIPELINE_CACHE=off`, under `NGG_SHADER_DIR` and
+under PIX (the capturer's device has the library refused).
+
+**Measured** (Radeon 780M, 1080p, track 42, RT on; `NGG_DRIVER_SHADER_CACHE=clear` empties this application's
+driver caches - developer mode - for a true cold start):
+
+| | before | shaders precompiled | + pipeline library |
+|---|---|---|---|
+| shaders at start-up | 25 compiled, ~1.6 s | lookups, 0 ms | 0 ms |
+| shaders at each scene load | 24 compiled, ~1.8 s | 0 ms | 0 ms |
+| renderer "ready" | ~1.9 s | **0.29 s** | 0.29 s |
+| pipelines, driver cache warm | 16-32 ms | 14 ms | 10 ms |
+| pipelines, driver cache cold | ~8 s on top | ~8 s (2 s start-up + 6 s scene) | ~8 s |
+| whole short replay run, warm | 11.0-13.6 s | 8.4-9.9 s | |
+
+The library saves **nothing** on this driver: AMD's holds 181 KB for the 72 pipelines - no GPU code - and with the
+driver's cache cold a library hit compiles again; per-pipeline `GetCachedBlob` / `CachedPSO` (504 KB) measured the
+same. (`NGG_DRIVER_SHADER_CACHE=off`, which disables instead of clears, made everything slow - 19-29 s - because the
+driver then ignores what the game hands it too.) It stays because it costs nothing and NVIDIA's driver is said to
+keep compiled code in it - unmeasured (9b item 32).
+
+**A first-launch "compiling shaders" screen is not worth it here.** Games show one because they have thousands of
+pipelines; W-Rally has 72, and the driver keeps its own cache, so only the first start after an install or a driver
+update pays: ~2 s before the window's first frame and ~6 s inside the first stage's loading. The cheaper cures are
+creating the pipelines on several threads (the driver compiles them in parallel) and making the scene's 48 at
+start-up in the background, so the stage load finds them made (9b item 31).
+
 ### 5.1 Renderer implications
 
 A track at night wants hundreds of small emitters (street lamps, windows, marshal posts, spectator torches, car
@@ -4309,6 +4387,9 @@ Items parked deliberately, with the reason, so "later" does not become "lost".
 | 29 | **Weather v2: cloud shapes, rain, snow, night** - WET SURFACES DONE (5.0v): the road's wetness darkens, glosses and puddles the ground | v1 (5.0q) does fog, haze and cloud COVER. Partly cloudy is a uniform blend; RBR's cloud textures vs volumetric clouds is undecided. Left of rain: drops, spray, rain on glass, reflections of more than the sky, drying. Snow is carried in the presets but not drawn. Night: RBR has none (its N is NOON, 2026-10-30) - night stages are W-Rally's own design question | user's choice on clouds; night design |
 | 26 | **Delete the established lighting balance** | `sunDiffuse`, `skyAmbient`, `kSpecScale`, the albedo*E convention and the lerp ambient. Kept behind `Z` for one round so the physical default can be compared in-game | the user's in-game look at the physical default |
 | 30 | **Build a new mesh's BLAS in the background** | `KeepRtCurrent` builds the missing BLASes inside the frame and waits (`Rt::Rebuild` -> `EndAndWait`): a car added to a loaded scene stalls its first frame - the game's Garage showroom, measured 2026-11-01, 160-280 ms with the build 110 ms of it (Hyundai i20 R5: 71 meshes, 201,628 triangles, 31 MB). Wanted: the build submitted on its own and fenced, the new instances left out of the TLAS (no RT shadow, or the cascades' for them) until their BLASes are done, then added - the frame never waits. The same on a stage's car load and any added prop. (Model creation's twice-a-material SRV heap rebuild, the other half of that stall, is already batched: `Scene::BeginMaterialBatch`.) | nothing |
+| 31 | **Pipelines made in parallel, the scene's ahead of the stage** (5.0x) | a cold driver cache (first start after an install or a driver update) costs ~8 s on the dev iGPU: 24 pipelines before the first frame, 48 inside the first stage load, one after another. D3D12 pipeline creation is free-threaded; a few threads, and the scene's set started at start-up in the background, would hide most of it | nothing |
+| 32 | **Measure the pipeline library on NVIDIA** (5.0x) | on the AMD iGPU it saves nothing (no GPU code in it); on the RTX test machine: `NGG_DRIVER_SHADER_CACHE=clear` with and without `NGG_PIPELINE_CACHE=off`, the log's "pipelines: ... made in" lines. No win there either: delete `pipeline_cache`'s library and keep the wrappers | the RTX machine |
+| 33 | **Shader hot reload** (5.0x) | `NGG_SHADER_DIR` compiles from the files at start; a key that recreates the pipelines without a restart was optional and is not built | nothing |
 | 21 | ~~Aerial perspective is the last per-pixel atmosphere march~~ **DONE - 5.0f** | 64x64x32 froxel table of in-scatter + transmittance, filled per frame with the same `AtmScatter` and the same 8x3 quadrature; the march stays as the exact reference (`L`). Aerial's share of the main pass 1.9 -> 0.5 ms at the start camera, max 1/255 difference to the march | done |
 
 ## 10. Status of open questions

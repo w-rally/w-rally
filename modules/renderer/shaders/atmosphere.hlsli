@@ -1,24 +1,11 @@
-// ---------------------------------------------------------------------------
-// The atmosphere model, as HLSL source shared by the sky pass and the scene
-// pass.
+// The atmosphere model (core/atmosphere_ms.h, sky.h, aerial.h, env.h), shared by the sky, the environment probe, the
+// aerial volume, the multiple-scattering LUT and the scene pass.
 //
-// ONE implementation on purpose. The sky behind the world and the aerial
-// perspective on the world are the same scattering integral over different
-// segments of the same ray; if they were written twice they would drift, and
-// the seam between them - the horizon - is exactly where a disagreement shows.
-// This project has already paid for a duplicated model once (Wallaby's
-// fixed-function ground blend vs RBR's actual shader, design 8.1).
-//
-// Included as a string and prepended to both shaders rather than compiled
-// separately, because D3DCompile has no include handler here and the cost of
-// wiring one up exceeds the cost of a concatenation.
-// ---------------------------------------------------------------------------
-#pragma once
+// ONE implementation on purpose. The sky behind the world and the aerial perspective on the world are the same
+// scattering integral over different segments of the same ray; if they were written twice they would drift, and the
+// seam between them - the horizon - is exactly where a disagreement shows. This project has already paid for a
+// duplicated model once (Wallaby's fixed-function ground blend vs RBR's actual shader, design 8.1).
 
-namespace ngg {
-namespace core {
-
-const char* const kAtmosphereHlsl = R"(
 
 static const float kPI = 3.14159265;
 
@@ -388,7 +375,3 @@ float3 AtmOctDecode(float2 f)
     return normalize(n);
 }
 
-)";
-
-} // namespace core
-} // namespace ngg

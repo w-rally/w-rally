@@ -1,0 +1,78 @@
+# Every shader the renderer loads (core/shaders.h LoadShader), compiled at build time by ngg-shaderc into WRenderer.dll.
+# One line each: <file> <entry point> <profile> [compiler arguments, as DXC takes them]. The line is the key LoadShader
+# looks the shader up by - the arguments in the order the C++ passes them. Profiles *_5_x compile with FXC (DXBC),
+# *_6_x with DXC (DXIL, signed). A shader missing here fails to load in a shipped build; with NGG_SHADER_DIR set it
+# compiles anyway and the log says it is not listed. docs/ngg-design.md, "Shaders and the pipeline cache".
+
+# --- the scene (scene.cpp): DXC, -HV 2018. FXC's 5.1 fallback is the run-time compile's only (no dxcompiler.dll).
+scene.hlsl  VSMain            vs_6_0  -HV 2018
+scene.hlsl  PSMain            ps_6_0  -HV 2018
+scene.hlsl  PSMain            ps_6_0  -HV 2018 -DALPHA_TEST=1
+scene.hlsl  PSMain            ps_6_0  -HV 2018 -DBLEND=1
+scene.hlsl  PSPrepass         ps_6_0  -HV 2018
+scene.hlsl  PSPrepass         ps_6_0  -HV 2018 -DALPHA_TEST=1
+scene.hlsl  PSGlassMotion     ps_6_0  -HV 2018
+scene.hlsl  PSShadow          ps_6_0  -HV 2018 -DALPHA_TEST=1
+scene.hlsl  PSShadowFlag      ps_6_0  -HV 2018
+scene.hlsl  PSShadowFlag      ps_6_0  -HV 2018 -DALPHA_TEST=1
+scene.hlsl  PSMain            ps_6_0  -HV 2018 -DGBUF=1
+scene.hlsl  PSMain            ps_6_0  -HV 2018 -DALPHA_TEST=1 -DGBUF=1
+scene.hlsl  VSFullscreen      vs_6_0  -HV 2018
+scene.hlsl  PSDeferredLights  ps_6_0  -HV 2018
+# the reflection focus's reflection rays (RayQuery)
+scene.hlsl  PSMain            ps_6_5  -HV 2018 -DNGG_REFL_RAY=1
+scene.hlsl  PSMain            ps_6_5  -HV 2018 -DGBUF=1 -DNGG_REFL_RAY=1
+
+# --- the editor's selection, labels and overlay (scene.cpp)
+select.hlsl  VSSel      vs_5_1
+select.hlsl  PSSel      ps_5_1
+select.hlsl  VSLabel    vs_5_1
+select.hlsl  PSLabel    ps_5_1
+select.hlsl  VSOverlay  vs_5_1
+select.hlsl  PSOverlay  ps_5_1
+
+# --- the sky and the atmosphere
+sky.hlsl            VSMain        vs_5_1
+sky.hlsl            PSMain        ps_5_1
+env.hlsl            VSMain        vs_5_1
+env.hlsl            PSSky         ps_5_1
+env.hlsl            PSDown        ps_5_1
+env.hlsl            PSIrradiance  ps_5_1
+aerial.hlsl         CSMain        cs_5_1
+atmosphere_ms.hlsl  CSMain        cs_5_1
+probe.hlsl          CSResolve     cs_5_1
+probe.hlsl          CSDown        cs_5_1
+
+# --- post and exposure
+post.hlsl   VSMain       vs_5_1
+post.hlsl   PSTaa        ps_5_1
+post.hlsl   PSTonemap    ps_5_1
+post.hlsl   PSUpscaleIn  ps_5_1
+meter.hlsl  CSHistogram  cs_5_1
+meter.hlsl  CSAdapt      cs_5_1
+
+# --- ray-traced visibility (rt.cpp); NGG_LIGHTS_REF=1|2 the local lights' references
+rt_trace.hlsl    CSMain  cs_6_5
+rt_ao.hlsl       CSMain  cs_6_5
+rt_lights.hlsl   CSMain  cs_6_5
+rt_lights.hlsl   CSMain  cs_6_5  -DLIGHTS_REF=1
+rt_lights.hlsl   CSMain  cs_6_5  -DLIGHTS_REF=2
+rt_denoise.hlsl  CSMain  cs_6_5
+rt_ao_wide.hlsl  CSMain  cs_6_5
+
+# --- XeGTAO (gtao.cpp): the passes, then the horizon search per quality (gtao.cpp kSlices/kSteps) and normals
+gtao.hlsl  CSPrefilterDepths16x16  cs_6_0  -DGTAO_SLICES=1 -DGTAO_STEPS=2
+gtao.hlsl  CSDenoisePass           cs_6_0  -DGTAO_SLICES=1 -DGTAO_STEPS=2
+gtao.hlsl  CSDenoiseLastPass       cs_6_0  -DGTAO_SLICES=1 -DGTAO_STEPS=2
+gtao.hlsl  CSGTAO                  cs_6_0  -DGTAO_SLICES=1 -DGTAO_STEPS=2
+gtao.hlsl  CSGTAO                  cs_6_0  -DGTAO_SLICES=2 -DGTAO_STEPS=2
+gtao.hlsl  CSGTAO                  cs_6_0  -DGTAO_SLICES=3 -DGTAO_STEPS=3
+gtao.hlsl  CSGTAO                  cs_6_0  -DGTAO_SLICES=9 -DGTAO_STEPS=3
+gtao.hlsl  CSGTAO                  cs_6_0  -DGTAO_SLICES=1 -DGTAO_STEPS=2 -DXE_GTAO_GENERATE_NORMALS_INPLACE=1
+gtao.hlsl  CSGTAO                  cs_6_0  -DGTAO_SLICES=2 -DGTAO_STEPS=2 -DXE_GTAO_GENERATE_NORMALS_INPLACE=1
+gtao.hlsl  CSGTAO                  cs_6_0  -DGTAO_SLICES=3 -DGTAO_STEPS=3 -DXE_GTAO_GENERATE_NORMALS_INPLACE=1
+gtao.hlsl  CSGTAO                  cs_6_0  -DGTAO_SLICES=9 -DGTAO_STEPS=3 -DXE_GTAO_GENERATE_NORMALS_INPLACE=1
+
+# --- the game's UI (module/ui.cpp), FXC at optimisation level 3
+ui.hlsl  VSMain  vs_5_0  -O3
+ui.hlsl  PSMain  ps_5_0  -O3

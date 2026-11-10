@@ -33,7 +33,6 @@
 #include "probe.h"
 #include "aerial.h"
 #include "lights.h"
-#include "dxc.h"
 #include "atmosphere_ms.h"
 #include "weather.h"
 
@@ -863,7 +862,6 @@ private:
     UINT                                                      m_srvStride = 0;
 
     Microsoft::WRL::ComPtr<ID3D12RootSignature>  m_rootSig;
-    Dxc                      m_dxc;          // the scene's shaders' compiler (FXC the fallback)
     Microsoft::WRL::ComPtr<ID3D12PipelineState>  m_pso;
     // Same shader with clip() enabled, for foliage. A separate PSO rather
     // than a branch: alpha test forces late depth-write, and paying that on

@@ -13,6 +13,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstring>
 #include <memory>
@@ -27,6 +28,8 @@
 #include "post.h"
 #include "renderer.h"
 #include "scene.h"
+#include "pipeline_cache.h"
+#include "shaders.h"
 #include "sky.h"
 #include "weather.h"
 #include "wrally/iface/renderer.h"
@@ -324,6 +327,8 @@ void WRALLY_CALL Destroy(Renderer* r)
 {
     if (!r) return;
     r->dev.WaitForGpu();
+    ngg::core::LogPipelineStats("since");
+    ngg::core::ClosePipelineCache();   // written if pipelines were added (XeGTAO's qualities, made when first used)
     ngg::core::SetLogSink(nullptr);
     g_logHost = {};
     delete r;
@@ -1131,6 +1136,7 @@ WRALLY_EXPORT Status WRALLY_CALL InitWInterface(uint32_t gameVersion, const Stru
     if (!input.window || !input.width || !input.height) return Status::ErrInvalidArg;
     if (g_logHost.log) return Status::ErrNotSupported;   // one renderer per process (ngg-core's log sink is global)
     try {
+        const auto start = std::chrono::steady_clock::now();
         auto r = std::make_unique<Renderer>();
         r->host = input.host;
         r->hwnd = static_cast<HWND>(input.window);
@@ -1138,6 +1144,7 @@ WRALLY_EXPORT Status WRALLY_CALL InitWInterface(uint32_t gameVersion, const Stru
         ngg::core::SetLogSink(&CoreLog);
         auto fail = [&](const char* what) {
             ngg::core::Log("wrenderer: %s", what);
+            ngg::core::ClosePipelineCache();
             ngg::core::SetLogSink(nullptr);
             g_logHost = {};
             return Status::ErrDevice;
@@ -1145,6 +1152,9 @@ WRALLY_EXPORT Status WRALLY_CALL InitWInterface(uint32_t gameVersion, const Stru
         LUID luid{input.adapterLuidLow, input.adapterLuidHigh};
         const bool pick = input.adapterLuidLow || input.adapterLuidHigh;
         if (!r->dev.Create(pick ? &luid : nullptr, (input.flags & kRendererDebugLayer) != 0)) return fail("D3D12 device creation failed");
+        // The pipeline cache (pipeline_cache.h) in the game's cache folder for this module (cache/wrenderer).
+        const char* cacheDir = input.host.files.cacheDir ? input.host.files.cacheDir(input.host.ctx) : nullptr;
+        ngg::core::OpenPipelineCache(r->dev.device.Get(), cacheDir ? cacheDir : "");
         if (!r->sc.Create(r->dev, r->hwnd, input.width, input.height)) return fail("swap chain creation failed");
         if (!r->core.Create(r->dev, kBackBufferFormat, r->sc.width, r->sc.height, !(input.flags & kRendererNoRayTracing)))
             return fail("renderer creation failed");
@@ -1170,7 +1180,11 @@ WRALLY_EXPORT Status WRALLY_CALL InitWInterface(uint32_t gameVersion, const Stru
         if (const char* gd = std::getenv("NGG_GTAO_DENOISE")) r->core.ScreenSpaceAo().SetDenoisePasses(std::atoi(gd));
         if (const char* lm = std::getenv("NGG_LIGHT_MODE")) r->scene.SetLightMode(std::atoi(lm));
         if (const char* lp = std::getenv("NGG_LEGACY_PROFILE")) r->scene.SetLegacyProfile(std::atoi(lp));
-        ngg::core::Log("wrenderer: %ux%u ready", input.width, input.height);
+        ngg::core::LogShaderStats("start-up");
+        ngg::core::LogPipelineStats("start-up");
+        ngg::core::SavePipelineCache();
+        ngg::core::Log("wrenderer: %ux%u ready in %.0f ms", input.width, input.height,
+                       std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count());
 
         output.info = {};
         std::snprintf(output.info.id, sizeof output.info.id, "wrenderer");

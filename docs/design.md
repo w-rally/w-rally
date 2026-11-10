@@ -57,8 +57,8 @@ arena) is not carried over either. It stays in plugin-rbr as the oracle that the
  │
  │  ModuleHost: scans modules/, GetWInterfaceVer → InitWInterface → function tables
  │
- ├── modules/renderer/WRenderer.dll         RendererApi   (ngg-core inside)
- │                     dxcompiler.dll, dxil.dll  (WRenderer's own dependencies, next to it)
+ ├── modules/renderer/WRenderer.dll         RendererApi   (ngg-core inside, its shaders precompiled inside it)
+ │                     FSR / DLSS runtimes  (WRenderer's own dependencies, next to it)
  ├── modules/physics/WPhysicsRBR.dll        PhysicsApi    id "rbr"       (phys/native)
  ├── modules/physics/WPhysics.dll           PhysicsApi    id "wphysics"  (fork of rbr, extended, JSON config)
  ├── modules/physics/<future>.dll           PhysicsApi
@@ -159,7 +159,7 @@ public:
 `Scan` does the following for each `*.dll`:
 
 1. `LoadLibraryExW(path, nullptr, LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_DEFAULT_DIRS)`. A module's
-   dependencies (WRenderer's `dxcompiler.dll`) load from its own folder.
+   dependencies (WRenderer's FSR and DLSS runtimes) load from its own folder.
 2. `GetProcAddress("GetWInterfaceVer")`. If it is missing, this is not a module: unload.
 3. `ver = GetWInterfaceVer(kind)`. If it is 0, unload. If it differs from the game's counter, record the DLL as
    incompatible and unload.
@@ -674,7 +674,7 @@ Output layout, mirroring the runtime:
 
 ```
 W-Rally.exe
-modules/renderer/WRenderer.dll, dxcompiler.dll, dxil.dll
+modules/renderer/WRenderer.dll (+ dxcompiler.dll, dxil.dll in the build tree only: NGG_SHADER_DIR's run-time compile)
 modules/physics/WPhysicsRBR.dll, WPhysics.dll
 modules/audio/WAudio.dll
 content/   config/   cache/   W-Rally.ini

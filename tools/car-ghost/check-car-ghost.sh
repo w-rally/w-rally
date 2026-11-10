@@ -2,7 +2,7 @@
 # check-car-ghost.sh [W-Rally.exe] [out dir]: is the ghost behind the car back?
 #
 # The ghost: the road a driving car uncovers took the car's own RT AO and shadow from the denoisers' history - pale
-# copies of the exhaust and the bumper a frame of travel behind them (2026-11-07, rt.cpp kDenoiseSrc `standing`).
+# copies of the exhaust and the bumper a frame of travel behind them (2026-11-07, shaders/rt_denoise.hlsl `standing`).
 # This replays a drive on track 42 (the Impreza, chase camera; track42-impreza.phr, the user's), TAA off, and shoots
 # every frame of three stretches in view 13 (RT AO) or view 11 (RT sun), each twice: as the game draws it, and with
 # NGG_RT_NO_HISTORY=1 (this frame's rays alone). ghost.py takes the signed difference behind the car: a history may

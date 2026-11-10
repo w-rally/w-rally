@@ -22,7 +22,7 @@
 //
 // Inline RayQuery in a compute shader, not a full DXR pipeline: no shader
 // tables, no ray-gen/miss/hit shaders, one PSO. It needs tier 1.1 and SM 6.5,
-// which is why this is the only thing here compiled by DXC (see dxc.h).
+// which is why it is compiled by DXC (shader_compiler.h).
 // ---------------------------------------------------------------------------
 #pragma once
 
@@ -35,7 +35,6 @@
 #include <stdint.h>
 
 #include "device.h"
-#include "dxc.h"
 #include "lights.h"
 #include "scene.h"
 
@@ -97,7 +96,7 @@ public:
     // The denoisers' histories dropped on the next Trace - a camera's cut, as
     // PostFx::ResetHistory: reprojected, the old view lands on the new one's
     // surfaces wherever the depths happen to agree, and a still camera keeps
-    // that for its long still history (kDenoiseSrc's STILL).
+    // that for its long still history (rt_denoise.hlsl's STILL).
     void ResetHistory() { m_histValid = m_aoHistValid = m_lightHistValid = false; }
 
     // Filled by ReadStats after the caller has waited for the GPU - the same
@@ -155,7 +154,6 @@ public:
 private:
     bool CreateTargets(ID3D12Device* device, UINT width, UINT height);
 
-    Dxc m_dxc;
     Microsoft::WRL::ComPtr<ID3D12RootSignature>  m_rootSig;
     Microsoft::WRL::ComPtr<ID3D12PipelineState>  m_pso;
 
@@ -176,7 +174,7 @@ private:
     Microsoft::WRL::ComPtr<ID3D12Resource>       m_aoHist[2];
     D3D12_RESOURCE_STATES m_aoHistState[2] = {};
     ID3D12Resource*       m_filteredAo = nullptr;
-    // The AO's wide pass (kAoWideSrc in rt.cpp) and its output.
+    // The AO's wide pass (shaders/rt_ao_wide.hlsl) and its output.
     void Widen(ID3D12GraphicsCommandList* list, const DenoiseCB& dc,
                Microsoft::WRL::ComPtr<ID3D12Resource>* hists, D3D12_RESOURCE_STATES* histState,
                UINT pair0, UINT pair1, ID3D12Resource* wide, D3D12_RESOURCE_STATES& wideState, UINT uav,

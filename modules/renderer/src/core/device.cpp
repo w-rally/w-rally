@@ -3,6 +3,7 @@
 
 #include <dxgi1_6.h>
 #include <cstdlib>
+#include <cstring>
 #include <string>
 #include <vector>
 
@@ -155,6 +156,23 @@ bool Device::Create(const LUID* luid, bool enableDebugLayer)
     {
         Log("core: D3D12CreateDevice failed");
         return false;
+    }
+    // NGG_DRIVER_SHADER_CACHE=off|clear: the driver's own shader caches for this application (the implicit ones, D3D's
+    // for the driver and the driver's), for measuring a cold start (docs/ngg-design.md, "Shaders and the pipeline
+    // cache"). off: not used by this process (nothing cleared) - but then the driver may ignore what the game hands
+    // it too; clear: emptied, as after a driver update, and used again - the honest cold start. Developer mode only.
+    if (const char* e = std::getenv("NGG_DRIVER_SHADER_CACHE"); e && (!strcmp(e, "off") || !strcmp(e, "clear")))
+    {
+        const bool clear = !strcmp(e, "clear");
+        ComPtr<ID3D12Device9> d9;
+        HRESULT hr = device.As(&d9);
+        if (SUCCEEDED(hr))
+            hr = d9->ShaderCacheControl(D3D12_SHADER_CACHE_KIND_FLAG_IMPLICIT_D3D_CACHE_FOR_DRIVER |
+                                        D3D12_SHADER_CACHE_KIND_FLAG_IMPLICIT_DRIVER_MANAGED,
+                                        clear ? D3D12_SHADER_CACHE_CONTROL_FLAG_CLEAR
+                                              : D3D12_SHADER_CACHE_CONTROL_FLAG_DISABLE);
+        Log("core: driver shader caches %s%s (NGG_DRIVER_SHADER_CACHE=%s, hr 0x%08x)", SUCCEEDED(hr) ? "" : "NOT ",
+            clear ? "cleared" : "off", e, (unsigned)hr);
     }
 
     // What this adapter can actually do, logged at startup rather than

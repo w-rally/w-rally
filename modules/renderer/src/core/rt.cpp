@@ -1,5 +1,7 @@
 #include "rt.h"
 #include "log.h"
+#include "pipeline_cache.h"
+#include "shaders.h"
 
 #include <string>
 #include <cstdlib>
@@ -13,937 +15,17 @@ namespace core {
 
 namespace {
 
-const char* kRtCommonSrc = R"(
-RaytracingAccelerationStructure gScene        : register(t0);
-Texture2D<float>                gDepth        : register(t1);
-Texture2D<float4>               gNormal       : register(t6);   // prepass, SNORM8
-// For the any-hit test only. Raw views over the SAME buffers the rasteriser
-// draws from, so a leaf is cut out by exactly the pixels that were drawn.
-ByteAddressBuffer               gVerts        : register(t2);
-ByteAddressBuffer               gAlphaIndices : register(t3);
-StructuredBuffer<uint>          gTriMaterial  : register(t4);
-// The editor's dynamic pool, for instances of the meshes it added.
-ByteAddressBuffer               gDynVerts     : register(t7);
-// Per TLAS instance (indexed by InstanceID): where its alpha triangles start
-// in gAlphaIndices/gTriMaterial, what to add to its indices, which vertex
-// buffer they index, and its material when the mesh's triangles do not say.
-// moved: the instance's transform changed since last frame (see Occluded);
-// was0..was3 then its LAST frame's object-to-world rows (row vectors), so a
-// ray's hit point can be put where it was.
-struct Inst { uint triBase; uint vertexBase; uint vb; uint material; uint moved;
-              float3 was0; float3 was1; float3 was2; float3 was3; };
-StructuredBuffer<Inst>          gInst         : register(t8);
-// Foliage: the plant each alpha triangle belongs to (~0 = none), and the
-// prepass's per-pixel plant (+ 1, 0 = none) - scene.cpp FindPlants.
-StructuredBuffer<uint>          gTriPlant     : register(t9);
-Texture2D<uint>                 gPlantId      : register(t10);
-struct Mat { uint tex; float cutoff; };
-StructuredBuffer<Mat>           gMaterials    : register(t5);
-Texture2D                       gTextures[]   : register(t0, space1);
-SamplerState                    gSamp         : register(s0);
-RWTexture2D<float>              gOut          : register(u0);
-RWStructuredBuffer<uint>        gCounters     : register(u1);
 
-cbuffer K : register(b0)
-{
-    row_major float4x4 gInvViewProj;
-    float3 gSunTowards;
-    float  gTMax;
-    uint2  gSize;
-    float  gBias;
-    uint   gStride;         // bytes per vertex; uv0 at +24, colour at +40
-    float3 gCamPos;
-    float  gSunAngle;       // the sun's angular RADIUS in radians; 0 = a point
-    uint   gFrame;          // decorrelates the samples frame to frame
-    float  gAoRadius;       // metres; occluders beyond this do not count
-    uint   gAoRays;         // rays per pixel per frame
-    uint   gPad2;
-    float3 gCamFwd;         // the local lights' clusters: their depth axis (lights.h)
-    float  gLightsOn;
-    float4 gClusterParams;  // tile w, h (px), slices' near plane, their log scale
-};
 
-// A cheap, good integer hash (PCG-style). White noise per pixel per frame;
-// the denoiser does the averaging.
-uint Hash(uint x)
-{
-    x ^= x >> 16; x *= 0x7feb352du; x ^= x >> 15; x *= 0x846ca68bu; x ^= x >> 16;
-    return x;
-}
-float2 Rand2(uint2 pixel, uint frame, uint salt)
-{
-    uint h = Hash(pixel.x * 1973u + pixel.y * 9277u + frame * 26699u + salt * 7919u);
-    return float2((h & 0xFFFFu) / 65535.0, (h >> 16) / 65535.0);
-}
 
-// STRATIFIED over the screen, as the AO's samples are (AoSample): every 4x4
-// tile of pixels takes each of 16 strata once, with a white jitter inside its
-// stratum, the whole pattern shifted every frame. White noise let a 5x5
-// window draw its samples unevenly - one lamp of three for twelve of its
-// pixels and another for five, half the sun's disc for most of them - and
-// that luck was the blotches the denoiser blurred but kept: under the
-// Garage's car, its floor. Stratified, a window's mean has little luck left.
-// StratU: one number (which lamp, Pick), its stratum the tile's (x + 2y,
-// 2x + y) cell in 16ths - any 2x2 block of it spans the four quarters.
-float StratU(uint2 px, uint frame)
-{
-    const uint k = ((px.x + 2u * px.y) & 3u) + 4u * ((2u * px.x + px.y) & 3u);
-    return frac((float(k) + Rand2(px, frame, 101u).x) / 16.0 + float(frame) * 0.6180339887);
-}
-// StratDisc: a point on a light's disc (the square, mapped by the caller); a
-// second bijection of the tile, (x + 3y, 3x + 2y), so which lamp a pixel
-// takes says nothing of where on it the ray goes.
-float2 StratDisc(uint2 px, uint frame)
-{
-    const uint2 cell = uint2((px.x + 3u * px.y) & 3u, (3u * px.x + 2u * px.y) & 3u);
-    const float2 j = Rand2(px, frame, 7u);
-    return frac((float2(cell) + j) * 0.25 + frac(float(frame) * float2(0.7548776662, 0.5698402910)));
-}
 
-// Surface position from depth and the frame's JITTERED matrix, and the
-// prepass normal. Shared by every ray type, because a ray origin that differs
-// between them by half a pixel would be a different bias problem per feature.
-// `plant`: the plant the pixel is a card of, + 1; 0 for anything else. Its
-// normal is then the card's own plane (PSPrepass), w = 0.5.
-bool SurfaceAt(uint2 px, out float3 p, out float3 N, out uint plant)
-{
-    plant = 0u;
-    float depth = gDepth.Load(int3(px, 0));
-    if (depth <= 0.0) return false;                      // reverse-Z far plane: sky
-    float2 uv  = (float2(px) + 0.5) / float2(gSize);
-    float2 ndc = float2(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0);
-    float4 wp  = mul(float4(ndc, depth, 1.0), gInvViewProj);
-    p = wp.xyz / wp.w;
-    const float4 n4 = gNormal.Load(int3(px, 0));
-    N = n4.xyz;
-    plant = (n4.w > 0.25 && n4.w < 0.75) ? gPlantId.Load(int3(px, 0)) : 0u;
-    if (dot(N, N) < 0.25) N = float3(0, 1, 0);
-    N = normalize(N);
-    return true;
-}
 
-// A basis around a direction, for scattering rays about it.
-void Basis(float3 d, out float3 T, out float3 B)
-{
-    float3 up = abs(d.y) < 0.99 ? float3(0, 1, 0) : float3(1, 0, 0);
-    T = normalize(cross(up, d));
-    B = cross(d, T);
-}
 
-// THE ANY-HIT TEST, shared. Opaque geometry (BLAS geometry 0) commits on its
-// own; alpha-tested geometry (geometry 1) surfaces as a candidate and is
-// accepted or refused by the rasteriser's own test - texture alpha times
-// vertex alpha against the material's cutoff - so a leaf blocks exactly the
-// pixels it was drawn with. Returns true if anything blocks the ray, and in
-// `mover` - if what blocked it is an object that moved this frame - how far
-// the point the ray hit moved since last frame and how far along the ray it
-// is, metres; x < 0 when it did not move (Allow).
-//
-// FROM A PLANT (`fromPlant` = its index + 1), that plant's own cards do not
-// count. A tree here is 2-3 crossed flat cards, and a card's ray towards the
-// sun crosses the other cards of the same tree, so visibility flipped card by
-// card: one lit, the one crossing it in shadow - a split no real canopy has.
-// The cascades never showed it because the foliage caster bias (400) is
-// deeper than a tree. Other plants, and everything opaque, still shadow it -
-// EXACTLY its own plant, by id: a first version skipped every plant whose box
-// held the ray's start, and grass under a tree is inside the tree's box, so it
-// lost the tree's shadow and glowed. What shading the plant's own volume gets
-// comes from the PIXEL shader (FoliageSelfShadow), the same on every card.
-// How far from a legacy card its rays ignore other cards, metres: past a grass tuft (~0.5 m) and the near cards of a
-// tree, short of the canopy over the grass.
-static const float kLegacyCardSkip = 1.5;
-bool Occluded(RayDesc ray, bool count, uint fromPlant, out float2 mover)
-{
-    mover = float2(-1.0, 0.0);
-    RayQuery<RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH |
-             RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES> q;
-    // From a legacy card (~0, scene.cpp PSPrepass): the cards within kLegacyCardSkip of the start do not count -
-    // the card's own tuft or tree, whose crossing cards split it card by card - while cards farther off (a
-    // canopy over the grass) still shadow it, as everything opaque does.
-    q.TraceRayInline(gScene, RAY_FLAG_NONE, 0xFF, ray);
-    while (q.Proceed())
-    {
-        if (q.CandidateType() != CANDIDATE_NON_OPAQUE_TRIANGLE) continue;
-        if (fromPlant == 0xFFFFFFFFu && q.CandidateTriangleRayT() < kLegacyCardSkip) continue;
 
-        // Which mesh, and where its alpha triangles live: per INSTANCE now,
-        // because the world, a moved object and an editor-added mesh are
-        // separate BLASes sharing one index buffer and one material table.
-        const Inst  inst = gInst[q.CandidateInstanceID()];
-        const uint  tri  = inst.triBase + q.CandidatePrimitiveIndex();
-        if (fromPlant != 0u && gTriPlant[tri] + 1u == fromPlant)
-        {
-            if (count) InterlockedAdd(gCounters[3], 1);
-            continue;
-        }
-        const uint3 idx  = gAlphaIndices.Load3(tri * 12) + inst.vertexBase;
-        const float2 b   = q.CandidateTriangleBarycentrics();
-        const float3 w   = float3(1.0 - b.x - b.y, b.x, b.y);
 
-        // What a plant casts (scene.cpp Plant::shadow, in its vertices' uv1.y above kPlantShadowPack; a plant's
-        // vertex has a volume normal, shorter than 0.55): grass nothing - its sun and AO shadows are its cards'
-        // outlines - and a bush half its hits, which the denoise turns into a lighter, softer shadow.
-        {
-            const uint at = idx.x * gStride;
-            const float3 pn = asfloat(inst.vb == 0 ? gVerts.Load3(at + 12) : gDynVerts.Load3(at + 12));
-            if (dot(pn, pn) < 0.3025)
-            {
-                const float packed = max(asfloat(inst.vb == 0 ? gVerts.Load(at + 36) : gDynVerts.Load(at + 36)), 0.0);
-                const float mode = floor(packed / 1000.0);
-                if (mode > 0.5 && mode < 1.5) continue;
-                if (mode > 1.5 && frac(sin(dot(ray.Origin + ray.Direction * 7.0 + float(tri) * 0.001,
-                                                float3(12.9898, 78.233, 37.719))) * 43758.5453) < 0.5)
-                    continue;
-            }
-        }
 
-        float2 uv0, uv1, uv2;
-        float  a0, a1, a2;
-        if (inst.vb == 0)
-        {
-            uv0 = asfloat(gVerts.Load2(idx.x * gStride + 24));
-            uv1 = asfloat(gVerts.Load2(idx.y * gStride + 24));
-            uv2 = asfloat(gVerts.Load2(idx.z * gStride + 24));
-            a0 = float(gVerts.Load(idx.x * gStride + 40) >> 24);
-            a1 = float(gVerts.Load(idx.y * gStride + 40) >> 24);
-            a2 = float(gVerts.Load(idx.z * gStride + 40) >> 24);
-        }
-        else
-        {
-            uv0 = asfloat(gDynVerts.Load2(idx.x * gStride + 24));
-            uv1 = asfloat(gDynVerts.Load2(idx.y * gStride + 24));
-            uv2 = asfloat(gDynVerts.Load2(idx.z * gStride + 24));
-            a0 = float(gDynVerts.Load(idx.x * gStride + 40) >> 24);
-            a1 = float(gDynVerts.Load(idx.y * gStride + 40) >> 24);
-            a2 = float(gDynVerts.Load(idx.z * gStride + 40) >> 24);
-        }
-        const float2 tuv = uv0 * w.x + uv1 * w.y + uv2 * w.z;
-        const float  va  = (a0 * w.x + a1 * w.y + a2 * w.z) / 255.0;
 
-        const Mat m = gMaterials[inst.material != 0xFFFFFFFFu ? inst.material : gTriMaterial[tri]];
-        const float ta = gTextures[NonUniformResourceIndex(m.tex)].SampleLevel(gSamp, tuv, 2.0).a;
-        if (ta * va >= m.cutoff)
-        {
-            q.CommitNonOpaqueTriangleHit();
-            if (count) InterlockedAdd(gCounters[2], 1);
-        }
-        else if (count) InterlockedAdd(gCounters[3], 1);
-    }
-    if (q.CommittedStatus() != COMMITTED_TRIANGLE_HIT) return false;
-    const Inst hit = gInst[q.CommittedInstanceID()];
-    if (hit.moved != 0)
-    {
-        const float  t   = q.CommittedRayT();
-        const float3 o   = q.CommittedObjectRayOrigin() + q.CommittedObjectRayDirection() * t;
-        const float3 was = o.x * hit.was0 + o.y * hit.was1 + o.z * hit.was2 + hit.was3;
-        mover = float2(length(ray.Origin + ray.Direction * t - was), t);
-    }
-    return true;
-}
 
-// HOW MUCH HISTORY a pixel may keep when its ray hit a moved object (`mover`,
-// from Occluded), as a history weight; -1 when it hit none. Its history holds
-// the shadow where it was: with weight b the shadow on the ground lags its
-// occluder by b / (1 - b) frames of the occluder's travel. What that costs is
-// the lag against how SOFT the shadow is there - its penumbra, the hit's
-// distance times the light's angular size (`penumbra`, per metre): a lag well
-// inside the penumbra moves the visibility by little, while one frame's own
-// coin tosses are off by far more. So the weight is whatever keeps the lag
-// within kLagShare of the penumbra. A car driving lags a contact shadow by its
-// whole width in one frame: the weight goes to nothing, and the denoiser keeps
-// gBlendMoved, as it always did - no trail. A car on the Garage's turntable
-// moves its sill some 3-7 mm a frame under a soft spotlight's shadow and keeps
-// most of it: at a quarter of history the floor around it boiled every frame
-// it turned (the lights' frame-to-frame noise 6x the standing car's). 0.3:
-// 0.15 left half as much noise again; full history (0.85) a visible lag line
-// along the sill.
-static const float kLagShare = 0.3;
-float Allow(float2 mover, float penumbra)
-{
-    if (mover.x < 0.0) return -1.0;
-    const float w = kLagShare * mover.y * penumbra;
-    return w / (w + mover.x + 1e-6);
-}
-
-// The raw result, and whether a ray of it hit a moved object: R16_FLOAT,
-// negative for "touched" - the value then -(1 + v + 2 k), k the history weight
-// it allows (Allow) in sevenths, rounded down. The denoiser decodes it.
-float EncodeRaw(float v, float allow)
-{
-    return allow < 0.0 ? v : -(1.0 + v + 2.0 * floor(saturate(allow) * 7.0));
-}
-)";
-
-// ---- sun shadow: one ray towards a random point on the sun's disc ---------
-const char* kTraceMainSrc = R"(
-[numthreads(8, 8, 1)]
-void CSMain(uint3 tid : SV_DispatchThreadID)
-{
-    if (tid.x >= gSize.x || tid.y >= gSize.y) return;
-    float3 p, N;
-    uint plant;
-    if (!SurfaceAt(tid.xy, p, N, plant)) { gOut[tid.xy] = 1.0; return; }
-
-    // Normal-offset origin, the normal flipped towards the sun so a two-sided
-    // leaf card is pushed to whichever side the ray leaves from. The offset
-    // grows with distance because depth precision does.
-    if (dot(N, gSunTowards) < 0.0) N = -N;
-    float offset = gBias * (1.0 + length(p - gCamPos) * 0.002);
-
-    // SOFT SHADOWS: the sun is a DISC. A random point on it per pixel per
-    // frame; the denoiser turns the binary answers into the penumbra. Uniform
-    // over the disc (sqrt on the radius), or the centre is over-sampled.
-    float3 dir = gSunTowards;
-    if (gSunAngle > 0.0)
-    {
-        float3 T, B; Basis(dir, T, B);
-        float2 r  = StratDisc(tid.xy, gFrame);
-        float rad = sqrt(r.x) * tan(gSunAngle);
-        float ang = r.y * 6.28318530;
-        dir = normalize(dir + T * (rad * cos(ang)) + B * (rad * sin(ang)));
-    }
-
-    RayDesc ray;
-    ray.Origin    = p + N * offset;
-    ray.Direction = dir;
-    ray.TMin      = 0.0;
-    ray.TMax      = gTMax;
-
-    float2 mover;
-    bool hit = Occluded(ray, true, plant, mover);
-    // The sun's disc: the penumbra per metre of the hit's distance.
-    gOut[tid.xy] = EncodeRaw(hit ? 0.0 : 1.0, Allow(mover, 2.0 * tan(gSunAngle)));
-    InterlockedAdd(gCounters[0], 1);
-    if (hit) InterlockedAdd(gCounters[1], 1);
-}
-)";
-
-// ---- ambient occlusion: cosine-weighted rays over the hemisphere ----------
-const char* kAoMainSrc = R"(
-// STRATIFIED over the screen. A 4x4 tile of pixels takes the 16 cells of a
-// 4x4 grid on the sample square, one each - (x + 2y, 2x + y) mod 4 is a
-// bijection, and any 2x2 block of it already has four different azimuths and
-// four different elevations - with a white jitter inside the cell. The
-// denoiser's AO window spans exactly one period each way (kDenoiseSrc), so on
-// an even surface its mean is a 16-sample STRATIFIED estimate rather than 25
-// independent coin tosses: most of the variance of white noise is the luck
-// of where the samples fall, and this takes the luck out. Every frame the
-// whole grid is shifted on the square (toroidally, by the R2 sequence), which
-// keeps the cells apart and walks each pixel's sample over the hemisphere.
-float2 AoSample(uint2 px, uint frame, uint i, uint n)
-{
-    const uint2  cell = uint2((px.x + 2u * px.y) & 3u, (2u * px.x + px.y) & 3u);
-    const float2 j    = Rand2(px, frame, i + 1u);
-    // n rays split their cell along the azimuth, so they stay apart too.
-    const float2 u    = (float2(cell) + float2((float(i) + j.x) / float(n), j.y)) * 0.25;
-    return frac(u + frac(float(frame) * float2(0.7548776662, 0.5698402910)));
-}
-
-// HOW FAST THE OCCLUSION CHANGES across the ground about an occluder at a
-// distance t, per metre of t: what Allow takes as an AO ray's "penumbra". It
-// was the whole distance (1.0), and behind a driving car - 17 cm a frame at
-// 18 km/h, its bumper some 0.3-1 m from the road its rays leave - that let
-// the road keep over half its history: the car's occlusion where it had been,
-// the road 10-15 grey darker than its rays said, half a metre behind the car;
-// and where the exhaust or the bumper had just uncovered the road, which had
-// no history to lag, it came out right - lighter, in their shape: the GHOST
-// BEHIND THE CAR, a copy of the bumper and the exhaust a frame of travel
-// behind them (view 13, TAA off; tools/car-ghost). The occlusion under a car
-// falls off far faster than its distance: 0.15 leaves a driving car's road
-// nothing to lag (its weight under gBlendMoved, the AO's 0), and the Garage's
-// turning car, its sill a few millimetres a frame, still over two thirds.
-static const float kAoPenumbra = 0.15;
-
-[numthreads(8, 8, 1)]
-void CSMain(uint3 tid : SV_DispatchThreadID)
-{
-    if (tid.x >= gSize.x || tid.y >= gSize.y) return;
-    float3 p, N;
-    uint plant;
-    if (!SurfaceAt(tid.xy, p, N, plant)) { gOut[tid.xy] = 1.0; return; }
-
-    // The prepass normal already faces the camera, which is the side the
-    // ambient light arrives from as far as this pixel is concerned.
-    float offset = gBias * (1.0 + length(p - gCamPos) * 0.002);
-    // A PLANT's card is not a surface facing one way: its lighting uses the
-    // plant's volume normal, and a hemisphere about the card's plane - mostly
-    // horizontal - sends half its rays into the ground. That ground is not
-    // missing sky; the ambient term already lights the card from it (E_ground
-    // * down, scene.cpp). It made grass ~7% darker than under the cascades,
-    // which have no AO. So a plant looks UP: the sky it is occluded from is
-    // the sky, by its neighbours and anything over it. The origin still
-    // leaves the card along its own plane's normal.
-    const float3 axis = plant != 0u ? float3(0.0, 1.0, 0.0) : N;
-    float3 T, B; Basis(axis, T, B);
-
-    // COSINE-WEIGHTED hemisphere: rays are distributed the way the diffuse
-    // ambient integral weights them, so the average of hit/miss IS the
-    // occluded fraction of the ambient term with no extra weighting. The
-    // radius is where this stops being "occlusion" and starts being "global
-    // illumination": an occluder ten metres away blocks sky but a wall that
-    // far away also reflects light we are not simulating, so beyond the radius
-    // the honest answer is "unknown", which is what unoccluded means here.
-    float open = 0.0;
-    float allow = -1.0;       // the least any ray allows (Allow), -1 none touched
-    for (uint i = 0; i < gAoRays; ++i)
-    {
-        float2 r = AoSample(tid.xy, gFrame, i, gAoRays);
-        float phi = r.x * 6.28318530;
-        float cosT = sqrt(1.0 - r.y);            // cosine-weighted
-        float sinT = sqrt(r.y);
-        float3 dir = T * (cos(phi) * sinT) + B * (sin(phi) * sinT) + axis * cosT;
-
-        RayDesc ray;
-        ray.Origin    = p + N * offset;
-        ray.Direction = dir;
-        ray.TMin      = 0.0;
-        ray.TMax      = gAoRadius;
-        float2 mover;
-        if (!Occluded(ray, false, plant, mover)) open += 1.0;
-        // An occluder this far off changes the occlusion over a fraction of
-        // that across the ground: its "penumbra" (kAoPenumbra).
-        const float a = Allow(mover, kAoPenumbra);
-        if (a >= 0.0) allow = allow < 0.0 ? a : min(allow, a);
-    }
-    gOut[tid.xy] = EncodeRaw(open / max(1.0, float(gAoRays)), allow);
-}
-)";
-
-// ---- local lights: one ray to one light, chosen by what it gives (lights.h) -
-// The RATIO ESTIMATOR's stochastic half: among the shadowed lights of this pixel's cluster, one chosen with a
-// probability in proportion to what it gives here (its irradiance's luminance times the cosine - the same terms the
-// scene pass sums), by a single weighted-reservoir pass; then one ray to a random point on its emitter. The 0/1 is
-// then an unbiased estimate of the shadowed fraction of the scene pass's sum, and the denoiser averages it as it does
-// the sun's. No light here: 1, which the scene multiplies into nothing.
-const char* kLightsRegsSrc = R"(
-#define NGG_LIGHTS_T0 t11
-#define NGG_LIGHTS_T1 t12
-#define NGG_LIGHTS_T2 t13
-)";
-
-const char* kLightMainSrc = R"(
-[numthreads(8, 8, 1)]
-void CSMain(uint3 tid : SV_DispatchThreadID)
-{
-    if (tid.x >= gSize.x || tid.y >= gSize.y) return;
-    float3 p, N;
-    uint plant;
-    if (!SurfaceAt(tid.xy, p, N, plant)) { gOut[tid.xy] = 1.0; return; }
-
-    const float viewZ = dot(p - gCamPos, gCamFwd);
-    const uint2 c = gClusters[LightCluster(float2(tid.xy) + 0.5, viewZ, gClusterParams)];
-#if LIGHTS_REF == 2
-    // NGG_LIGHTS_REF=2: the estimator itself, 16 picks per pixel averaged - what the one pick converges to.
-    {
-        float vSum = 0.0;
-        float allow = -1.0;
-        for (uint s = 0; s < 16u; ++s)
-        {
-            float total = 0.0;
-            uint chosen = 0xFFFFFFFFu;
-            for (uint k = 0; k < c.y; ++k)
-            {
-                const uint li = gLightIndex[c.x + k];
-                if ((gLights[li].flags & kLightShadows) == 0u) continue;
-                float3 l;
-                float dist;
-                const float3 E = LightIrradiance(li, p, l, dist);
-                const float w = dot(E, float3(0.2126, 0.7152, 0.0722)) * (plant != 0u ? 1.0 : saturate(dot(N, l)));
-                if (w <= 0.0) continue;
-                total += w;
-                if (Rand2(tid.xy, gFrame * 17u + s, 101u + k).x * total < w) chosen = li;
-            }
-            if (chosen == 0xFFFFFFFFu) { vSum += 1.0; continue; }
-            const float3 lpos = gLights[chosen].pos;
-            const float3 toL = lpos - p;
-            const float3 d0 = toL / max(length(toL), 1e-4);
-            float3 T, B; Basis(d0, T, B);
-            const float2 r = Rand2(tid.xy, gFrame * 17u + s, 7u);
-            const float rad = sqrt(r.x) * gLights[chosen].radius, ang = r.y * 6.28318530;
-            const float3 target = lpos + T * (rad * cos(ang)) + B * (rad * sin(ang));
-            float3 Nn = N;
-            if (dot(Nn, d0) < 0.0) Nn = -Nn;
-            RayDesc ray;
-            ray.Origin = p + Nn * (gBias * (1.0 + length(p - gCamPos) * 0.002));
-            const float3 dv = target - ray.Origin;
-            const float len = length(dv);
-            ray.Direction = dv / max(len, 1e-4);
-            ray.TMin = 0.0;
-            ray.TMax = max(len - 0.02, 0.0);
-            float2 mover;
-            const bool hit = Occluded(ray, false, plant, mover);
-            const float a = Allow(mover, 2.0 * gLights[chosen].radius / max(len, 1e-3));
-            if (a >= 0.0) allow = allow < 0.0 ? a : min(allow, a);
-            vSum += hit ? 0.0 : 1.0;
-        }
-        gOut[tid.xy] = EncodeRaw(vSum / 16.0, allow);
-        return;
-    }
-#elif defined(LIGHTS_REF)
-    // NGG_LIGHTS_REF=1: THE REFERENCE - a ray to EVERY light, the exact weighted visibility. The one-ray estimate below
-    // is checked against it (design 5.4 N3: the lamp lab, the test lamps' shadows).
-    {
-        float sumW = 0.0, sumV = 0.0;
-        float allow = -1.0;
-        for (uint k = 0; k < c.y; ++k)
-        {
-            const uint li = gLightIndex[c.x + k];
-            if ((gLights[li].flags & kLightShadows) == 0u) continue;
-            float3 l;
-            float dist;
-            const float3 E = LightIrradiance(li, p, l, dist);
-            const float w = dot(E, float3(0.2126, 0.7152, 0.0722)) * (plant != 0u ? 1.0 : saturate(dot(N, l)));
-            if (w <= 0.0) continue;
-            const float3 lpos = gLights[li].pos;
-            const float3 toL = lpos - p;
-            const float3 d0 = toL / max(length(toL), 1e-4);
-            float3 T, B; Basis(d0, T, B);
-            const float2 r = Rand2(tid.xy, gFrame, 7u + k);
-            const float rad = sqrt(r.x) * gLights[li].radius, ang = r.y * 6.28318530;
-            const float3 target = lpos + T * (rad * cos(ang)) + B * (rad * sin(ang));
-            float3 Nn = N;
-            if (dot(Nn, d0) < 0.0) Nn = -Nn;
-            RayDesc ray;
-            ray.Origin = p + Nn * (gBias * (1.0 + length(p - gCamPos) * 0.002));
-            const float3 dv = target - ray.Origin;
-            const float len = length(dv);
-            ray.Direction = dv / max(len, 1e-4);
-            ray.TMin = 0.0;
-            ray.TMax = max(len - 0.02, 0.0);
-            float2 mover;
-            const bool hit = Occluded(ray, false, plant, mover);
-            const float a = Allow(mover, 2.0 * gLights[li].radius / max(len, 1e-3));
-            if (a >= 0.0) allow = allow < 0.0 ? a : min(allow, a);
-            sumW += w;
-            sumV += hit ? 0.0 : w;
-        }
-        gOut[tid.xy] = EncodeRaw(sumW > 0.0 ? sumV / sumW : 1.0, allow);
-        return;
-    }
-#endif
-    // Each lamp in proportion to what it gives here: their sum, then the one
-    // whose share of it holds this pixel's stratified number (StratU).
-    float total = 0.0;
-    for (uint k = 0; k < c.y; ++k)
-    {
-        const uint li = gLightIndex[c.x + k];
-        if ((gLights[li].flags & kLightShadows) == 0u) continue;
-        float3 l;
-        float dist;
-        const float3 E = LightIrradiance(li, p, l, dist);
-        // A plant's card takes light from both sides (its shading wraps), any other surface from its front.
-        total += max(dot(E, float3(0.2126, 0.7152, 0.0722)) * (plant != 0u ? 1.0 : saturate(dot(N, l))), 0.0);
-    }
-    if (total <= 0.0) { gOut[tid.xy] = 1.0; return; }
-    float pick = StratU(tid.xy, gFrame) * total;
-    uint chosen = 0xFFFFFFFFu;
-    for (uint k = 0; k < c.y && pick >= 0.0; ++k)
-    {
-        const uint li = gLightIndex[c.x + k];
-        if ((gLights[li].flags & kLightShadows) == 0u) continue;
-        float3 l;
-        float dist;
-        const float3 E = LightIrradiance(li, p, l, dist);
-        const float w = dot(E, float3(0.2126, 0.7152, 0.0722)) * (plant != 0u ? 1.0 : saturate(dot(N, l)));
-        if (w <= 0.0) continue;
-        chosen = li;
-        pick -= w;
-    }
-    if (chosen == 0xFFFFFFFFu) { gOut[tid.xy] = 1.0; return; }
-
-    const float3 lpos = gLights[chosen].pos;
-    const float lradius = gLights[chosen].radius;
-    // A random point on the emitter, a disc of its radius facing this surface: the penumbra, per pixel per frame.
-    const float3 toL = lpos - p;
-    const float3 d0 = toL / max(length(toL), 1e-4);
-    float3 T, B; Basis(d0, T, B);
-    const float2 r = StratDisc(tid.xy, gFrame);
-    const float rad = sqrt(r.x) * lradius, ang = r.y * 6.28318530;
-    const float3 target = lpos + T * (rad * cos(ang)) + B * (rad * sin(ang));
-
-    if (dot(N, d0) < 0.0) N = -N;
-    const float offset = gBias * (1.0 + length(p - gCamPos) * 0.002);
-    RayDesc ray;
-    ray.Origin = p + N * offset;
-    const float3 dv = target - ray.Origin;
-    const float len = length(dv);
-    ray.Direction = dv / max(len, 1e-4);
-    ray.TMin = 0.0;
-    ray.TMax = max(len - 0.02, 0.0);    // short of the emitter itself
-    float2 mover;
-    const bool hit = Occluded(ray, false, plant, mover);
-    // The emitter's disc as seen from here: the penumbra per metre of the hit's distance.
-    gOut[tid.xy] = EncodeRaw(hit ? 0.0 : 1.0, Allow(mover, 2.0 * lradius / max(len, 1e-3)));
-}
-)";
-
-// ---------------------------------------------------------------------------
-// The visibility denoiser. One stochastic ray per pixel is a coin toss inside
-// a penumbra, and the colour TAA cannot be asked to settle it: its variance
-// clip exists to REJECT history that disagrees with the neighbourhood, which is
-// what a converging penumbra looks like, so patches of it never converge and
-// flicker. So the visibility is filtered BEFORE the lighting sees it - a
-// spatial blur of this frame's coin tosses, then a temporal blend with last
-// frame's filtered result reprojected and validated against depth. The
-// lighting then gets a stable term, and the colour TAA has nothing to fight.
-// ---------------------------------------------------------------------------
-const char* kDenoiseSrc = R"(
-Texture2D<float>   gRaw     : register(t0);   // this frame (EncodeRaw: < 0 = hit a moved object)
-// Last frame: x filtered vis, y ndc depth, z 1 = a ray hit a moved object,
-// w 1 = the pixel was a moved object's, else 0.45 x the history weight its
-// rays allowed (Allow) where they hit one.
-Texture2D<float4>  gHist    : register(t1);
-Texture2D<float>   gDepth   : register(t2);
-// Scene::MotionBuffer: w = 1 where an object moved, xy its NDC offset to last
-// frame and z its depth there. Zero (a null view) when there is none.
-Texture2D<float4>  gMotion  : register(t3);
-RWTexture2D<float4> gOut    : register(u0);   // this frame's, the same layout
-
-cbuffer K : register(b0)
-{
-    row_major float4x4 gReproj;   // current NDC+depth -> previous NDC (unjittered)
-    uint2  gSize;
-    float  gBlend;                // history weight
-    float  gValid;
-    float  gMotionOn;
-    float  gBlendMoved;           // history weight where a moved object was hit
-    float  gPeriod4;              // 1 = the window spans 4 pixels each way (the AO's)
-    float  gBlendStill;           // history weight where the pixel stays put on the screen
-};
-
-// The depth one pixel along an axis, as the surface's PLANE predicts it.
-// Reverse-Z NDC depth is linear in screen space across a plane, so the
-// smaller of the two one-sided differences is the slope of the surface this
-// pixel is on (the other may cross a silhouette). A flat 3% depth test on its
-// own rejects most of a road seen at a grazing angle - its depth changes by
-// that much from one row to the next some 30 m out - and the far road then
-// had only its own row to average and its history to lose.
-float Slope(float c, float m, float p)
-{
-    const float a = p - c, b = c - m;
-    const float g = (abs(a) < abs(b)) ? a : b;
-    return (abs(g) < 0.25 * c) ? g : 0.0;          // no plane: a lone pixel
-}
-
-// The group's 12x12 window of depth (negative: a moved object's pixel; 0: sky
-// or off the screen) and raw result, loaded once: 25 taps of three textures
-// per pixel were most of this pass's cost. And whether each moved pixel moves
-// AGAINST THE WORLD there - over half a pixel from where the camera alone
-// takes it (a car standing on the turntable, or parked as the camera passes,
-// does not).
-groupshared float sDepth[144];
-groupshared float sRaw[144];
-groupshared uint  sAgainst[144];
-
-[numthreads(8, 8, 1)]
-void CSMain(uint3 tid : SV_DispatchThreadID, uint3 gid : SV_GroupID, uint gi : SV_GroupIndex)
-{
-    const int2 origin = int2(gid.xy) * 8 - 2;
-    for (uint k = gi; k < 144u; k += 64u)
-    {
-        const int2 q = origin + int2(k % 12u, k / 12u);
-        float d = 0.0, r = 1.0;
-        uint against = 0u;
-        if (all(q >= 0) && all(q < int2(gSize)))
-        {
-            d = max(gDepth.Load(int3(q, 0)), 0.0);
-            r = gRaw.Load(int3(q, 0));
-            const float4 m = (gMotionOn > 0.5) ? gMotion.Load(int3(q, 0)) : float4(0.0, 0.0, 0.0, 0.0);
-            if (m.w > 0.5)
-            {
-                const float2 n = float2((q.x + 0.5) / gSize.x * 2.0 - 1.0, 1.0 - (q.y + 0.5) / gSize.y * 2.0);
-                const float4 c = mul(float4(n, d, 1.0), gReproj);
-                const float2 off = abs(c.w) > 1e-7 ? (n + m.xy - c.xy / c.w) * 0.5 * float2(gSize) : float2(1e3, 1e3);
-                against = dot(off, off) > 0.25 ? 1u : 0u;
-                d = -d;
-            }
-        }
-        sDepth[k]   = d;
-        sRaw[k]     = r;
-        sAgainst[k] = against;
-    }
-    GroupMemoryBarrierWithGroupSync();
-
-    if (tid.x >= gSize.x || tid.y >= gSize.y) return;
-    const int2 px = int2(tid.xy);
-    const int2 lp = int2(tid.xy) - origin;          // px in the window
-    const float depth = abs(sDepth[lp.y * 12 + lp.x]);
-    if (depth <= 0.0) { gOut[px] = float4(1.0, 0.0, 0.0, 0.0); return; }     // sky
-
-    // SPATIAL: a depth-aware 5x5 mean of this frame's tosses. Nine-to-
-    // twenty-five samples cut the per-frame variance by that much before the
-    // temporal blend ever sees it, which is most of why this converges in a
-    // few frames rather than a few dozen. Depth-aware so a shadow does not
-    // bleed across a silhouette onto the thing behind it.
-    //
-    // And IDENTITY-aware: a moved object's pixels and static ones never mix,
-    // even at the same depth. The road just under a bumper is within 3% of
-    // it, so the back of the car - in its own shadow - was averaged into a
-    // thin strip of road every frame, and the history carried each strip off
-    // as the road went by: faint bands, one per frame, behind the car.
-    //
-    // For the AO, whose samples repeat every 4 pixels (AoSample), the outer
-    // ring weighs a half, so each axis spans exactly one period: every cell
-    // of the grid counts once, and the tile leaves no pattern of its own.
-    const bool movedPixel = sDepth[lp.y * 12 + lp.x] < 0.0;
-    // A moving object STANDING here - with the world: stopped on the turntable, parked as the camera passes: one of
-    // its pixels in the 5x5 and none that moves against the world (sAgainst). Only there may its pixels and the
-    // world's pass each other - at a standing car's outline the jitter swaps them, frame by frame. NOT where none is
-    // here now: the object has GONE (as TAA's Gone), and what it uncovered must not take its history. Read as
-    // "nothing here moves against the world", that let the road a car had covered keep the car's own lit visibility:
-    // under a still TV camera (0.95 a frame) and far enough off that the roof is within the depth test of the road,
-    // copies of the car on the shaded road behind it - several, a frame of travel apart (golden replay, --step 0.1).
-    bool against = false, near = false;
-    [unroll] for (int ay = -2; ay <= 2; ++ay)
-    [unroll] for (int ax = -2; ax <= 2; ++ax)
-    {
-        const int k = (lp.y + ay) * 12 + lp.x + ax;
-        near    = near    || sDepth[k] < 0.0;
-        against = against || sAgainst[k] != 0u;
-    }
-    const bool standing = near && !against;
-    float sum = 0.0, sum2 = 0.0, wsum = 0.0;
-    bool  touched = false;      // a ray in the window hit a moved object
-    float allow = 1.0;          // the least history weight those rays allow
-    const int c0 = lp.y * 12 + lp.x;
-    const float2 slope = float2(Slope(depth, abs(sDepth[c0 - 1]),  abs(sDepth[c0 + 1])),
-                                Slope(depth, abs(sDepth[c0 - 12]), abs(sDepth[c0 + 12])));
-    [unroll] for (int y = -2; y <= 2; ++y)
-    [unroll] for (int x = -2; x <= 2; ++x)
-    {
-        const int k = (lp.y + y) * 12 + lp.x + x;
-        const float ds = sDepth[k];
-        float d = abs(ds);
-        if (d <= 0.0) continue;
-        // Linear depth ratio from reverse-Z NDC: 1/z is proportional to
-        // distance, so this is a relative distance test - against the depth
-        // the pixel's plane predicts there (Slope).
-        const float e = max(depth + dot(slope, float2(x, y)), 1e-7);
-        float rel = abs(1.0 / d - 1.0 / e) * e;
-        const bool qMoved = ds < 0.0;
-        float w = (rel < 0.03 && (qMoved == movedPixel || standing)) ? 1.0 : 0.0;
-        if (gPeriod4 > 0.5) w *= (abs(x) == 2 ? 0.5 : 1.0) * (abs(y) == 2 ? 0.5 : 1.0);
-        float r = sRaw[k];
-        if (r < 0.0)
-        {
-            r = -r - 1.0;                       // v + 2 k (EncodeRaw)
-            const float a = floor(r * 0.5);
-            r -= 2.0 * a;
-            if (w > 0.0) { touched = true; allow = min(allow, a / 7.0); }
-        }
-        sum  += r * w;
-        sum2 += r * r * w;
-        wsum += w;
-    }
-    float curr = sum / max(wsum, 1e-6);
-    if (wsum <= 0.0)
-    {
-        const float r = gRaw.Load(int3(px, 0));
-        const float a = floor((-r - 1.0) * 0.5);
-        curr = r < 0.0 ? -r - 1.0 - 2.0 * a : r;
-        touched = r < 0.0;
-        if (touched) allow = a / 7.0;
-    }
-
-    // TEMPORAL: reproject into last frame, homogeneous so the sky/far case
-    // needs no special handling (see post.cpp), and accept the history only
-    // where it landed on the same surface - same linear depth within 3%.
-    // A MOVED object's pixel takes the prepass's motion instead: by the
-    // camera alone it lands where the object is not, and loses its history.
-    float2 uv  = (float2(px) + 0.5) / float2(gSize);
-    float2 ndc = float2(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0);
-    float4 mo  = (gMotionOn > 0.5) ? gMotion.Load(int3(px, 0)) : float4(0, 0, 0, 0);
-    float4 pc  = movedPixel ? float4(ndc + mo.xy, mo.z, 1.0)
-                            : mul(float4(ndc, depth, 1.0), gReproj);
-    float  blend = 0.0;
-    float2 hist = float2(curr, depth);
-    float  histDistrust = 0.0;    // the history's z where it was taken, else 0
-    float  histAllow = 0.0;       // and the weight its rays allowed
-    float  histYouth = 0.0;       // a moved pixel's history: 8 one frame old, down to 0 (w)
-    if (gValid > 0.5 && abs(pc.w) > 1e-7)
-    {
-        float3 pn = pc.xyz / pc.w;
-        float2 puv = float2(pn.x * 0.5 + 0.5, 0.5 - pn.y * 0.5);
-        if (all(puv >= 0.0) && all(puv <= 1.0) && pn.z > 0.0)
-        {
-            int2 pp = int2(puv * float2(gSize));
-            pp = clamp(pp, int2(0, 0), int2(gSize) - 1);
-            float4 h = gHist.Load(int3(pp, 0));
-            // STILL: a pixel that stays put on the screen (under a quarter
-            // pixel of motion, as TAA's `still`) reads its history without
-            // resampling it, so a longer one costs no blur: from 0.85 it goes
-            // to gBlendStill. One ray a pixel, among three spotlights in the
-            // Garage, averaged over 5x5 and a dozen frames left the floor's
-            // shadows blotchy under a camera that never moves, the car
-            // standing or turning; three dozen halve that. The neighbourhood
-            // clamp below still pulls a stale value in at once where every
-            // sample disagrees with it. A moving object's pixel too, by its own
-            // motion: the Garage's car stopped is still, as it was before it
-            // counted as moving at all (scene.cpp movedOf).
-            const float still = saturate(1.0 - length(puv * float2(gSize) - (float2(px) + 0.5)) * 4.0);
-            const float top = lerp(gBlend, gBlendStill, still);
-            // Ground the car uncovered: last frame this spot was the moved
-            // object, so its history is cut below - and that, too, is "a moved
-            // object was involved". Without it the distrust broke on every
-            // such strip: they started over as merely fresh, and TAA, which
-            // reads the distrust (post.cpp), kept the shadow each strip was
-            // first seen in - a band behind the car per frame.
-            if (h.y > 0.0 && h.w > 0.5 && !movedPixel && !standing) { touched = true; allow = 0.0; }
-            const bool histTouched = h.z > 0.5;
-            // IDENTITY first, as TAA's (post.cpp): a moved object's history
-            // never passes to a static pixel, nor the reverse. Depth cannot
-            // tell them apart where they meet - the road just behind a
-            // bumper is within 3% of the bumper - and the back of a car, in
-            // its own shadow, then printed a dark band of itself on the sunlit
-            // road behind it every frame.
-            if (h.y > 0.0 && ((h.w > 0.5) == movedPixel || standing))
-            {
-                float rel = abs(1.0 / h.y - 1.0 / pn.z) * pn.z;
-                // The history is read at the nearest pixel, up to half a pixel
-                // from where this one landed: on a slope that alone is half a
-                // pixel's depth change, which the 3% is widened by.
-                const float tol = 0.03 + 0.5 * (abs(slope.x) + abs(slope.y)) / depth;
-                // MOVED OCCLUDERS. Where a ray hit something that moved -
-                // this frame, or last - the history holds where its shadow
-                // or its occlusion WAS, not where it is: kept at 0.85 it lays
-                // a fading copy on the ground every frame, which is the trail
-                // behind a moving car. The neighbourhood clamp below cannot
-                // catch it under the car, where the ground stays partly in
-                // shadow either way. So there, the history counts for little.
-                // Not on the moved object itself: its pixel was reprojected
-                // by its own motion, and the occluder its rays hit is mostly
-                // itself, moving with it - the car's self-shadow is as valid
-                // a history as a wall's, and dropping it only makes it boil.
-                //
-                // How little is the rays' to say (Allow): the occluder's
-                // travel this frame against the softness of what it casts.
-                // Where none hit it now, the shadow has just left: the weight
-                // its rays allowed then, kept in the history's w.
-                const bool distrust = !movedPixel && (touched || histTouched);
-                if (rel < tol)
-                {
-                    hist.x = h.x;
-                    histAllow = histTouched ? h.w / 0.45 : 0.0;
-                    blend = distrust ? clamp(touched ? allow : histAllow, gBlendMoved, top) : top;
-                    histDistrust = histTouched ? h.z : 0.0;
-                    // A YOUNG moved pixel's history - the car just out from
-                    // behind a panel, which cut it - holds only the frames
-                    // since: a running mean of them, not 0.85 of the first
-                    // one's raw 5x5, which kept the car blotchy for a dozen.
-                    // (A grown one is left to `top`: a standing car's still.)
-                    if (movedPixel)
-                    {
-                        histYouth = round((1.0 - h.w) * 32.0);
-                        const float frames = 9.0 - histYouth;
-                        if (histYouth > 0.0) blend = min(blend, frames / (frames + 1.0));
-                    }
-                }
-            }
-        }
-    }
-    // NEIGHBOURHOOD CLAMP. The depth test above proves the history is the
-    // same SURFACE, not that its lighting is the same: when a shadow moves -
-    // a car's, over a road that did not - the history still holds where it
-    // was, and at 0.85 a dark patch takes a dozen frames to fade, trailing the
-    // car. So the history may not leave the range this frame's own samples
-    // allow: their mean +- their spread, plus a margin for what 25 samples
-    // cannot resolve. Inside a penumbra the spread is wide and nothing
-    // changes; where every sample now says lit (or shadow), a stale opposite
-    // is pulled to within the margin at once.
-    if (blend > 0.0 && wsum > 0.0)
-    {
-        const float sigma  = sqrt(max(0.0, sum2 / wsum - curr * curr));
-        const float spread = sigma + 0.5 / sqrt(wsum);
-        hist.x = clamp(hist.x, curr - spread, curr + spread);
-    }
-    float vis = lerp(curr, hist.x, blend);
-    // The depth for next frame's test, and the two flags it reads: whether a
-    // moved object was involved (so next frame still distrusts this answer)
-    // and whether this pixel is one. z is 0.5 where no history was taken at
-    // all - next frame reads only z > 0.5; kAoWideSrc reads both.
-    //
-    // The distrust FADES: 1 where a ray hit a moved object this frame, then
-    // 0.125 less each frame after, so the four frames after a shadow has left
-    // still take only gBlendMoved of the past. One frame of it was not
-    // enough: the few percent of old shadow it kept then faded at gBlend, and
-    // stayed over 1% for half a dozen frames - a trail too faint to see on a
-    // textured road, but there.
-    const float fresh = blend <= 0.0 ? 0.5 : 0.0;
-    const float fading = histDistrust - 0.125;
-    const float level = touched ? 1.0 : (fading > 0.5 ? fading : fresh);
-    const float allowed = touched ? allow : (fading > 0.5 ? histAllow : 0.0);
-    // A moved pixel's w counts its history's youth down in 32nds, 8 where it
-    // started over: 0.75 to 1, still > 0.5 for the identity tests.
-    const float youth = blend <= 0.0 ? 8.0 : max(histYouth - 1.0, 0.0);
-    gOut[px] = float4(vis, depth, level, movedPixel ? 1.0 - youth / 32.0 : 0.45 * allowed);
-}
-)";
-
-// ---------------------------------------------------------------------------
-// The AO's WIDE pass, after its denoise. Where the history was cut - a ray hit
-// a moved object (0.25 of it, so the car leaves no trail) or none was found
-// (disoccluded, behind the car) - the answer is little more than one frame's
-// 5x5, and the ground around a moving car boiled. So there, and only there,
-// the denoised result is averaged again over a 13x13 footprint: 5x5 taps 3
-// pixels apart, the same depth and identity rules, static pixels only. It is
-// spatial, so it cannot trail; it blurs only what had no history to lose.
-// Not fed back: the history stays the 5x5's, so the next frame's clamp and
-// blend see what they always did.
-// ---------------------------------------------------------------------------
-const char* kAoWideSrc = R"(
-Texture2D<float4>  gIn   : register(t1);   // this frame's denoised AO (kDenoiseSrc's layout)
-RWTexture2D<float> gWide : register(u0);
-
-float Slope(float c, float m, float p)       // as kDenoiseSrc's
-{
-    const float a = p - c, b = c - m;
-    const float g = (abs(a) < abs(b)) ? a : b;
-    return (abs(g) < 0.25 * c) ? g : 0.0;
-}
-
-cbuffer K : register(b0)
-{
-    row_major float4x4 gReproj;
-    uint2  gSize;
-};
-
-[numthreads(8, 8, 1)]
-void CSMain(uint3 tid : SV_DispatchThreadID)
-{
-    if (tid.x >= gSize.x || tid.y >= gSize.y) return;
-    const int2 px = int2(tid.xy);
-    const float4 c = gIn.Load(int3(px, 0));
-    // Static, with a cut or no history: the rest keep their own answer. A
-    // slow occluder's pixels too are widened unless their rays allowed all of
-    // the history (w 0.45, Allow): under the Garage's turning car they keep
-    // 0.7-0.85 of it, a third of what a still pixel keeps (gBlendStill), and
-    // were the grainiest floor there - widened, smoother than the car standing.
-    //
-    // And a moved object's pixels while their history is young (w < 1, its
-    // youth, kDenoiseSrc): the car come out from behind a panel had a single
-    // frame's 5x5 of the sky's occlusion, then a few frames' - the whole side
-    // of it blotchy. Widened over its own pixels only, less as it ages.
-    const bool moved = c.w > 0.5;
-    const float youth = moved ? (1.0 - c.w) * 4.0 : 1.0;     // 1 fresh .. 0 grown up
-    if (c.y <= 0.0 || (moved ? youth <= 0.0 : (c.z < 0.25 || c.w > 0.44))) { gWide[px] = c.x; return; }
-    const float2 slope = float2(Slope(c.y, gIn.Load(int3(px - int2(1, 0), 0)).y, gIn.Load(int3(px + int2(1, 0), 0)).y),
-                                Slope(c.y, gIn.Load(int3(px - int2(0, 1), 0)).y, gIn.Load(int3(px + int2(0, 1), 0)).y));
-    float sum = c.x, wsum = 1.0;
-    [unroll] for (int y = -2; y <= 2; ++y)
-    [unroll] for (int x = -2; x <= 2; ++x)
-    {
-        if (x == 0 && y == 0) continue;
-        const int2 q = px + int2(x, y) * 3;
-        if (any(q < 0) || any(q >= int2(gSize))) continue;
-        const float4 h = gIn.Load(int3(q, 0));
-        if (h.y <= 0.0 || (h.w > 0.5) != moved) continue;
-        const float e = max(c.y + dot(slope, float2(x, y) * 3.0), 1e-7);
-        if (abs(1.0 / h.y - 1.0 / e) * e >= 0.03) continue;
-        sum += h.x; wsum += 1.0;
-    }
-    gWide[px] = lerp(c.x, sum / wsum, youth);
-}
-)";
 
 struct DenoiseCB
 {
@@ -1098,7 +180,7 @@ enum { kSlotTlas = 0, kSlotDepth = 1, kSlotOut = 2, kSlotCounters = 3,
        kSlotDynVerts = 23, kSlotInst = 24,
        // The scene's motion target, for the denoiser (a null view when none).
        kSlotMotion = 25,
-       // The AO's wide pass output (kAoWideSrc).
+       // The AO's wide pass output (rt_ao_wide.hlsl).
        kSlotAoWideUav = 26,
        // Foliage (scene.cpp FindPlants): the plant of each alpha triangle and
        // the prepass's plant per pixel, for the rays that must not hit their
@@ -1108,7 +190,7 @@ enum { kSlotTlas = 0, kSlotDepth = 1, kSlotOut = 2, kSlotCounters = 3,
        // shape.
        kSlotLightOut = 29, kSlotLightCounters = 30,
        kSlotLightPair0 = 31, kSlotLightPair1 = 33, kSlotLightHistUav0 = 35, kSlotLightHistUav1 = 36,
-       // Their wide pass output (kAoWideSrc, as the AO's).
+       // Their wide pass output (rt_ao_wide.hlsl, as the AO's).
        kSlotLightWideUav = 37,
        kSlotTextures = 38 };
 
@@ -1125,7 +207,7 @@ bool Rt::Create(Device& dev)
             dev.rtTier / 10, dev.rtTier % 10, dev.shaderModel >> 4, dev.shaderModel & 0xF);
         return false;
     }
-    if (!m_dxc.Load()) return false;
+    if (!ShaderModel6Available()) return false;
 
     ComPtr<ID3D12Device5> dev5;
     if (FAILED(dev.device.As(&dev5)))
@@ -1208,41 +290,39 @@ bool Rt::Create(Device& dev)
         Log("rt: root signature: %s", err ? (const char*)err->GetBufferPointer() : "?");
         return false;
     }
-    if (FAILED(dev.device->CreateRootSignature(0, sig->GetBufferPointer(), sig->GetBufferSize(),
+    if (FAILED(CreateRootSignature(dev.device, 0, sig->GetBufferPointer(), sig->GetBufferSize(),
                                                IID_PPV_ARGS(&m_rootSig))))
         return false;
 
-    ComPtr<ID3DBlob> cs = m_dxc.Compile(std::string(kRtCommonSrc) + kTraceMainSrc,
-                                        L"CSMain", L"cs_6_5", "ngg_rt_trace");
+    ComPtr<ID3DBlob> cs = LoadShader("rt_trace.hlsl", "CSMain", "cs_6_5");
     if (!cs) return false;
 
     D3D12_COMPUTE_PIPELINE_STATE_DESC pd = {};
     pd.pRootSignature = m_rootSig.Get();
     pd.CS = { cs->GetBufferPointer(), cs->GetBufferSize() };
-    if (FAILED(dev.device->CreateComputePipelineState(&pd, IID_PPV_ARGS(&m_pso))))
+    if (FAILED(CreatePipeline(dev.device, &pd, IID_PPV_ARGS(&m_pso))))
     {
         Log("rt: compute pipeline creation failed - the DXIL was probably rejected");
         return false;
     }
 
-    ComPtr<ID3DBlob> aocs = m_dxc.Compile(std::string(kRtCommonSrc) + kAoMainSrc,
-                                          L"CSMain", L"cs_6_5", "ngg_rt_ao");
+    ComPtr<ID3DBlob> aocs = LoadShader("rt_ao.hlsl", "CSMain", "cs_6_5");
     if (aocs)
     {
         pd.CS = { aocs->GetBufferPointer(), aocs->GetBufferSize() };
-        if (FAILED(dev.device->CreateComputePipelineState(&pd, IID_PPV_ARGS(&m_psoAo))))
+        if (FAILED(CreatePipeline(dev.device, &pd, IID_PPV_ARGS(&m_psoAo))))
             Log("rt: AO pipeline creation failed - shadows still work, AO does not");
     }
 
-    // NGG_LIGHTS_REF=1|2: the local lights' shadows by a reference (kLightMainSrc) - for checking, never for play.
+    // NGG_LIGHTS_REF=1|2: the local lights' shadows by a reference (rt_lights.hlsl) - for checking, never for play.
     const char* refEnv = std::getenv("NGG_LIGHTS_REF");
-    const char* lightsRef = !refEnv ? "" : refEnv[0] == '2' ? "#define LIGHTS_REF 2\n" : "#define LIGHTS_REF 1\n";
-    ComPtr<ID3DBlob> lcs = m_dxc.Compile(std::string(lightsRef) + kRtCommonSrc + kLightsRegsSrc + kLightsHlsl + kLightMainSrc,
-                                         L"CSMain", L"cs_6_5", "ngg_rt_lights");
+    ComPtr<ID3DBlob> lcs = !refEnv ? LoadShader("rt_lights.hlsl", "CSMain", "cs_6_5")
+                         : LoadShader("rt_lights.hlsl", "CSMain", "cs_6_5",
+                                      { refEnv[0] == '2' ? "-DLIGHTS_REF=2" : "-DLIGHTS_REF=1" });
     if (lcs)
     {
         pd.CS = { lcs->GetBufferPointer(), lcs->GetBufferSize() };
-        if (FAILED(dev.device->CreateComputePipelineState(&pd, IID_PPV_ARGS(&m_psoLights))))
+        if (FAILED(CreatePipeline(dev.device, &pd, IID_PPV_ARGS(&m_psoLights))))
             m_psoLights.Reset();
     }
     if (!m_psoLights) Log("rt: local-light pipeline creation failed - local lights go unshadowed");
@@ -1282,29 +362,29 @@ bool Rt::Create(Device& dev)
         drs.pParameters = dp;
         ComPtr<ID3DBlob> dsig, derr;
         if (FAILED(D3D12SerializeRootSignature(&drs, D3D_ROOT_SIGNATURE_VERSION_1, &dsig, &derr)) ||
-            FAILED(dev.device->CreateRootSignature(0, dsig->GetBufferPointer(), dsig->GetBufferSize(),
+            FAILED(CreateRootSignature(dev.device, 0, dsig->GetBufferPointer(), dsig->GetBufferSize(),
                                                    IID_PPV_ARGS(&m_denoiseRootSig))))
         {
             Log("rt: denoise root signature failed");
             return false;
         }
-        ComPtr<ID3DBlob> dcs = m_dxc.Compile(kDenoiseSrc, L"CSMain", L"cs_6_5", "ngg_rt_denoise");
+        ComPtr<ID3DBlob> dcs = LoadShader("rt_denoise.hlsl", "CSMain", "cs_6_5");
         if (!dcs) return false;
         D3D12_COMPUTE_PIPELINE_STATE_DESC dpd = {};
         dpd.pRootSignature = m_denoiseRootSig.Get();
         dpd.CS = { dcs->GetBufferPointer(), dcs->GetBufferSize() };
-        if (FAILED(dev.device->CreateComputePipelineState(&dpd, IID_PPV_ARGS(&m_psoDenoise))))
+        if (FAILED(CreatePipeline(dev.device, &dpd, IID_PPV_ARGS(&m_psoDenoise))))
         {
             Log("rt: denoise pipeline creation failed");
             return false;
         }
-        // The AO's wide pass, on the same root signature (kAoWideSrc). Without
+        // The AO's wide pass, on the same root signature (rt_ao_wide.hlsl). Without
         // it the AO is the denoise's own output, as before.
-        ComPtr<ID3DBlob> wcs = m_dxc.Compile(kAoWideSrc, L"CSMain", L"cs_6_5", "ngg_rt_ao_wide");
+        ComPtr<ID3DBlob> wcs = LoadShader("rt_ao_wide.hlsl", "CSMain", "cs_6_5");
         if (wcs)
         {
             dpd.CS = { wcs->GetBufferPointer(), wcs->GetBufferSize() };
-            if (FAILED(dev.device->CreateComputePipelineState(&dpd, IID_PPV_ARGS(&m_psoAoWide))))
+            if (FAILED(CreatePipeline(dev.device, &dpd, IID_PPV_ARGS(&m_psoAoWide))))
                 m_psoAoWide.Reset();
         }
         if (!m_psoAoWide) Log("rt: AO wide pass pipeline creation failed - the AO goes unwidened");
@@ -1694,7 +774,7 @@ bool Rt::CreateTargets(ID3D12Device* dev, UINT width, UINT height)
     // The filtered history, two of them, RGBA16F: filtered visibility, the
     // NDC depth it was computed at - so next frame can tell whether a
     // reprojected sample landed on the same surface - and two flags (a ray
-    // hit a moved object; the pixel is a moved object's), see kDenoiseSrc.
+    // hit a moved object; the pixel is a moved object's), see rt_denoise.hlsl.
     D3D12_RESOURCE_DESC hd2 = d;
     hd2.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
     for (int i = 0; i < 2; ++i)
@@ -2038,7 +1118,7 @@ void Rt::Trace(Device& dev, ID3D12GraphicsCommandList* list, ID3D12Resource* dep
     }
     if (m_timestamps) list->EndQuery(m_timestamps.Get(), D3D12_QUERY_TYPE_TIMESTAMP, 2);
 
-    // LOCAL LIGHTS: one ray per pixel to one of them (kLightMainSrc), into their own output.
+    // LOCAL LIGHTS: one ray per pixel to one of them (rt_lights.hlsl), into their own output.
     if (!doLights) m_lightHistValid = false;
     if (doLights)
     {
@@ -2065,7 +1145,7 @@ void Rt::Trace(Device& dev, ID3D12GraphicsCommandList* list, ID3D12Resource* dep
         // car's own shadow from boiling, little enough that a stale one is
         // gone in two or three frames (0.25^3 < 2%).
         dc.blendMoved = 0.25f;
-        // A pixel still on the screen: three times the samples (see kDenoiseSrc's STILL).
+        // A pixel still on the screen: three times the samples (see rt_denoise.hlsl's STILL).
         dc.blendStill = 0.95f;
         // The sun's and the lamps' samples are stratified over 4x4 tiles (StratU, StratDisc), as the AO's.
         dc.period4 = 1.0f;
@@ -2143,7 +1223,7 @@ void Rt::Trace(Device& dev, ID3D12GraphicsCommandList* list, ID3D12Resource* dep
 }
 
 // Spatial + temporal filter of one binary-per-frame ray result; see
-// kDenoiseSrc. Generic over which pair of history textures it works on, so the
+// rt_denoise.hlsl. Generic over which pair of history textures it works on, so the
 // shadow and the AO share the shader, the root signature and the reasoning.
 void Rt::Denoise(ID3D12GraphicsCommandList* list, const DenoiseCB& base, ID3D12Resource* raw,
                  UINT pair0, UINT pair1, UINT uav0, UINT uav1,
@@ -2197,7 +1277,7 @@ void Rt::Denoise(ID3D12GraphicsCommandList* list, const DenoiseCB& base, ID3D12R
     histValid = true;
 }
 
-// kAoWideSrc over this frame's denoised result (the history just written, of
+// rt_ao_wide.hlsl over this frame's denoised result (the history just written, of
 // the pair pair0/pair1), into `wide`, which then is what the scene reads.
 void Rt::Widen(ID3D12GraphicsCommandList* list, const DenoiseCB& dc,
                Microsoft::WRL::ComPtr<ID3D12Resource>* hists, D3D12_RESOURCE_STATES* histState,
