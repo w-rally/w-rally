@@ -85,7 +85,6 @@ std::string CheckModels(const ModelLibrary& m, size_t textureCount)
         const ModelLod& l = m.lods[i];
         if (l.submeshCount == 0 || uint64_t(l.firstSubmesh) + l.submeshCount > m.submeshes.size())
             return "model LOD " + std::to_string(i) + ": its submeshes run past them";
-        if (!(l.maxDistance > 0.0f)) return "model LOD " + std::to_string(i) + ": no distance";
     }
     for (size_t i = 0; i < m.models.size(); ++i) {
         const ModelRecord& r = m.models[i];
@@ -94,9 +93,24 @@ std::string CheckModels(const ModelLibrary& m, size_t textureCount)
         for (size_t j = 0; j < i; ++j)
             if (!std::strcmp(m.models[j].name, r.name)) return at + ": the name " + r.name + " twice";
         if (r.lodCount == 0 || uint64_t(r.firstLod) + r.lodCount > m.lods.size()) return at + ": its LODs run past them";
-        for (uint32_t k = 1; k < r.lodCount; ++k)
-            if (!(m.lods[r.firstLod + k].maxDistance > m.lods[r.firstLod + k - 1].maxDistance))
-                return at + ": its LOD distances do not increase";
+        // The ray-only LOD (kModelLodRayOnly): one at most, the last, after a drawn one, named by rtLod, not a
+        // billboard, no distance. The drawn LODs before it keep their rules.
+        const ModelLod* L = m.lods.data() + r.firstLod;
+        uint32_t rayOnly = 0;
+        for (uint32_t k = 0; k < r.lodCount; ++k) rayOnly += (L[k].flags & kModelLodRayOnly) ? 1 : 0;
+        if (rayOnly > 1) return at + ": two ray-only LODs";
+        const uint32_t drawn = r.lodCount - rayOnly;
+        if (rayOnly) {
+            const ModelLod& ray = L[r.lodCount - 1];
+            if (!(ray.flags & kModelLodRayOnly)) return at + ": its ray-only LOD is not its last";
+            if (!drawn) return at + ": no drawn LOD before its ray-only one";
+            if (ray.flags & kModelLodBillboard) return at + ": its ray-only LOD is also a billboard";
+            if (ray.maxDistance != 0.0f) return at + ": its ray-only LOD has a distance";
+            if (r.rtLod != r.lodCount - 1) return at + ": its rtLod does not name its ray-only LOD";
+        }
+        for (uint32_t k = 0; k < drawn; ++k)
+            if (!(L[k].maxDistance > (k ? L[k - 1].maxDistance : 0.0f)))
+                return at + (k ? ": its LOD distances do not increase" : ": its first LOD has no distance");
         if (r.rtLod >= r.lodCount || (m.lods[r.firstLod + r.rtLod].flags & kModelLodBillboard))
             return at + ": its ray-traced LOD is past its LODs or a billboard";
         if (r.fadeWidth < 0.0f) return at + ": a negative fade";
@@ -389,8 +403,9 @@ std::string Read(const void* bytes, size_t n, SceneData& out)
             ModelChunkHeader mh{};
             if (size < sizeof mh) return "NGGD is truncated";
             std::memcpy(&mh, d, sizeof mh);
-            if (mh.version != kModelVersion)
-                return "NGGD version " + std::to_string(mh.version) + " (this reads " + std::to_string(kModelVersion) + ")";
+            if (mh.version < kModelVersionMin || mh.version > kModelVersion)
+                return "NGGD version " + std::to_string(mh.version) + " (this reads " + std::to_string(kModelVersionMin) + "-" +
+                       std::to_string(kModelVersion) + ")";
             const uint64_t need = sizeof mh + uint64_t(mh.modelCount) * sizeof(ModelRecord) + uint64_t(mh.lodCount) * sizeof(ModelLod) +
                                   uint64_t(mh.submeshCount) * sizeof(ModelSubmesh) + uint64_t(mh.materialCount) * sizeof(Material) +
                                   uint64_t(mh.vertexCount) * sizeof(Vertex) + uint64_t(mh.indexCount) * 4;
@@ -409,6 +424,10 @@ std::string Read(const void* bytes, size_t n, SceneData& out)
             grab(m.materials, mh.materialCount);
             grab(m.vertices, mh.vertexCount);
             grab(m.indices, mh.indexCount);
+            // Version 1 had no ray-only LOD: a v1 chunk carrying the flag was written by nobody this reader knows.
+            if (mh.version < 2)
+                for (const ModelLod& l : m.lods)
+                    if (l.flags & kModelLodRayOnly) return "NGGD version 1 with a ray-only LOD";
         } else if (f == ChunkPlacements()) {
             PlacementChunkHeader ph{};
             if (size < sizeof ph) return "NGGE is truncated";

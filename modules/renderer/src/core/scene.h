@@ -915,7 +915,10 @@ private:
     {
         std::string name;
         std::vector<ModelLodRt> lods;
-        float bmin[3] = {}, bmax[3] = {};
+        // The DRAWN LODs are lods[0 .. drawLods): all of them, or all but a ray-only last one (kModelLodRayOnly) -
+        // which only the ray tracer sees (rtLod names it). The distance pick, the crossfade and a cell's reach stop here.
+        uint32_t drawLods = 0;
+        float bmin[3] = {}, bmax[3] = {};         // over the drawn LODs (not the billboard, not a ray-only LOD)
         float fade = 0.0f;
         uint32_t rtLod = 0;
     };

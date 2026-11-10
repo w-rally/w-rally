@@ -2460,9 +2460,18 @@ void Scene::DescribeModelsRt(std::vector<uint64_t>& meshes, std::vector<RtInstan
         m_rtModelMeshes.clear();
         auto key = [&](uint32_t mesh) { return kRtDynamic | ((uint64_t)m_rtGeneration << 32) | mesh; };
         auto live = [&](uint32_t mesh) { return mesh && mesh <= m_dynMeshes.size() && m_dynMeshes[mesh - 1].alive; };
+        // (lods[rtLod] is a drawn LOD or the model's ray-only one, ngg_format.h kModelLodRayOnly - the same here.)
+        size_t blasTris = 0, rayOnly = 0;
         for (const ModelDef& m : m_models)
+        {
+            rayOnly += m.rtLod >= m.drawLods ? 1 : 0;
             for (const ModelSub& s : m.lods[m.rtLod].subs)
-                if (live(s.mesh)) m_rtModelMeshes.push_back(key(s.mesh));
+                if (live(s.mesh))
+                {
+                    m_rtModelMeshes.push_back(key(s.mesh));
+                    blasTris += m_dynMeshes[s.mesh - 1].indexCount / 3;
+                }
+        }
         for (const PlacementRt& p : m_placements)
         {
             if (p.removed) continue;
@@ -2481,6 +2490,9 @@ void Scene::DescribeModelsRt(std::vector<uint64_t>& meshes, std::vector<RtInstan
                 m_rtModelInstances.push_back(d);
             }
         }
+        if (m_rtModelInstancesDirty && !m_models.empty())
+            Log("scene: models ray traced - %zu BLAS mesh(es), %zu triangle(s) (%zu model(s) from a ray-only LOD); "
+                "%zu TLAS instance(s)", m_rtModelMeshes.size(), blasTris, rayOnly, m_rtModelInstances.size());
         m_rtModelInstancesDirty = false;
         m_rtModelGen = m_rtGeneration;
     }

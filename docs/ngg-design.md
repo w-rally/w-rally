@@ -2965,6 +2965,22 @@ draw was `DrawIndexedInstanced(n, 1, ...)`, and there was no level of detail.
   these numbers. `recordSize` lets a later record grow (a full matrix, when a producer needs one).
 - `kMaterialFoliage` (bit 4): alpha-tested, two-sided, lit with the transmission and wrap terms (5.0, "black
   foliage"), its alpha edge hashed.
+- **A ray-tracing-only LOD** (`kModelLodRayOnly`, `ModelLod` flag bit 1; NGGD **version 2**, 2026-11-10, the user's
+  decision in the vegetation plan, "a ray-tracing-only LOD"): the mesh the BLAS is built from and nothing else - never
+  drawn (no prepass, main pass or shadow map), never picked by distance. For a coarse shell with few alpha layers
+  (workstream 4's `<id>_RT`: a ray crosses 2 alpha surfaces of it against 18-24 of LOD0's). The rules, each refusing
+  the chunk (the cards drawn instead): at most one per model and it is the model's LAST LOD; at least one drawn LOD
+  before it; `rtLod` names it whenever it exists; it is not also a billboard; its `maxDistance` is 0. The drawn LODs
+  before it keep every rule they had (nearest first, `maxDistance` above 0 and increasing, the last drawn one's is how
+  far the model is drawn). `ModelRecord`'s box covers the DRAWN LODs only - not the billboard, not the ray-only LOD:
+  the culling box is a drawing matter, the TLAS has the BLAS's own bounds. Its materials are alpha-tested and
+  two-sided but need not be `kMaterialFoliage` (a binary alpha needs no hashing, and transmission would only cost ray
+  hits); the renderer depends on neither.
+- **Versions:** version 1 could not state the flag - a v1 reader would refuse the shell's zero distance, or draw a
+  shell given one as a LOD - so the bump makes "a reader refuses a version it does not know" do the refusing. A
+  version-2 reader (both `ngg_scene` and the renderer, `kModelVersionMin` 1) still reads version 1, whose layout is the
+  same; a version-1 chunk carrying the flag is refused. The writer writes 2. Nothing shipped NGGD before, so the bump
+  cost no content.
 - `ngg_scene` (the format library) reads and writes them structured and checks them whole on both sides
   (`CheckModels`, `CheckPlacements`); `ngg-check` round-trips a made-up model and the stage-41 file.
 
@@ -2994,7 +3010,16 @@ draw was `DrawIndexedInstanced(n, 1, ...)`, and there was no level of detail.
 - **Ray tracing:** a BLAS per submesh of each model's ray-traced LOD (one shape per model at every distance keeps the
   TLAS fixed while the camera moves), a TLAS instance per placement and submesh, cached between edits - `DescribeRt`
   runs every frame the car moves (its ~119 parts bump the geometry revision), so the placements must cost a copy, not
-  a search.
+  a search. The ray-traced LOD is `lods[rtLod]` whether it is drawn or ray-only; the cache's rebuild logs its BLAS
+  meshes and triangles ("scene: models ray traced - ...", what `instancing-41` checks).
+- **What the ray-only LOD moved** (version 2): `ModelDef::drawLods` counts the drawn LODs (all, or all but a ray-only
+  last). The distance pick and the crossfade's next LOD stop there, and so does a cell's `reach` (the last DRAWN
+  LOD's distance, which was `lods.back()`). Both were real bugs with the shell in place: its distance 0 made every
+  cell's reach 0 (nothing drawn at all), and the billboard's fade-out crossfaded INTO the shell. The loader also
+  checks now that the drawn LODs' distances increase (only `ngg_scene` did). Nothing else changed: the shadow cull
+  takes the camera's pick, `ModelDrawItems` draws what the batches name, and the editor table (`modelStats`)
+  counts drawn LODs and addresses none by index - so **the editor table is unchanged** (version 2) and Wallaby's
+  generated bindings stay as they are. The load log reads "N LODs (M ray tracing only)".
 - **The replaced plants' cards:** their triangles are made degenerate in the index buffer at load (the plant table
   says which), so object ranges, plant parts and triangle numbers stay the file's; `BuildRtMesh` leaves them out, and
   an object left with none is removed.
@@ -3029,15 +3054,57 @@ frames, TAA and vsync off, the GPU frame; alternating runs):
 **The proof file:** `ngg-check --trees track-41.ngg --out <file>` puts a placeholder conifer generated in code (no
 RBR data: a trunk and needle tiers, textures made there; LOD0 142 triangles to 50 m, LOD1 40 to 150 m, a billboard to
 900 m, at scale 1, crossfading over 6 m, LOD1 ray traced - `--rt-lod 0` for LOD0) in place of each of the 3,743 tree-card plants, at its base,
-height and footprint, turned and tinted by its index. The renderer drops their 25,558 card triangles. CTests:
-`instancing-41` (the file round-trips, the renderer counts the model, 3 LODs, 3,743 placements and plants replaced),
-`editor-api-41` (the placement calls, each seen in the next frame's counts: all removed draws none, fifty added draw,
-moved away none, one moved back exactly one, a bad batch changes nothing; and the cascades draw instances).
+height and footprint, turned and tinted by its index. The renderer drops their 25,558 card triangles.
+`--rt-lod ray` adds a fourth LOD, ray-tracing only, and traces it: the trunk (5 sides) and a closed hull round the
+needle tiers (a ring at each tier's rim, 12 sectors, an apex and a cap - 178 triangles with the trunk), its material
+alpha-tested and two-sided, not foliage, with blobby holes (about 60% covered), so a ray crosses 2 alpha surfaces of
+the crown instead of up to 7 tiers. CTests:
+- `instancing-41` (`--rt-lod ray`): the file round-trips, the renderer counts the model, 4 LODs (1 ray tracing only),
+  3,743 placements and plants replaced. Then against the same trees with LOD1 traced and no shell: frames from 14
+  distances to a tree of about the model's size, inside each LOD, in each crossfade band (LOD0-1, LOD1-billboard, the
+  billboard's fade-out) and past the end, ray tracing off so that the cascades draw - every editor statistic
+  (visible, per LOD, fading, shadow-map instances, draws) must be the same, and the shell (it would count as LOD2)
+  never drawn. Then a ray-traced frame: the BLAS must be the shell's 178 triangles (40, LOD1's, without it). And the
+  trees without the shell written as a version-1 NGGD must read the same and load. Checked that it bites: with the
+  crossfade not stopped at `drawLods` it fails at 25 m (a neighbour's billboard fading out into the shell), with the
+  old `reach` at 5 m.
+- `ngg-roundtrip`: the made-up scene's model has a ray-only LOD; then each rule broken in turn - not last, two, one
+  `rtLod` does not name, also a billboard, a distance, no drawn LOD before it, the flag in a version-1 chunk - must be
+  refused by `CheckModels`, by `Read` and by the renderer, which loads the scene with no models (the cards drawn).
+- `editor-api-41` (the placement calls, each seen in the next frame's counts: all removed draws none, fifty added draw,
+  moved away none, one moved back exactly one, a bad batch changes nothing; and the cascades draw instances), now on
+  the file with the shell.
+
+**The ray-only shell, measured** (2026-11-10, the same run: 780M, RBR's run replayed, `--step 0.0333`, 16,000 ticks,
+3,300 frames, TAA and vsync off, a worktree build without `W-Rally.ini`; three interleaved rounds). The machine read
+~40% slower than on 11-09 (the cards' ray tracing 12.3-13.5 ms against 8.8-9.1) and drifted slower within each round,
+so the numbers are read against the cards of the same round:
+
+| stage 41, ray tracing median | round 1 | round 2 | round 3 | over the cards |
+|---|---|---|---|---|
+| RBR's tree cards | 12.33 ms | 13.03 ms | 13.47 ms | - |
+| placeholder trees, LOD1 traced (4 tiers) | 16.11 | 17.31 | 18.32 | +3.8 / +4.3 / +4.9 |
+| placeholder trees, the ray-only shell (178 tris) | 16.14 | 16.95 | 17.28 | +3.8 / +3.9 / +3.8 |
+| placeholder trees, LOD0 traced (7 tiers) | 20.18 | 20.59 | - | +7.9 / +7.6 |
+| the shell made opaque (experiment) | - | - | 15.73 | +2.3 |
+| the shell without its trunk submesh (experiment) | - | - | 16.77 | +3.3 |
+
+The GPU frame moved with it (cards 38.8-41.6 ms, shell 43.3-46.1, LOD1 43.1-47.1, LOD0 48.4-49.0); the main pass
+stayed at 6.1-6.8 ms in every row - the shell is never drawn.
+- **Against LOD0 the shell saves 3.3-3.6 ms**, the alpha tests of 7 tiers against 2 surfaces. Against the
+  placeholder's LOD1 it saves 0-1.0 ms: LOD1 is already only 4 coarse tiers, so there were few tests left to save.
+  Workstream 4's real LOD0 has 18-24 layers per ray, so the shell's place is against that, not against this LOD1.
+- **What is left over the cards is not the shell's alpha alone:** opaque, the same shell costs +2.3 ms (11-09's
+  opaque LOD0 cost +2.2): the TLAS traversal of 7,486 instances in a dense forest. Its alpha tests are the other
+  ~1.5 ms. Its trunk as a second submesh costs ~0.5 ms (3,743 more TLAS instances): a producer that puts the trunk
+  into the shell's one submesh (one material, the trunk as opaque texels) saves that.
+- So the shell is one mitigation, not the whole answer; the rest is in "not done" below.
 
 **Not done:**
-- **The ray-traced foliage's cost** (above) - the next decision. Options: a coarse ray-tracing proxy per model (the
-  format has `rtLod` for it, workstream 4 can bake one with fewer, denser layers); opaque leaves for the AO rays
-  only (AO needs no leaf-sharp occlusion); placements beyond some distance as opaque or out of the TLAS.
+- **The ray-traced foliage's cost** (above). Done: the ray-only LOD, so a coarse proxy can be traced (workstream 4's
+  `<id>_RT`, written by workstream 3's converter). Still open: opaque leaves for the AO rays only (AO needs no
+  leaf-sharp occlusion); placements beyond some distance as opaque or out of the TLAS; one submesh per shell; the
+  real models' run (their LOD0 against the shell) is the number that decides how far the shell alone goes.
 - GPU culling (`ExecuteIndirect`): the CPU cull costs 0.03 ms (camera) / 0.34 ms (with the cascades), not worth the
   machinery yet; with 25k placements (bushes too) it is the first thing to measure again.
 - Models in the lamps' shadow maps and in the car's reflection probe; a model's own `kMaterialBlend` (drawn opaque).

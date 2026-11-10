@@ -10,6 +10,10 @@
 // (distances at scale 1: a placement's scale with its height), crossfading over 6 m. The ray tracer takes LOD1 by
 // default (--rt-lod 0 for LOD0): measured on stage 41, its rays' alpha tests through 7 needle tiers cost 16.3 ms of
 // ray tracing against 12.6 ms through 4 (8.8 ms with RBR's cards) - NGG design 5.0w.
+// --rt-lod ray adds a fourth, RAY-TRACING-ONLY LOD (kModelLodRayOnly, never drawn) and traces it:
+//   LOD3  trunk 5 sides + a closed hull round the needle tiers, 12 sectors x 7 rings and an apex, its material
+//         alpha-tested with holes (two-sided, not foliage), so a ray crosses 2 alpha surfaces, not one per tier
+// - what workstream 4's <id>_RT shell is for its real trees (vegetation plan, "a ray-tracing-only LOD").
 #include "placeholder_tree.h"
 
 #include <algorithm>
@@ -178,6 +182,22 @@ std::vector<uint8_t> BillboardTexture()
     return Dds(img, w, h);
 }
 
+// The ray-tracing shell's alpha: blobs of needles with holes between (about 60% covered), so two crossings pass
+// roughly the light the seven tiers do.
+std::vector<uint8_t> ShellTexture()
+{
+    const int n = 128;
+    std::vector<Rgba> img(size_t(n) * n);
+    for (int y = 0; y < n; ++y)
+        for (int x = 0; x < n; ++x) {
+            const float u = x / float(n), v = y / float(n);
+            const float f = Noise(u * 16.0f, v * 16.0f, 16, 17u) * 0.75f + Noise(u * 32.0f, v * 32.0f, 32, 19u) * 0.25f;
+            const float shade = 0.6f + 0.5f * f;
+            img[size_t(y) * n + x] = {uint8_t(30 * shade), uint8_t(60 * shade), uint8_t(27 * shade), uint8_t(f > 0.44f ? 255 : 0)};
+        }
+    return Dds(img, n, n);
+}
+
 ngg::Vertex V(float x, float y, float z, float nx, float ny, float nz, float u, float v)
 {
     ngg::Vertex o{};
@@ -240,6 +260,49 @@ void Tiers(int tiers, int segs, std::vector<ngg::Vertex>& v, std::vector<uint32_
     }
 }
 
+// The shell round LOD0's tiers (Tiers(7, ...)): a ring at each tier's drooping rim, as wide as the widest needle cone
+// there (and a little more), then the top tier's apex; a flat cap under the lowest rim closes it. Normals outward.
+void Shell(int sectors, std::vector<ngg::Vertex>& v, std::vector<uint32_t>& idx)
+{
+    const int tiers = 7;
+    auto coneRadius = [&](int t, float y) {        // tier t's needle cone at height y (0 outside it)
+        const float f = float(t) / (tiers - 1), base = 1.6f + f * 6.6f, top = base + 2.6f, r = kRadius * (1.0f - f * 0.82f);
+        const float lo = base - 0.35f;
+        return (y < lo || y > top) ? 0.0f : r * (top - y) / (top - lo);
+    };
+    std::vector<float> ys, rs;
+    for (int t = 0; t < tiers; ++t) {
+        const float f = float(t) / (tiers - 1), y = 1.6f + f * 6.6f - 0.35f;
+        float r = 0.0f;
+        for (int k = 0; k < tiers; ++k) r = std::max(r, coneRadius(k, y));
+        ys.push_back(y), rs.push_back(r * 1.08f);
+    }
+    const float apexY = 1.6f + 6.6f + 2.6f;
+    const uint32_t first = uint32_t(v.size());
+    for (size_t k = 0; k < ys.size(); ++k) {
+        const float slope = k + 1 < ys.size() ? (rs[k] - rs[k + 1]) / (ys[k + 1] - ys[k]) : rs[k] / (apexY - ys[k]);
+        for (int j = 0; j <= sectors; ++j) {
+            const float a = 2.0f * kPi * j / sectors, c = std::cos(a), sn = std::sin(a);
+            v.push_back(V(rs[k] * c, ys[k], rs[k] * sn, c, slope, sn, 2.0f * j / sectors, ys[k] / 2.5f));
+        }
+    }
+    const uint32_t row = uint32_t(sectors + 1);
+    for (uint32_t k = 0; k + 1 < ys.size(); ++k)
+        for (uint32_t j = 0; j < uint32_t(sectors); ++j) {
+            const uint32_t a = first + k * row + j, b = a + row;
+            idx.insert(idx.end(), {a, b, a + 1, a + 1, b, b + 1});
+        }
+    const uint32_t last = first + uint32_t(ys.size() - 1) * row;
+    for (int j = 0; j < sectors; ++j) {        // the apex: one vertex per sector, for its own u
+        const uint32_t apex = uint32_t(v.size());
+        v.push_back(V(0.0f, apexY, 0.0f, 0.0f, 1.0f, 0.0f, 2.0f * (j + 0.5f) / sectors, apexY / 2.5f));
+        idx.insert(idx.end(), {last + j, apex, last + j + 1});
+    }
+    const uint32_t centre = uint32_t(v.size());   // the cap under the lowest rim, facing down
+    v.push_back(V(0.0f, ys[0], 0.0f, 0.0f, -1.0f, 0.0f, 0.5f, 0.5f));
+    for (int j = 0; j < sectors; ++j) idx.insert(idx.end(), {centre, first + j, first + j + 1});
+}
+
 struct PlantBox { float bmin[3], bmax[3]; uint32_t firstTag, tagCount; };
 
 } // namespace
@@ -282,6 +345,8 @@ std::string AddPlaceholderTrees(ngg::SceneData& s, PlaceholderReport& report, ui
     s.textures.push_back({"placeholder-needles.dds", NeedleTexture()});
     s.textures.push_back({"placeholder-bark.dds", BarkTexture()});
     s.textures.push_back({"placeholder-conifer-billboard.dds", BillboardTexture()});
+    const bool shell = rtLod == kPlaceholderRtShell;
+    if (shell) s.textures.push_back({"placeholder-conifer-rt-shell.dds", ShellTexture()});
 
     ngg::ModelLibrary& lib = s.models;
     ngg::Material needles = ngg::DefaultMaterial(), bark = ngg::DefaultMaterial(), board = ngg::DefaultMaterial();
@@ -295,6 +360,14 @@ std::string AddPlaceholderTrees(ngg::SceneData& s, PlaceholderReport& report, ui
     board = needles;
     board.baseColour = tex + 2;
     lib.materials = {needles, bark, board};
+    if (shell) {   // the shell: alpha-tested and two-sided, NOT foliage (its alpha is binary; no hashing, no transmission)
+        ngg::Material hull = ngg::DefaultMaterial();
+        hull.baseColour = tex + 3;
+        hull.flags = ngg::kMaterialAlphaTest | ngg::kMaterialTwoSided;
+        hull.alphaCutoff = 0.5f;
+        hull.roughness = 0.8f;
+        lib.materials.push_back(hull);
+    }
 
     std::vector<ngg::Vertex> v;
     std::vector<uint32_t> i;
@@ -328,14 +401,30 @@ std::string AddPlaceholderTrees(ngg::SceneData& s, PlaceholderReport& report, ui
         lib.lods.push_back(l);
         report.trianglesPerLod.push_back(2);
     }
+    if (shell) {   // the ray-only LOD: last, no distance, never drawn
+        ngg::ModelLod l{};
+        l.firstSubmesh = uint32_t(lib.submeshes.size());
+        v.clear(), i.clear();
+        Trunk(5, v, i);
+        lib.submeshes.push_back(Submesh(lib, 1, v, i));
+        report.trianglesPerLod.push_back(uint32_t(i.size() / 3));
+        v.clear(), i.clear();
+        Shell(12, v, i);
+        lib.submeshes.push_back(Submesh(lib, 3, v, i));
+        report.trianglesPerLod.back() += uint32_t(i.size() / 3);
+        l.submeshCount = 2;
+        l.maxDistance = 0.0f;
+        l.flags = ngg::kModelLodRayOnly;
+        lib.lods.push_back(l);
+    }
     ngg::ModelRecord m{};
     std::strcpy(m.name, "placeholder-conifer");
     m.firstLod = 0;
-    m.lodCount = 3;
+    m.lodCount = shell ? 4 : 3;
     m.bboxMin[0] = -kRadius, m.bboxMin[1] = 0, m.bboxMin[2] = -kRadius;
     m.bboxMax[0] = kRadius, m.bboxMax[1] = kHeight, m.bboxMax[2] = kRadius;
     m.fadeWidth = 6.0f;
-    m.rtLod = rtLod < 2 ? rtLod : 1;
+    m.rtLod = shell ? 3 : rtLod < 2 ? rtLod : 1;
     lib.models.push_back(m);
 
     // A placement per tree card: the base mid-plant on its lowest point, the height and footprint the plant's, a turn

@@ -497,13 +497,33 @@ static_assert(sizeof(Object) == 16,   "Object layout");
 //     Vertex       [vertexCount]    the file's own 44-byte vertex (NGGV), in model space
 //     uint32       index[indexCount]   relative to the submesh's firstVertex
 // Every array is the struct's exact size, so the chunk is (header) + the sum, and a reader can check it whole.
-constexpr uint32_t kModelVersion = 1;
+//
+// Version 2 added kModelLodRayOnly (below). A version-1 reader cannot know it: it would refuse the shell's zero
+// distance, or draw a shell given one as a LOD, so the bump makes "refuse a version you do not know" the rule. A
+// version-2 reader still reads version 1, which has no ray-only LOD; the layout is the same.
+constexpr uint32_t kModelVersion = 2;
+constexpr uint32_t kModelVersionMin = 1;   // the oldest a reader still reads
 
 // ModelLod::flags
 // The far BILLBOARD: a quad in the model's x-y plane (x across, y up from the base, z = 0) that the renderer turns
 // about the placement's up axis to face the camera (and the sun, in the shadow maps). Its texture is a picture of the
 // model baked by the producer (workstream 4), so the switch to it is the model seen from afar. Never ray traced.
 constexpr uint32_t kModelLodBillboard = 1u << 0;
+// RAY TRACING ONLY (version 2): the mesh the ray tracer's BLAS is built from and nothing else - never drawn (no main
+// pass, prepass or shadow map), never picked by distance. For a coarse shell with few, dense alpha layers: a ray costs
+// alpha tests, not triangles, and the drawn LOD0's foliage tiers cost a shadow ray 18-24 of them (vegetation plan,
+// "a ray-tracing-only LOD"). Its materials are alpha-tested and two-sided but need not be kMaterialFoliage (its alpha
+// is binary already; hashed alpha and transmission would only cost ray hits); the renderer depends on neither.
+//
+// THE RULES a reader checks, refusing the chunk on any (the cards are drawn instead, as for any bad NGGD):
+//   - at most one ray-only LOD per model, and it is the model's LAST LOD;
+//   - the model has at least one drawn LOD before it;
+//   - the model's rtLod names it whenever it exists;
+//   - it is not also a billboard;
+//   - its maxDistance is 0 (it has none).
+// The DRAWN LODs (every LOD before it, or all of them) keep every rule they had: nearest first, maxDistance > 0 and
+// increasing, the last drawn LOD's distance is how far the model is drawn at all.
+constexpr uint32_t kModelLodRayOnly = 1u << 1;
 
 // Material flag (NGGM and NGGD): FOLIAGE - leaves, needles, a bush's sprigs. Implies kMaterialAlphaTest and
 // kMaterialTwoSided (a reader ORs them in), lit with light through the leaves (wrap and transmission), and its alpha
@@ -529,14 +549,16 @@ struct ModelRecord
     char     name[32];        // UTF-8, NUL-terminated, unique in the file: "spruce-a", "beech-b"
     uint32_t firstLod;
     uint32_t lodCount;        // >= 1
-    float    bboxMin[3];      // model space, over every LOD but the billboard
+    float    bboxMin[3];      // model space, over the DRAWN LODs: not the billboard, not a ray-only LOD (the culling
+                              // box is a drawing matter; the TLAS has the BLAS's own bounds)
     float    bboxMax[3];
     // The CROSSFADE: over the last fadeWidth metres before a LOD's maxDistance, the LOD and the next are both drawn,
     // each dithered to its share (the pixels one keeps, the other drops), so the switch never pops. After the last
     // LOD the model dithers out to nothing the same way. 0: hard switches.
     float    fadeWidth;
     // The LOD the ray tracer's acceleration structure is built from (a BLAS per submesh), for every placement at any
-    // distance: one shape per model keeps the TLAS fixed while the camera moves. Not a billboard.
+    // distance: one shape per model keeps the TLAS fixed while the camera moves. Not a billboard. A drawn LOD, or the
+    // model's ray-only LOD - which it must name when there is one (kModelLodRayOnly).
     uint32_t rtLod;
     uint32_t flags;           // 0 (none yet)
     uint32_t reserved;        // 0
@@ -547,10 +569,10 @@ struct ModelLod
     uint32_t firstSubmesh;
     uint32_t submeshCount;    // >= 1
     // Drawn while the camera is nearer than this (metres, for the model at scale 1; a placement's distances scale with
-    // its vertical scale, so a tree twice as tall switches twice as far). Increasing along a model's LODs; the last
-    // one's is how far the model is drawn at all.
+    // its vertical scale, so a tree twice as tall switches twice as far). Increasing along a model's drawn LODs; the
+    // last drawn one's is how far the model is drawn at all. 0 on a ray-only LOD, which is never drawn.
     float    maxDistance;
-    uint32_t flags;           // kModelLodBillboard
+    uint32_t flags;           // kModelLodBillboard, kModelLodRayOnly
 };
 
 struct ModelSubmesh

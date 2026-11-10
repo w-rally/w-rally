@@ -74,12 +74,15 @@ target_compile_options(editor-api-check PRIVATE /W4 /permissive-)
 if(EXISTS ${WRALLY_TEST_NGG})
     # INSTANCED MODELS (NGG design 5.0w): a placeholder tree model (tools/ngg-check placeholder_tree.cpp) in place of
     # every tree-card plant of stage 41 - written as NGGD + NGGE, read back the same, and loaded by the renderer, whose
-    # log must count the model, its LODs, the 3743 placements and the 3743 plants whose cards it dropped. The file is
-    # the next test's.
+    # log must count the model, its LODs, the 3743 placements and the 3743 plants whose cards it dropped. Its ray
+    # tracer takes a RAY-TRACING-ONLY shell (--rt-lod ray, kModelLodRayOnly): frames through every LOD band must draw
+    # exactly what the same trees without the shell draw (main pass and cascades), never the shell; the BLAS must be
+    # the shell's triangles; and the trees without it, written as a version-1 NGGD, must still load. The file is the
+    # next test's.
     set(WRALLY_TEST_TREES ${CMAKE_BINARY_DIR}/tests-bin/track-41-trees.ngg)
-    add_test(NAME instancing-41 COMMAND ngg-check --trees ${WRALLY_TEST_NGG} --out ${WRALLY_TEST_TREES})
+    add_test(NAME instancing-41 COMMAND ngg-check --trees ${WRALLY_TEST_NGG} --rt-lod ray --out ${WRALLY_TEST_TREES})
     set_tests_properties(instancing-41 PROPERTIES FIXTURES_SETUP trees-41 TIMEOUT 300 PASS_REGULAR_EXPRESSION
-        "placeholder trees: 3743 placement.*read back the same.*scene: models - 1 model\\(s\\): 3 LODs, 5 submeshes, 184 triangles.*3743 placement\\(s\\) \\(0 in other variants\\), 3743 replace a plant.*scene: models replace 3743 plant\\(s\\): [1-9][0-9]* card triangle.*ngg-check: all good")
+        "placeholder trees: 3743 placement.*read back the same.*scene: models - 1 model\\(s\\): 4 LODs \\(1 ray tracing only\\), 7 submeshes, [0-9]+ triangles.*3743 placement\\(s\\) \\(0 in other variants\\), 3743 replace a plant.*scene: models replace 3743 plant\\(s\\): [1-9][0-9]* card triangle.*a version-1 NGGD.*loaded by the renderer.*drawn the same as without the shell.*never the shell.*the ray tracer's BLAS: the shell's [0-9]+ triangles.*ngg-check: all good")
     # The editor table on stage 41, and its placements (version 2) on the file with trees.
     add_test(NAME editor-api-41 COMMAND editor-api-check ${WRALLY_BIN}/modules/renderer/WRenderer.dll ${WRALLY_TEST_NGG}
              ${WRALLY_TEST_TREES})
@@ -125,10 +128,13 @@ if(EXISTS ${WRALLY_TEST_RBR_DIR}/Maps/track-4_E.lbs)
 endif()
 
 # The .ngg writer and its readers in step (tools/ngg-check, docs/design.md decision 2): a made-up scene written, read
-# back the same and loaded by the renderer; Wallaby's stage 41 .ngg (another producer) read, rewritten the same and
-# both loaded; W-Rally's legacy importer on RBR's stage 41 .lbs, loaded by the renderer. They open a hidden window.
+# back the same and loaded by the renderer - its model with a ray-tracing-only LOD, then each of that LOD's rules
+# broken in turn and refused by both (7: "refused: ..." lines); Wallaby's stage 41 .ngg (another producer) read,
+# rewritten the same and both loaded; W-Rally's legacy importer on RBR's stage 41 .lbs, loaded by the renderer. They
+# open a hidden window.
 add_test(NAME ngg-roundtrip COMMAND ngg-check)
-set_tests_properties(ngg-roundtrip PROPERTIES PASS_REGULAR_EXPRESSION "ngg-check: all good")
+set_tests_properties(ngg-roundtrip PROPERTIES PASS_REGULAR_EXPRESSION
+    "refused: a ray-only LOD that is not the last.*refused: two ray-only LODs.*refused: a ray-only LOD that rtLod does not name.*refused: a ray-only LOD that is also a billboard.*refused: a ray-only LOD with a distance.*refused: a ray-only LOD with no drawn LOD before it.*refused: a ray-only LOD in a version-1 chunk.*ngg-check: all good")
 if(EXISTS ${WRALLY_TEST_NGG})
     add_test(NAME ngg-producer-wallaby COMMAND ngg-check ${WRALLY_TEST_NGG})
     set_tests_properties(ngg-producer-wallaby PROPERTIES PASS_REGULAR_EXPRESSION "ngg-check: all good")

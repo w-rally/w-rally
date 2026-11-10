@@ -37,7 +37,10 @@ struct ModelLibrary {
 
 // "" or the first thing in the library that does not hold together: a model's LODs or a LOD's submeshes past their
 // arrays, a submesh past the vertices or indices, an index past its submesh's vertices, a material slot past
-// `textureCount`, LOD distances not increasing, a billboard as the ray tracer's LOD, a name not terminated.
+// `textureCount`, LOD distances not increasing, a billboard as the ray tracer's LOD, a name not terminated; and a
+// ray-only LOD (kModelLodRayOnly) that is not the model's last, a second one, one rtLod does not name, one that is
+// also a billboard or has a distance, one with no drawn LOD before it. Read takes NGGD versions 1 and 2 (a version-1
+// chunk with a ray-only LOD is refused); Write writes version 2.
 std::string CheckModels(const ModelLibrary& m, size_t textureCount);
 // "" or the first placement naming a model past the library or a plant past `plantCount` (pass kNoPlant to skip
 // that check: no plant table to check against).
