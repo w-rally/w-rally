@@ -686,12 +686,22 @@ void CSMain(uint3 tid : SV_DispatchThreadID, uint3 gid : SV_GroupID, uint gi : S
     // ring weighs a half, so each axis spans exactly one period: every cell
     // of the grid counts once, and the tile leaves no pattern of its own.
     const bool movedPixel = sDepth[lp.y * 12 + lp.x] < 0.0;
-    // A moving object here that moves against the world (sAgainst, the 3x3): only then is there anything its pixels
-    // and the world's could pass each other - at a standing car's outline the jitter swaps them, frame by frame.
-    bool against = false;
-    [unroll] for (int ay = -1; ay <= 1; ++ay)
-    [unroll] for (int ax = -1; ax <= 1; ++ax)
-        against = against || sAgainst[(lp.y + ay) * 12 + lp.x + ax] != 0u;
+    // A moving object STANDING here - with the world: stopped on the turntable, parked as the camera passes: one of
+    // its pixels in the 5x5 and none that moves against the world (sAgainst). Only there may its pixels and the
+    // world's pass each other - at a standing car's outline the jitter swaps them, frame by frame. NOT where none is
+    // here now: the object has GONE (as TAA's Gone), and what it uncovered must not take its history. Read as
+    // "nothing here moves against the world", that let the road a car had covered keep the car's own lit visibility:
+    // under a still TV camera (0.95 a frame) and far enough off that the roof is within the depth test of the road,
+    // copies of the car on the shaded road behind it - several, a frame of travel apart (golden replay, --step 0.1).
+    bool against = false, near = false;
+    [unroll] for (int ay = -2; ay <= 2; ++ay)
+    [unroll] for (int ax = -2; ax <= 2; ++ax)
+    {
+        const int k = (lp.y + ay) * 12 + lp.x + ax;
+        near    = near    || sDepth[k] < 0.0;
+        against = against || sAgainst[k] != 0u;
+    }
+    const bool standing = near && !against;
     float sum = 0.0, sum2 = 0.0, wsum = 0.0;
     bool  touched = false;      // a ray in the window hit a moved object
     float allow = 1.0;          // the least history weight those rays allow
@@ -711,7 +721,7 @@ void CSMain(uint3 tid : SV_DispatchThreadID, uint3 gid : SV_GroupID, uint gi : S
         const float e = max(depth + dot(slope, float2(x, y)), 1e-7);
         float rel = abs(1.0 / d - 1.0 / e) * e;
         const bool qMoved = ds < 0.0;
-        float w = (rel < 0.03 && (qMoved == movedPixel || !against)) ? 1.0 : 0.0;
+        float w = (rel < 0.03 && (qMoved == movedPixel || standing)) ? 1.0 : 0.0;
         if (gPeriod4 > 0.5) w *= (abs(x) == 2 ? 0.5 : 1.0) * (abs(y) == 2 ? 0.5 : 1.0);
         float r = sRaw[k];
         if (r < 0.0)
@@ -778,7 +788,7 @@ void CSMain(uint3 tid : SV_DispatchThreadID, uint3 gid : SV_GroupID, uint gi : S
             // such strip: they started over as merely fresh, and TAA, which
             // reads the distrust (post.cpp), kept the shadow each strip was
             // first seen in - a band behind the car per frame.
-            if (h.y > 0.0 && h.w > 0.5 && !movedPixel && against) { touched = true; allow = 0.0; }
+            if (h.y > 0.0 && h.w > 0.5 && !movedPixel && !standing) { touched = true; allow = 0.0; }
             const bool histTouched = h.z > 0.5;
             // IDENTITY first, as TAA's (post.cpp): a moved object's history
             // never passes to a static pixel, nor the reverse. Depth cannot
@@ -786,7 +796,7 @@ void CSMain(uint3 tid : SV_DispatchThreadID, uint3 gid : SV_GroupID, uint gi : S
             // bumper is within 3% of the bumper - and the back of a car, in
             // its own shadow, then printed a dark band of itself on the sunlit
             // road behind it every frame.
-            if (h.y > 0.0 && ((h.w > 0.5) == movedPixel || !against))
+            if (h.y > 0.0 && ((h.w > 0.5) == movedPixel || standing))
             {
                 float rel = abs(1.0 / h.y - 1.0 / pn.z) * pn.z;
                 // The history is read at the nearest pixel, up to half a pixel
