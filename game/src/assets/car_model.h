@@ -17,7 +17,7 @@
 // car frame (y up, forward -z) - the physics' body frame with y and z swapped, as the collision meshes are.
 //
 // The wheels: the game places them itself, where the physics has them; a wheel's mesh is one for all four (its own
-// matrix a leftover), its rim towards +x - outward on the left, turned half about y on the right. A wheel, and a part
+// matrix a leftover: only its scale is kept), its rim towards +x - outward on the left, turned half about y on the right. A wheel, and a part
 // under a hub's helper (Point_e_wheel_<lf|rf|lb|rb>: brake disc, caliper, ...), is kept in its hub's frame (CarPart::
 // wheel: the helper's place at the origin, the car's axes), for a renderer to put on the physics' wheel.
 

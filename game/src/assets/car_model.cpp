@@ -256,10 +256,15 @@ CarModel ReadCarModel(const std::string& sgcPath, const std::string& surface, co
             frame(id, placed, &under);
             model.wheelFound[wheel] = true;
             model.wheelAt[wheel][0] = placed[3], model.wheelAt[wheel][1] = placed[7], model.wheelAt[wheel][2] = placed[11];
-            // In the hub's frame: its node's turn and scale without its place (the right wheels' turned half about y, a
-            // wheel's size - Skoda Octavia's 1.05), its object offset under it (below).
-            std::memcpy(world, placed, 48);
-            world[3] = world[7] = world[11] = 0;
+            // In the hub's frame: its node's scale (a wheel's size - Skoda Octavia's 1.05), then the right wheels turned
+            // half about y; its object offset under it (below). Not the node's turn: like its place, a leftover the game
+            // never uses - every wheel mesh has its rim towards +x (after its offset), and i20 R5's tarmac and snow
+            // wheels are all four turned as the right ones, which turned their left wheels' rims inward on a stage.
+            float scale[3];
+            for (int j = 0; j < 3; ++j) scale[j] = std::sqrt(placed[j] * placed[j] + placed[4 + j] * placed[4 + j] + placed[8 + j] * placed[8 + j]);
+            const float side = wheel == 1 || wheel == 3 ? -1.0f : 1.0f;
+            const float turned[12] = {side * scale[0], 0, 0, 0, 0, scale[1], 0, 0, 0, 0, side * scale[2], 0};
+            std::memcpy(world, turned, 48);
         } else {
             frame(id, world, &wheel);
         }
