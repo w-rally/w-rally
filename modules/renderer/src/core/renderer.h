@@ -99,6 +99,9 @@ public:
 
     bool Load(Device& dev, const wchar_t* path);
     bool LoadFromMemory(Device& dev, const void* data, size_t bytes);
+    // The scene's pipelines made ahead, in the background, for the next load (Scene::PreparePipelines) - after the
+    // settings that decide them (the upscaler's mip bias).
+    void PrepareScenePipelines(Device& dev) { m_scene.PreparePipelines(dev.device.Get(), PostFx::kHdrFormat); }
 
     // Records the whole frame into dev.list (already open): environment and
     // aerial tables, depth+normal prepass, sun visibility (ray traced or

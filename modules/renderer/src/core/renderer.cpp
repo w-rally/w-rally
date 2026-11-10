@@ -43,6 +43,10 @@ bool Renderer::Create(Device& dev, DXGI_FORMAT outputFormat, UINT width, UINT he
     m_renderHeight = height;
 
     ID3D12Device* d = dev.device.Get();
+    // The scene's pipelines first, on their own thread (Scene::PreparePipelines), while the rest are made here - at
+    // the native mip bias; the module asks again once the settings are applied, which makes another build only when
+    // an upscaler changed the bias.
+    m_scene.PreparePipelines(d, PostFx::kHdrFormat);
     if (!m_sky.Create(d, PostFx::kHdrFormat)) Log("renderer: sky unavailable - frames clear instead");
     if (!m_shadows.Create(d, 2048)) Log("renderer: cascaded shadow maps unavailable");
     if (!m_gtao.Create(d, dev.queue.Get())) Log("renderer: no screen-space AO - the cascades go without AO");

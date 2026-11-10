@@ -6,7 +6,10 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <algorithm>
+#include <atomic>
 #include <mutex>
+#include <thread>
 #include <unordered_map>
 #include <vector>
 
@@ -137,33 +140,44 @@ template <class Desc, class LoadFn, class CreateFn>
 HRESULT Create(ID3D12Device* dev, const Desc* desc, uint64_t name, REFIID riid, void** out, LoadFn load,
                CreateFn create)
 {
+    // The device's create runs OUTSIDE the lock: PipelineBatch makes pipelines on several threads at once, and the
+    // device is free-threaded. The library is used under the lock (its loads, stores and serialising): its
+    // documentation promises nothing about threads, and one run with eight threads loading from it at once crashed.
     Cache& c = C();
-    std::lock_guard<std::mutex> hold(c.lock);
     const double t0 = NowMs();
     wchar_t wname[24];
     swprintf_s(wname, L"%016llx", (unsigned long long)name);
     HRESULT hr = E_FAIL;
     bool hit = false;
-    if (c.library && dev == c.device)
+    ComPtr<ID3D12PipelineLibrary> library;
     {
-        hr = load(c.library.Get(), wname, desc, riid, out);
-        hit = SUCCEEDED(hr);
-    }
-    if (!hit)
-    {
-        hr = create(dev, desc, riid, out);
-        if (SUCCEEDED(hr) && c.library && dev == c.device)
+        std::lock_guard<std::mutex> hold(c.lock);
+        if (dev == c.device) library = c.library;
+        if (library)
         {
-            ComPtr<ID3D12PipelineState> pso;
-            static_cast<IUnknown*>(*out)->QueryInterface(IID_PPV_ARGS(&pso));
-            if (pso)
+            hr = load(library.Get(), wname, desc, riid, out);
+            hit = SUCCEEDED(hr);
+        }
+    }
+    if (!hit) hr = create(dev, desc, riid, out);
+    const double ms = NowMs() - t0;
+    std::lock_guard<std::mutex> hold(c.lock);
+    if (!hit && SUCCEEDED(hr) && library && library == c.library)
+    {
+        ComPtr<ID3D12PipelineState> pso;
+        static_cast<IUnknown*>(*out)->QueryInterface(IID_PPV_ARGS(&pso));
+        if (pso)
+        {
+            if (SUCCEEDED(library->StorePipeline(wname, pso.Get()))) c.dirty = true;
+            else
             {
-                if (SUCCEEDED(c.library->StorePipeline(wname, pso.Get()))) c.dirty = true;
-                else c.stale = true;   // the name is taken (by another description)
+                // The name is taken: by the same description made twice at once (a batch), which loads - or by
+                // another one, which the library cannot drop.
+                ComPtr<ID3D12PipelineState> same;
+                if (FAILED(load(library.Get(), wname, desc, IID_PPV_ARGS(&same)))) c.stale = true;
             }
         }
     }
-    const double ms = NowMs() - t0;
     ++c.count;
     c.hits += hit ? 1 : 0;
     c.ms += ms;
@@ -189,11 +203,11 @@ void OpenPipelineCache(ID3D12Device* dev, const std::string& dir)
     c.blob.clear();
     c.dirty = c.stale = false;
     if (!dev || dir.empty()) return;
-    if (const char* e = std::getenv("NGG_PIPELINE_CACHE"); e && !std::strcmp(e, "off"))
-    {
-        Log("pipelines: no cache (NGG_PIPELINE_CACHE=off)");
+    // OPT-IN (NGG_PIPELINE_CACHE=library): on the AMD iGPU the library saved nothing, and with the driver's cache
+    // cold its loads compile - one at a time, under this cache's lock - which undid PipelineBatch's parallel making
+    // (the scene's batch 7.4 s instead of 2.9-4.3). Kept to measure on NVIDIA (docs/ngg-design.md 9b item 32).
+    if (const char* e = std::getenv("NGG_PIPELINE_CACHE"); !e || std::strcmp(e, "library") != 0)
         return;
-    }
     if (const char* d = std::getenv("NGG_SHADER_DIR"); d && *d)
     {
         Log("pipelines: no cache while NGG_SHADER_DIR compiles the shaders");
@@ -397,6 +411,63 @@ HRESULT CreateRootSignature(ID3D12Device* dev, UINT nodeMask, const void* blob, 
         if (rs) c.rootSigs[rs.Get()] = f.h;
     }
     return hr;
+}
+
+void PipelineBatch::Add(const D3D12_GRAPHICS_PIPELINE_STATE_DESC& desc, ComPtr<ID3D12PipelineState>* out,
+                        const char* failure)
+{
+    Item it;
+    it.graphics = desc;
+    it.out = out;
+    it.failure = failure;
+    m_items.push_back(it);
+}
+
+void PipelineBatch::Add(const D3D12_COMPUTE_PIPELINE_STATE_DESC& desc, ComPtr<ID3D12PipelineState>* out,
+                        const char* failure)
+{
+    Item it;
+    it.compute = true;
+    it.computeDesc = desc;
+    it.out = out;
+    it.failure = failure;
+    m_items.push_back(it);
+}
+
+bool PipelineBatch::Run(const char* what)
+{
+    if (m_items.empty()) return true;
+    const double t0 = NowMs();
+    unsigned threads = std::thread::hardware_concurrency();
+    threads = threads ? (std::min)(threads, 8u) : 4u;
+    if (const char* t = std::getenv("NGG_PIPELINE_THREADS")) threads = (unsigned)(std::max)(1, std::atoi(t));
+    threads = (std::min)(threads, (unsigned)m_items.size());
+    std::atomic<size_t> next{ 0 };
+    auto work = [&]() {
+        for (size_t i; (i = next++) < m_items.size();)
+        {
+            Item& it = m_items[i];
+            ComPtr<ID3D12PipelineState> pso;
+            it.hr = it.compute ? CreatePipeline(m_dev, &it.computeDesc, IID_PPV_ARGS(&pso))
+                               : CreatePipeline(m_dev, &it.graphics, IID_PPV_ARGS(&pso));
+            if (FAILED(it.hr)) pso.Reset();
+            *it.out = pso;
+        }
+    };
+    std::vector<std::thread> pool;
+    for (unsigned i = 1; i < threads; ++i) pool.emplace_back(work);
+    work();   // this thread too
+    for (std::thread& t : pool) t.join();
+    bool ok = true;
+    for (const Item& it : m_items)
+        if (FAILED(it.hr))
+        {
+            ok = false;
+            if (it.failure) Log("%s", it.failure);
+        }
+    Log("pipelines: %s - %zu made on %u threads in %.0f ms", what, m_items.size(), threads, NowMs() - t0);
+    m_items.clear();
+    return ok;
 }
 
 void LogPipelineStats(const char* when)
