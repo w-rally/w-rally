@@ -9,7 +9,7 @@ use the `.ngg` format.
 W-Rally runs on its own content, and when it is placed in (or pointed at) a Richard Burns Rally folder it also reads
 RBR's stages, cars, sounds and replays in place. RBR's files are never part of this project and never shipped.
 
-Status: early development. The design is in [docs/design.md](docs/design.md), the stage format in
+Status: early development. The design is in [docs/design.md](docs/design.md), the renderer and its `.ngg` scene format in
 [docs/ngg-design.md](docs/ngg-design.md).
 
 ## Repositories
