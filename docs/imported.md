@@ -1,7 +1,7 @@
 # Code imported from plugin-rbr
 
 W-Rally is self-contained: it builds nothing from outside this repository. The code it shares with plugin-rbr
-(`plugin-rbr`) was **copied** in on 2026-10-25 from plugin-rbr commit `e696c4f`
+(a separate repository) was **copied** in on 2026-10-25 from plugin-rbr commit `e696c4f`
 ("M6 cleanup, step 2: the native physics self-contained"). From then on, the two copies evolve separately. A fix
 that matters to both is ported by hand.
 
@@ -106,5 +106,5 @@ native physics is bit-exact with RBR only under them.
 | `third_party/stb/stb_vorbis.c` | stb_vorbis v1.22 (public domain), the Ogg Vorbis decoder, unchanged | github.com/nothings/stb, master, downloaded 2026-10-30 (sha256 4c7cb2ff1f7011e9d67950446b7eb9ca044f2e464d76bfbb0b84dd2e23e65636) |
 | `third_party/dxc/` | DirectX Shader Compiler redistributables | see the table above |
 
-**Checked on import:** W-Rally.exe and plugin-rbr's `phys-drive.exe` with the same arguments (`<RBR>`, track-108_M,
+**Checked on import:** W-Rally.exe and plugin-rbr's `phys-drive.exe` with the same arguments (the RBR folder, track-108_M,
 `--no-sound --step 0.0166 --quick-start --exit-at 2000 --overrides none`) write byte-identical `.phr` recordings.

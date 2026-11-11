@@ -34,8 +34,8 @@ cmake --build build --config Release
 ctest --test-dir build -C Release
 ```
 
-Everything runs from `build/bin`. Some tests need an RBR folder (`WRALLY_TEST_RBR_DIR`, by default `<RBR>`) and
-are left out without one.
+Everything runs from `build/bin`. Some tests need an RBR folder (`-DWRALLY_TEST_RBR_DIR=<RBR folder>` at configure; the
+golden replay also `WRALLY_TEST_NGG` and `WRALLY_TEST_GOLDEN`) and are left out without one.
 
 ## Licence
 

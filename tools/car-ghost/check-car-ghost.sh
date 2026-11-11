@@ -7,12 +7,12 @@
 # every frame of three stretches in view 13 (RT AO) or view 11 (RT sun), each twice: as the game draws it, and with
 # NGG_RT_NO_HISTORY=1 (this frame's rays alone). ghost.py takes the signed difference behind the car: a history may
 # smooth the noise there, not shift it either way. Exits non-zero when a stretch is over its limit.
-# Needs RBR at <RBR> (track-42.ngg, the Impreza), Python with numpy and Pillow. About 6 minutes on the dev iGPU.
+# Needs RBR=<RBR folder> (track-42.ngg, the Impreza), Python with numpy and Pillow. About 6 minutes on the dev iGPU.
 here=$(cd "$(dirname "$0")" && pwd)
 exe=${1:-$here/../../build/bin/W-Rally.exe}
 exe=$(cd "$(dirname "$exe")" && pwd)/$(basename "$exe")
 out=${2:-${TMPDIR:-/tmp}/car-ghost}
-rbr=${RBR:-<RBR>}
+rbr=${RBR:?set RBR to the RBR folder}
 lim=${GHOST_MAX:-1.0}       # the mean bias allowed, 0..255 grey (before the fix: 2-4; after: about 0)
 mkdir -p "$out"
 # Track 42's stage file: by its track id since the stages were renamed (fr_joux_verte), else the old name.
@@ -39,8 +39,8 @@ for s in "13 7000 7210" "13 9400 9606" "11 1100 1290"; do
 done
 # And the golden replay (run 41, track-41, --step 0.1, the TV camera standing): copies of the car, a frame of travel
 # apart, on the shaded road behind it (the sun's history - 2026-11-10). Where its files are (GOLDEN_DIR, the phys-data
-# checkout); view 11, the road beside and behind the car at 116 km/h, blurred against the reference.
-gd=${GOLDEN_DIR:-<phys-data>}
+# folder; skipped when unset); view 11, the road beside and behind the car at 116 km/h, blurred against the reference.
+gd=${GOLDEN_DIR:-}
 if [ -f "$gd/m5/track-41.ngg" ] && [ -f "$gd/m2/run-41-20261011-150633.phr" ]; then
     gold() {   # <dir> [ENV=val ...]
         local d=$out/$1; shift

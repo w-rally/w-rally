@@ -26,11 +26,11 @@ set_tests_properties(physics-rbr-handshake PROPERTIES PASS_REGULAR_EXPRESSION
 
 # The golden check (docs/design.md 4.2): RBR's own recording of a whole stage replayed through the game and
 # WPhysicsRBR.dll, every pose bit-exact. Needs an RBR folder, stage 41's .ngg to draw (another map's would leave the
-# car with no ground drawn under it) and the recording - this machine's paths by default; the test is left out where
-# they are missing. It opens the game's window while it runs.
-set(WRALLY_TEST_RBR_DIR "<RBR>" CACHE PATH "RBR folder for the golden replay test")
-set(WRALLY_TEST_NGG "<phys-data>/m5/track-41.ngg" CACHE FILEPATH "stage 41's .ngg (drawn only)")
-set(WRALLY_TEST_GOLDEN "<phys-data>/m2/run-41-20261011-150633.phr" CACHE FILEPATH "RBR's recording of stage 41")
+# car with no ground drawn under it) and the recording - set them at configure (-DWRALLY_TEST_RBR_DIR=... and so on);
+# the test is left out where they are missing. It opens the game's window while it runs.
+set(WRALLY_TEST_RBR_DIR "" CACHE PATH "RBR folder for the golden replay test")
+set(WRALLY_TEST_NGG "" CACHE FILEPATH "stage 41's .ngg (drawn only)")
+set(WRALLY_TEST_GOLDEN "" CACHE FILEPATH "RBR's recording of stage 41 (a .phr)")
 if(EXISTS ${WRALLY_TEST_RBR_DIR}/Maps/track-41_M.trk AND EXISTS ${WRALLY_TEST_NGG} AND EXISTS ${WRALLY_TEST_GOLDEN})
     add_test(NAME golden-replay-41 COMMAND W-Rally ${WRALLY_TEST_RBR_DIR} ${WRALLY_TEST_NGG} --stage track-41_M --step 0.1
              --no-sound --overrides none --replay ${WRALLY_TEST_GOLDEN} --out ${CMAKE_BINARY_DIR}/tests-bin/golden-41.phr)
