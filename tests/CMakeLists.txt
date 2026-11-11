@@ -72,7 +72,7 @@ target_link_libraries(editor-api-check PRIVATE wrally-iface)
 target_compile_definitions(editor-api-check PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN _CRT_SECURE_NO_WARNINGS)
 target_compile_options(editor-api-check PRIVATE /W4 /permissive-)
 if(EXISTS ${WRALLY_TEST_NGG})
-    # INSTANCED MODELS (NGG design 5.0w): a placeholder tree model (tools/ngg-check placeholder_tree.cpp) in place of
+    # INSTANCED MODELS (NGG design §2.6): a placeholder tree model (tools/ngg-check placeholder_tree.cpp) in place of
     # every tree-card plant of stage 41 - written as NGGD + NGGE, read back the same, and loaded by the renderer, whose
     # log must count the model, its LODs, the 3743 placements and the 3743 plants whose cards it dropped. The file is
     # the next test's.
@@ -100,7 +100,7 @@ target_compile_definitions(car-parts PRIVATE _CRT_SECURE_NO_WARNINGS NOMINMAX)
 set_target_properties(car-parts PROPERTIES CXX_STANDARD 17)
 add_test(NAME car-parts COMMAND car-parts)
 
-# The renderer's sky clockwork (modules/renderer/src/core/astronomy.*, NGG design 5.4 N1) against Meeus's worked
+# The renderer's sky clockwork (modules/renderer/src/core/astronomy.*, NGG design §5.4) against Meeus's worked
 # examples and the solstice's noon sun.
 add_executable(astronomy-check astronomy_check.cpp ${PROJECT_SOURCE_DIR}/modules/renderer/src/core/astronomy.cpp)
 target_include_directories(astronomy-check PRIVATE ${PROJECT_SOURCE_DIR}/modules/renderer/src/core)
@@ -144,7 +144,7 @@ if(EXISTS ${WRALLY_TEST_RBR_DIR}/Maps/track-4_E.lbs)
     set_tests_properties(legacy-import-weather-4 PROPERTIES PASS_REGULAR_EXPRESSION
         "weather: 43 presets from TrackSettings.ini, default 04E_crisp_clear .*ngg-check: all good")
 endif()
-# A protected (encrypted) stage is refused whole, never imported in part (NGG design 3.7).
+# A protected (encrypted) stage is refused whole, never imported in part (NGG design §2.9).
 if(EXISTS ${WRALLY_TEST_RBR_DIR}/Maps/track-96_E.lbs)
     add_test(NAME legacy-import-protected COMMAND ngg-check --lbs ${WRALLY_TEST_RBR_DIR}/Maps/track-96_E.lbs)
     set_tests_properties(legacy-import-protected PROPERTIES PASS_REGULAR_EXPRESSION

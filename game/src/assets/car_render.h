@@ -60,7 +60,7 @@ public:
     const iface::InstanceUpdate& Place(const physics::Pose& pose, const physics::Wheel wheels[4], const float cog[3],
                                        const std::vector<physics::Part>& parts);
 
-    // THE LAMPS' MESHES (NGG design 5.4 N3b), placed as the car's parts are at the last Place - a lamp on a part that
+    // THE LAMPS' MESHES (NGG design §5.5), placed as the car's parts are at the last Place - a lamp on a part that
     // came loose goes with it: per LampMeshGroup and side the unlit meshes or their lit twins (glowing in the lamp's
     // colour), as `lit` says - dark where the lamp's part is off the car (its cable torn); the ramp's housing when
     // `housing` (the car's own ramp chosen). Appended to `out`.

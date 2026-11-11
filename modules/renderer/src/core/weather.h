@@ -1,5 +1,5 @@
 // ---------------------------------------------------------------------------
-// Weather presets - OUR format (design 3.4, 5.0q).
+// Weather presets - OUR format (design §5.1).
 //
 // RBR's TrackSettings.ini was the obvious source and the wrong destination. Its
 // 757 sections do name the weather - "<map><variant>_<haze>_<cloud>", e.g.
@@ -8,14 +8,14 @@
 // phase "Greenstein_Value" is 1.0 (a delta function) in most presets, and
 // track-108's clear sky has Rayleigh_Multiplier 0.025. Feeding those into a
 // physical atmosphere gives nonsense; being bound by their shape would cap the
-// renderer at what a 2004 shader needed (design 3.0's rule: replace, do not
+// renderer at what a 2004 shader needed (design §2.1's rule: replace, do not
 // extend).
 //
 // So a preset here holds PHYSICAL quantities only - visibility in metres, cloud
 // cover as a fraction, turbidity in our model's units. It has two forms: the
 // versioned JSON below, for projects and the editor (Wallaby's sidecar, the
 // flat API, --export-weather), and binary records in the .ngg's NGGW chunk
-// (format/ngg_format.h), which is what the runtime loads. The legacy file is an IMPORT source (host/tracksettings.*): its
+// (format/ngg_format.h), which is what the runtime loads. The legacy file is an IMPORT source (game/src/assets/legacy_weather.*): its
 // category words and fog distances are translated once, the rest is left
 // behind, and the import is recorded in `source` so a preset can always be
 // traced back.
@@ -60,13 +60,13 @@ struct WeatherPreset
     float       fogHeight = 150.0f;     // scale height of the fog layer, metres
     float       rain = 0.0f;            // 0 dry .. 1 heavy - carried, not yet rendered
     float       snow = 0.0f;            // 0 none .. 1 heavy - carried, not yet rendered
-    // The time and place (NGG design 5.4, N1). When set, the sun follows from them (ApplyWeather) and sky.sunDir is
+    // The time and place (NGG design §5.4). When set, the sun follows from them (ApplyWeather) and sky.sunDir is
     // not used.
     bool        timeSet = false;
     SkyTime     time;
 };
 
-// The .ngg's NGGW chunk (design 5.0t): binary records. Parse returns false on a
+// The .ngg's NGGW chunk (design §2.5): binary records. Parse returns false on a
 // payload it does not understand (logged) and leaves `out` empty; Pack writes
 // the presets in order, the first being the default.
 bool ParseWeatherChunk(const void* payload, size_t bytes, std::vector<WeatherPreset>& out);

@@ -1,14 +1,14 @@
 // ---------------------------------------------------------------------------
-// Physical sky - single-scattering Rayleigh + Mie, evaluated per pixel.
+// Physical sky - Rayleigh + Mie with tabulated multiple scattering
+// (atmosphere_ms.h), evaluated per pixel.
 //
-// This replaces RBR's skybox TEXTURE rather than converting it (design 9b item
-// 6, now decided): a painted skybox cannot respond to a sun that moves, and
-// dynamic time of day is the whole point of the overhaul. It also gives the
+// This replaces RBR's skybox TEXTURE rather than converting it (design §3.1):
+// a painted skybox cannot respond to a sun that moves, and dynamic time of day is the whole point of the overhaul. It also gives the
 // ambient term somewhere real to come from, which matters because "directional
 // light plus a hardcoded ambient constant" is a placeholder that never gets
 // removed.
 //
-// WHAT IS AND IS NOT TAKEN FROM THE GAME (design 3.4a):
+// WHAT IS AND IS NOT TAKEN FROM THE GAME (design §5.1):
 // RBR's TrackSettings.ini carries `SunDir` per track and variant, and that is
 // used directly - it is unambiguous and it is exactly what a photometric solve
 // would have had to recover. Its `Turbidity`, `Rayleigh_Multiplier`,
@@ -62,13 +62,13 @@ struct SkyParams
     // units error, which is exactly how a wrong model gets locked in.
     float skyAmbient    = 1.0f;
 
-    // WEATHER (weather.h, design 5.0q), in physical units. Defaults are a
+    // WEATHER (weather.h, design §5.1), in physical units. Defaults are a
     // clear, fog-free day - exactly the atmosphere before these existed.
     float cloudCover    = 0.0f;    // 0 clear .. 1 overcast
     float fogVisibility = 0.0f;    // metres (2 % contrast); 0 = no fog layer
     float fogHeight     = 150.0f;  // fog layer scale height, metres
 
-    // NIGHT (design 5.4, N1b), set by ApplySkyTime from a date, a time and a place; neutral otherwise - no moon is
+    // NIGHT (design §5.4), set by ApplySkyTime from a date, a time and a place; neutral otherwise - no moon is
     // drawn, no stars, no glow, and sunDir/sunIntensity are the sun's.
     float lightIsMoon   = 0.0f;    // 1: sunDir/sunIntensity are the MOON's (the night's light): no sun disc drawn
     float trueSunTowards[3] = { 0.0f, 1.0f, 0.0f };   // the real sun, towards it: it lights the moon's disc

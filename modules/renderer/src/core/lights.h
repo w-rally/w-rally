@@ -1,6 +1,6 @@
 #pragma once
 // ---------------------------------------------------------------------------
-// Local lights (NGG design 5.4, phase N2): point and spot lights, many of them, every one of them shadowed.
+// Local lights (NGG design §5.5): point and spot lights, many of them, every one of them shadowed.
 //
 // HOW THEY ARE SHADED - the ratio estimator (Heitz, Hill and McGuire 2018, "Combining Analytic Direct Illumination
 // and Stochastic Shadows"). The scene pass sums the lights' UNSHADOWED light exactly, every light that reaches the
@@ -28,7 +28,7 @@
 namespace ngg {
 namespace core {
 
-// A BEAM's lobe (design 5.4 N3a): an intensity peak in the lamp's own frame - its axis, its up - that falls to half at
+// A BEAM's lobe (design §5.5): an intensity peak in the lamp's own frame - its axis, its up - that falls to half at
 // the half-width across and the half-height up and down, centred `yawDeg` right and `pitchDeg` up of the axis.
 // `sharpness` 2 is a gaussian; higher, a flatter top with a harder edge (a headlamp's cut-off). A lamp's beam is the
 // sum of a few: a pod's pencil plus its driving spread, an LED bar's one wide flood.

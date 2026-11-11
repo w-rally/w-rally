@@ -668,7 +668,7 @@ StageEnd RunStage(Shell& sh, const Options& given, bool fromMenu, std::string& e
     V3 drawnEye{};
     // PHYS_DRIVE_LOOK_UP=<degrees>: every view tilted up by that much - the sky's moon and stars to look at.
     const float lookUp = std::getenv("PHYS_DRIVE_LOOK_UP") ? static_cast<float>(std::atof(std::getenv("PHYS_DRIVE_LOOK_UP"))) : 0.0f;
-    // PHYS_DRIVE_TEST_LIGHTS: test lamps on the car until it carries its own (assets::TestLayout, design 5.4 N3).
+    // PHYS_DRIVE_TEST_LIGHTS: test lamps on the car until it carries its own (assets::TestLayout, design §5.5).
     // =ramp (or any other value) two main beams and a 4-pod ramp, =bars two main beams and two LED bars, =low the
     // dipped beams; =lamp a lamp above and behind the car alone (its shadow of the car); =noshadow the ramp layout never
     // occluded (no light rays - the shading's cost alone).
@@ -685,7 +685,7 @@ StageEnd RunStage(Shell& sh, const Options& given, bool fromMenu, std::string& e
     if (testLights_)
         std::printf("test lights (PHYS_DRIVE_TEST_LIGHTS=%s): %s, always lit, in place of the car's own lamps\n", testLightsEnv,
                     testLampOnly ? "the lamp behind" : (std::to_string(testLamps.size()) + " lamps").c_str());
-    // THE CAR'S LAMPS (NGG design 5.4 N3b): its own (assets::LoadCarLamps, at the first frame - the centre of gravity
+    // THE CAR'S LAMPS (NGG design §5.5): its own (assets::LoadCarLamps, at the first frame - the centre of gravity
     // is the physics'), switched by the driver (headlights, ramp, indicators, hazard) and by the car (the brake pedal,
     // reverse). Until the driver touches the headlights they follow the sun: lit after dusk - main beam and the ramp -,
     // off by day; and by day the small lamps' light is not given (it would show only on their glass, and costs the GPU
@@ -715,7 +715,7 @@ StageEnd RunStage(Shell& sh, const Options& given, bool fromMenu, std::string& e
     const uint32_t shotEvery = std::getenv("PHYS_DRIVE_SHOTS") ? std::strtoul(std::getenv("PHYS_DRIVE_SHOTS"), nullptr, 0) : 0;
     uint32_t shotTick = 0;
     // PHYS_DRIVE_FRAMEMS: every drawn frame's whole GPU time (RenderStats::frameMs), its mean and median printed at the
-    // end - how a renderer setting is judged (design 5.4 N2c), from a replay under --step. With it the main pass's and
+    // end - how a renderer setting is judged (design §5.5), from a replay under --step. With it the main pass's and
     // the ray tracing's medians (passMs, rtMs), so a difference can be put where it is.
     const bool frameMsLog = std::getenv("PHYS_DRIVE_FRAMEMS") != nullptr;
     std::vector<float> frameMsSeen, passMsSeen, rtMsSeen;
@@ -1165,7 +1165,7 @@ StageEnd RunStage(Shell& sh, const Options& given, bool fromMenu, std::string& e
             fd.weatherPreset = customSkySet ? -1 : weatherPreset;   // the .ngg's preset (0 its own weather), or --sky's
             if (customSkySet) fd.weather = customSky;
             fd.wetness = 0.5f * static_cast<float>(std::clamp(wet, 0, 2));   // the road's: dry 0, damp 0.5, wet 1
-            if (o.skyTimeSet) {   // the time and place: the sun from them (NGG design 5.4)
+            if (o.skyTimeSet) {   // the time and place: the sun from them (NGG design §5.4)
                 fd.skyTime = {1, o.skyYear, o.skyMonth, o.skyDay, static_cast<float>(o.skyHour), static_cast<float>(o.skyUtcOffset),
                               static_cast<float>(o.skyLatitude), static_cast<float>(o.skyLongitude), static_cast<float>(o.skyNorth)};
             }
@@ -1491,7 +1491,7 @@ int Menus(Shell& sh, std::string note, bool intro)
 
 } // namespace
 
-// THE LAMP LAB (--lab, NGG design 5.4 N3): the test lamps (PHYS_DRIVE_TEST_LIGHTS, the ramp by default) on a car standing
+// THE LAMP LAB (--lab, NGG design §5.5): the test lamps (PHYS_DRIVE_TEST_LIGHTS, the ramp by default) on a car standing
 // in a synthetic scene (assets::BuildLampLab) - no stage, no physics, no car model yet. The sky's --time / --date as a
 // stage's (23:00 by default); --camera 0 chase, 1 bonnet (the default), 2 above, 3 beside; --exit-at <frame>.
 // PHYS_DRIVE_SHOTS=<n> a capture at frame n and every n frames after; PHYS_DRIVE_OFF and NGG_DEBUG_VIEW as on a stage.

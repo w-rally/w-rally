@@ -1,7 +1,7 @@
 // ---------------------------------------------------------------------------
 // The pipelines: every pipeline state the renderer makes goes through CreatePipeline - counted and timed, made
 // several at once by PipelineBatch - and, with NGG_PIPELINE_CACHE=library, kept in an ID3D12PipelineLibrary in the
-// game's cache folder (UserDir()/cache/wrenderer/pipelines.bin) (docs/ngg-design.md 5.0x).
+// game's cache folder (UserDir()/cache/wrenderer/pipelines.bin) (docs/ngg-design.md §1.6).
 //
 // WHY THE LIBRARY IS OFF. The shaders are precompiled (shaders.h), but DXIL / DXBC is still an intermediate language:
 // each pipeline is compiled to the GPU's own code by the driver when it is created, and the driver keeps its own disk
@@ -65,7 +65,7 @@ inline HRESULT CreateRootSignature(const Microsoft::WRL::ComPtr<ID3D12Device>& d
 // free-threaded, and on the dev iGPU it cut a cold start by ~5 s - but AMD's driver (32.0.31021.5001, Radeon 780M,
 // 2026-11) crashed inside its compiler (amdxc64.dll) or hung in ~1 run of 12-28, warm or cold, whenever two threads
 // compiled at once; one at a time it never did. For trying another driver or vendor, not for shipping
-// (docs/ngg-design.md 5.0x).
+// (docs/ngg-design.md §1.6).
 class PipelineBatch
 {
 public:

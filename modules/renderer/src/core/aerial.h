@@ -1,6 +1,6 @@
 // ---------------------------------------------------------------------------
 // AerialLut - aerial perspective, integrated once per FROXEL instead of once
-// per pixel (design 9b item 21, 5.0f).
+// per pixel (design §3.3).
 //
 // The scene pass used to march the atmosphere for every geometry pixel: 8 view
 // steps x 3 light steps, on a million-plus pixels, to answer a question that

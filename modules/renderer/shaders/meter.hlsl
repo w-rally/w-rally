@@ -25,7 +25,7 @@ cbuffer Meter : register(b0)
     float  gLowPct;         // percentile window of the mean
     float  gHighPct;
     float  gSnap;           // 1 = no adaptation this frame
-    float  gNightKnee;      // EV darker than the reference made up in full (design 5.4, N1c)
+    float  gNightKnee;      // EV darker than the reference made up in full (design §5.4)
     float  gNightSlope;     // the share of the rest made up
 };
 
@@ -154,7 +154,7 @@ void CSAdapt(uint gi : SV_GroupIndex)
 
     // How much darker than the reference this is, and how much of that the exposure makes up: all of it within
     // gNightKnee EV, then gNightSlope of the rest - the night stays darker than the day, as it does to adapted
-    // eyes, instead of being exposed to the day's grey (design 5.4, N1c).
+    // eyes, instead of being exposed to the day's grey (design §5.4).
     const float darker = gRefLog2 - adapted;
     const float madeUp = darker > gNightKnee ? gNightKnee + (darker - gNightKnee) * gNightSlope : darker;
     const float ev = clamp(madeUp, -gEvDown, gEvUp);

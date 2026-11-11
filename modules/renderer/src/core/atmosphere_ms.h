@@ -1,6 +1,6 @@
 // ---------------------------------------------------------------------------
 // AtmosphereMs - multiple scattering for the atmosphere, as a 32x32 LUT
-// (design 9b item 25, 5.0j).
+// (design §3.2).
 //
 // The model was single-scattering only: light that scatters once into the eye.
 // Real sky light scatters many times, and leaving that out makes the sky about

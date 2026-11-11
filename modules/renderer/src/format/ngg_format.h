@@ -1,12 +1,11 @@
 // ---------------------------------------------------------------------------
-// .ngg asset format - v0 (minimal).
+// .ngg asset format - v3 (docs/ngg-design.md §2.2).
 //
-// This is the real container design from docs/ngg-design.md 3.5,
-// implemented so far only as much as the renderer needs: header, vertices,
-// indices. The chunk framing is the part worth getting right now, because it is
-// what lets later versions add materials, clusters, lights and skeletons
-// without invalidating anything already written - an unknown chunk is skipped,
-// not an error.
+// A chunked container: a file header, then tagged chunks (geometry, materials,
+// objects, layers and variants, weather, plants, the model library and its
+// placements). The chunk framing is what lets a version add chunks without
+// invalidating anything already written - an unknown chunk is skipped, not an
+// error.
 //
 // W-Rally's writer of this layout is ngg_scene.h beside this file (the legacy
 // importer writes through it); Wallaby's NggWriter.cs is another producer.
@@ -48,7 +47,7 @@ const uint32_t kFormatCurrent = kFormatV3;
 struct FileHeader
 {
     uint32_t magic;        // kMagic
-    uint32_t version;      // kFormatV0
+    uint32_t version;      // kFormatCurrent
     uint32_t chunkCount;
     uint32_t reserved;
 };
@@ -86,7 +85,7 @@ struct SceneHeader
     // other out - which is exactly what a hard-coded 2.0 did.
     //
     // Physically this stands in for the game's own per-track lighting constant
-    // (design 3.2b: sun colour x exposure, from Maps\TrackSettings.ini). Using
+    // (design §2.8: sun colour x exposure, from Maps\TrackSettings.ini). Using
     // the bake's own headroom is a self-calibrating approximation of it, and
     // disappears entirely once lighting is dynamic.
     float    bakedScale;
@@ -127,7 +126,7 @@ const uint32_t kMaterialTwoSided  = 1u << 1;   // no back-face culling
 // Alpha-BLENDED (glass): drawn after everything opaque, far to near, over it -
 // its base colour's alpha (texture x vertex x factor) is how much of the tint
 // covers what is behind, while its reflection stays whole. It writes no depth,
-// casts no shadow and is not in the ray-traced scene (NGG design 5.0u).
+// casts no shadow and is not in the ray-traced scene (NGG design §5.3).
 const uint32_t kMaterialBlend     = 1u << 3;
 // 1u << 4 is kMaterialFoliage, with the instanced models below.
 
@@ -142,7 +141,7 @@ const uint32_t kMaterialBlend     = 1u << 3;
 // modern one.
 //
 // v3 is glTF metallic-roughness, near enough 1:1. That is deliberate and it is
-// the same argument as design 7.2: glTF is the interchange format, every DCC
+// the same argument as design §9.3: glTF is the interchange format, every DCC
 // tool speaks it, and a runtime material model that maps onto it means an
 // authored material survives the trip without a translation layer inventing
 // values on the way.
@@ -150,14 +149,14 @@ const uint32_t kMaterialBlend     = 1u << 3;
 // TWO THINGS ARE KEPT FROM RBR, and both earned their place by measurement
 // rather than by inheritance:
 //
-//   - `detail` + the vertex-alpha blend. Design 3.3c measured this live on both
+//   - `detail` + the vertex-alpha blend. Design §2.3 measured this live on both
 //     test tracks, and it is what hides terrain chunk seams. Detail texturing is
 //     a standard technique in its own right; this is not a legacy stage, it is
 //     a second layer that happens to be how RBR spelled it too.
 //   - `baseColour.a` as coverage on alpha-tested geometry.
 //
 // And one thing is deliberately NOT here: the baked vertex colour. It stays in
-// the vertex data (design 3.2) as the A/B reference against vanilla, not as a
+// the vertex data (design §2.8) as the A/B reference against vanilla, not as a
 // material property, because it is a record of one particular sun on one
 // particular day.
 struct Material
@@ -168,13 +167,13 @@ struct Material
                              // kNoTexture is what makes a material single-layer:
                              // the shader then never reads uv1, which matters
                              // because RBR's uv1 on object meshes is garbage
-                             // (design 3.3f) - and cannot be fixed by a flag
+                             // (design §2.7) - and cannot be fixed by a flag
                              // that a writer might forget to set.
     uint32_t normal;         // LINEAR. Tangent-space, +Y up (glTF convention).
     uint32_t orm;            // LINEAR. R = occlusion, G = roughness, B = metallic.
                              // glTF's packing, so an exported material needs no
                              // channel shuffle.
-    uint32_t emissive;       // sRGB. Design 5: night lighting needs surfaces that
+    uint32_t emissive;       // sRGB. Design §5: night lighting needs surfaces that
                              // are bright without being lit.
     uint32_t flags;          // kMaterial*
 
@@ -233,7 +232,7 @@ struct Object
 //     per texture: uint32 nameLen, char name[nameLen],
 //                  uint32 dataSize, uint8 dds[dataSize], pad to 4
 // Embedded rather than referenced so a stage is one file and therefore one CRC
-// in the fairness chain (design 3.6).
+// in the fairness chain (design §2.9).
 
 // 'NGGS' - where the car starts: float position[3] then float facing[3].
 //
@@ -269,7 +268,7 @@ inline uint32_t ChunkSpawn()       { return FourCC('N','G','G','S'); }
 // OPTIONAL: without it nothing is linked.
 inline uint32_t ChunkObjectKeys()  { return FourCC('N','G','G','K'); }
 
-// STAGE VARIANTS (design 3.4b) - one file for a map's STAGES: RBR's reversed stages (Joux Verte 45 is 42 driven the
+// STAGE VARIANTS (design §2.4) - one file for a map's STAGES: RBR's reversed stages (Joux Verte 45 is 42 driven the
 // other way), and a sibling of the map that is really another stage. RBR shipped each time of day as its own .lbs
 // (_M, _N, _E, _O) with the light baked in; W-Rally lights the stage live and picks the time of day as weather, so the
 // converter COLLAPSES siblings that draw the same and are the same physics into one stage (Wallaby StagePlan) and the
@@ -383,10 +382,10 @@ static_assert(sizeof(PlantPart) == 16,        "PlantPart layout - keep Plants.cs
 inline uint32_t ChunkTagNames()    { return FourCC('N','G','G','G'); }
 inline uint32_t ChunkPlants()      { return FourCC('N','G','G','P'); }
 
-// WEATHER PRESETS (design 5.0q, 5.0t). Inside the file, not beside it: the
+// WEATHER PRESETS (design §2.5). Inside the file, not beside it: the
 // preset is part of an event's definition and must be covered by the same CRC
 // (and encryption envelope) as the geometry, or a competitor could thin the fog
-// with a text editor (design 3.6).
+// with a text editor (design §2.9).
 //
 // Payload: WeatherChunkHeader, then `count` records of `recordSize` bytes. The
 // FIRST record is the track's default.
@@ -404,8 +403,8 @@ inline uint32_t ChunkPlants()      { return FourCC('N','G','G','P'); }
 //
 // `name` is the preset's identity, and for a preset the game should ever select
 // it must be RBR's TrackSettings section name for that condition
-// ("108M_crisp_clear", "04O_M_heavyfog_clear") - that is what RBRTM passes
-// (design 5.0s). Other names are legal and the game never picks them.
+// ("108M_crisp_clear", "04O_M_heavyfog_clear") - that is what the game
+// selects by (design §5.1). Other names are legal and the game never picks them.
 #pragma pack(push, 4)
 struct WeatherChunkHeader
 {
@@ -429,7 +428,7 @@ struct WeatherRecord
     float rain;               // 0..1
     float snow;               // 0..1
     float exposure;           // exposure at reference brightness
-    // --- appended 2026-10-30 (NGG design 5.4, N1): the TIME and PLACE. With kWeatherTimeSet the sun and the moon
+    // --- appended 2026-10-30 (NGG design §5.4): the TIME and PLACE. With kWeatherTimeSet the sun and the moon
     // follow from them astronomically (core/astronomy.h) and `sunDirection` is not used. A 124-byte record (before
     // this) reads as no time set.
     uint32_t timeFlags;       // kWeatherTimeSet
@@ -476,7 +475,7 @@ inline uint32_t ChunkWeather()     { return FourCC('N','G','G','W'); }
 static_assert(sizeof(Object) == 16,   "Object layout");
 
 // ---------------------------------------------------------------------------
-// INSTANCED MODELS (vegetation plan, workstream 2; NGG design 5.0w). A MODEL is a mesh drawn many times: a species of
+// INSTANCED MODELS (vegetation plan, workstream 2; NGG design §2.6). A MODEL is a mesh drawn many times: a species of
 // tree, a bush, a rock. The file holds each once, in a library (NGGD), and a placement table (NGGE) puts them in the
 // world; the renderer draws every placement of a model's level of detail in one instanced draw, culls them per
 // placement and switches the levels by distance. They are what replaces RBR's crossed-card plants (NGGP): a placement

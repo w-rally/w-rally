@@ -1,5 +1,5 @@
 // ---------------------------------------------------------------------------
-// Instanced models (ngg_format.h NGGD / NGGE, NGG design 5.0w): the model library loaded into the dynamic pool, the
+// Instanced models (ngg_format.h NGGD / NGGE, NGG design §2.6): the model library loaded into the dynamic pool, the
 // placements, their culling and level of detail, and the per-frame instance stream the passes draw them from.
 //
 // The passes themselves (the prepass, the main pass, the cascades) are in scene.cpp; they ask CullModels for a view's

@@ -64,7 +64,7 @@ bool Lights::Create(ID3D12Device* dev)
     m_clusterBuf = MakeUpload(dev, sizeof(uint32_t) * 2 * kClusters);
     m_indexBuf = MakeUpload(dev, sizeof(uint32_t) * kMaxIndices);
     // ... and their GPU-local copies, which is what the shaders read: the upload heap is CPU-visible memory the GPU
-    // reads slowly and barely caches (on the development GPU, an APU, it measured the same - design 5.4 N2).
+    // reads slowly and barely caches (on the development GPU, an APU, it measured the same - design §5.5).
     m_lightGpu = MakeLocal(dev, sizeof(GpuLight) * kMaxLights);
     m_clusterGpu = MakeLocal(dev, sizeof(uint32_t) * 2 * kClusters);
     m_indexGpu = MakeLocal(dev, sizeof(uint32_t) * kMaxIndices);
@@ -323,7 +323,7 @@ bool Lights::Build(ID3D12GraphicsCommandList* list, const float* view, const flo
     // Each cluster's bounding sphere in view space - its eight corners, from the tile's NDC rectangle at the slice's
     // near and far depth - and whether a light's sphere of reach, or a spot's CONE, touches it. The box above is the
     // sphere's; a spot's cone is much less (a 30-degree headlight beam reaches 300 m and every cluster ahead in its
-    // box), and every light a cluster lists is shaded by every pixel in it (design 5.4 N2).
+    // box), and every light a cluster lists is shaded by every pixel in it (design §5.5).
     m_clusterSpheres.resize(kClusters);
     for (uint32_t z = 0; z < kClustersZ; ++z) {
         const float zn = z == 0 ? 0.0f : kNear * std::exp((float)z / sliceScale);

@@ -36,7 +36,7 @@ uint LightCluster(float2 px, float viewZ, float4 params)
 // struct, which indexed by a variable (its lobes) is an indexable temporary in scratch memory, ~1.5 ms per light at
 // 1080p on the development GPU - and every one of them used whatever the light's type (LightIrradiance selects, it
 // does not branch), so the compiler issues them as one clause (one round trip, not four), and with a wave-uniform
-// index as scalar loads (the scene pass's light loop, design 5.4 N2).
+// index as scalar loads (the scene pass's light loop, design §5.5).
 struct LightRec
 {
     float3 pos;    float invRange2;
@@ -75,7 +75,7 @@ float3 LightIrradiance(uint li, LightRec L, float3 p, out float3 l, out float di
     const float cd = dot(-l, L.dir);
     const float s = saturate((cd - L.cosOuter) * L.spotScale);   // smoothstep(cosOuter, cosInner, cd)
     atten *= L.type == kLightSpot ? s * s * (3.0 - 2.0 * s) : 1.0;
-    // A BEAM (design 5.4 N3a): the sum of its lobes, each an elliptical peak in the lamp's frame, measured in the
+    // A BEAM (design §5.5): the sum of its lobes, each an elliptical peak in the lamp's frame, measured in the
     // tangent plane (across and up over along) - read only where it is used, the lobes from the buffer by index.
     if (L.type == kLightBeam)
     {

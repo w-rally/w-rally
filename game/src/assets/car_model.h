@@ -32,7 +32,7 @@ struct CarVertex {
     float pos[3], normal[3], uv[2];
 };
 
-// The lamps' meshes (NGG design 5.4 N3b), by what switches them: RBR's lamp meshes come in pairs - e_light_lf and its
+// The lamps' meshes (NGG design §5.5), by what switches them: RBR's lamp meshes come in pairs - e_light_lf and its
 // lit twin e_light_lf_lit, one shown at a time (the .ini's SwitchBox = light) -, the ramp's housing (e_bonnet_ramp,
 // e_ramp, their glass) shows with the car's own ramp.
 enum LampMeshGroup : int { kLampHead, kLampTail, kLampBrake, kLampReverse, kLampRamp, kLampRampHousing, kLampGroups };

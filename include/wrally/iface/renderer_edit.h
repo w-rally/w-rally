@@ -7,7 +7,7 @@
 // ngg-api's editor surface (plugin-rbr ngg/api, removed from W-Rally in phase
 // 4) over the same ngg-core calls, so an editor that used ngg-api.dll can draw
 // through this one and stay on the renderer the game ships. Its client is
-// Wallaby (NGG design 8.2); the game does not use it.
+// Wallaby (NGG design §8); the game does not use it.
 //
 // Reached from RendererApi::editApi with kRendererEditVer, and versioned on its
 // own: editor additions do not move kRendererInterfaceVer, and the game's

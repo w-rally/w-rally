@@ -205,7 +205,7 @@ void OpenPipelineCache(ID3D12Device* dev, const std::string& dir)
     if (!dev || dir.empty()) return;
     // OPT-IN (NGG_PIPELINE_CACHE=library): on the AMD iGPU the library saved nothing, and with the driver's cache
     // cold its loads compile - one at a time, under this cache's lock - which undid PipelineBatch's parallel making
-    // (the scene's batch 7.4 s instead of 2.9-4.3). Kept to measure on NVIDIA (docs/ngg-design.md 9b item 32).
+    // (the scene's batch 7.4 s instead of 2.9-4.3). Kept to measure on NVIDIA (docs/ngg-design.md §11 #4).
     if (const char* e = std::getenv("NGG_PIPELINE_CACHE"); !e || std::strcmp(e, "library") != 0)
         return;
     if (const char* d = std::getenv("NGG_SHADER_DIR"); d && *d)

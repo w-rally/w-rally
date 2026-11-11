@@ -42,7 +42,7 @@ struct SkyCB
     float cloudCover;      // weather (5.0q)
     float fogBeta;
     float fogHeight;
-    // The night (design 5.4, N1b).
+    // The night (design §5.4).
     float nightGlow;
     float lightIsMoon;
     float starIrradiance;
@@ -177,7 +177,7 @@ void Sky::Record(ID3D12GraphicsCommandList* list, D3D12_CPU_DESCRIPTOR_HANDLE rt
     // params so it can be exaggerated for visibility while debugging.
     cb.sunDiscCos   = cosf(0.00465f * (p.sunDiscSize > 0.0f ? p.sunDiscSize : 1.0f));
 
-    // The night (design 5.4, N1b). The moon subtends ~0.52 degrees, as the sun does.
+    // The night (design §5.4). The moon subtends ~0.52 degrees, as the sun does.
     cb.nightGlow      = p.nightGlow;
     cb.lightIsMoon    = p.lightIsMoon;
     cb.starIrradiance = p.starIrradiance;

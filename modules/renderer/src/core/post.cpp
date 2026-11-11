@@ -22,7 +22,7 @@ namespace {
 // exposure applies the dial unchanged. It was measured, not chosen - see 5.0g:
 // the track-108 start camera, the scene the current dial (0.8) was tuned on,
 // meters at this value, so turning auto exposure on leaves that view as it was.
-// The meter reaches down to 2^-32 for the night (design 5.4, N1c): a moonlit stage meters near 2^-21, a moonless
+// The meter reaches down to 2^-32 for the night (design §5.4): a moonlit stage meters near 2^-21, a moonless
 // one near 2^-28 - both below the day's floor of 2^-12, where they counted as black and the meter froze.
 const float kMinLog2       = -32.0f;
 const float kLog2Range     = 40.0f;    // to 2^8: above that is the sun disc

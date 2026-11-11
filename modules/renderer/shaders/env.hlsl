@@ -11,7 +11,7 @@ cbuffer EnvCB : register(b0)
     float  gCloud;           // weather (5.0q)
     float  gFogBeta;
     float  gFogH;
-    float  gNightGlow;       // design 5.4: the moonless sky's own radiance
+    float  gNightGlow;       // design §5.4: the moonless sky's own radiance
     float3 gLight2;          // ... and the other body's sky
     float  gLight2I;
 };

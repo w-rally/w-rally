@@ -1,24 +1,16 @@
 // ---------------------------------------------------------------------------
-// Rt - the ray-tracing probe: an acceleration structure over the static world,
-// and one inline ray per pixel.
+// Rt - the ray tracer: acceleration structures over the scene, and the inline
+// rays that give the sun's shadow, AO and the local lights' shadows, with their
+// denoisers (design §4).
 //
-// It exists to answer a cost question before a feature is built on top of it
-// (design 1.8.3 makes RT the baseline and takes SSAO, CSM-as-primary and the
-// probe grid off the critical path - so the first thing worth knowing is what
-// RT actually costs on the floor hardware, not what it deletes).
+// ONE BLAS PER MESH, A TLAS OF INSTANCES (design §4.2). Moving an object or a
+// placement changes only its instance; a new or dropped mesh builds or drops
+// its BLAS (Renderer::KeepRtCurrent). Opaque and alpha-tested triangles are two
+// geometries, so foliage is cut out by an any-hit test with the rasteriser's
+// own alpha rule.
 //
-// OUR CONTENT IS THE EASIEST RT CASE THIS PROJECT WILL EVER GET, and that is a
-// property of the format rather than luck: the converter bakes every transform
-// into world space (ngg_format.h), so the world is rigid. One BLAS, built once
-// at load, never refitted, and a TLAS with a single identity instance. The day
-// per-object transforms land (design 9b item 7) this stops being true and the
-// TLAS has to be rebuilt per frame - cheap, but it has to exist as code.
-//
-// THE FIRST RAY IS A SHADOW RAY, not ambient occlusion, and deliberately: its
-// answer can be checked against something we already have. If RT visibility and
-// the cascaded shadow map disagree, one of them is wrong and the disagreement
-// is visible. Ambient occlusion has nothing to be checked against, so it is the
-// wrong thing to write first.
+// The trace runs after the prepass and before the main pass of the SAME frame:
+// the main pass reads this frame's visibility, not last frame's.
 //
 // Inline RayQuery in a compute shader, not a full DXR pipeline: no shader
 // tables, no ray-gen/miss/hit shaders, one PSO. It needs tier 1.1 and SM 6.5,
@@ -50,7 +42,7 @@ public:
     bool Create(Device& dev);
     bool Ready() const { return m_pso != nullptr; }
 
-    // The acceleration structures, per MESH (design 5.0o): one BLAS per key
+    // The acceleration structures, per MESH (design §4.2): one BLAS per key
     // in Scene::DescribeRt - the world, each moved object, each editor mesh -
     // cached, so only `newMeshes` (the keys HasMesh says are missing) are
     // built; BLASes whose keys are no longer live are dropped. Then the shared

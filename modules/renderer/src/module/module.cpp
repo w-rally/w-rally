@@ -632,7 +632,7 @@ Status WRALLY_CALL RenderFrame(Renderer* r, const FrameDesc* f)
         }
         ApplyFrameWeather(*r, *f);
         r->scene.SetWetness(f->wetness);
-        // The frame's local lights, as the core takes them (NGG design 5.4 N2).
+        // The frame's local lights, as the core takes them (NGG design §5.5).
         {
             std::vector<ngg::core::LightDesc> lights;
             lights.reserve(f->lightCount);
@@ -684,7 +684,7 @@ Status WRALLY_CALL RenderFrame(Renderer* r, const FrameDesc* f)
     r->dev.list->ResourceBarrier(1, &toRt);
 
     const D3D12_CPU_DESCRIPTOR_HANDLE rtv = r->sc.CurrentRtv();
-    // The frame's sky: the weather's, and over its sun the time and place when the frame gives them (NGG design 5.4)
+    // The frame's sky: the weather's, and over its sun the time and place when the frame gives them (NGG design §5.4)
     // - from the weather's sky every frame, so the night's scaling of the light never compounds.
     ngg::core::SkyParams sky = r->weatherSky;
     // The sun's elevation for the stats: the weather's sun (sunDir its light's direction), unless a time sets it below.

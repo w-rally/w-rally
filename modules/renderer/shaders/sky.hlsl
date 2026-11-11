@@ -15,7 +15,7 @@ cbuffer SkyCB : register(b0)
     float  gCloud;           // weather (5.0q)
     float  gFogBeta;
     float  gFogH;
-    float  gNightGlow;       // the night (design 5.4, N1b)
+    float  gNightGlow;       // the night (design §5.4)
     float  gLightIsMoon;
     float  gStarIrradiance;
     float3 gMoonDir;         float gMoonRadiance;
@@ -23,7 +23,7 @@ cbuffer SkyCB : register(b0)
     float3 gEq0;             float gPixelAngle;
     float3 gEq1;             float gPad3;
     float3 gEq2;             float gPad4;
-    float3 gLight2;          float gLight2I;   // the other body's sky (design 5.4)
+    float3 gLight2;          float gLight2I;   // the other body's sky (design §5.4)
 };
 
 // The atmosphere's extinction of a point source (a star, the moon) along `ray`: ~0.2 magnitudes per air mass in V,
@@ -111,12 +111,12 @@ float4 PSMain(VSOut i) : SV_Target
     float cosSun = dot(ray, gSunDir);
     // The disc dims behind the cloud deck and inside fog - the same factors
     // the direct sun on the ground gets. Clear air leaves it as it was.
-    // At night gSunDir is the MOON (the light, design 5.4): no sun disc then - the moon has its own, below.
+    // At night gSunDir is the MOON (the light, design §5.4): no sun disc then - the moon has its own, below.
     if (cosSun > gSunDiscCos && gLightIsMoon < 0.5)
         col += gSunIntensity * 0.02 * smoothstep(gSunDiscCos, 1.0, cosSun)
              * AtmCloudSun() * AtmFogSunT(gSunDir);
 
-    // The MOON's disc (design 5.4, N1b), by day too: a sphere lit by the real sun, so its phase draws itself -
+    // The MOON's disc (design §5.4), by day too: a sphere lit by the real sun, so its phase draws itself -
     // the lit part is where the disc's surface faces the sun. Earthshine keeps the dark part just visible.
     bool behindMoon = false;
     if (gMoonRadiance > 0.0 && gMoonDir.y > -0.02)

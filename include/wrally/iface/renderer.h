@@ -10,7 +10,7 @@
 // that can drift from the game's.
 //
 // THE RENDERER KNOWS NOTHING ABOUT RBR - the rule ngg-core already keeps (NGG
-// design 8.0). It draws .ngg scenes and models it is given. Reading RBR's
+// design §1.3). It draws .ngg scenes and models it is given. Reading RBR's
 // .lbs / .sgc / .dds and turning them into that is the game's assets layer
 // (design doc, "Assets"), which is what lets legacy and new tracks share one
 // renderer path.
@@ -63,7 +63,7 @@ typedef uint32_t InstanceHandle;     // one placed model
 
 // RendererCaps (ModuleInfo::caps)
 constexpr uint64_t kRendererCapRayTracing = 1ull << 0;   // the adapter can, and the module will
-constexpr uint64_t kRendererCapVr         = 1ull << 1;   // OpenXR (NGG design 1.8)
+constexpr uint64_t kRendererCapVr         = 1ull << 1;   // OpenXR (NGG design §1.1)
 constexpr uint64_t kRendererCapHdrOutput  = 1ull << 2;
 
 // RendererInput::flags
@@ -130,7 +130,7 @@ struct WeatherDesc {
 };
 static_assert(sizeof(WeatherDesc) == 60, "WeatherDesc layout");
 
-// The time and place (NGG design 5.4). With `set`, the sun follows from them astronomically, over whatever the
+// The time and place (NGG design §5.4). With `set`, the sun follows from them astronomically, over whatever the
 // weather (a preset or a WeatherDesc) says - any stage at any hour.
 struct SkyTimeDesc {
     uint32_t set;            // 0: the weather's own sun
@@ -143,12 +143,12 @@ struct SkyTimeDesc {
 };
 static_assert(sizeof(SkyTimeDesc) == 36, "SkyTimeDesc layout");
 
-// A local light (NGG design 5.4, N2): a point or a spot, in the world (render axes, y up), in PHYSICAL units -
+// A local light (NGG design §5.5): a point or a spot, in the world (render axes, y up), in PHYSICAL units -
 // candela on its axis, metres, degrees. Every one casts ray-traced shadows (unless kLightNoShadows); a car's lamps
 // are lights like any other, sent each frame where the car has them.
 constexpr uint32_t kLightPoint = 0;
 constexpr uint32_t kLightSpot  = 1;
-constexpr uint32_t kLightBeam  = 2;             // a lamp: the sum of its lobes in its own frame (design 5.4 N3a)
+constexpr uint32_t kLightBeam  = 2;             // a lamp: the sum of its lobes in its own frame (design §5.5)
 constexpr uint32_t kLightNoShadows = 1u << 0;   // never occluded (a dashboard lamp)
 constexpr uint32_t kMaxLightLobes = 4;
 // A beam's lobe: a peak that falls to half at the half-width across and the half-height up and down, centred `yawDeg`
@@ -286,7 +286,7 @@ struct FrameDesc {
     // the weather's `rain`.
     float                    wetness;
     SkyTimeDesc              skyTime;         // the time and place: the sun from them (set), else the weather's
-    const LightDesc*         lights;          // this frame's local lights (design 5.4 N2)
+    const LightDesc*         lights;          // this frame's local lights (design §5.5)
     uint32_t                 lightCount;
     float                    time;            // seconds, the game's: animated materials, wind
     const InstanceUpdate*    instances;
@@ -336,7 +336,7 @@ struct RenderStats {
     float    exposure;                     // applied last frame
     float    meteredEv, adaptedEv;         // auto exposure: log2 luminance, this frame / adapted
     char     rtFallback[96];               // why RT is not active, "" when it is
-    float    lightsMs;                     // the local lights' ray trace (GPU ms), part of rtMs (design 5.4 N2)
+    float    lightsMs;                     // the local lights' ray trace (GPU ms), part of rtMs (design §5.5)
     uint32_t lightCount;                   // the local lights this frame
     float    frameMs;                      // the whole frame's GPU time, first command to last (GPU ms)
     float    sunElevationDeg;              // the last frame's sun over the horizon, degrees (a game's lamps by it)

@@ -52,7 +52,7 @@ public:
     //
     // The editor needs it: Wallaby serialises the scene it is holding and hands
     // over the pointer, so opening a project costs no temp file and no disk round
-    // trip (design 8.2). It is for OPENING a project - editing pushes deltas
+    // trip (design §8). It is for OPENING a project - editing pushes deltas
     // instead, or the disk cost simply moves to PCIe.
     bool LoadFromMemory(ID3D12Device* device, ID3D12CommandQueue* queue,
                         const void* data, size_t bytes,
@@ -174,7 +174,7 @@ public:
     bool AerialMarch() const { return m_aerialMarch; }
     bool AerialLutReady() const { return m_aerialLut.Ready(); }
 
-    // Mip chains for textures that shipped without one (mipgen.h, design 5.0l).
+    // Mip chains for textures that shipped without one (mipgen.h, design §2.7).
     // 0 = off (as shipped), 1 = plain box filter (the A/B reference - foliage
     // thins out with distance), 2 = coverage-preserving (default). Applied at
     // load, so it takes effect on the next Load.
@@ -210,7 +210,7 @@ public:
     enum { kLegacyProfileCount = 3 };
     void SetLegacyProfile(int mode) { m_legacyProfile = WrapMode(mode, kLegacyProfileCount); }
     int  LegacyProfile() const { return m_legacyProfile; }
-    // How wet the surfaces are, 0 dry .. 1 wet (design 5.0v): porous ones darker, all glossier, and above ~0.5
+    // How wet the surfaces are, 0 dry .. 1 wet (design §5.2): porous ones darker, all glossier, and above ~0.5
     // puddles on the ground layer. The road's state, set per frame by the client.
     void  SetWetness(float w) { m_wetness = w < 0.0f ? 0.0f : w > 1.0f ? 1.0f : w; }
     // The car whose paint reflects the world (probe.h): its objects sample the cube probe instead of the sky, and the
@@ -265,7 +265,7 @@ public:
     void SetAmbientSpecular(bool on) { m_ambientSpecular = on; }
     const Environment& Env() const { return m_ownEnv; }
 
-    // Lighting balance (design 5.0i). false: the established balance, with
+    // Lighting balance (design §3.5). false: the established balance, with
     // sunDiffuse/skyAmbient and the albedo*E diffuse convention. true: physical
     // Lambert (albedo/PI) and GGX with no extra factors, the sun at its model
     // irradiance, the sky from the irradiance map, the ground bounce
@@ -279,7 +279,7 @@ public:
     void SetPhysicalLighting(bool on) { m_physical = on; }
     bool PhysicalLighting() const { return m_physical; }
 
-    // Multiple scattering in the atmosphere (atmosphere_ms.h, design 5.0j).
+    // Multiple scattering in the atmosphere (atmosphere_ms.h, design §3.2).
     // The Sky has its own table and its own switch - keep the two in step.
     void SetMultipleScattering(bool on) { m_msOn = on; }
     bool MultipleScattering() const { return m_msOn; }
@@ -295,7 +295,7 @@ public:
     // targets (a rebuild, a resize) the new texture can be allocated at the
     // address the old one had - same pointer, so no rewrite, and the main pass
     // read the FREED texture's memory. A page fault, then a GPU hang (TDR),
-    // caught by DRED on the first object move (design 5.0r). Two descriptor
+    // caught by DRED on the first object move (design §10.5). Two descriptor
     // writes a frame cost nothing; a pointer is not an identity.
     void SetRtVisibility(ID3D12Resource* tex) { m_rtVis = tex; m_rtSrvReady = false; }
     void ClearRtVisibility() { m_rtVis = nullptr; m_rtSrvReady = false; }
@@ -312,7 +312,7 @@ public:
     }
     void ClearRtAo() { m_rtAo = nullptr; m_aoSrvReady = false; }
 
-    // LOCAL LIGHTS (lights.h, design 5.4 N2): this frame's lights, their clusters for this view (before the ray
+    // LOCAL LIGHTS (lights.h, design §5.5): this frame's lights, their clusters for this view (before the ray
     // tracer reads them), and the ray tracer's denoised shadowed fraction of their light (Rt::FilteredLights; none:
     // unshadowed).
     void SetLights(const std::vector<LightDesc>& lights) { m_lights.Set(lights); }
@@ -328,7 +328,7 @@ public:
     bool AmbientSpecular() const { return m_ambientSpecular; }
     void RenderShadows(ID3D12GraphicsCommandList* list,
                        const float* view, const float* proj, const float* sunDirTravel);
-    // --- editor: per-object visibility (design 8.2, tier 1) -----------------
+    // --- editor: per-object visibility (design §8, tier 1) -----------------
     //
     // Hiding is a DRAW-LIST edit and costs no GPU work, which is what makes an
     // editor's delete and undo equally cheap: the geometry never leaves the
@@ -366,7 +366,7 @@ public:
     const std::string& Variant() const { return m_variant; }
     const std::vector<std::string>& VariantNames() const { return m_variantNames; }
 
-    // --- editor: selection highlight (design 8.2, tier 1) -------------------
+    // --- editor: selection highlight (design §8, tier 1) -------------------
     //
     // The renderer draws this, not the host, for one reason: the depth buffer
     // is here. A wire drawn by WinForms on top of the viewport would show
@@ -411,7 +411,7 @@ public:
     uint32_t OverlayPixelsVisible() const    { return m_ovPixVisible; }
     uint32_t OverlayPixelsOccluded() const   { return m_ovPixOccluded; }
 
-    // --- editor: overlay line layers (design 8.2) ---------------------------
+    // --- editor: overlay line layers (design §8) ---------------------------
     //
     // Everything a track editor draws that is not track geometry is a line: the
     // drive line, trigger volumes, camera markers, bounding boxes, manipulator
@@ -482,7 +482,7 @@ public:
     uint32_t LabelPixelsVisible() const  { return m_labPixVisible; }
     uint32_t LabelPixelsOccluded() const { return m_labPixOccluded; }
 
-    // --- editor: the dynamic pool (design 8.2, tier 2) ----------------------
+    // --- editor: the dynamic pool (design §8, tier 2) ----------------------
     //
     // Everything added after the load lives BESIDE the static scene, in its own
     // vertex and index buffers, so placing one prop does not re-upload a 50 MB
@@ -523,7 +523,7 @@ public:
     void SetShadowsOn(bool on) { m_shadowsOn = on; }
     bool ShadowsOn() const { return m_shadowsOn; }
 
-    // --- editor: live material editing (design 3.3g) ------------------------
+    // --- editor: live material editing (design §2.3) ------------------------
     //
     // Scalars take effect on the NEXT FRAME with no rebuild of anything: the
     // material travels to the shader as root constants, read from m_materials
@@ -596,7 +596,7 @@ public:
     // Two index buffers over the ONE vertex buffer: opaque triangles and
     // alpha-tested triangles, each contiguous, because a BLAS geometry is a
     // contiguous index range and RBR's objects interleave the two freely.
-    // ---- the ray tracer's view of the scene (design 9b item 7, 5.0o) ------
+    // ---- the ray tracer's view of the scene (design §4.2) ------
     //
     // MESHES and INSTANCES, like the rasteriser's draw list rather than one
     // baked soup. Each mesh has a stable KEY, so the ray tracer can keep a BLAS
@@ -670,7 +670,7 @@ public:
     // TLAS instance masks: every instance has kRtMaskAll's bits; the reflection focus's also kRtMaskFocus.
     static constexpr uint32_t kRtMaskAll = 0x01, kRtMaskFocus = 0x02;
 
-    // ---- instanced models (NGGD / NGGE, ngg_format.h; NGG design 5.0w) ----------
+    // ---- instanced models (NGGD / NGGE, ngg_format.h; NGG design §2.6) ----------
     //
     // A model's LOD meshes live in the dynamic pool (one mesh per submesh, so the ray tracer's BLAS per mesh is a BLAS
     // per model submesh), its materials in the scene's table. Its placements are drawn with GPU instancing: per pass
@@ -715,7 +715,7 @@ public:
     // has been consumed) and last frame's statistics are logged every few seconds.
     void BeginFrame(ID3D12Device* dev);
 
-    // The weather presets the FILE carries (NGGW, design 5.0q) - the only ones
+    // The weather presets the FILE carries (NGGW, design §5.1) - the only ones
     // a competition should use. Empty for a file converted before the chunk
     // existed. The first is the track's default.
     const std::vector<WeatherPreset>& WeatherPresets() const { return m_weather; }
@@ -755,7 +755,7 @@ private:
                     const uint8_t* table, size_t tableBytes, uint32_t indexCount, bool untaggedCards);
 
     // Bounds are computed at LOAD from the vertex data - the renderer-side
-    // fallback promised in design 3.3e. The converter should eventually emit
+    // fallback promised in design §2.7. The converter should eventually emit
     // them, because only it can also choose the grouping.
     struct DrawItem
     {

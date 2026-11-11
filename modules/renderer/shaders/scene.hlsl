@@ -126,7 +126,7 @@ cbuffer Camera : register(b0)
 #define NGG_DRAW_HASHED      2048u
 
 // --- microfacet specular, metallic-roughness ------------------------------
-// Value noise on the world's xz, for where puddles lie (design 5.0v): fixed to the ground, so a puddle stays put as the
+// Value noise on the world's xz, for where puddles lie (design §5.2): fixed to the ground, so a puddle stays put as the
 // camera moves. The hash takes the cell's integer coordinates mod 4096 (puddle cells are metres: kilometres of stage
 // repeat nowhere a driver can see), so it stays exact in float far from the origin.
 float WetHash(float2 c)
@@ -153,7 +153,7 @@ float3 LocalLights(float3 p, float3 N, float3 V, float3 diffuseCol, float3 f0, f
 // emitter (ShadeLocalLight - Karis 2013), sin(r) / 2.
 static const float kSunDiscWiden = 0.0024;
 
-// THE LOCAL LIGHTS at this pixel (lights.h, design 5.4 N2): every light of its cluster, unshadowed - Lambert and GGX
+// THE LOCAL LIGHTS at this pixel (lights.h, design §5.5): every light of its cluster, unshadowed - Lambert and GGX
 // as the sun's - then the shadowed ones times the ray tracer's denoised shadowed fraction (the ratio estimator: one
 // ray per pixel to one light chosen by what it gives here, lights.h). `wrap` softens the cosine (a foliage card's),
 // `withSpec` adds the highlight. Glass takes the fraction as 1: the traced pixel is what lies behind.
@@ -175,9 +175,9 @@ static const float kSunDiscWiden = 0.0024;
 // to the main pass at 1080p, in proportion to each draw's pixel shader invocations - foliage's overdraw included.
 // Scalar loads (above), the cone culling of the clusters (lights.cpp) and the early exit below each took little
 // off it - fewer fragments did: the opaque world's lights are shaded once per PIXEL by the deferred pass
-// (PSDeferredLights), only glass here (design 5.4 N2c).
+// (PSDeferredLights), only glass here (design §5.5).
 // `trans`: a foliage card's transmission, as for the sun - a leaf with the lamp behind it is backlit, not black
-// (design 5.4 N3: grass tufts lit by the lamps had black lower halves, their volume normals turned away).
+// (design §5.5: grass tufts lit by the lamps had black lower halves, their volume normals turned away).
 // THE LOCAL LIGHTS' SHADOW MAPS (Lights::ShadowCount, Scene::RenderLocalShadows) - the cascades' path, where no ray
 // tracer shadows them: a few spots and beams (the Garage's three spots, the player's headlamps) each have a
 // perspective depth map from the lamp. Their emitters are big (the Garage's spots are 0.6 m discs), so a hard map's
@@ -405,7 +405,7 @@ Texture2D               gReflProbe  : register(t19);
 Texture2D<float>        gRtVis      : register(t7);
 // And this frame's ray-traced ambient occlusion, same source, denoised.
 Texture2D<float>        gRtAo       : register(t8);
-// Sky irradiance per normal, cosine-convolved (env.h, design 5.0i).
+// Sky irradiance per normal, cosine-convolved (env.h, design §3.4).
 Texture2D               gIrr        : register(t11);
 // Aerial perspective, tabulated per froxel (aerial.h): screen x, screen y, and
 // sqrt(distance / gAerialMaxDist). In-scatter and transmittance, both rgb.
@@ -480,7 +480,7 @@ float SunVisibility(float3 wpos, float viewDepth, float3 N, float3 L)
 // The material's five slots, in NGGM order. An empty slot is bound to the 1x1
 // white fallback rather than left unwritten, so a missing map is a neutral
 // value and never an unwritten descriptor reading zero - which is a failure
-// mode this renderer has already paid for once (design 5.0b).
+// mode this renderer has already paid for once (design §4.6).
 Texture2D    gTex0      : register(t0);   // baseColour
 Texture2D    gTex1      : register(t1);   // detail
 Texture2D    gNormalMap : register(t2);
@@ -834,7 +834,7 @@ float2 PSGlassMotion(VSOut i) : SV_Target
 //
 // Read from the froxel table (aerial.h) - one trilinear fetch per volume
 // where this used to be an 8x3 march on every geometry pixel, the largest
-// per-pixel cost left once the ambient march went (design 9b item 21).
+// per-pixel cost left once the ambient march went (design §3.3).
 // The march stays as the reference path (gAerialLut = 0): same integral,
 // so a difference between the two is a table defect by definition.
 // The scene pass's and the deferred local lights' (their light reaches the camera through the same air).
@@ -1171,7 +1171,7 @@ float4 Shade(VSOut i, bool frontFace, out GBufOut g)
         }
 
 #if !defined(ALPHA_TEST) && !defined(BLEND)
-        // WET SURFACES (design 5.0v; after Lagarde, "Water drop 2b"). Water in a POROUS surface's pores traps light
+        // WET SURFACES (design §5.2; after Lagarde, "Water drop 2b"). Water in a POROUS surface's pores traps light
         // - wet asphalt and gravel go darker - and a film of it on top is smooth: everything wet is glossier, and
         // then the sky's reflection does the rest. Rain reaches what faces up and is open; walls take half, and
         // what something stands over (the AO's dark: a canopy, the car) stays drier. Above half wet (damp -> wet),
@@ -1271,8 +1271,8 @@ float4 Shade(VSOut i, bool frontFace, out GBufOut g)
         // of marching a second time towards the zenith - a real approximation,
         // but the alternative doubles the per-pixel cost of the pass for a term
         // that is then multiplied by a ~0.5 albedo.
-        // The sky this surface sees. A LOOKUP, not a march (design 9b item
-        // 14): the environment map is built from the same AtmSkyRadiance in the
+        // The sky this surface sees. A LOOKUP, not a march (design
+        // §3.4): the environment map is built from the same AtmSkyRadiance in the
         // same direction, so this replaces a recomputation rather than
         // answering a different question. It was the last per-pixel evaluation
         // of the atmosphere that did not have to be one - N + up is in the
@@ -1368,7 +1368,7 @@ float4 Shade(VSOut i, bool frontFace, out GBufOut g)
         // lighting pass and absorbed by gSunDiffuse. Specular must therefore
         // carry the SAME factor or the two are out of balance by PI, which
         // would read as a chrome sheen on everything. Both terms collapse to the
-        // physical form together when exposure becomes physical (9b item 17).
+        // physical form together when exposure becomes physical (design §3.6).
         //
         // In the PHYSICAL balance the convention goes: diffuse is albedo/PI
         // and specular carries no factor - Lambert and GGX exactly as written
@@ -1659,7 +1659,7 @@ float4 Shade(VSOut i, bool frontFace, out GBufOut g)
 
 // THE DEPTH TEST BEFORE THE SHADER. The probe's UAV write (Shade) makes the default a test AFTER it - every fragment
 // the rasteriser makes ran the whole shader and only then failed: 6.4 per pixel on stage 41 at 1080p, with the
-// prepass's depth to test against or without (PIX's PS invocations, design 5.4 N2d). [earlydepthstencil] restores it
+// prepass's depth to test against or without (PIX's PS invocations, design §5.5). [earlydepthstencil] restores it
 // where it is exact - no clip, no SV_Depth, so testing and writing before the shader gives the same depth; the
 // alpha-tested variant clips, so it leaves out the probe instead and the driver tests early on its own.
 #if defined(ALPHA_TEST)
@@ -1694,7 +1694,7 @@ float4 PSMain(VSOut i, bool frontFace : SV_IsFrontFace) : SV_Target
 }
 #endif
 
-// THE DEFERRED LOCAL LIGHTS (design 5.4 N2c): one full-screen pass after the opaque world, each PIXEL's lights once -
+// THE DEFERRED LOCAL LIGHTS (design §5.5): one full-screen pass after the opaque world, each PIXEL's lights once -
 // in the main pass they were shaded per FRAGMENT, foliage's overdraw and every 2x2 quad's helper lanes included, at
 // the big shader's occupancy. The same LocalLights, from the surface the GBUF variants left (Shade), its position
 // from the depth; added (ONE, ONE) times the aerial transmittance, as the main pass added them before its aerial

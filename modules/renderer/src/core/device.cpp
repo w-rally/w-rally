@@ -177,7 +177,7 @@ bool Device::Create(const LUID* luid, bool enableDebugLayer)
 
     // What this adapter can actually do, logged at startup rather than
     // discovered when a feature silently fails to create. Ray tracing is the
-    // one that decides a whole branch of the plan (design 1.8.3), and shader
+    // one that decides a whole branch of the plan (design §1.1), and shader
     // model matters as much as the tier: inline RayQuery needs SM 6.5, which
     // FXC cannot emit at all.
     {

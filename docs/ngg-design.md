@@ -9,8 +9,8 @@ in [design.md](design.md). **This file is how the renderer works inside, and why
 
 This document describes the renderer **as it is now**. Until 2026-11 it was a running log written while NGG was an
 RBR plugin: a d3d9 proxy, a 64-bit host process, IPC, resource tagging. That history was dropped in the
-2026-11-11 rewrite and stays in git (`git log -- docs/ngg-design.md`). Code comments still cite the old section
-numbers ("design 5.0e", "9b item 30"); [Appendix A](#appendix-a-old-section-numbers) maps them to the new ones.
+2026-11-11 rewrite and stays in git (`git log -- docs/ngg-design.md`). Older commit messages and plugin-rbr still cite the old section numbers
+("design 5.0e", "9b item 30"); [Appendix A](#appendix-a-old-section-numbers) maps them to the new ones.
 
 **The decisions everything else rests on:**
 
@@ -2009,12 +2009,11 @@ glass, and VR behind `kRendererCapVr`.
 
 | # | item | state / why | blocked on |
 |---|---|---|---|
-| 34 | **Stale code comments** | the headers of `rt.h` (single BLAS, one-frame lag), `post.h` (no motion vectors), `sky.h` (single scattering) and `rt_lights.hlsl` (reservoir) are stale, as are `weather.cpp`/`weather.h` (rbrtm import), `ngg_format.h` (v0, RBRTM) and the `MeasureSingleStage` log line. About 200 comments cite old section numbers: rewrite them with Appendix A | nothing |
-| 35 | **RT vs VR budget** | which techniques fit a two-eye 90 Hz tier can only be measured on real hardware, once VR exists | VR ([design.md §3.2](design.md)) |
+| 34 | **RT vs VR budget** | which techniques fit a two-eye 90 Hz tier can only be measured on real hardware, once VR exists | VR ([design.md §3.2](design.md)) |
 
 ## Appendix A: old section numbers
 
-Code comments written before 2026-11-11 cite the plugin-era numbering. Where the topic still exists:
+Commit messages before 2026-11-11 and plugin-rbr cite the plugin-era numbering. Where the topic still exists:
 
 | old | new | old | new |
 |---|---|---|---|

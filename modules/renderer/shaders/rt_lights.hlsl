@@ -3,7 +3,7 @@
 // ---- local lights: one ray to one light, chosen by what it gives (lights.h) -
 // The RATIO ESTIMATOR's stochastic half: among the shadowed lights of this pixel's cluster, one chosen with a
 // probability in proportion to what it gives here (its irradiance's luminance times the cosine - the same terms the
-// scene pass sums), by a single weighted-reservoir pass; then one ray to a random point on its emitter. The 0/1 is
+// scene pass sums), by a sum over the cluster and an inverse-CDF pick on a stratified number; then one ray to a random point on its emitter. The 0/1 is
 // then an unbiased estimate of the shadowed fraction of the scene pass's sum, and the denoiser averages it as it does
 // the sun's. No light here: 1, which the scene multiplies into nothing.
 #include "rt_common.hlsli"
@@ -72,7 +72,7 @@ void CSMain(uint3 tid : SV_DispatchThreadID)
     }
 #elif defined(LIGHTS_REF)
     // NGG_LIGHTS_REF=1: THE REFERENCE - a ray to EVERY light, the exact weighted visibility. The one-ray estimate below
-    // is checked against it (design 5.4 N3: the lamp lab, the test lamps' shadows).
+    // is checked against it (design §5.5: the lamp lab, the test lamps' shadows).
     {
         float sumW = 0.0, sumV = 0.0;
         float allow = -1.0;

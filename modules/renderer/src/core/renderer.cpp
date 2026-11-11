@@ -11,7 +11,7 @@ namespace core {
 const QualityTier& Renderer::Tier(Quality q)
 {
     // Costs on the development machine's integrated Radeon, lab forest view
-    // (965k geometry pixels) - see design 5.0p for the measurement.
+    // (965k geometry pixels) - see design §1.5 for the measurement.
     static const QualityTier kTiers[3] = {
         { "low",    false, 0, 0, 0.25f },   // RT sun shadows only - the VR baseline
         { "medium", true,  1, 1, 0.50f },   // + RT AO, one ray (the default); XeGTAO medium (2 slices x 2 steps)
@@ -139,7 +139,7 @@ bool Renderer::LoadFromMemory(Device& dev, const void* data, size_t bytes)
     return ok;
 }
 
-// The BVH follows the scene, per MESH (design 5.0o). When only instances
+// The BVH follows the scene, per MESH (design §4.2). When only instances
 // changed - a drag, an instance of a mesh it already has - that is the TLAS
 // alone; when the mesh set changed (a load, a first move, a hide, an added
 // mesh) the missing BLASes are built and the stale ones dropped. Both on the

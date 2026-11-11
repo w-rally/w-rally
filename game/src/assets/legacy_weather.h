@@ -1,5 +1,5 @@
 #pragma once
-// An RBR stage's weathers as .ngg presets (wrally::assets; docs/design.md phase 8 step 3, NGG design 5.0q): every
+// An RBR stage's weathers as .ngg presets (wrally::assets; docs/design.md phase 8 step 3, NGG design §5.1): every
 // Maps/TrackSettings.ini section of the stage's map, translated into NGGW records for the legacy importer to write.
 //
 // TrackSettings.ini's numbers are art knobs for RBR's 2004 shader (Turbidity -2.8..9, a Mie phase g of 1.0), not

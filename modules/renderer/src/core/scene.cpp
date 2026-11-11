@@ -181,7 +181,7 @@ bool ReadWholeFile(const wchar_t* path, std::vector<uint8_t>& out)
 
 // Upload heap for simplicity: this is a one-off static scene of a few MB, and a
 // DEFAULT-heap copy would add a staging path for no measurable benefit at this
-// size. Real streaming (design 1.8.2) does not look like this.
+// size. Real streaming (design §1.1) does not look like this.
 ComPtr<ID3D12Resource> MakeUploadBuffer(ID3D12Device* dev, const void* data, size_t bytes)
 {
     D3D12_HEAP_PROPERTIES heap = {};
@@ -323,7 +323,7 @@ bool Invert4x4(const float* m, float* out)
 //
 // This is a STAND-IN. The right answer is the car's start position, which RBR
 // keeps in the track data and the converter does not currently carry into .ngg
-// (design 9b item 11). Until it does, the bounding box alone is a poor guide:
+// (design §11 #20). Until it does, the bounding box alone is a poor guide:
 // a stage is kilometres wide and ~150 m tall with an arbitrary origin, so its
 // box centre is usually in mid-air over a valley, and its corner - which is
 // what the first version of this used - is nowhere at all.
@@ -810,7 +810,7 @@ bool Scene::ObjectMaterial(uint32_t index, uint32_t* out) const
 //   - A TEXTURE slot rewrites the SRV heap. That is a descriptor write per
 //     material, not an allocation, but it is not free and it must not happen on
 //     every drag of a roughness slider.
-//   - The DRAW flags are derived from the slots (design 3.3g), so they have to
+//   - The DRAW flags are derived from the slots (design §2.3), so they have to
 //     be recomposed on every object using this material. The MEASURED
 //     single-stage decision from MeasureSingleStage is kept separately and
 //     re-applied here, because it came from the geometry and not from the
@@ -906,7 +906,7 @@ void Scene::MeasureSingleStage(const Vertex* verts, uint32_t vertexCount,
     if (flagged || partial || alreadyFlagged || alphaTested)
         Log("scene: single-stage - %zu object(s) flagged by the file, %zu alpha-tested, %zu measured "
             "(uv1 unusable on every vertex), %zu mixed and left alone. The converter "
-            "should set kMaterialSingleStage; this is the fallback.",
+            "should leave such objects' detail slot empty; this is the fallback.",
             alreadyFlagged, alphaTested, flagged, partial);
 }
 
@@ -2442,7 +2442,7 @@ bool Scene::LoadFromMemory(ID3D12Device* dev, ID3D12CommandQueue* queue,
         else Log("scene: NGGK truncated - ignored");
     }
 
-    // Weather presets carried by the file (NGGW): binary records, design 5.0t.
+    // Weather presets carried by the file (NGGW): binary records, design §2.5.
     m_weather.clear();
     if (weather)
     {
@@ -2703,7 +2703,7 @@ bool Scene::LoadFromMemory(ID3D12Device* dev, ID3D12CommandQueue* queue,
         }
     }
     // And the cascades, timed on their own: RT vs shadow maps on the same view
-    // is the comparison design 9b item 23 is decided by.
+    // is the comparison design §4.9 is decided by.
     if (!m_shadowTimer && m_timer)
     {
         D3D12_QUERY_HEAP_DESC qh = {};
@@ -2783,7 +2783,7 @@ bool Scene::LoadFromMemory(ID3D12Device* dev, ID3D12CommandQueue* queue,
 // as one PipelineBatch, and again only when the bias changed (an upscaler since). ONE AT A TIME, on the loading thread:
 // made in parallel - on worker threads, and ahead on a thread of their own from start-up - they saved ~5 s of a cold
 // start on the dev iGPU, but AMD's driver crashed or hung inside its compiler now and then (pipeline_cache.h,
-// docs/ngg-design.md 5.0x).
+// docs/ngg-design.md §1.6).
 // ---------------------------------------------------------------------------
 bool Scene::EnsurePipelines(ID3D12Device* dev, DXGI_FORMAT rtvFormat)
 {
@@ -3015,7 +3015,7 @@ bool Scene::CreatePipelines(ID3D12Device* dev, DXGI_FORMAT rtvFormat, float mipB
 
     // --- shaders -----------------------------------------------------------
     // scene.hlsl. DXC, shader model 6.0 (shader_compiler.h): the local lights' loop walks a wave's lights with scalar
-    // loads, which takes wave intrinsics (LocalLights, design 5.4 N2). FXC (5.1) stays as the fallback - a machine
+    // loads, which takes wave intrinsics (LocalLights, design §5.5). FXC (5.1) stays as the fallback - a machine
     // without dxcompiler.dll, or a source DXC refuses - so the source compiles under both, the wave path behind
     // __SHADER_TARGET_MAJOR. A pipeline cannot mix DXIL and DXBC, so the whole set goes through one compiler.
     enum Variant { kOpaque, kAlphaTest, kBlend };
@@ -3078,7 +3078,7 @@ bool Scene::CreatePipelines(ID3D12Device* dev, DXGI_FORMAT rtvFormat, float mipB
     // NGG_DUMP_PS=<path>: the opaque pixel shader for offline analysis - what Radeon GPU Analyzer needs to compile the
     // pipeline for a given GPU (registers, occupancy, ISA): the PS and VS blobs (DXIL, or DXBC from the fallback), the
     // root signature and the source, scene.hlsl with its includes written out (<path>.ps.obj, .vs.obj, .rs.bin, .hlsl;
-    // the .hlsl when the shader files are at hand). How the local lights' cost was taken apart (design 5.4 N2).
+    // the .hlsl when the shader files are at hand). How the local lights' cost was taken apart (design §5.5).
     if (const char* dump = std::getenv("NGG_DUMP_PS"))
     {
         auto put = [&](const char* ext, const void* p, size_t n) {
@@ -3425,7 +3425,7 @@ bool Scene::CreatePipelines(ID3D12Device* dev, DXGI_FORMAT rtvFormat, float mipB
 }
 
 // ---------------------------------------------------------------------------
-// The dynamic pool (design 8.2, tier 2).
+// The dynamic pool (design §8, tier 2).
 //
 // Added content lives in its own buffers beside the static scene. The point is
 // what does NOT happen: placing one prop does not touch the 50 MB the track
@@ -3835,7 +3835,7 @@ uint32_t Scene::VisibleObjectCount() const
 }
 
 // ---------------------------------------------------------------------------
-// Selection highlight (design 8.2, tier 1).
+// Selection highlight (design §8, tier 1).
 //
 // The shader is deliberately tiny: position in, flat colour out. It reads no
 // textures, no lighting, no atmosphere - an overlay routed through the shading
@@ -4188,7 +4188,7 @@ bool Scene::CreateSelectionPipeline(ID3D12Device* dev, DXGI_FORMAT outputFormat)
 }
 
 // ---------------------------------------------------------------------------
-// Overlay line layers (design 8.2).
+// Overlay line layers (design §8).
 //
 // This is the shape that lets an ngg-core backend replace D3D9 at all. The old
 // editor path is immediate mode -- every map object issues SetRenderState,

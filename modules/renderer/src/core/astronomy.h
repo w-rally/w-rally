@@ -1,6 +1,6 @@
 #pragma once
 // ---------------------------------------------------------------------------
-// The sky's clockwork (NGG design 5.4, phase N1): where the sun and the moon stand for a date, a time and a place,
+// The sky's clockwork (NGG design §5.4): where the sun and the moon stand for a date, a time and a place,
 // and how much of the moon is lit. Night in W-Rally is any stage at any hour, so the sun is no longer a direction
 // copied from a preset - it follows from when and where.
 //

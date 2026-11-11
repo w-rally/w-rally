@@ -1,5 +1,5 @@
 #pragma once
-// wrally::assets::BuildLampLab - the lamp lab (NGG design 5.4 N3): a synthetic scene in which to look at a car's lamps,
+// wrally::assets::BuildLampLab - the lamp lab (NGG design §5.5): a synthetic scene in which to look at a car's lamps,
 // built in memory as an .ngg (the old lab's way, ngg/host/testscene). The car stands at the origin, facing the render
 // frame's -z (the physics frame's -y), its centre of gravity kLabCogHeight over the floor; in front of it a flat floor,
 // a wall 10 m ahead of its ramp (an aiming screen), and thin white poles and a person-sized block a few metres ahead,

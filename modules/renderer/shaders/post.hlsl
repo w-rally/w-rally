@@ -479,7 +479,7 @@ float3 Agx(float3 x)
     return pow(max(v, 0.0), 2.2);      // back to linear; the OETF follows
 }
 
-// NIGHT VISION (design 5.4, N1c): in dim light the rods take over from the cones - colour drains away and what is
+// NIGHT VISION (design §5.4): in dim light the rods take over from the cones - colour drains away and what is
 // left shifts to blue-green (the Purkinje shift), which is most of why a moonlit scene reads as night. Per pixel, on
 // the scene's own luminance BEFORE exposure, against the day's reference grey: full colour down to ~8 EV under it
 // (late twilight), rods alone from ~17 EV under (moonlight), mesopic between. A surface in a headlight's beam stays

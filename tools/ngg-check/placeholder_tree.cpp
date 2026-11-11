@@ -9,7 +9,7 @@
 //   LOD2  the far billboard, one quad with a picture of the tree       to 900 m
 // (distances at scale 1: a placement's scale with its height), crossfading over 6 m. The ray tracer takes LOD1 by
 // default (--rt-lod 0 for LOD0): measured on stage 41, its rays' alpha tests through 7 needle tiers cost 16.3 ms of
-// ray tracing against 12.6 ms through 4 (8.8 ms with RBR's cards) - NGG design 5.0w.
+// ray tracing against 12.6 ms through 4 (8.8 ms with RBR's cards) - NGG design §2.6.
 #include "placeholder_tree.h"
 
 #include <algorithm>

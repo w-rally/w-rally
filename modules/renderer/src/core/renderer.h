@@ -1,6 +1,5 @@
 // ---------------------------------------------------------------------------
-// Renderer - ONE frame, recorded the same way for every client (design 9b
-// item 27, 5.0n).
+// Renderer - ONE frame, recorded the same way for every client (design §1.4).
 //
 // Until this existed, each client wired the frame up itself: the viewer had a
 // depth prepass, ray-traced shadows and AO, a denoiser and a carefully ordered
@@ -43,7 +42,7 @@
 namespace ngg {
 namespace core {
 
-// QUALITY TIERS (design 1.8.4): one technique-agnostic lighting path, scaled
+// QUALITY TIERS (design §1.5): one technique-agnostic lighting path, scaled
 // by tier rather than forked into a second renderer. VR at 90 Hz in stereo is
 // the reason they exist from P1; the floor hardware is the reason they matter
 // now. What each tier changes is only what has been MEASURED to matter
@@ -149,7 +148,7 @@ public:
     // A camera's cut: TAA's history (and the upscaler's), the shadow and AO sources' - whatever each keeps.
     void ResetHistory();
     // The whole frame's GPU time (RecordFrame, first command to last), last frame's. The one number a change of
-    // what the GPU does is judged by: a pass's own timestamps are not (design 5.4 N2c).
+    // what the GPU does is judged by: a pass's own timestamps are not (design §5.5).
     double LastFrameMs() const          { return m_frameMs; }
     // The size the scene is rendered at, and what upscales it ("" none: our own TAA, at the output size).
     UINT RenderWidth() const            { return m_renderWidth; }
