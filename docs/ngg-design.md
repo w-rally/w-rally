@@ -3096,7 +3096,7 @@ description (shader bytes, every state field, the root signature's serialised by
 revision (not the LUID: new every boot), the user-mode driver version and the shader set's hash, plus a hash of the
 file's bytes. Any mismatch, damage, or a library the runtime refuses, and it is deleted and built again. Written
 after start-up, after a scene load and at the end. Not used under `NGG_SHADER_DIR` and under PIX (the capturer's
-device has the library refused). **Since the parallel pipelines below it is OFF by default** -
+device has the library refused). **It is OFF by default** -
 `NGG_PIPELINE_CACHE=library` turns it on.
 
 **Measured** (Radeon 780M, 1080p, track 42, RT on; `NGG_DRIVER_SHADER_CACHE=clear` empties this application's
@@ -3116,40 +3116,39 @@ driver's cache cold a library hit compiles again; per-pipeline `GetCachedBlob` /
 same. (`NGG_DRIVER_SHADER_CACHE=off`, which disables instead of clears, made everything slow - 19-29 s - because the
 driver then ignores what the game hands it too.) And once the scene's pipelines were made in parallel it cost time:
 its loads compile when the driver's cache is cold, and they run under the cache's lock, one at a time (the scene's
-batch 7.4 s with it, 2.9-4.3 s without). So it is opt-in, kept to measure on NVIDIA, whose driver is said to keep
+batch 7.4 s with it, 2.9-4.3 s without - before that was reverted, below). So it is opt-in, kept to measure on NVIDIA, whose driver is said to keep
 compiled code in it (9b item 32).
 
 **A first-launch "compiling shaders" screen is not worth it here.** Games show one because they have thousands of
 pipelines; W-Rally has 72, and the driver keeps its own cache, so only the first start after an install or a driver
 update pays: ~2 s before the window's first frame and ~6 s inside the first stage's loading (before the parallel
-pipelines). The cheaper cures are below.
+pipelines). Making them in parallel would cut that, and did - but not on this driver (below).
 
-**The scene's pipelines in parallel and ahead (9b item 31, 2026-11-10).** The scene's 41 pipeline states (and its
-root signature) do not depend on what is loaded - the HDR format and the materials' mip bias, which is in the root
-signature's samplers, decide them - yet every load made them again, one after another. Now `Scene::CreatePipelines`
-makes them as one `PipelineBatch` (`pipeline_cache.h`): `Add` copies each description, `Run` makes them all on up to
-8 threads (`NGG_PIPELINE_THREADS`; the device is free-threaded), then whatever their success decides (the deferred
-lights, the reflection rays, a fatal main pipeline) is decided from the results. `Renderer::Create` starts that on a
-thread of its own first thing (`Scene::PreparePipelines`, native mip bias), while the start-up's own pipelines are
-made; the module asks again after the settings, which chains a second build only if an upscaler changed the bias. A
-load joins the thread (logging any wait), and makes the pipelines itself only when the bias changed since - a second
-load no longer makes any.
+**The scene's pipelines in parallel and ahead - built, then REVERTED: AMD's driver (9b item 31, 2026-11-10/11).**
+The scene's 41 pipeline states (and its root signature) do not depend on what is loaded - the HDR format and the
+materials' mip bias, which is in the root signature's samplers, decide them - yet every load made them again. That
+part stays: `Scene::CreatePipelines` makes them as one `PipelineBatch` (`pipeline_cache.h`) at the first load and again
+only when the bias changes (an upscaler since); a second load makes none.
 
-Measured cold (`NGG_DRIVER_SHADER_CACHE=clear`, three rounds each, the short track-42 replay run from start to exit):
-
-| | sequential (before) | ahead, after "ready" | ahead, from the start (built) |
-|---|---|---|---|
-| renderer "ready" | 2.5-2.7 s | 2.8-3.3 s | 3.2-4.7 s |
-| the load waits for the scene's pipelines | ~6 s (made in it) | 2.7-2.9 s | **0** |
-| the scene's batch | - | 4.3-4.5 s on 8 threads | 2.9-4.4 s |
-| whole run | 20.5-21.3 s | 17.7-18.2 s | **13.1-16.7 s** |
-
-Starting at once costs the window's first frame ~1 s (the start-up pipelines compete with the batch inside the
-driver; lowering the batch threads' priority did not help) and saves ~5 s to the first scene - and the game loads a
-scene straight after start-up (the Garage's showroom), so that is the wait the player sees. Warm (the driver's cache
-filled) nothing changed: ready 0.28-0.31 s, the batch 5 ms. Frames identical: track 42 RT, cascades + XeGTAO, FSR
-Quality (the chained second build), the still showroom (60 frames). Not done: the start-up's own 24 pipelines are
-still made one after another across the passes' `Create`s (~2-3 s cold).
+What was reverted is making them AT ONCE. The batch ran on 8 threads, and `Renderer::Create` started it on a thread of
+its own first thing, so the first load found it done. Cold (`NGG_DRIVER_SHADER_CACHE=clear`, the short track-42 replay
+run from start to exit) the whole run went 20.5-21.3 s -> 13.1-16.7 s and the load stopped waiting. But it crashed or
+hung now and then - **warm as well as cold, so on any start**: 1 run in 12 on main's build, 1 in 12 and 1 in 28 on the
+follow-up's, 0 in 12 on the sequential build before it. Caught with a crash handler and symbols: an access violation
+inside AMD's shader compiler (`amdxc64.dll`, driver 32.0.31021.5001, Radeon 780M) under `CreateGraphicsPipelineState`
+on a batch worker. D3D12 documents pipeline creation as free-threaded and the same descriptions never failed made one
+at a time, so it is the driver's. What was tried around it:
+- one thread per pixel shader (pipelines sharing a shader never compiled at once): 0 in 60, but a hang (a frozen
+  window) on that same build - not safe;
+- one compile at a time, process-wide (the batch ahead on its thread, the start-up behind a lock): the background
+  build took the lock first and "ready" went to 9.4 s, the whole run 18.9-19.2 s; started after "ready" instead, the
+  load waited 5.2-7.4 s for it, the run 16.5-20.3 s - no better than plain sequential (17.8-19.4 s that day).
+The ~5 s exists only while two compiles run at once, and only on a cold start (after an install or a driver update);
+a crash on 4-8 % of every start is far worse. So creation is sequential again: `PipelineBatch` runs on one thread
+unless `NGG_PIPELINE_THREADS=<n>` asks for more (to try a newer AMD driver or another vendor), no background thread.
+The start-up's own 24 pipelines (2.2 s cold: the sky's multiple scattering 0.95 s and its pass 0.27 s, the ray
+tracer's five 0.74 s, post 0.15 s) and the scene load's 7 (the environment 1.35 s of 1.5 s) stay sequential for the
+same reason - made in parallel (sky and RT on threads) they took "ready" 3.5-4.5 -> 2.3-3.3 s, on the same driver.
 
 ### 5.1 Renderer implications
 
@@ -4416,7 +4415,7 @@ Items parked deliberately, with the reason, so "later" does not become "lost".
 | 29 | **Weather v2: cloud shapes, rain, snow, night** - WET SURFACES DONE (5.0v): the road's wetness darkens, glosses and puddles the ground | v1 (5.0q) does fog, haze and cloud COVER. Partly cloudy is a uniform blend; RBR's cloud textures vs volumetric clouds is undecided. Left of rain: drops, spray, rain on glass, reflections of more than the sky, drying. Snow is carried in the presets but not drawn. Night: RBR has none (its N is NOON, 2026-10-30) - night stages are W-Rally's own design question | user's choice on clouds; night design |
 | 26 | **Delete the established lighting balance** | `sunDiffuse`, `skyAmbient`, `kSpecScale`, the albedo*E convention and the lerp ambient. Kept behind `Z` for one round so the physical default can be compared in-game | the user's in-game look at the physical default |
 | 30 | **Build a new mesh's BLAS in the background** | `KeepRtCurrent` builds the missing BLASes inside the frame and waits (`Rt::Rebuild` -> `EndAndWait`): a car added to a loaded scene stalls its first frame - the game's Garage showroom, measured 2026-11-01, 160-280 ms with the build 110 ms of it (Hyundai i20 R5: 71 meshes, 201,628 triangles, 31 MB). Wanted: the build submitted on its own and fenced, the new instances left out of the TLAS (no RT shadow, or the cascades' for them) until their BLASes are done, then added - the frame never waits. The same on a stage's car load and any added prop. (Model creation's twice-a-material SRV heap rebuild, the other half of that stall, is already batched: `Scene::BeginMaterialBatch`.) | nothing |
-| 31 | ~~Pipelines made in parallel, the scene's ahead of the stage~~ **SCENE DONE - 5.0x** | the scene's 41 made in one parallel batch on their own thread from start-up, once (not per load): cold whole run 20.5-21.3 -> 13.1-16.7 s, the load waits 0. Left: the start-up's own 24 pipelines (sky, environment, aerial, multiple scattering, probe, post, RT, XeGTAO, UI), still one after another across the passes' `Create`s, ~2-3 s cold before the first frame | nothing |
+| 31 | **Pipelines made in parallel** - BUILT AND REVERTED (5.0x) | made on 8 threads and ahead on their own thread, a cold start was ~5 s shorter (whole run 20.5-21.3 -> 13.1-16.7 s), but AMD's driver 32.0.31021.5001 crashed inside its compiler (amdxc64.dll) or hung in ~1 run of 12-28, warm or cold, whenever two threads compiled at once. Sequential again; `NGG_PIPELINE_THREADS=<n>` to try again on a newer AMD driver or on NVIDIA (the RTX machine) - 60+ warm runs with the crash/hang harness before trusting it | a driver that survives it |
 | 32 | **Measure the pipeline library on NVIDIA** (5.0x) | on the AMD iGPU it saves nothing (no GPU code in it) and, its loads serialised, slowed the parallel batch - so it is opt-in. On the RTX test machine: `NGG_DRIVER_SHADER_CACHE=clear` with and without `NGG_PIPELINE_CACHE=library`, the log's "pipelines:" lines. No win there either: delete `pipeline_cache`'s library and keep the wrappers | the RTX machine |
 | 33 | **Shader hot reload** (5.0x) | `NGG_SHADER_DIR` compiles from the files at start; a key that recreates the pipelines without a restart was optional and is not built | nothing |
 | 21 | ~~Aerial perspective is the last per-pixel atmosphere march~~ **DONE - 5.0f** | 64x64x32 froxel table of in-scatter + transmittance, filled per frame with the same `AtmScatter` and the same 8x3 quadrature; the march stays as the exact reference (`L`). Aerial's share of the main pass 1.9 -> 0.5 ms at the start camera, max 1/255 difference to the march | done |

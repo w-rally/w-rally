@@ -25,7 +25,6 @@
 #include <stdint.h>
 #include <vector>
 #include <string>
-#include <thread>
 
 #include "../format/ngg_format.h"   // for the file's Vertex layout
 #include "sky.h"                    // SkyParams, shared with the sky pass
@@ -55,13 +54,6 @@ public:
     // over the pointer, so opening a project costs no temp file and no disk round
     // trip (design 8.2). It is for OPENING a project - editing pushes deltas
     // instead, or the disk cost simply moves to PCIe.
-    ~Scene() { if (m_pipeThread.joinable()) m_pipeThread.join(); }
-
-    // The scene's pipelines (its root signature and pipeline states) made ahead, on a thread of their own, for the
-    // next load at this format and the current mip bias (SetMipBias); the load waits for them, or makes them itself
-    // when the bias changed since. Without it the first load makes them. Not while a load runs.
-    void PreparePipelines(ID3D12Device* device, DXGI_FORMAT rtvFormat);
-
     bool LoadFromMemory(ID3D12Device* device, ID3D12CommandQueue* queue,
                         const void* data, size_t bytes,
                         DXGI_FORMAT rtvFormat, UINT width, UINT height);
@@ -733,7 +725,7 @@ public:
 
 private:
     bool CreateDepth(ID3D12Device* device, UINT width, UINT height);
-    bool EnsurePipelines(ID3D12Device* device, DXGI_FORMAT rtvFormat);   // joins PreparePipelines' thread
+    bool EnsurePipelines(ID3D12Device* device, DXGI_FORMAT rtvFormat);   // made once per format and mip bias
     bool CreatePipelines(ID3D12Device* device, DXGI_FORMAT rtvFormat, float mipBias);
     bool UploadTextures(ID3D12Device* device, ID3D12CommandQueue* queue,
                         const uint8_t* chunk, size_t bytes);
@@ -909,7 +901,6 @@ private:
     // main pass ~1 ms on the development GPU.
     Microsoft::WRL::ComPtr<ID3D12PipelineState>  m_psoRefl[2][3];
     bool                     m_deferredReady = false;
-    std::thread              m_pipeThread;              // PreparePipelines' (joined by the load)
     bool                     m_pipeBuilt = false, m_pipeOk = false;
     DXGI_FORMAT              m_pipeFormat = DXGI_FORMAT_UNKNOWN;
     float                    m_pipeBias = 0.0f;         // the mip bias the pipelines were made for
