@@ -56,12 +56,16 @@ inline HRESULT CreateRootSignature(const Microsoft::WRL::ComPtr<ID3D12Device>& d
     return CreateRootSignature(dev.Get(), nodeMask, blob, size, riid, out);
 }
 
-// Pipelines made together, IN PARALLEL: the driver compiles each one to the GPU's code, seconds for the scene's
-// uber shaders when its cache is cold, and one thread made them one after another (~6 s for the scene's 48 on the dev
-// iGPU). Add copies the description (what it points to - shader bytes, the input layout, the root signature - must
-// live until Run); Run makes them all through CreatePipeline on up to NGG_PIPELINE_THREADS threads (default: the
-// CPU's cores, at most 8) and stores each into its target, or leaves the target empty and logs `failure` (when given).
-// Whatever a caller decides from a pipeline's success, it decides after Run, from the targets.
+// Pipelines made together. Add copies the description (what it points to - shader bytes, the input layout, the root
+// signature - must live until Run); Run makes them all through CreatePipeline and stores each into its target, or
+// leaves the target empty and logs `failure` (when given). Whatever a caller decides from a pipeline's success, it
+// decides after Run, from the targets.
+//
+// ONE THREAD by default. NGG_PIPELINE_THREADS=<n> makes them on n threads at once - D3D12 says pipeline creation is
+// free-threaded, and on the dev iGPU it cut a cold start by ~5 s - but AMD's driver (32.0.31021.5001, Radeon 780M,
+// 2026-11) crashed inside its compiler (amdxc64.dll) or hung in ~1 run of 12-28, warm or cold, whenever two threads
+// compiled at once; one at a time it never did. For trying another driver or vendor, not for shipping
+// (docs/ngg-design.md 5.0x).
 class PipelineBatch
 {
 public:

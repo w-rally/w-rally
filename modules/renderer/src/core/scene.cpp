@@ -17,7 +17,6 @@
 #include <algorithm>
 #include <atomic>
 #include <thread>
-#include <chrono>
 #include <unordered_map>
 #include <array>
 
@@ -2779,34 +2778,15 @@ bool Scene::LoadFromMemory(ID3D12Device* dev, ID3D12CommandQueue* queue,
 }
 
 // ---------------------------------------------------------------------------
-// The scene's pipelines: its root signature and the 48 pipeline states of every pass, independent of what is loaded
-// - the HDR format and the materials' LOD bias (in the root signature's samplers) decide them. Made together and in
-// parallel (PipelineBatch), on a thread of their own from start-up on (PreparePipelines) so the first load finds them
-// made, and again at a load only when the bias changed (an upscaler since). docs/ngg-design.md 5.0x, 9b item 31.
+// The scene's pipelines: its root signature and the 41 pipeline states of every pass, independent of what is loaded
+// - the HDR format and the materials' LOD bias (in the root signature's samplers) decide them. Made at the first load
+// as one PipelineBatch, and again only when the bias changed (an upscaler since). ONE AT A TIME, on the loading thread:
+// made in parallel - on worker threads, and ahead on a thread of their own from start-up - they saved ~5 s of a cold
+// start on the dev iGPU, but AMD's driver crashed or hung inside its compiler now and then (pipeline_cache.h,
+// docs/ngg-design.md 5.0x).
 // ---------------------------------------------------------------------------
-void Scene::PreparePipelines(ID3D12Device* dev, DXGI_FORMAT rtvFormat)
-{
-    if (!dev || (m_pipeBuilt && m_pipeFormat == rtvFormat && m_pipeBias == m_mipBias)) return;
-    m_pipeFormat = rtvFormat;
-    m_pipeBias = m_mipBias;
-    m_pipeBuilt = true;
-    // A build already under way (another bias - an upscaler set since start-up) finishes first: this one follows it.
-    ComPtr<ID3D12Device> keep(dev);
-    m_pipeThread = std::thread([this, keep, rtvFormat, bias = m_mipBias, before = std::move(m_pipeThread)]() mutable {
-        if (before.joinable()) before.join();
-        m_pipeOk = CreatePipelines(keep.Get(), rtvFormat, bias);
-    });
-}
-
 bool Scene::EnsurePipelines(ID3D12Device* dev, DXGI_FORMAT rtvFormat)
 {
-    if (m_pipeThread.joinable())
-    {
-        const auto t0 = std::chrono::steady_clock::now();
-        m_pipeThread.join();
-        const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
-        if (ms >= 1.0) Log("scene: waited %.0f ms for its pipelines (made since start-up)", ms);
-    }
     if (m_pipeBuilt && m_pipeFormat == rtvFormat && m_pipeBias == m_mipBias) return m_pipeOk;
     m_pipeFormat = rtvFormat;
     m_pipeBias = m_mipBias;

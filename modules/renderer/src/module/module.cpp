@@ -1163,7 +1163,6 @@ WRALLY_EXPORT Status WRALLY_CALL InitWInterface(uint32_t gameVersion, const Stru
         r->settings = input.settings;
         if (r->settings.mode != WindowMode::Windowed) r->settings.mode = WindowMode::Windowed;
         Apply(*r);
-        r->core.PrepareScenePipelines(r->dev);   // on their own thread: the first stage's load finds them made
         // ngg-api's environment switches, after the settings (a quality tier sets the AO's rays): NGG_DEBUG_VIEW,
         // NGG_AO_RAYS, NGG_LIGHT_MODE, NGG_LEGACY_PROFILE; NGG_AO_SOURCE=screen (a ray-traced frame takes XeGTAO's AO),
         // NGG_GTAO_QUALITY=0..3 (over the tiers), NGG_GTAO_RADIUS=<m>, NGG_GTAO_NORMALS=prepass|depth,

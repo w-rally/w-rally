@@ -140,9 +140,9 @@ template <class Desc, class LoadFn, class CreateFn>
 HRESULT Create(ID3D12Device* dev, const Desc* desc, uint64_t name, REFIID riid, void** out, LoadFn load,
                CreateFn create)
 {
-    // The device's create runs OUTSIDE the lock: PipelineBatch makes pipelines on several threads at once, and the
-    // device is free-threaded. The library is used under the lock (its loads, stores and serialising): its
-    // documentation promises nothing about threads, and one run with eight threads loading from it at once crashed.
+    // The device's create runs OUTSIDE the lock (PipelineBatch may make pipelines on several threads at once when
+    // asked, NGG_PIPELINE_THREADS). The library is used under the lock (its loads, stores and serialising): its
+    // documentation promises nothing about threads.
     Cache& c = C();
     const double t0 = NowMs();
     wchar_t wname[24];
@@ -438,8 +438,7 @@ bool PipelineBatch::Run(const char* what)
 {
     if (m_items.empty()) return true;
     const double t0 = NowMs();
-    unsigned threads = std::thread::hardware_concurrency();
-    threads = threads ? (std::min)(threads, 8u) : 4u;
+    unsigned threads = 1;   // see pipeline_cache.h: concurrent compiles crash AMD's driver
     if (const char* t = std::getenv("NGG_PIPELINE_THREADS")) threads = (unsigned)(std::max)(1, std::atoi(t));
     threads = (std::min)(threads, (unsigned)m_items.size());
     std::atomic<size_t> next{ 0 };
