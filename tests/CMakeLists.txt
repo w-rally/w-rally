@@ -31,13 +31,13 @@ set_tests_properties(physics-rbr-handshake PROPERTIES PASS_REGULAR_EXPRESSION
 set(WRALLY_TEST_RBR_DIR "" CACHE PATH "RBR folder for the golden replay test")
 set(WRALLY_TEST_NGG "" CACHE FILEPATH "stage 41's .ngg (drawn only)")
 set(WRALLY_TEST_GOLDEN "" CACHE FILEPATH "RBR's recording of stage 41 (a .phr)")
-if(EXISTS ${WRALLY_TEST_RBR_DIR}/Maps/track-41_M.trk AND EXISTS ${WRALLY_TEST_NGG} AND EXISTS ${WRALLY_TEST_GOLDEN})
+if(EXISTS "${WRALLY_TEST_RBR_DIR}/Maps/track-41_M.trk" AND EXISTS "${WRALLY_TEST_NGG}" AND EXISTS "${WRALLY_TEST_GOLDEN}")
     add_test(NAME golden-replay-41 COMMAND W-Rally ${WRALLY_TEST_RBR_DIR} ${WRALLY_TEST_NGG} --stage track-41_M --step 0.1
              --no-sound --overrides none --replay ${WRALLY_TEST_GOLDEN} --out ${CMAKE_BINARY_DIR}/tests-bin/golden-41.phr)
     set_tests_properties(golden-replay-41 PROPERTIES PASS_REGULAR_EXPRESSION "replay check: [0-9]+ poses, all bit-exact"
                          TIMEOUT 600)
 else()
-    message(STATUS "golden-replay-41 left out: no ${WRALLY_TEST_RBR_DIR}, ${WRALLY_TEST_NGG} or ${WRALLY_TEST_GOLDEN}")
+    message(STATUS "golden-replay-41 left out: needs WRALLY_TEST_RBR_DIR, WRALLY_TEST_NGG and WRALLY_TEST_GOLDEN")
 endif()
 
 # The sound through WAudio.dll against the audio library linked in, offline from the same records, bit for bit
@@ -47,7 +47,7 @@ add_test(NAME audio-offline-synthetic-mix COMMAND audio-check --mix ${CMAKE_CURR
 set_tests_properties(audio-offline-synthetic audio-offline-synthetic-mix PROPERTIES PASS_REGULAR_EXPRESSION
     "the same, bit for bit")
 # RBR's sounds and the physics' records of RBR's stage-41 recording (its first 20000 ticks), where the data is.
-if(EXISTS ${WRALLY_TEST_RBR_DIR}/Maps/track-41_M.trk AND EXISTS ${WRALLY_TEST_RBR_DIR}/audio AND EXISTS ${WRALLY_TEST_GOLDEN})
+if(EXISTS "${WRALLY_TEST_RBR_DIR}/Maps/track-41_M.trk" AND EXISTS "${WRALLY_TEST_RBR_DIR}/audio" AND EXISTS "${WRALLY_TEST_GOLDEN}")
     add_test(NAME audio-offline-replay-41 COMMAND audio-check --game ${WRALLY_TEST_RBR_DIR} --stage track-41_M
              --replay ${WRALLY_TEST_GOLDEN} --ticks 20000 --mix ${CMAKE_CURRENT_SOURCE_DIR}/data/audio-mix.ini)
     set_tests_properties(audio-offline-replay-41 PROPERTIES PASS_REGULAR_EXPRESSION "the same, bit for bit" TIMEOUT 600)
@@ -71,7 +71,7 @@ add_executable(editor-api-check editor_api.cpp)
 target_link_libraries(editor-api-check PRIVATE wrally-iface)
 target_compile_definitions(editor-api-check PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN _CRT_SECURE_NO_WARNINGS)
 target_compile_options(editor-api-check PRIVATE /W4 /permissive-)
-if(EXISTS ${WRALLY_TEST_NGG})
+if(EXISTS "${WRALLY_TEST_NGG}")
     # INSTANCED MODELS (NGG design §2.6): a placeholder tree model (tools/ngg-check placeholder_tree.cpp) in place of
     # every tree-card plant of stage 41 - written as NGGD + NGGE, read back the same, and loaded by the renderer, whose
     # log must count the model, its LODs, the 3743 placements and the 3743 plants whose cards it dropped. The file is
@@ -86,7 +86,7 @@ if(EXISTS ${WRALLY_TEST_NGG})
     set_tests_properties(editor-api-41 PROPERTIES PASS_REGULAR_EXPRESSION "editor-api-check: all good" TIMEOUT 300
                          FIXTURES_REQUIRED trees-41)
 else()
-    message(STATUS "editor-api-41 left out: no ${WRALLY_TEST_NGG}")
+    message(STATUS "editor-api-41 left out: needs WRALLY_TEST_NGG")
 endif()
 
 # A car's part drawn where the physics has it (game/src/assets/car_render.cpp's PartNode): at rest exactly the body,
@@ -119,7 +119,7 @@ target_include_directories(catalog-check PRIVATE ${GAME_SRC})
 target_link_libraries(catalog-check PRIVATE wrally-json wrally-vfs phys-data wrally-modules wrally-signals)
 target_compile_definitions(catalog-check PRIVATE _CRT_SECURE_NO_WARNINGS NOMINMAX WRALLY_SOURCE_DIR="${PROJECT_SOURCE_DIR}")
 set_target_properties(catalog-check PROPERTIES CXX_STANDARD 17)
-if(EXISTS ${WRALLY_TEST_RBR_DIR}/Maps/track-4_E.lbs)
+if(EXISTS "${WRALLY_TEST_RBR_DIR}/Maps/track-4_E.lbs")
     add_test(NAME catalog-every-stage COMMAND catalog-check ${WRALLY_TEST_RBR_DIR})
     set_tests_properties(catalog-every-stage PROPERTIES PASS_REGULAR_EXPRESSION "catalog-check: all good")
 endif()
@@ -129,23 +129,23 @@ endif()
 # both loaded; W-Rally's legacy importer on RBR's stage 41 .lbs, loaded by the renderer. They open a hidden window.
 add_test(NAME ngg-roundtrip COMMAND ngg-check)
 set_tests_properties(ngg-roundtrip PROPERTIES PASS_REGULAR_EXPRESSION "ngg-check: all good")
-if(EXISTS ${WRALLY_TEST_NGG})
+if(EXISTS "${WRALLY_TEST_NGG}")
     add_test(NAME ngg-producer-wallaby COMMAND ngg-check ${WRALLY_TEST_NGG})
     set_tests_properties(ngg-producer-wallaby PROPERTIES PASS_REGULAR_EXPRESSION "ngg-check: all good")
 endif()
-if(EXISTS ${WRALLY_TEST_RBR_DIR}/Maps/track-41_M.lbs)
+if(EXISTS "${WRALLY_TEST_RBR_DIR}/Maps/track-41_M.lbs")
     add_test(NAME legacy-import-41 COMMAND ngg-check --lbs ${WRALLY_TEST_RBR_DIR}/Maps/track-41_M.lbs)
     set_tests_properties(legacy-import-41 PROPERTIES PASS_REGULAR_EXPRESSION
         "weather: 7 presets from TrackSettings.ini, default 41M_crisp_clear .*imported track-41_M.lbs: .* 304744 triangles, .*\(0 missing\).*ngg-check: all good")
 endif()
 # Its weathers on a map under 10: TrackSettings.ini writes it "04", so a "4" prefix would find none.
-if(EXISTS ${WRALLY_TEST_RBR_DIR}/Maps/track-4_E.lbs)
+if(EXISTS "${WRALLY_TEST_RBR_DIR}/Maps/track-4_E.lbs")
     add_test(NAME legacy-import-weather-4 COMMAND ngg-check --lbs ${WRALLY_TEST_RBR_DIR}/Maps/track-4_E.lbs)
     set_tests_properties(legacy-import-weather-4 PROPERTIES PASS_REGULAR_EXPRESSION
         "weather: 43 presets from TrackSettings.ini, default 04E_crisp_clear .*ngg-check: all good")
 endif()
 # A protected (encrypted) stage is refused whole, never imported in part (NGG design §2.9).
-if(EXISTS ${WRALLY_TEST_RBR_DIR}/Maps/track-96_E.lbs)
+if(EXISTS "${WRALLY_TEST_RBR_DIR}/Maps/track-96_E.lbs")
     add_test(NAME legacy-import-protected COMMAND ngg-check --lbs ${WRALLY_TEST_RBR_DIR}/Maps/track-96_E.lbs)
     set_tests_properties(legacy-import-protected PROPERTIES PASS_REGULAR_EXPRESSION
         "encrypted - a protected stage \\(block \\(1,[0-9]\\) version 8[89]\\), not imported")
@@ -173,7 +173,7 @@ set_target_properties(codriver PROPERTIES CXX_STANDARD 17)
 foreach(cfg "" _DEBUG _RELEASE _RELWITHDEBINFO _MINSIZEREL)
     set_target_properties(codriver PROPERTIES RUNTIME_OUTPUT_DIRECTORY${cfg} ${CMAKE_BINARY_DIR}/tests-bin)
 endforeach()
-if(EXISTS ${WRALLY_TEST_RBR_DIR}/Maps/track-41_M.dls)
+if(EXISTS "${WRALLY_TEST_RBR_DIR}/Maps/track-41_M.dls")
     add_test(NAME codriver-41 COMMAND codriver ${WRALLY_TEST_RBR_DIR}/Maps/track-41_M.dls)
     set_tests_properties(codriver-41 PROPERTIES PASS_REGULAR_EXPRESSION "codriver: [0-9]+ calls; all good")
 endif()
@@ -207,7 +207,7 @@ foreach(cfg "" _DEBUG _RELEASE _RELWITHDEBINFO _MINSIZEREL)
 endforeach()
 add_test(NAME vfs-made-up COMMAND vfs-check ${CMAKE_BINARY_DIR}/tests-bin/vfs-scratch)
 set_tests_properties(vfs-made-up PROPERTIES PASS_REGULAR_EXPRESSION "vfs-check: all good")
-if(EXISTS ${WRALLY_TEST_RBR_DIR}/physics.rbz)
+if(EXISTS "${WRALLY_TEST_RBR_DIR}/physics.rbz")
     add_test(NAME vfs-rbr COMMAND vfs-check ${CMAKE_BINARY_DIR}/tests-bin/vfs-scratch-rbr ${WRALLY_TEST_RBR_DIR})
     set_tests_properties(vfs-rbr PROPERTIES PASS_REGULAR_EXPRESSION "vfs-check: all good")
 endif()
