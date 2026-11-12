@@ -141,7 +141,7 @@ opens the list, sets sky time, and records. The order is the code's:
 | 2 | one atmosphere for every consumer; the MS switch mirrored to the sky | `Scene::SetAtmosphere`, `Sky::SetMultipleScattering` |
 | 3 | **jitter set before the prepass** (every rasterising pass the same sub-pixel offset; the main pass tests `GREATER_EQUAL` against the prepass's depth) | `PostFx::Jitter` -> `Scene`/`Sky::SetJitter` |
 | 4 | the instance stream starts over | `Scene::BeginFrame` |
-| 5 | BVH follows the scene: same mesh set -> instances + TLAS only; new / dropped meshes -> missing BLASes built, stale dropped (secondary context) | `Renderer::KeepRtCurrent` |
+| 5 | BVH follows the scene: finished BLAS batches land; same mesh set -> instances + TLAS only; new meshes -> their BLASes queued for the build thread and queue (never waited for), dropped ones leave; TLAS on the secondary context | `Renderer::KeepRtCurrent` |
 | 6 | local lights' clusters for this view | `Scene::PrepareLights` |
 | 7 | **prepass: depth + normal + motion + plant** at the render size | `Scene::RecordPrepass` |
 | 8 | shadow source: RT if preferred, prepass drawn, BVH valid and shadows on; reflection TLAS set wherever RT exists (cascades too) | `m_rtActive`, `Scene::SetReflectionTlas` |
@@ -151,7 +151,8 @@ opens the list, sets sky time, and records. The order is the code's:
 | 12 | resolve: upscaler or TAA; exposure meter on what is about to be tonemapped; tonemap + sharpen into the output | `PostFx::Resolve` |
 | 13 | end GPU timestamp | `LastFrameMs` |
 
-Then the module draws the editor overlay (only at native render size: it depth-tests against the render-size depth),
+After step 12 the frame starts the threads of the BLAS batches step 5 queued (`Rt::StartBatches`), so their
+allocations overlap the frame's wait for the GPU (4.2). Then the module draws the editor overlay (only at native render size: it depth-tests against the render-size depth),
 the UI pass, the optional capture copy, `EndAndWait`, the probe / overlay readbacks, `DrainMessages` and
 `CheckRemoved`. `present` is a separate call (`vsync` from the settings).
 
@@ -885,13 +886,59 @@ SM 6.5 (`Rt::Create` logs the adapter's and declines otherwise). `modules/render
 | `kRtMoved \| i` | a static object that moved, was hidden/shown, or is keyed (NGGK, the physics moves it), at its authored position | one, its transform |
 | `kRtDynamic \| mesh` | a dynamic-pool mesh (the car's parts, editor meshes, a model's ray-traced LOD submesh) | one per use; material per instance, `FORCE_OPAQUE` when drawn opaque |
 
-`Rt` caches BLASes by key (`std::map`); `Rt::Rebuild` builds only missing keys (`PREFER_FAST_TRACE`), drops dead
-ones, rebuilds the shared any-hit buffers and the descriptor heap. `Rt::UpdateInstances` rebuilds only the TLAS
-(`PREFER_FAST_BUILD`) and the instance table. `Renderer::KeepRtCurrent` runs when `Scene::GeometryRevision` changes and
-chooses: same key set -> instances only; else rebuild. Both run on the **secondary device context** (`m_buildDev`,
-blocking), because the frame's list is open. **Two speeds: a change in which meshes exist rebuilds BLASes (load,
-first move of a non-keyed object, hide/show, added mesh); a change in where things are - a driving car, a drag - is
-TLAS-only.**
+`Rt` caches BLASes by key (`std::map`). `Renderer::KeepRtCurrent` runs when `Scene::GeometryRevision` changes, when a
+batch of BLASes has landed, or the frame after one did. **Two speeds: a change in which meshes exist builds BLASes
+(load, first move of a non-keyed object, hide/show, added car, prop or model); a change in where things are - a
+driving car, a drag - is TLAS-only.** The TLAS (`Rt::UpdateInstances`, `PREFER_FAST_BUILD`, with the instance table)
+is built on the **secondary device context** (`m_buildDev`, blocking: the frame's list is open). `Rt::Rebuild` drops
+dead BLASes and rewrites the shared any-hit buffers and the descriptor heap, then the TLAS.
+
+**New BLASes never stall a frame.** They are built off the frame and join the TLAS when done:
+
+1. **Queue** (`Rt::SubmitBlases`, the frame a mesh appears in): `Scene::BuildRtMesh` copies each missing key's
+   indices out of the scene (1-5 ms for a car or a stage), and the batch is queued. Nothing else - that frame
+   allocates plenty of its own (the car's materials, the scene's heap), and a thread allocating beside it made it
+   35 ms longer.
+2. **Record and submit** (`Rt::StartBatches` after the frame is recorded, then `RecordBatch` on the batch's own
+   thread): one index upload, one 8 MB scratch reused past UAV barriers, 4 MB result arenas (a BLAS of 4 MB or more
+   gets its own buffer, so a replaced world never pins a car's parts), the builds (`PREFER_FAST_TRACE`) on **the
+   ray tracer's own COMPUTE queue**, then a fence. The thread does not log (the sink is the main thread's).
+3. **Land** (`Rt::Land`, step 5 of a later frame): a finished batch's BLASes go into the cache and the TLAS is
+   published with their instances. Until then they are **simply not in the TLAS**: no RT shadow, AO or reflection
+   rays from them. On a load that means no TLAS at all: the cascades draw those frames
+   (`rtFallback` "the acceleration structure is being built").
+
+Why each step is shaped so (measured, dev iGPU 780M):
+- **One committed buffer per BLAS** (BLAS, scratch, index upload) cost ~1.2 ms each to create and as much again to
+  free: a stage's 922 BLASes took 1.15 s to record and 0.38 s to release - the old first stage frame was 1.68 s.
+  Sub-allocated, the same batch records in 40-50 ms, on its thread.
+- **Small allocations on purpose**: the driver creates a buffer under a lock that the frame's own allocations (the
+  TLAS's instance upload, every frame the car moves) wait on. With 32 MB arenas the frame after a new car waited
+  143 ms for the batch's thread; at 4 MB each creation holds it about a millisecond.
+- The GPU part is small: the i20's 71 BLASes (202k triangles, 31 MB) 8 ms, a stage's 922 (439k, 69 MB) 39 ms.
+- **The renderer's RT targets** (outputs and histories, 11 textures at the render size) are made with the renderer
+  and on a resize (`Rt::PrepareTargets`), not by the first frame that traces: 95 ms at 1080p, most of the frame a
+  stage's first BVH landed in. A new descriptor heap only rewrites their views (`WriteTargetViews`) - recreating
+  them dropped every history on the screen whenever a mesh appeared.
+- The any-hit buffers are rewritten in place when big enough (made with a third to spare), and a pool upload for a
+  mesh still building only moves the dynamic-vertex view (`FollowDynamicPool`), not the heap.
+- **A superseded world is kept** while its successor builds (a hide or first move rebuilds the world's BLAS): its
+  identity instance stays, or the whole stage would leave the rays for those frames. A new scene empties the cache
+  first (`Rt::ForgetScene` in `Renderer::Load`), so an old stage is never kept.
+- **History when it lands**: a landed mesh's instances go into that frame's instance table as occluders that were
+  10 km away (`kRtAppearedFrom`), so `Allow` gives the pixels whose rays hit them no history (4.5) - the new shadow
+  and AO come in at once instead of fading in over the old "unoccluded"; the next frame's table is the ordinary
+  one (`InstancesStale`). And whenever the RT path turns on again (the first BVH of a load, `K`, shadows on), its
+  histories are reset: they are from whenever it last ran.
+
+Measured (dev iGPU, 1080p, whole-frame wall time / GPU `frameMs` of the frame before; machine noise +-10 ms):
+
+| event | before | after |
+|---|---|---|
+| Garage, i20 R5 put on (71 BLASes) | 218-230 ms (record 176: BLAS 92 CPU + 8 GPU, release and the rest 38) | 59-71 ms; with RT off the same frame is 54-57 |
+| Garage, Fabia RS Rally2 after the i20 (92 BLASes) | 328 ms | 98-124; RT off 104-105 |
+| the frame the car's BLASes land (1-2 frames later) | - | publish 7-12 ms CPU (any-hit buffers, heap, TLAS) |
+| stage 41 load, first frames (922 + 2 BLASes) | 1676, 103, 51 ms | 87, 42, 74 (the world lands: publish 13-18 ms), 53, 50; RT off 97, 112, 88 |
 
 - **Keyed objects get their own BLAS from the load** (`InRtWorld` excludes them): a car going through a row of
   barriers used to rebuild the 92 MB world BLAS once per barrier - worst frame 292 ms -> 89 ms.
@@ -994,6 +1041,10 @@ which is what a converging penumbra looks like, so it never converged.
   is there any more, the object has gone, and what it uncovered starts over (golden replay, TV camera: copies of the
   car on the shaded road, blurred error 5.04 -> 2.40).
 - Ground uncovered this frame (last frame's pixel was a moved object's) counts as touched, allow 0.
+- **A mesh whose BLAS just landed** (4.2: a car, a prop, a stage's world) is an occluder that was 10 km away last
+  frame, for one frame: its hits allow nothing, so its shadow and AO are in at once, not faded in over "unoccluded"
+  (Garage shots: the Fabia's contact shadow complete in its second frame, no trail). The RT path turning on again
+  resets all three histories.
 - **A moved object's own pixels keep their history** (reprojected by their motion; their occluder is mostly
   themselves). Its young history (just out from behind a panel) is a running mean of its frames, youth counted in
   32nds in w, and widened while young.
@@ -1541,8 +1592,9 @@ Fixed camera; the projection's centre shifted to where the menu wants the car (`
 - `PHYS_DRIVE_OFF` (taa, ao, shadows, rt) applies as on a stage.
 - Measuring: `--showroom <car> [--turn deg] [--spin deg/s] [--shots n] [--stop shot] [--jerk k] [--then car]`
   captures `showroom.png` / `showroom-NN.png`; `WRALLY_SHOWROOM_TIMES=1` logs upload and slow-frame times.
-- **Open: the first frame of a new car stalls 160-280 ms** (i20 R5: 71 meshes, 201,628 triangles), 110 ms of it the
-  BLAS build inside the frame (`KeepRtCurrent` -> `Rt::Rebuild` -> `EndAndWait`). See OPEN below.
+- **A new car's BLASes are built off the frame** (4.2): its first frame is as long with RT as without (55-70 ms on
+  the iGPU, from the car's materials and model), and the car casts no RT shadow or AO for the 1-2 frames until they
+  land. It was 160-280 ms, 110 of them the BLAS build inside the frame.
 
 ---
 
@@ -1951,8 +2003,8 @@ glass, and VR behind `kRendererCapVr`.
 
 | # | item | state / why | blocked on |
 |---|---|---|---|
-| 1 | **Build a new mesh's BLAS off the frame** | `Renderer::KeepRtCurrent` builds missing BLASes but waits for them (`Rt::Rebuild` -> `EndAndWait`). A car added to a loaded scene therefore stalls its first frame. Garage, i20 R5 (71 meshes, 202k triangles): 160-280 ms, of which 110 ms is the build. Wanted: the build submitted and fenced, and the new instances left out of the TLAS until it is done | nothing |
-| 2 | **TLAS refit instead of a full rebuild** | the TLAS is rebuilt whole (`FAST_BUILD`), blocking on the secondary context, every frame anything moves (the car). No update path; the cost per frame is unmeasured | a measurement first |
+| 1 | **Build a new mesh's BLAS off the frame** | done (4.2): queued, recorded on a thread, built on the ray tracer's own compute queue, fenced, landed 1-2 frames later. Left: the landing frame's publish, 7-18 ms CPU (the any-hit buffers rebuilt whole - appending the new BLASes' share would make it ~1 ms - and the blocking TLAS); dropping a car frees its BLASes on the frame (3-8 ms); a frame's other allocations can still wait a millisecond or so behind the thread's | nothing |
+| 2 | **TLAS refit instead of a full rebuild** | the TLAS is rebuilt whole (`FAST_BUILD`), blocking on the secondary context, every frame anything moves (the car). No update path. Measured once, stage 41 (922 instances): 3.5-5 ms of the frame's CPU, the upload, the build and the wait together - so worth it, and the async queue of 4.2 would take the wait out | nothing |
 | 3 | **Pipelines in parallel** | built and reverted (§1.6). A cold start was ~5 s shorter, but AMD driver 32.0.31021.5001 crashed in `amdxc64.dll` or hung in about 1 run of 12-28 whenever two threads compiled. `NGG_PIPELINE_THREADS=<n>` retries it. Run it 60+ times with the crash/hang harness before trusting it | a driver that survives it (newer AMD, or NVIDIA) |
 | 4 | **Measure the pipeline library on NVIDIA** | it saves nothing on the AMD iGPU, so it is opt-in (`NGG_PIPELINE_CACHE=library`). On the RTX machine, run with `NGG_DRIVER_SHADER_CACHE=clear`, with and without it, and compare the log's `pipelines:` lines. If there is no win there either, delete `pipeline_cache`'s library and keep the wrappers | the RTX machine |
 | 5 | **Shader hot reload** | `NGG_SHADER_DIR` compiles from the files at start only. Recreating the pipelines without a restart is not built | nothing (optional) |

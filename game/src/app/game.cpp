@@ -1645,8 +1645,9 @@ int RunGame(const std::vector<std::string>& args)
             sh.renderer.RenderFrame(fd);
             sh.renderer.Present();
             if (const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - r0).count();
-                std::getenv("WRALLY_SHOWROOM_TIMES") && ms > 30)
-                std::printf("the showroom: frame %d drawn in %.0f ms\n", frame, ms);
+                std::getenv("WRALLY_SHOWROOM_TIMES") && (ms > 30 || sh.renderer.Stats().frameMs > 30))
+                std::printf("the showroom: frame %d drawn in %.0f ms (the gpu frame before it %.1f ms)\n", frame, ms,
+                            sh.renderer.Stats().frameMs);   // (frameMs is read as the next frame starts)
             if (frameMsLog && settle > 40)
                 if (const float ms = sh.renderer.Stats().frameMs; ms > 0.0f) frameMsSeen.push_back(ms);
             if (const std::string log = sh.renderer.TakeLog(); sh.rendererLog && !log.empty()) std::printf("%s", log.c_str());

@@ -581,6 +581,13 @@ public:
     ID3D12Resource* StaticVertexBuffer() const { return m_vb.Get(); }
     ID3D12Resource* StaticIndexBuffer() const  { return m_ib.Get(); }
     uint32_t StaticVertexCount() const { return m_vbv.SizeInBytes / (m_vbv.StrideInBytes ? m_vbv.StrideInBytes : 1); }
+    // The dynamic pool's vertices as last uploaded (FlushDynamic), for the ray tracer's any-hit view.
+    ID3D12Resource* DynamicVertexBuffer() const { return m_dynVb.Get(); }
+    uint32_t DynamicVertexCount() const { return (uint32_t)m_dynVerts.size(); }
+    // A DescribeRt key that is the world's (scene.cpp kRtWorld: kind 0 in the top byte).
+    static bool IsRtWorldKey(uint64_t key) { return (key >> 56) == 0; }
+    // The vertex stride the BLASes read positions with (both pools share the layout).
+    uint32_t RtVertexStride() const { return m_vbv.StrideInBytes ? m_vbv.StrideInBytes : (uint32_t)sizeof(Vertex); }
     uint32_t StaticVertexStride() const { return m_vbv.StrideInBytes; }
     uint32_t StaticIndexCount() const { return m_indexCount; }
 
@@ -657,8 +664,8 @@ public:
     bool BuildRtMesh(uint64_t key, RtMeshData& out) const;
     bool BuildRtShared(ID3D12Device* device, RtShared& out) const;
     // The dynamic pool's upload is lazy (the next pass does it); a BVH built
-    // from it needs it now.
-    void FlushDynamic(ID3D12Device* device) { if (m_dynDirty) UploadDynamic(device); }
+    // from it needs it now. True when it uploaded: the pool's buffer is a new one (the old is freed).
+    bool FlushDynamic(ID3D12Device* device) { if (!m_dynDirty) return false; UploadDynamic(device); return true; }
 
     // Bumped by every change to WHAT geometry exists or where (load, add,
     // remove, hide, move, compact). The Renderer re-describes the scene to the

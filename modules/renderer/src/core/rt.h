@@ -18,7 +18,10 @@
 // ---------------------------------------------------------------------------
 #pragma once
 
+#include <future>
 #include <map>
+#include <memory>
+#include <mutex>
 #include <vector>
 
 #include <windows.h>
@@ -43,18 +46,55 @@ public:
     bool Ready() const { return m_pso != nullptr; }
 
     // The acceleration structures, per MESH (design §4.2): one BLAS per key
-    // in Scene::DescribeRt - the world, each moved object, each editor mesh -
-    // cached, so only `newMeshes` (the keys HasMesh says are missing) are
-    // built; BLASes whose keys are no longer live are dropped. Then the shared
-    // any-hit buffers and the descriptor heap, then the TLAS. Blocking on
-    // `dev`, which is why the Renderer hands it a secondary context.
+    // in Scene::DescribeRt - the world, each moved object, each car part or
+    // model submesh - cached by key. A new mesh never stalls a frame:
+    //   - SubmitBlases queues the missing ones (the frame copies their indices
+    //     out of the scene, ~1-5 ms); StartBatches, once the frame is recorded,
+    //     gives the batch a thread that allocates from pooled memory (one index
+    //     upload, one 8 MB scratch, 4 MB result arenas - a committed buffer per
+    //     BLAS cost ~1.2 ms each to create and as much to free: 1.6 s for a
+    //     stage's 922), records the builds and submits them on the ray tracer's
+    //     OWN compute queue with a fence. Nothing waits for it;
+    //   - Land, at the start of a later frame, takes in the batches the GPU
+    //     has finished. Until then their meshes are simply not in the TLAS:
+    //     no RT shadow, AO or reflection rays from them.
+    // `Building` is true while a batch is out.
+    bool SubmitBlases(Device& dev, uint32_t stride, std::vector<Scene::RtMeshData>& newMeshes);
+    bool Land();
+    bool Building() const { return !m_batches.empty(); }
+    bool IsBuilding(uint64_t key) const;     // (or failed to: not queued again until the next scene)
+    // The BLASes whose keys are no longer live dropped (a superseded world
+    // kept while its successor builds: see rt.cpp), then the shared any-hit
+    // buffers and the descriptor heap, then the TLAS over the built meshes.
+    // Blocking on `dev` - the TLAS, which is why the Renderer hands it a
+    // secondary context.
     bool Rebuild(Device& dev, const Scene::RtShared& shared,
-                 std::vector<Scene::RtMeshData>& newMeshes,
                  const std::vector<uint64_t>& liveKeys,
                  const std::vector<Scene::RtInstanceDesc>& instances);
     // When only instances changed (a drag, an added instance of a known mesh):
     // the TLAS and the instance table, nothing else.
     bool UpdateInstances(Device& dev, const std::vector<Scene::RtInstanceDesc>& instances);
+    // The dynamic pool was uploaded again (a new buffer, the old one freed) and nothing else changed for the TLAS:
+    // the any-hit test's view of it follows, without a Rebuild.
+    void FollowDynamicPool(ID3D12Device* device, ID3D12Resource* dynVb, uint32_t dynVertexCount);
+    // The instance table still flags meshes that landed last frame as new
+    // (UpdateInstances): the next frame must rewrite it even if nothing moved.
+    bool InstancesStale() const { return m_appearedFlagged; }
+    // The live keys the last Rebuild published (sorted): what the TLAS can
+    // hold without another Rebuild.
+    const std::vector<uint64_t>& PublishedKeys() const { return m_publishedKeys; }
+    // A new scene: every BLAS and the TLAS let go (the frames are synchronous,
+    // so nothing on the GPU holds them). Batches still out keep their own
+    // memory and are dropped as dead when they land.
+    void ForgetScene();
+    // The batches SubmitBlases queued get their threads. The renderer calls it once the frame is recorded, so their
+    // allocations overlap the frame's wait for the GPU rather than its recording (see SubmitBlases).
+    void StartBatches();
+    // The outputs and histories made at this size now, not in the first frame that traces: they are 11 textures at
+    // the render size, 95 ms to create at 1080p - most of the frame the first BVH of a stage landed in. They survive
+    // scene loads (ForgetScene does not touch them).
+    bool PrepareTargets(ID3D12Device* device, UINT width, UINT height);
+    ~Rt();
     bool HasMesh(uint64_t key) const { return m_blas.count(key) != 0; }
     size_t MeshCount() const { return m_blas.size(); }
     uint32_t InstanceCount() const { return m_instanceCount; }
@@ -144,6 +184,8 @@ public:
     bool ReadableResult() const { return m_result && m_resultReadable; }
 
 private:
+    // The outputs and the denoisers' histories at this size, and their views in the heap. A new heap (Rebuild) only
+    // rewrites the views (WriteTargetViews): recreating the targets dropped every history whenever a mesh appeared.
     bool CreateTargets(ID3D12Device* device, UINT width, UINT height);
 
     Microsoft::WRL::ComPtr<ID3D12RootSignature>  m_rootSig;
@@ -151,11 +193,50 @@ private:
 
     struct BlasEntry
     {
+        // Its memory: a buffer of its own (a big BLAS - the world) or a share of a batch's arena, which lives as long
+        // as any BLAS in it.
         Microsoft::WRL::ComPtr<ID3D12Resource> as;
+        UINT64   offset = 0;
+        D3D12_GPU_VIRTUAL_ADDRESS Va() const { return as ? as->GetGPUVirtualAddress() + offset : 0; }
         std::vector<uint32_t> alpha, alphaMat, alphaPlant;   // kept for the shared any-hit buffers
         uint32_t vbSelect = 0, vertexBase = 0, triBase = 0;
     };
     std::map<uint64_t, BlasEntry>                m_blas;
+    // A batch of BLAS builds (SubmitBlases -> Land): recorded and submitted on a thread of its own, built on the
+    // build queue, taken in by the first Land after both.
+    struct BlasBatch
+    {
+        std::vector<uint64_t>             keys;      // its meshes' (IsBuilding), set before the thread starts
+        std::vector<Scene::RtMeshData>    meshes;    // the thread's input
+        std::future<bool>                 work;
+        bool          started = false;     // its thread (StartBatches, at the end of the frame that queued it)
+        ID3D12Device* device = nullptr;
+        uint32_t      stride = 0;
+        bool        ok = false;
+        const char* error = nullptr;
+        Microsoft::WRL::ComPtr<ID3D12CommandAllocator>     alloc;
+        Microsoft::WRL::ComPtr<ID3D12GraphicsCommandList4> list;
+        UINT64 fence = 0;
+        std::vector<std::pair<uint64_t, BlasEntry>> entries;
+        // The index upload, the scratch and the source vertex buffers: the GPU reads them until the fence.
+        std::vector<Microsoft::WRL::ComPtr<ID3D12Resource>> keep;
+        uint32_t triangles = 0;
+        UINT64   bytes = 0, scratchBytes = 0;
+        double   recordMs = 0.0;
+        LARGE_INTEGER submitted = {};
+        uint32_t frames = 0;               // Land calls it has been out for
+    };
+    bool RecordBatch(BlasBatch& b, ID3D12Device* device, uint32_t stride);
+    std::vector<std::unique_ptr<BlasBatch>>      m_batches;
+    std::mutex                                   m_submitLock;   // the batches' threads submit one at a time
+    Microsoft::WRL::ComPtr<ID3D12CommandQueue>   m_buildQueue;   // COMPUTE: overlaps the frames
+    Microsoft::WRL::ComPtr<ID3D12Fence>          m_buildFence;
+    UINT64                                       m_buildFenceValue = 0;
+    std::vector<uint64_t>                        m_appeared;     // landed, not yet flagged in an instance table
+    bool                                         m_appearedFlagged = false;
+    std::vector<uint64_t>                        m_publishedKeys;
+    std::vector<uint64_t>                        m_failedKeys;   // a batch that failed: counted as building (IsBuilding)
+    bool WriteTargetViews(ID3D12Device* device);
     Microsoft::WRL::ComPtr<ID3D12Resource>       m_tlas, m_scratch, m_instances, m_instInfo;
     ID3D12Resource*                              m_staticVb = nullptr;
     ID3D12Resource*                              m_dynVb = nullptr;
