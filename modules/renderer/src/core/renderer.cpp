@@ -3,6 +3,7 @@
 #include "pipeline_cache.h"
 #include "shaders.h"
 
+#include <algorithm>
 #include <math.h>
 
 namespace ngg {
@@ -61,6 +62,7 @@ bool Renderer::Create(Device& dev, DXGI_FORMAT outputFormat, UINT width, UINT he
     {
         if (!m_buildDev.CreateSecondary(dev))
             Log("renderer: no secondary command context - the BVH cannot be rebuilt mid-frame");
+        if (m_preferRt) m_rt.PrepareTargets(d, m_renderWidth, m_renderHeight);
     }
 
     // Which upscalers can run here, for the settings menu: each backend made and let go once (it logs why not).
@@ -82,7 +84,9 @@ void Renderer::OnResize(Device& dev, UINT width, UINT height)
     m_scene.OnResize(dev.device.Get(), m_renderWidth, m_renderHeight);
     m_scene.SetMipBias(m_renderWidth < width ? log2f((float)m_renderWidth / (float)width) : 0.0f);
     m_post.OnResize(dev.device.Get(), m_renderWidth, m_renderHeight, width, height);
-    // (The ray tracer's targets follow the size it is traced at: Rt::Trace.)
+    // The ray tracer's targets follow the size it is traced at (Rt::Trace) - made here already, so the first frame that
+    // traces does not make them.
+    if (m_rt.Ready() && m_preferRt) m_rt.PrepareTargets(dev.device.Get(), m_renderWidth, m_renderHeight);
 }
 
 void Renderer::SetUpscaling(Device& dev, UpscalerKind kind, float scale)
@@ -123,6 +127,7 @@ bool Renderer::Load(Device& dev, const wchar_t* path)
     LogPipelineStats("the scene's");
     SavePipelineCache();
     m_rtRevision = 0xFFFFFFFFu;          // rebuilt on the next frame
+    m_rt.ForgetScene();                  // the old scene's BLASes: never part of this one's TLAS
     m_post.ResetHistory();
     return ok;
 }
@@ -135,15 +140,18 @@ bool Renderer::LoadFromMemory(Device& dev, const void* data, size_t bytes)
     LogPipelineStats("the scene's");
     SavePipelineCache();
     m_rtRevision = 0xFFFFFFFFu;
+    m_rt.ForgetScene();
     m_post.ResetHistory();
     return ok;
 }
 
 // The BVH follows the scene, per MESH (design §4.2). When only instances
 // changed - a drag, an instance of a mesh it already has - that is the TLAS
-// alone; when the mesh set changed (a load, a first move, a hide, an added
-// mesh) the missing BLASes are built and the stale ones dropped. Both on the
-// SECONDARY context: this runs inside RecordFrame, with the client's list open.
+// alone. When meshes appear (a load, a car, a model, a first move, a hide) their
+// BLASes are SUBMITTED on the ray tracer's own queue and the frame goes on
+// without them: they join the TLAS in the first frame after the GPU has built
+// them (Rt::Land). Dropped meshes leave at once. The TLAS on the SECONDARY
+// context: this runs inside RecordFrame, with the client's list open.
 void Renderer::KeepRtCurrent(Device& dev)
 {
     (void)dev;
@@ -153,40 +161,64 @@ void Renderer::KeepRtCurrent(Device& dev)
         m_rtReason = "no ray tracing on this adapter";
         return;
     }
+    const bool landed = m_rt.Land();
     const uint32_t rev = m_scene.GeometryRevision();
-    if (rev == m_rtRevision) return;
+    if (rev == m_rtRevision && !landed && !m_rt.InstancesStale()) return;
     m_rtRevision = rev;
 
-    m_scene.FlushDynamic(m_buildDev.device.Get());     // a new mesh's vertices, before its BLAS
+    // A new mesh's vertices, before its BLAS. A new upload is a new buffer, which the any-hit test's view must follow.
+    const bool poolMoved = m_scene.FlushDynamic(m_buildDev.device.Get());
     std::vector<uint64_t> keys;
     std::vector<Scene::RtInstanceDesc> instances;
     m_scene.DescribeRt(keys, instances);
+    std::sort(keys.begin(), keys.end());
+    keys.erase(std::unique(keys.begin(), keys.end()), keys.end());
 
-    bool sameSet = m_rt.HasScene() && keys.size() == m_rt.MeshCount();
-    size_t missing = 0, moved = 0;
-    for (uint64_t k : keys) if (!m_rt.HasMesh(k)) ++missing;
+    std::vector<uint64_t> built;
+    size_t missing = 0, building = 0, moved = 0;
+    for (uint64_t k : keys)
+    {
+        if (m_rt.HasMesh(k)) built.push_back(k);
+        else if (m_rt.IsBuilding(k)) ++building;
+        else ++missing;
+    }
     for (const Scene::RtInstanceDesc& d : instances) moved += d.moved ? 1 : 0;
-    sameSet = sameSet && missing == 0;
-    Log("renderer: scene revision %u - %zu mesh key(s) (%zu not built, world %016llx), %zu instance(s), %zu moved -> %s",
-        rev, keys.size(), missing, keys.empty() ? 0ull : (unsigned long long)keys[0], instances.size(), moved,
-        sameSet ? "instances only" : "rebuild");
+    // The same set: nothing landed or dropped (what is missing is submitted below and changes no TLAS yet) - the TLAS
+    // alone, and the pool's view when it was uploaded again for a mesh now building. So the frame a mesh appears in
+    // allocates no more here than a frame the car moves in.
+    const bool sameSet = m_rt.HasScene() && !landed && built == m_rt.PublishedKeys();
 
-    if (sameSet)
-        m_rtValid = m_rt.UpdateInstances(m_buildDev, instances);
-    else
+    if (missing)
     {
         std::vector<Scene::RtMeshData> fresh;
         for (uint64_t k : keys)
         {
-            if (m_rt.HasMesh(k)) continue;
+            if (m_rt.HasMesh(k) || m_rt.IsBuilding(k)) continue;
             Scene::RtMeshData m;
             if (m_scene.BuildRtMesh(k, m)) fresh.push_back(std::move(m));
         }
+        if (!fresh.empty() && m_rt.SubmitBlases(m_buildDev, m_scene.RtVertexStride(), fresh)) building += fresh.size();
+    }
+    Log("renderer: scene revision %u - %zu mesh key(s) (%zu built, %zu building%s), %zu instance(s), %zu moved -> %s",
+        rev, keys.size(), built.size(), building, landed ? ", some just landed" : "", instances.size(), moved,
+        sameSet ? "instances only" : "publish");
+
+    if (sameSet)
+    {
+        if (poolMoved) m_rt.FollowDynamicPool(m_buildDev.device.Get(), m_scene.DynamicVertexBuffer(),
+                                              m_scene.DynamicVertexCount());
+        m_rtValid = m_rt.UpdateInstances(m_buildDev, instances);
+    }
+    else
+    {
         Scene::RtShared shared;
         m_rtValid = m_scene.BuildRtShared(m_buildDev.device.Get(), shared) &&
-                    m_rt.Rebuild(m_buildDev, shared, fresh, keys, instances);
+                    m_rt.Rebuild(m_buildDev, shared, keys, instances);
     }
-    m_rtReason = m_rtValid ? nullptr : "the acceleration structure failed to build";
+    // An empty TLAS while the first BLASes build (a load) is not a failure: the cascades meanwhile.
+    m_rtReason = m_rtValid ? nullptr
+               : m_rt.Building() ? "the acceleration structure is being built"
+                                 : "the acceleration structure failed to build";
 }
 
 const char* Renderer::RtFallbackReason() const
@@ -301,6 +333,14 @@ void Renderer::RecordFrame(Device& dev, D3D12_CPU_DESCRIPTOR_HANDLE outRtv,
         if (prepass) motion = m_scene.MotionBuffer();
 
         m_rtActive = m_preferRt && prepass && m_rt.HasScene() && m_rtValid && m_scene.ShadowsOn();
+        // Back on the RT path (the first BVH of a load built, the switch, shadows on again): its histories are from
+        // whenever it last ran.
+        if (m_rtActive != m_rtTraced)
+        {
+            if (m_rtActive) m_rt.ResetHistory();
+            Log("renderer: RT visibility %s", m_rtActive ? "on" : RtFallbackReason());
+            m_rtTraced = m_rtActive;
+        }
         // The car's own reflection rays (Scene::SetReflectionTlas) trace this TLAS - kept current wherever the adapter
         // ray traces (KeepRtCurrent), so with the cascades' shadows too.
         m_scene.SetReflectionTlas(prepass && m_rt.HasScene() && m_rtValid ? m_rt.TlasVa() : 0);
@@ -355,6 +395,9 @@ void Renderer::RecordFrame(Device& dev, D3D12_CPU_DESCRIPTOR_HANDLE outRtv,
                    m_vis.aoTaa, m_vis.aoTaaPrev,
                    // without the ray tracer, the local lights' moved-shadow mask in its place (Scene::LocalShadowMask)
                    m_vis.lightsTaa ? m_vis.lightsTaa : m_scene.LocalShadowMask(), m_scene.LastViewProj(), width, height);
+
+    // The BLAS batches this frame queued (KeepRtCurrent): their threads allocate while the frame waits for the GPU.
+    m_rt.StartBatches();
 
     if (m_frameTimer)
     {

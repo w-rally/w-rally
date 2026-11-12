@@ -200,8 +200,9 @@ private:
     int   m_curve = PostFx::kCurveAces;
 
     uint32_t    m_rtRevision = 0xFFFFFFFFu;   // scene geometry the BVH was built from
-    bool        m_rtValid = false;            // the BVH represents the scene exactly
+    bool        m_rtValid = false;            // the TLAS holds the scene's meshes whose BLASes are built (design §4.2)
     bool        m_rtActive = false;
+    bool        m_rtTraced = false;           // m_rtActive as of the last frame that drew the world
     const char* m_rtReason = "not built yet";
 
     Microsoft::WRL::ComPtr<ID3D12QueryHeap> m_frameTimer;       // [0] the frame's first command, [1] its last

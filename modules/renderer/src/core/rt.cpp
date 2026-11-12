@@ -6,6 +6,7 @@
 #include <string>
 #include <cstdlib>
 #include <algorithm>
+#include <chrono>
 #include <math.h>
 
 using Microsoft::WRL::ComPtr;
@@ -427,6 +428,21 @@ bool Rt::Create(Device& dev)
         }
     }
 
+    // The BLAS builds' own queue (SubmitBlases): COMPUTE, so they overlap the frames instead of going ahead of them on
+    // the frame's queue. Without it a new mesh is never built: no ray tracing.
+    {
+        D3D12_COMMAND_QUEUE_DESC qd = {};
+        qd.Type = D3D12_COMMAND_LIST_TYPE_COMPUTE;
+        if (FAILED(dev.device->CreateCommandQueue(&qd, IID_PPV_ARGS(&m_buildQueue))) ||
+            FAILED(dev.device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&m_buildFence))))
+        {
+            Log("rt: no compute queue for the BLAS builds - the RT path is unavailable");
+            m_pso.Reset();
+            return false;
+        }
+        m_buildQueue->SetName(L"ngg BLAS builds");
+    }
+
     Log("rt: ready - inline RayQuery, tier %d.%d, SM %d.%d",
         dev.rtTier / 10, dev.rtTier % 10, dev.shaderModel >> 4, dev.shaderModel & 0xF);
     return true;
@@ -444,117 +460,357 @@ void ToInstanceTransform(const float* m, float t[3][4])
     }
 }
 
+namespace {
+double MsSince(const LARGE_INTEGER& t0)
+{
+    LARGE_INTEGER t1, hz;
+    QueryPerformanceCounter(&t1);
+    QueryPerformanceFrequency(&hz);
+    return 1000.0 * double(t1.QuadPart - t0.QuadPart) / double(hz.QuadPart);
+}
+UINT64 AlignAs(UINT64 v) { return (v + D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BYTE_ALIGNMENT - 1) &
+                                  ~UINT64(D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BYTE_ALIGNMENT - 1); }
+// A BLAS at least this big gets a buffer of its own; smaller ones share arenas of up to kArenaBytes. A share is freed
+// only with its whole arena, so a big BLAS that is replaced (the world, after a hide) must not pin a car's parts.
+// SMALL ALLOCATIONS ON PURPOSE: the driver creates a buffer under a lock the frame's own small allocations (the TLAS's
+// instance upload, every frame the car moves) then wait on - with 32 MB arenas the frame after a new car waited
+// 143 ms for the batch's thread. Each 4 MB creation holds it for about a millisecond.
+constexpr UINT64 kOwnBufferBytes = 4ull << 20;
+constexpr UINT64 kArenaBytes     = 4ull << 20;
+// The batch's scratch is reused from the start, past a UAV barrier, once this much is in use (a single bigger build
+// gets what it needs). The builds then run in groups, which costs the build queue a little and the frames nothing.
+constexpr UINT64 kScratchBytes   = 8ull << 20;
+} // namespace
+
+Rt::~Rt()
+{
+    // The batches' threads, then the build queue: it may still read and write memory the batches hold.
+    for (auto& b : m_batches)
+        if (b->work.valid()) b->work.wait();
+    if (m_buildFence && m_buildFence->GetCompletedValue() < m_buildFenceValue)
+    {
+        HANDLE e = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+        if (e && SUCCEEDED(m_buildFence->SetEventOnCompletion(m_buildFenceValue, e))) WaitForSingleObject(e, 5000);
+        if (e) CloseHandle(e);
+    }
+}
+
+bool Rt::IsBuilding(uint64_t key) const
+{
+    for (const auto& b : m_batches)
+        if (std::find(b->keys.begin(), b->keys.end(), key) != b->keys.end()) return true;
+    return std::find(m_failedKeys.begin(), m_failedKeys.end(), key) != m_failedKeys.end();
+}
+
+void Rt::ForgetScene()
+{
+    m_blas.clear();
+    m_tlas.Reset();
+    m_instanceCount = 0;
+    m_appeared.clear();
+    m_appearedFlagged = false;
+    m_publishedKeys.clear();
+    m_failedKeys.clear();
+}
+
+bool Rt::SubmitBlases(Device& dev, uint32_t stride, std::vector<Scene::RtMeshData>& newMeshes)
+{
+    if (!Ready() || !m_buildQueue || newMeshes.empty()) return false;
+    auto b = std::make_unique<BlasBatch>();
+    QueryPerformanceCounter(&b->submitted);
+    for (const Scene::RtMeshData& m : newMeshes)
+    {
+        b->keys.push_back(m.key);
+        // The source vertices, held from now: the build reads them, and the next upload of the dynamic pool replaces
+        // (frees) its buffer - possibly before the thread has started.
+        if (m.vb) b->keep.push_back(ComPtr<ID3D12Resource>(m.vb));
+    }
+    b->meshes.swap(newMeshes);
+    b->device = dev.device.Get();
+    b->stride = stride;
+    // The allocations and the recording on a thread of their own: a car's 71 BLASes took 15-140 ms of CPU, most of it
+    // creating buffers. The thread starts with the NEXT frame (Land): this one is the frame a mesh appears in, which
+    // allocates plenty of its own (the car's materials, the scene's heap), and the driver makes the two wait on each
+    // other - the Fabia's first frame +35 ms when started here.
+    m_batches.push_back(std::move(b));
+    return true;
+}
+
+// On the batch's thread: everything here is the batch's own, or free-threaded (the device's creation calls, the
+// queue's submit under m_submitLock). No Log: the sink is the main thread's - Land reports.
+bool Rt::RecordBatch(BlasBatch& b, ID3D12Device* device, uint32_t stride)
+{
+    std::vector<Scene::RtMeshData>& newMeshes = b.meshes;
+    ComPtr<ID3D12Device5> dev5;
+    if (FAILED(device->QueryInterface(IID_PPV_ARGS(&dev5)))) { b.error = "no ID3D12Device5"; return false; }
+    LARGE_INTEGER t0;
+    QueryPerformanceCounter(&t0);
+
+    // ---- what each needs: its geometries (opaque commits on its own; alpha-tested surfaces as a candidate for the
+    // any-hit test - PrimitiveIndex counts per geometry, which is what lets the alpha one index from 0), and the
+    // driver's sizes. The prebuild ask does not read the addresses, so the index buffer's are filled in later.
+    struct Plan { D3D12_RAYTRACING_GEOMETRY_DESC geos[2]; const std::vector<uint32_t>* src[2]; UINT n;
+                  UINT64 ib[2]; UINT64 result, scratch; };
+    std::vector<Plan> plans(newMeshes.size());
+    UINT64 indexBytes = 0, scratchMax = 0, scratchTotal = 0;
+    for (size_t i = 0; i < newMeshes.size(); ++i)
+    {
+        Scene::RtMeshData& m = newMeshes[i];
+        Plan& p = plans[i];
+        p = Plan{};
+        if (!m.vb) continue;
+        auto describe = [&](const std::vector<uint32_t>& idx, bool opaque) {
+            if (idx.empty()) return;
+            D3D12_RAYTRACING_GEOMETRY_DESC& g = p.geos[p.n];
+            g.Type = D3D12_RAYTRACING_GEOMETRY_TYPE_TRIANGLES;
+            g.Flags = opaque ? D3D12_RAYTRACING_GEOMETRY_FLAG_OPAQUE : D3D12_RAYTRACING_GEOMETRY_FLAG_NONE;
+            g.Triangles.VertexBuffer.StartAddress = m.vb->GetGPUVirtualAddress() + m.vbOffset;
+            g.Triangles.VertexBuffer.StrideInBytes = stride;
+            g.Triangles.VertexCount = m.vertexCount;
+            g.Triangles.VertexFormat = DXGI_FORMAT_R32G32B32_FLOAT;
+            g.Triangles.IndexCount = (UINT)idx.size();
+            g.Triangles.IndexFormat = DXGI_FORMAT_R32_UINT;
+            p.src[p.n] = &idx;
+            p.ib[p.n++] = indexBytes;
+            indexBytes += idx.size() * 4;
+        };
+        describe(m.opaque, true);
+        describe(m.alpha, false);
+        if (!p.n) continue;
+        D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS in = {};
+        in.Type = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL;
+        in.DescsLayout = D3D12_ELEMENTS_LAYOUT_ARRAY;
+        in.Flags = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PREFER_FAST_TRACE;
+        in.NumDescs = p.n;
+        in.pGeometryDescs = p.geos;
+        D3D12_RAYTRACING_ACCELERATION_STRUCTURE_PREBUILD_INFO info = {};
+        dev5->GetRaytracingAccelerationStructurePrebuildInfo(&in, &info);
+        p.result = AlignAs(info.ResultDataMaxSizeInBytes);
+        p.scratch = AlignAs(info.ScratchDataSizeInBytes);
+        scratchMax = (std::max)(scratchMax, p.scratch);
+        scratchTotal += p.scratch;
+    }
+    if (!indexBytes) { b.error = "no triangles"; return false; }
+
+    if (FAILED(device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_COMPUTE, IID_PPV_ARGS(&b.alloc))) ||
+        FAILED(device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_COMPUTE, b.alloc.Get(), nullptr,
+                                             IID_PPV_ARGS(&b.list))))
+    {
+        b.error = "no command list";
+        return false;
+    }
+    b.list->SetName(L"ngg BLAS builds");
+
+    // ---- one upload for every index of the batch
+    ComPtr<ID3D12Resource> indices = MakeBuffer(device, indexBytes, D3D12_HEAP_TYPE_UPLOAD,
+                                                D3D12_RESOURCE_STATE_GENERIC_READ);
+    uint8_t* mapped = nullptr;
+    D3D12_RANGE none = { 0, 0 };
+    if (!indices || FAILED(indices->Map(0, &none, reinterpret_cast<void**>(&mapped))))
+    {
+        b.error = "the index upload failed";
+        return false;
+    }
+    b.keep.push_back(indices);
+
+    // ---- one scratch, reused past a barrier when a batch outgrows kScratchBytes. COMMON: buffers are created in it
+    // whatever is asked, and promote to UNORDERED_ACCESS on first use - asking for UAV only earned a validation
+    // warning per rebuild.
+    const UINT64 scratchBytes = (std::min)(scratchTotal, (std::max)(kScratchBytes, scratchMax));
+    ComPtr<ID3D12Resource> scratch = MakeBuffer(device, scratchBytes, D3D12_HEAP_TYPE_DEFAULT,
+                                                D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
+    if (!scratch) { indices->Unmap(0, nullptr); b.error = "the scratch allocation failed"; return false; }
+    b.keep.push_back(scratch);
+
+    // ---- results: the small ones packed into arenas, each big one in a buffer of its own
+    ComPtr<ID3D12Resource> arena;
+    UINT64 arenaUsed = 0, arenaSize = 0, scratchUsed = 0;
+    auto openArena = [&](size_t from) {
+        arenaSize = 0;
+        for (size_t j = from; j < plans.size(); ++j)
+        {
+            if (!plans[j].n || plans[j].result >= kOwnBufferBytes) continue;
+            if (arenaSize + plans[j].result > kArenaBytes) break;
+            arenaSize += plans[j].result;
+        }
+        arena = MakeBuffer(device, (std::max)(arenaSize, UINT64(256)), D3D12_HEAP_TYPE_DEFAULT,
+                           D3D12_RESOURCE_STATE_RAYTRACING_ACCELERATION_STRUCTURE,
+                           D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
+        arenaUsed = 0;
+    };
+
+    for (size_t i = 0; i < newMeshes.size(); ++i)
+    {
+        Scene::RtMeshData& m = newMeshes[i];
+        Plan& p = plans[i];
+        if (!p.n) continue;
+        for (UINT g = 0; g < p.n; ++g)
+        {
+            memcpy(mapped + p.ib[g], p.src[g]->data(), p.src[g]->size() * 4);
+            p.geos[g].Triangles.IndexBuffer = indices->GetGPUVirtualAddress() + p.ib[g];
+        }
+
+        BlasEntry e;
+        if (p.result >= kOwnBufferBytes)
+            e.as = MakeBuffer(device, p.result, D3D12_HEAP_TYPE_DEFAULT,
+                              D3D12_RESOURCE_STATE_RAYTRACING_ACCELERATION_STRUCTURE,
+                              D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
+        else
+        {
+            if (!arena || arenaUsed + p.result > arenaSize) openArena(i);
+            e.as = arena;
+            e.offset = arenaUsed;
+            arenaUsed += p.result;
+        }
+        if (!e.as) { b.error = "a BLAS allocation failed"; continue; }
+
+        if (scratchUsed + p.scratch > scratchBytes)
+        {
+            D3D12_RESOURCE_BARRIER ub = {};
+            ub.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
+            ub.UAV.pResource = scratch.Get();
+            b.list->ResourceBarrier(1, &ub);
+            scratchUsed = 0;
+        }
+        D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_DESC bd = {};
+        bd.Inputs.Type = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL;
+        bd.Inputs.DescsLayout = D3D12_ELEMENTS_LAYOUT_ARRAY;
+        // PREFER_FAST_TRACE: a BLAS is built when its mesh appears and then traced for as long as it exists - moving
+        // it is the TLAS's job.
+        bd.Inputs.Flags = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PREFER_FAST_TRACE;
+        bd.Inputs.NumDescs = p.n;
+        bd.Inputs.pGeometryDescs = p.geos;
+        bd.ScratchAccelerationStructureData = scratch->GetGPUVirtualAddress() + scratchUsed;
+        bd.DestAccelerationStructureData = e.Va();
+        b.list->BuildRaytracingAccelerationStructure(&bd, 0, nullptr);
+        scratchUsed += p.scratch;
+
+        e.alpha.swap(m.alpha);
+        e.alphaMat.swap(m.alphaMat);
+        e.alphaPlant.swap(m.alphaPlant);
+        if (e.alphaPlant.size() != e.alphaMat.size()) e.alphaPlant.assign(e.alphaMat.size(), 0xFFFFFFFFu);
+        e.vbSelect = m.vbSelect;
+        e.vertexBase = m.vertexBase;
+        b.bytes += p.result;
+        b.triangles += (uint32_t)((m.opaque.size() + e.alpha.size()) / 3);
+        b.entries.emplace_back(m.key, std::move(e));
+    }
+    indices->Unmap(0, nullptr);
+    if (FAILED(b.list->Close()) || b.entries.empty())
+    {
+        b.error = "the builds could not be recorded";
+        return false;
+    }
+    b.scratchBytes = scratchBytes;
+    ID3D12CommandList* lists[] = { b.list.Get() };
+    {
+        std::lock_guard<std::mutex> lock(m_submitLock);   // fence values in the order the queue sees them
+        m_buildQueue->ExecuteCommandLists(1, lists);
+        b.fence = ++m_buildFenceValue;
+        m_buildQueue->Signal(m_buildFence.Get(), b.fence);
+    }
+    b.recordMs = MsSince(t0);
+    return true;
+}
+
+void Rt::StartBatches()
+{
+    for (auto& p : m_batches)
+    {
+        BlasBatch& b = *p;
+        if (b.started) continue;
+        BlasBatch* raw = &b;
+        b.work = std::async(std::launch::async, [this, raw] { return RecordBatch(*raw, raw->device, raw->stride); });
+        b.started = true;
+    }
+}
+
+bool Rt::PrepareTargets(ID3D12Device* device, UINT width, UINT height)
+{
+    if (!Ready() || !width || !height) return false;
+    if (width == m_width && height == m_height && m_result) return true;
+    LARGE_INTEGER t0;
+    QueryPerformanceCounter(&t0);
+    // Without a heap yet the views wait for the first Rebuild, which writes them into the heap it makes.
+    if (!CreateTargets(device, width, height)) { m_width = m_height = 0; return false; }
+    Log("rt: targets %ux%u made ahead of the first ray (%.0f ms)", width, height, MsSince(t0));
+    return true;
+}
+
+bool Rt::Land()
+{
+    if (m_batches.empty()) return false;
+    bool landed = false;
+    for (auto it = m_batches.begin(); it != m_batches.end(); )
+    {
+        BlasBatch& b = **it;
+        if (!b.started) { StartBatches(); ++b.frames; ++it; continue; }   // (the renderer starts them: StartBatches)
+        if (b.work.valid())
+        {
+            if (b.work.wait_for(std::chrono::seconds(0)) != std::future_status::ready) { ++b.frames; ++it; continue; }
+            b.ok = b.work.get();
+            Log("rt: %zu BLAS(es) %s (%u triangles, %.1f MB, scratch %.1f MB): recorded in %.1f ms on their thread%s%s",
+                b.entries.size(), b.ok ? "submitted" : "NOT submitted", b.triangles, b.bytes / 1048576.0,
+                b.scratchBytes / 1048576.0, b.recordMs, b.error ? " - " : "", b.error ? b.error : "");
+        }
+        if (b.ok && m_buildFence->GetCompletedValue() < b.fence) { ++b.frames; ++it; continue; }
+        if (b.ok)
+        {
+            for (auto& e : b.entries)
+            {
+                m_appeared.push_back(e.first);
+                m_blas[e.first] = std::move(e.second);
+            }
+            Log("rt: %zu BLAS(es) built, in the TLAS %.0f ms / %u frame(s) after the submit", b.entries.size(),
+                MsSince(b.submitted), b.frames + 1);
+        }
+        else    // not tried again until the next scene: a failure every frame would be a submit every frame
+            m_failedKeys.insert(m_failedKeys.end(), b.keys.begin(), b.keys.end());
+        it = m_batches.erase(it);
+        landed = true;
+    }
+    return landed;
+}
+
 bool Rt::Rebuild(Device& dev, const Scene::RtShared& shared,
-                 std::vector<Scene::RtMeshData>& newMeshes,
                  const std::vector<uint64_t>& liveKeys,
                  const std::vector<Scene::RtInstanceDesc>& instances)
 {
     if (!Ready() || !shared.staticVb) return false;
-    ComPtr<ID3D12Device5> dev5;
-    if (FAILED(dev.device.As(&dev5))) return false;
-
-    LARGE_INTEGER t0, t1, hz;
+    LARGE_INTEGER t0;
     QueryPerformanceCounter(&t0);
-    QueryPerformanceFrequency(&hz);
 
-    // ---- drop the BLASes nothing uses any more
+    // ---- drop the BLASes nothing uses any more - except a superseded WORLD while its successor builds: hiding or
+    // first moving a static object rebuilds the world's BLAS, and dropping the old one at once would take the whole
+    // stage out of the rays for the frames the new one takes. It keeps its identity instance until then. (A new
+    // scene is not this case: ForgetScene has emptied the cache.)
+    bool worldBuilding = false;
+    for (uint64_t k : liveKeys)
+        if (Scene::IsRtWorldKey(k) && !m_blas.count(k) && IsBuilding(k)) worldBuilding = true;
+    std::vector<uint64_t> held;
     for (auto it = m_blas.begin(); it != m_blas.end(); )
     {
-        if (std::find(liveKeys.begin(), liveKeys.end(), it->first) == liveKeys.end())
-            it = m_blas.erase(it);
-        else
-            ++it;
-    }
-
-    // ---- build the new ones, in one list. Each has its own scratch, so they
-    // need no barriers between them; all scratch dies after the wait.
-    std::vector<ComPtr<ID3D12Resource>> keep;      // uploads + scratch, alive until EndAndWait
-    UINT64 blasBytes = 0;
-    uint32_t builtTris = 0;
-    ComPtr<ID3D12GraphicsCommandList4> list4;
-    if (!newMeshes.empty())
-    {
-        if (!dev.Begin()) return false;
-        if (FAILED(dev.list.As(&list4))) { dev.EndAndWait(); return false; }
-
-        for (Scene::RtMeshData& m : newMeshes)
+        if (std::find(liveKeys.begin(), liveKeys.end(), it->first) != liveKeys.end()) { ++it; continue; }
+        if (worldBuilding && Scene::IsRtWorldKey(it->first))
         {
-            ComPtr<ID3D12Resource> ibo = m.opaque.empty() ? nullptr :
-                MakeUploadBuffer(dev.device.Get(), m.opaque.data(), m.opaque.size() * 4);
-            ComPtr<ID3D12Resource> iba = m.alpha.empty() ? nullptr :
-                MakeUploadBuffer(dev.device.Get(), m.alpha.data(), m.alpha.size() * 4);
-            keep.push_back(ibo); keep.push_back(iba);
-
-            // Opaque geometry commits on its own; alpha-tested geometry surfaces
-            // as a candidate for the any-hit test. PrimitiveIndex counts per
-            // geometry, which is what lets the alpha one index from 0.
-            D3D12_RAYTRACING_GEOMETRY_DESC geos[2] = {};
-            UINT n = 0;
-            auto describe = [&](ID3D12Resource* ib, size_t count, bool opaque) {
-                if (!ib || !count) return;
-                D3D12_RAYTRACING_GEOMETRY_DESC& g = geos[n++];
-                g.Type = D3D12_RAYTRACING_GEOMETRY_TYPE_TRIANGLES;
-                g.Flags = opaque ? D3D12_RAYTRACING_GEOMETRY_FLAG_OPAQUE : D3D12_RAYTRACING_GEOMETRY_FLAG_NONE;
-                g.Triangles.VertexBuffer.StartAddress = m.vb->GetGPUVirtualAddress() + m.vbOffset;
-                g.Triangles.VertexBuffer.StrideInBytes = shared.stride;
-                g.Triangles.VertexCount = m.vertexCount;
-                g.Triangles.VertexFormat = DXGI_FORMAT_R32G32B32_FLOAT;
-                g.Triangles.IndexBuffer = ib->GetGPUVirtualAddress();
-                g.Triangles.IndexCount = (UINT)count;
-                g.Triangles.IndexFormat = DXGI_FORMAT_R32_UINT;
-            };
-            describe(ibo.Get(), m.opaque.size(), true);
-            describe(iba.Get(), m.alpha.size(), false);
-            if (!n) continue;
-
-            D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS in = {};
-            in.Type = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL;
-            in.DescsLayout = D3D12_ELEMENTS_LAYOUT_ARRAY;
-            // PREFER_FAST_TRACE: a BLAS is built when its mesh appears and then
-            // traced for as long as it exists - moving it is the TLAS's job.
-            in.Flags = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PREFER_FAST_TRACE;
-            in.NumDescs = n;
-            in.pGeometryDescs = geos;
-            D3D12_RAYTRACING_ACCELERATION_STRUCTURE_PREBUILD_INFO info = {};
-            dev5->GetRaytracingAccelerationStructurePrebuildInfo(&in, &info);
-
-            BlasEntry e;
-            e.as = MakeBuffer(dev.device.Get(), info.ResultDataMaxSizeInBytes, D3D12_HEAP_TYPE_DEFAULT,
-                              D3D12_RESOURCE_STATE_RAYTRACING_ACCELERATION_STRUCTURE,
-                              D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
-            // COMMON: buffers are created in it whatever is asked, and promote
-            // to UNORDERED_ACCESS on first use - asking for UAV only earned a
-            // validation warning per rebuild.
-            ComPtr<ID3D12Resource> scratch = MakeBuffer(dev.device.Get(), info.ScratchDataSizeInBytes,
-                              D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_COMMON,
-                              D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
-            if (!e.as || !scratch) { Log("rt: BLAS allocation failed"); continue; }
-            keep.push_back(scratch);
-
-            D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_DESC bd = {};
-            bd.Inputs = in;
-            bd.ScratchAccelerationStructureData = scratch->GetGPUVirtualAddress();
-            bd.DestAccelerationStructureData = e.as->GetGPUVirtualAddress();
-            list4->BuildRaytracingAccelerationStructure(&bd, 0, nullptr);
-
-            e.alpha.swap(m.alpha);
-            e.alphaMat.swap(m.alphaMat);
-            e.alphaPlant.swap(m.alphaPlant);
-            if (e.alphaPlant.size() != e.alphaMat.size()) e.alphaPlant.assign(e.alphaMat.size(), 0xFFFFFFFFu);
-            e.vbSelect = m.vbSelect;
-            e.vertexBase = m.vertexBase;
-            blasBytes += info.ResultDataMaxSizeInBytes;
-            builtTris += (uint32_t)((m.opaque.size() + e.alpha.size()) / 3);
-            m_blas[m.key] = std::move(e);
+            held.push_back(it->first);
+            ++it;
+            continue;
         }
-        dev.EndAndWait();
+        it = m_blas.erase(it);
     }
+    std::vector<uint64_t> published;              // what the TLAS can hold now: built and live (and a held world)
+    for (uint64_t k : liveKeys)
+        if (m_blas.count(k)) published.push_back(k);
+    std::sort(published.begin(), published.end());
+    m_publishedKeys = published;
+    published.insert(published.end(), held.begin(), held.end());
 
     // ---- the shared alpha index buffer and per-triangle materials: every
     // live mesh's alpha triangles end to end, each BLAS knowing where its own
     // start. Rebuilt whenever the mesh set changes, which is not per drag.
     std::vector<uint32_t> alpha, alphaMat, alphaPlant;
-    for (uint64_t k : liveKeys)
+    for (uint64_t k : published)
     {
         auto it = m_blas.find(k);
         if (it == m_blas.end()) continue;
@@ -564,9 +820,30 @@ bool Rt::Rebuild(Device& dev, const Scene::RtShared& shared,
         alphaPlant.insert(alphaPlant.end(), it->second.alphaPlant.begin(), it->second.alphaPlant.end());
     }
     if (alpha.empty()) { alpha.assign(3, 0); alphaMat.assign(1, 0); alphaPlant.assign(1, 0xFFFFFFFFu); }   // never an empty view
-    m_triPlant = MakeUploadBuffer(dev.device.Get(), alphaPlant.data(), alphaPlant.size() * 4);
-    m_ibAlpha = MakeUploadBuffer(dev.device.Get(), alpha.data(), alpha.size() * 4);
-    m_triMaterial = MakeUploadBuffer(dev.device.Get(), alphaMat.data(), alphaMat.size() * 4);
+    // Written into the buffers the last Rebuild made when they are big enough (a third to spare when made): a car's
+    // BLASes landing then allocates nothing here. Safe to overwrite - the frames are synchronous, and this runs before
+    // the frame's first ray.
+    auto write = [&](ComPtr<ID3D12Resource>& buf, const std::vector<uint32_t>& v) {
+        const size_t bytes = v.size() * 4;
+        void* p = nullptr;
+        D3D12_RANGE none = { 0, 0 };
+        if (buf && buf->GetDesc().Width >= bytes && SUCCEEDED(buf->Map(0, &none, &p)))
+        {
+            memcpy(p, v.data(), bytes);
+            buf->Unmap(0, nullptr);
+            return;
+        }
+        buf = MakeBuffer(dev.device.Get(), bytes + bytes / 3, D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_STATE_GENERIC_READ);
+        if (buf && SUCCEEDED(buf->Map(0, &none, &p)))
+        {
+            memcpy(p, v.data(), bytes);
+            buf->Unmap(0, nullptr);
+        }
+    };
+    write(m_triPlant, alphaPlant);
+    write(m_ibAlpha, alpha);
+    write(m_triMaterial, alphaMat);
+    if (!m_triPlant || !m_ibAlpha || !m_triMaterial) return false;
     m_materials = shared.materials;
     m_vertexStride = shared.stride;
     m_staticVb = shared.staticVb;
@@ -579,7 +856,9 @@ bool Rt::Rebuild(Device& dev, const Scene::RtShared& shared,
     hd.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
     m_heap.Reset();
     if (FAILED(dev.device->CreateDescriptorHeap(&hd, IID_PPV_ARGS(&m_heap)))) return false;
-    m_width = m_height = 0;        // the output UAVs live in the new heap: recreate on first Trace
+    // The outputs' views live in the heap: into the new one, with the targets and their histories kept (a new mesh
+    // used to drop every history on the screen). Without targets yet, the first Trace makes them.
+    if (!m_result || !WriteTargetViews(dev.device.Get())) m_width = m_height = 0;
 
     auto slot = [&](UINT i) {
         D3D12_CPU_DESCRIPTOR_HANDLE h = m_heap->GetCPUDescriptorHandleForHeapStart();
@@ -626,16 +905,34 @@ bool Rt::Rebuild(Device& dev, const Scene::RtShared& shared,
         dev.device->CreateShaderResourceView(r, &sd, slot(kSlotTextures + (UINT)i));
     }
 
-    const bool ok = UpdateInstances(dev, instances);
+    std::vector<Scene::RtInstanceDesc> all = instances;
+    for (uint64_t k : held) all.push_back(Scene::RtInstanceDesc{ k });
+    const bool ok = UpdateInstances(dev, all);
 
-    QueryPerformanceCounter(&t1);
-    Log("rt: %zu BLAS(es) built (%u triangles, %.1f MB) in %.0f ms; %zu live, %zu instance(s), "
-        "%zu alpha-tested triangles for the any-hit test, %zu textures",
-        newMeshes.size(), builtTris, blasBytes / 1048576.0,
-        1000.0 * double(t1.QuadPart - t0.QuadPart) / double(hz.QuadPart),
-        m_blas.size(), instances.size(), alphaMat.size(), shared.textures.size());
+    Log("rt: published %zu BLAS(es)%s: %u instance(s) in the TLAS, %zu alpha-tested triangles for the any-hit test, "
+        "%zu textures - %.1f ms", published.size(), held.empty() ? "" : " (the old world kept while the new builds)",
+        m_instanceCount, alphaMat.size(), shared.textures.size(), MsSince(t0));
     return ok;
 }
+
+void Rt::FollowDynamicPool(ID3D12Device* dev, ID3D12Resource* dynVb, uint32_t dynVertexCount)
+{
+    if (!m_heap || !m_staticVb) return;
+    ID3D12Resource* r = dynVb && dynVertexCount ? dynVb : m_staticVb;   // never a holed table (Rebuild)
+    D3D12_SHADER_RESOURCE_VIEW_DESC sd = {};
+    sd.Format = DXGI_FORMAT_R32_TYPELESS;
+    sd.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
+    sd.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    sd.Buffer.NumElements = (UINT)(r->GetDesc().Width / 4);
+    sd.Buffer.Flags = D3D12_BUFFER_SRV_FLAG_RAW;
+    D3D12_CPU_DESCRIPTOR_HANDLE h = m_heap->GetCPUDescriptorHandleForHeapStart();
+    h.ptr += (SIZE_T)kSlotDynVerts * m_stride;
+    dev->CreateShaderResourceView(r, &sd, h);
+    m_dynVb = dynVb;
+}
+
+// How far away a newly built mesh "was" last frame (UpdateInstances): far beyond any penumbra, so no history.
+constexpr float kRtAppearedFrom = 1.0e4f;
 
 // The TLAS and the instance table only. What a drag costs: a handful of
 // instances, rebuilt whole - FAST_BUILD, because it is rebuilt far more often
@@ -659,15 +956,24 @@ bool Rt::UpdateInstances(Device& dev, const std::vector<Scene::RtInstanceDesc>& 
         id.InstanceMask = Scene::kRtMaskAll | (d.focus ? Scene::kRtMaskFocus : 0u);   // (the rays here: 0xFF, all)
         id.Flags = d.forceOpaque ? D3D12_RAYTRACING_INSTANCE_FLAG_FORCE_OPAQUE
                                  : D3D12_RAYTRACING_INSTANCE_FLAG_NONE;
-        id.AccelerationStructure = it->second.as->GetGPUVirtualAddress();
+        id.AccelerationStructure = it->second.Va();
         descs.push_back(id);
+        // A mesh whose BLAS landed since the last table (Land) is NEW to the rays: what they hit there was nothing
+        // last frame. It goes in as an occluder that was far away (kRtAppearedFrom), so Allow gives the pixels whose
+        // rays hit it no history - its shadow and AO come in at once instead of fading in over the old "unoccluded"
+        // (design 4.5). One frame: the next table (InstancesStale) is the ordinary one.
+        const bool appeared = std::find(m_appeared.begin(), m_appeared.end(), d.mesh) != m_appeared.end();
         InstInfo in = { it->second.triBase, it->second.vertexBase, it->second.vbSelect, d.material,
-                        d.moved ? 1u : 0u };
+                        d.moved || appeared ? 1u : 0u };
         for (int r = 0; r < 4; ++r)                  // the rows' xyz (row vectors)
             for (int c = 0; c < 3; ++c) in.was[r * 3 + c] = d.prevXform[r * 4 + c];
+        if (appeared)
+            for (int c = 0; c < 3; ++c) in.was[9 + c] += kRtAppearedFrom;
         info.push_back(in);
     }
-    if (descs.empty()) { m_tlas.Reset(); return false; }
+    m_appearedFlagged = !m_appeared.empty();
+    m_appeared.clear();
+    if (descs.empty()) { m_tlas.Reset(); m_instanceCount = 0; return false; }
 
     m_instances = MakeUploadBuffer(dev.device.Get(), descs.data(), descs.size() * sizeof(descs[0]));
     m_instInfo  = MakeUploadBuffer(dev.device.Get(), info.data(), info.size() * sizeof(info[0]));
@@ -741,234 +1047,98 @@ bool Rt::CreateTargets(ID3D12Device* dev, UINT width, UINT height)
     d.Format = DXGI_FORMAT_R16_FLOAT;
     d.SampleDesc.Count = 1;
     d.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
-
-    m_result.Reset();
-    if (FAILED(dev->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &d,
-                                            D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
-                                            nullptr, IID_PPV_ARGS(&m_result))))
-        return false;
-
-    D3D12_UNORDERED_ACCESS_VIEW_DESC uv = {};
-    uv.Format = DXGI_FORMAT_R16_FLOAT;
-    uv.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
-    D3D12_CPU_DESCRIPTOR_HANDLE h = m_heap->GetCPUDescriptorHandleForHeapStart();
-    h.ptr += (SIZE_T)kSlotOut * m_stride;
-    dev->CreateUnorderedAccessView(m_result.Get(), nullptr, &uv, h);
-
-    // Raw visibility as an SRV, for the denoiser - twice, at the head of each
-    // [raw, hist] pair.
-    {
-        D3D12_SHADER_RESOURCE_VIEW_DESC rs = {};
-        rs.Format = DXGI_FORMAT_R16_FLOAT;
-        rs.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
-        rs.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-        rs.Texture2D.MipLevels = 1;
-        D3D12_CPU_DESCRIPTOR_HANDLE a = m_heap->GetCPUDescriptorHandleForHeapStart();
-        a.ptr += (SIZE_T)kSlotPair0 * m_stride;
-        dev->CreateShaderResourceView(m_result.Get(), &rs, a);
-        a = m_heap->GetCPUDescriptorHandleForHeapStart();
-        a.ptr += (SIZE_T)kSlotPair1 * m_stride;
-        dev->CreateShaderResourceView(m_result.Get(), &rs, a);
-    }
-
-    // The filtered history, two of them, RGBA16F: filtered visibility, the
-    // NDC depth it was computed at - so next frame can tell whether a
-    // reprojected sample landed on the same surface - and two flags (a ray
-    // hit a moved object; the pixel is a moved object's), see rt_denoise.hlsl.
+    // The filtered histories, RGBA16F: filtered visibility, the NDC depth it was computed at - so next frame can tell
+    // whether a reprojected sample landed on the same surface - and two flags (a ray hit a moved object; the pixel is
+    // a moved object's), see rt_denoise.hlsl.
     D3D12_RESOURCE_DESC hd2 = d;
     hd2.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
+
+    auto make = [&](const D3D12_RESOURCE_DESC& desc, D3D12_RESOURCE_STATES state, ComPtr<ID3D12Resource>& out) {
+        out.Reset();
+        return SUCCEEDED(dev->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &desc, state, nullptr,
+                                                      IID_PPV_ARGS(&out)));
+    };
+    const D3D12_RESOURCE_STATES uav = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+    const D3D12_RESOURCE_STATES srv = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+    if (!make(d, uav, m_result) || !make(d, uav, m_aoResult) || !make(d, uav, m_lightResult) ||
+        !make(d, uav, m_aoWide) || !make(d, uav, m_lightWide))
+        return false;
     for (int i = 0; i < 2; ++i)
     {
-        m_hist[i].Reset();
-        if (FAILED(dev->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &hd2,
-                                                D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
-                                                nullptr, IID_PPV_ARGS(&m_hist[i]))))
+        if (!make(hd2, srv, m_hist[i]) || !make(hd2, srv, m_aoHist[i]) || !make(hd2, srv, m_lightHist[i]))
             return false;
-        m_histState[i] = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
-
-        D3D12_SHADER_RESOURCE_VIEW_DESC hs = {};
-        hs.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
-        hs.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
-        hs.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-        hs.Texture2D.MipLevels = 1;
-        D3D12_CPU_DESCRIPTOR_HANDLE sh = m_heap->GetCPUDescriptorHandleForHeapStart();
-        sh.ptr += (SIZE_T)((i == 0 ? kSlotPair0 : kSlotPair1) + 1) * m_stride;
-        dev->CreateShaderResourceView(m_hist[i].Get(), &hs, sh);
-
-        D3D12_UNORDERED_ACCESS_VIEW_DESC hu = {};
-        hu.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
-        hu.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
-        D3D12_CPU_DESCRIPTOR_HANDLE uh = m_heap->GetCPUDescriptorHandleForHeapStart();
-        uh.ptr += (SIZE_T)(i == 0 ? kSlotHistUav0 : kSlotHistUav1) * m_stride;
-        dev->CreateUnorderedAccessView(m_hist[i].Get(), nullptr, &hu, uh);
+        m_histState[i] = m_aoHistState[i] = m_lightHistState[i] = srv;
     }
-    m_histValid = false;
-
-    // ---- the same again for ambient occlusion ------------------------------
-    m_aoResult.Reset();
-    if (FAILED(dev->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &d,
-                                            D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
-                                            nullptr, IID_PPV_ARGS(&m_aoResult))))
-        return false;
-    {
-        D3D12_UNORDERED_ACCESS_VIEW_DESC au = {};
-        au.Format = DXGI_FORMAT_R16_FLOAT;
-        au.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
-        D3D12_CPU_DESCRIPTOR_HANDLE ah = m_heap->GetCPUDescriptorHandleForHeapStart();
-        ah.ptr += (SIZE_T)kSlotAoOut * m_stride;
-        dev->CreateUnorderedAccessView(m_aoResult.Get(), nullptr, &au, ah);
-
-        D3D12_UNORDERED_ACCESS_VIEW_DESC acv = {};
-        acv.ViewDimension = D3D12_UAV_DIMENSION_BUFFER;
-        acv.Buffer.NumElements = 4;
-        acv.Buffer.StructureByteStride = sizeof(uint32_t);
-        ah = m_heap->GetCPUDescriptorHandleForHeapStart();
-        ah.ptr += (SIZE_T)kSlotAoCounters * m_stride;
-        dev->CreateUnorderedAccessView(m_aoCounters.Get(), nullptr, &acv, ah);
-
-        D3D12_SHADER_RESOURCE_VIEW_DESC rs = {};
-        rs.Format = DXGI_FORMAT_R16_FLOAT;
-        rs.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
-        rs.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-        rs.Texture2D.MipLevels = 1;
-        ah = m_heap->GetCPUDescriptorHandleForHeapStart();
-        ah.ptr += (SIZE_T)kSlotAoPair0 * m_stride;
-        dev->CreateShaderResourceView(m_aoResult.Get(), &rs, ah);
-        ah = m_heap->GetCPUDescriptorHandleForHeapStart();
-        ah.ptr += (SIZE_T)kSlotAoPair1 * m_stride;
-        dev->CreateShaderResourceView(m_aoResult.Get(), &rs, ah);
-    }
-    for (int i = 0; i < 2; ++i)
-    {
-        m_aoHist[i].Reset();
-        if (FAILED(dev->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &hd2,
-                                                D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
-                                                nullptr, IID_PPV_ARGS(&m_aoHist[i]))))
-            return false;
-        m_aoHistState[i] = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
-
-        D3D12_SHADER_RESOURCE_VIEW_DESC hs = {};
-        hs.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
-        hs.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
-        hs.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-        hs.Texture2D.MipLevels = 1;
-        D3D12_CPU_DESCRIPTOR_HANDLE sh = m_heap->GetCPUDescriptorHandleForHeapStart();
-        sh.ptr += (SIZE_T)((i == 0 ? kSlotAoPair0 : kSlotAoPair1) + 1) * m_stride;
-        dev->CreateShaderResourceView(m_aoHist[i].Get(), &hs, sh);
-
-        D3D12_UNORDERED_ACCESS_VIEW_DESC hu = {};
-        hu.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
-        hu.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
-        D3D12_CPU_DESCRIPTOR_HANDLE uh = m_heap->GetCPUDescriptorHandleForHeapStart();
-        uh.ptr += (SIZE_T)(i == 0 ? kSlotAoHistUav0 : kSlotAoHistUav1) * m_stride;
-        dev->CreateUnorderedAccessView(m_aoHist[i].Get(), nullptr, &hu, uh);
-    }
-    m_aoHistValid = false;
-
-    // ---- and again for the local lights (no wide pass) ----------------------
-    m_lightResult.Reset();
-    if (FAILED(dev->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &d,
-                                            D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
-                                            nullptr, IID_PPV_ARGS(&m_lightResult))))
-        return false;
-    {
-        D3D12_UNORDERED_ACCESS_VIEW_DESC lu = {};
-        lu.Format = DXGI_FORMAT_R16_FLOAT;
-        lu.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
-        D3D12_CPU_DESCRIPTOR_HANDLE lh = m_heap->GetCPUDescriptorHandleForHeapStart();
-        lh.ptr += (SIZE_T)kSlotLightOut * m_stride;
-        dev->CreateUnorderedAccessView(m_lightResult.Get(), nullptr, &lu, lh);
-
-        D3D12_UNORDERED_ACCESS_VIEW_DESC lcv = {};
-        lcv.ViewDimension = D3D12_UAV_DIMENSION_BUFFER;
-        lcv.Buffer.NumElements = 4;
-        lcv.Buffer.StructureByteStride = sizeof(uint32_t);
-        lh = m_heap->GetCPUDescriptorHandleForHeapStart();
-        lh.ptr += (SIZE_T)kSlotLightCounters * m_stride;
-        dev->CreateUnorderedAccessView(m_lightCounters.Get(), nullptr, &lcv, lh);
-
-        D3D12_SHADER_RESOURCE_VIEW_DESC rs = {};
-        rs.Format = DXGI_FORMAT_R16_FLOAT;
-        rs.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
-        rs.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-        rs.Texture2D.MipLevels = 1;
-        lh = m_heap->GetCPUDescriptorHandleForHeapStart();
-        lh.ptr += (SIZE_T)kSlotLightPair0 * m_stride;
-        dev->CreateShaderResourceView(m_lightResult.Get(), &rs, lh);
-        lh = m_heap->GetCPUDescriptorHandleForHeapStart();
-        lh.ptr += (SIZE_T)kSlotLightPair1 * m_stride;
-        dev->CreateShaderResourceView(m_lightResult.Get(), &rs, lh);
-    }
-    for (int i = 0; i < 2; ++i)
-    {
-        m_lightHist[i].Reset();
-        if (FAILED(dev->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &hd2,
-                                                D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
-                                                nullptr, IID_PPV_ARGS(&m_lightHist[i]))))
-            return false;
-        m_lightHistState[i] = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
-
-        D3D12_SHADER_RESOURCE_VIEW_DESC hs = {};
-        hs.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
-        hs.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
-        hs.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-        hs.Texture2D.MipLevels = 1;
-        D3D12_CPU_DESCRIPTOR_HANDLE sh = m_heap->GetCPUDescriptorHandleForHeapStart();
-        sh.ptr += (SIZE_T)((i == 0 ? kSlotLightPair0 : kSlotLightPair1) + 1) * m_stride;
-        dev->CreateShaderResourceView(m_lightHist[i].Get(), &hs, sh);
-
-        D3D12_UNORDERED_ACCESS_VIEW_DESC hu = {};
-        hu.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
-        hu.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
-        D3D12_CPU_DESCRIPTOR_HANDLE uh = m_heap->GetCPUDescriptorHandleForHeapStart();
-        uh.ptr += (SIZE_T)(i == 0 ? kSlotLightHistUav0 : kSlotLightHistUav1) * m_stride;
-        dev->CreateUnorderedAccessView(m_lightHist[i].Get(), nullptr, &hu, uh);
-    }
-    m_lightHistValid = false;
-
-    // The AO's wide pass output: visibility only, read by the scene like the
-    // histories (its SRV follows this format).
-    m_aoWide.Reset();
-    if (FAILED(dev->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &d,
-                                            D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
-                                            nullptr, IID_PPV_ARGS(&m_aoWide))))
-        return false;
-    m_aoWideState = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
-    {
-        D3D12_UNORDERED_ACCESS_VIEW_DESC wu = {};
-        wu.Format = DXGI_FORMAT_R16_FLOAT;
-        wu.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
-        D3D12_CPU_DESCRIPTOR_HANDLE wh = m_heap->GetCPUDescriptorHandleForHeapStart();
-        wh.ptr += (SIZE_T)kSlotAoWideUav * m_stride;
-        dev->CreateUnorderedAccessView(m_aoWide.Get(), nullptr, &wu, wh);
-    }
-    // And the local lights' (the same pass, the same format).
-    m_lightWide.Reset();
-    if (FAILED(dev->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &d,
-                                            D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
-                                            nullptr, IID_PPV_ARGS(&m_lightWide))))
-        return false;
-    m_lightWideState = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
-    {
-        D3D12_UNORDERED_ACCESS_VIEW_DESC wu = {};
-        wu.Format = DXGI_FORMAT_R16_FLOAT;
-        wu.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
-        D3D12_CPU_DESCRIPTOR_HANDLE wh = m_heap->GetCPUDescriptorHandleForHeapStart();
-        wh.ptr += (SIZE_T)kSlotLightWideUav * m_stride;
-        dev->CreateUnorderedAccessView(m_lightWide.Get(), nullptr, &wu, wh);
-    }
-
-    D3D12_UNORDERED_ACCESS_VIEW_DESC cv = {};
-    cv.ViewDimension = D3D12_UAV_DIMENSION_BUFFER;
-    cv.Buffer.NumElements = 4;
-    cv.Buffer.StructureByteStride = sizeof(uint32_t);
-    h = m_heap->GetCPUDescriptorHandleForHeapStart();
-    h.ptr += (SIZE_T)kSlotCounters * m_stride;
-    dev->CreateUnorderedAccessView(m_counters.Get(), nullptr, &cv, h);
+    m_aoWideState = m_lightWideState = uav;
+    m_histValid = m_aoHistValid = m_lightHistValid = false;
+    // Without a heap yet (PrepareTargets before the first Rebuild), Rebuild writes the views.
+    if (m_heap && !WriteTargetViews(dev)) return false;
 
     m_width = width;
     m_height = height;
     m_resultReadable = false;
+    return true;
+}
+
+bool Rt::WriteTargetViews(ID3D12Device* dev)
+{
+    if (!m_heap || !m_result) return false;
+    auto at = [&](UINT slot) {
+        D3D12_CPU_DESCRIPTOR_HANDLE h = m_heap->GetCPUDescriptorHandleForHeapStart();
+        h.ptr += (SIZE_T)slot * m_stride;
+        return h;
+    };
+    auto uav2d = [&](ID3D12Resource* r, DXGI_FORMAT f, UINT slot) {
+        D3D12_UNORDERED_ACCESS_VIEW_DESC u = {};
+        u.Format = f;
+        u.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
+        dev->CreateUnorderedAccessView(r, nullptr, &u, at(slot));
+    };
+    auto srv2d = [&](ID3D12Resource* r, DXGI_FORMAT f, UINT slot) {
+        D3D12_SHADER_RESOURCE_VIEW_DESC v = {};
+        v.Format = f;
+        v.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+        v.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        v.Texture2D.MipLevels = 1;
+        dev->CreateShaderResourceView(r, &v, at(slot));
+    };
+    auto counters = [&](ID3D12Resource* r, UINT slot) {
+        D3D12_UNORDERED_ACCESS_VIEW_DESC c = {};
+        c.ViewDimension = D3D12_UAV_DIMENSION_BUFFER;
+        c.Buffer.NumElements = 4;
+        c.Buffer.StructureByteStride = sizeof(uint32_t);
+        dev->CreateUnorderedAccessView(r, nullptr, &c, at(slot));
+    };
+    const DXGI_FORMAT r16 = DXGI_FORMAT_R16_FLOAT, rgba16 = DXGI_FORMAT_R16G16B16A16_FLOAT;
+
+    // The sun: the raw output, and the raw visibility as an SRV for the denoiser - twice, at the head of each
+    // [raw, hist] pair - then the histories' SRVs (second in each pair) and UAVs.
+    uav2d(m_result.Get(), r16, kSlotOut);
+    srv2d(m_result.Get(), r16, kSlotPair0);
+    srv2d(m_result.Get(), r16, kSlotPair1);
+    counters(m_counters.Get(), kSlotCounters);
+    // The same again for ambient occlusion: its raw output (u0) followed by counters (u1).
+    uav2d(m_aoResult.Get(), r16, kSlotAoOut);
+    counters(m_aoCounters.Get(), kSlotAoCounters);
+    srv2d(m_aoResult.Get(), r16, kSlotAoPair0);
+    srv2d(m_aoResult.Get(), r16, kSlotAoPair1);
+    // And for the local lights.
+    uav2d(m_lightResult.Get(), r16, kSlotLightOut);
+    counters(m_lightCounters.Get(), kSlotLightCounters);
+    srv2d(m_lightResult.Get(), r16, kSlotLightPair0);
+    srv2d(m_lightResult.Get(), r16, kSlotLightPair1);
+    for (int i = 0; i < 2; ++i)
+    {
+        srv2d(m_hist[i].Get(), rgba16, (i == 0 ? kSlotPair0 : kSlotPair1) + 1);
+        uav2d(m_hist[i].Get(), rgba16, i == 0 ? kSlotHistUav0 : kSlotHistUav1);
+        srv2d(m_aoHist[i].Get(), rgba16, (i == 0 ? kSlotAoPair0 : kSlotAoPair1) + 1);
+        uav2d(m_aoHist[i].Get(), rgba16, i == 0 ? kSlotAoHistUav0 : kSlotAoHistUav1);
+        srv2d(m_lightHist[i].Get(), rgba16, (i == 0 ? kSlotLightPair0 : kSlotLightPair1) + 1);
+        uav2d(m_lightHist[i].Get(), rgba16, i == 0 ? kSlotLightHistUav0 : kSlotLightHistUav1);
+    }
+    // The wide passes' outputs (rt_ao_wide.hlsl): visibility only, read by the scene like the histories.
+    uav2d(m_aoWide.Get(), r16, kSlotAoWideUav);
+    uav2d(m_lightWide.Get(), r16, kSlotLightWideUav);
     return true;
 }
 
@@ -987,8 +1157,14 @@ void Rt::Trace(Device& dev, ID3D12GraphicsCommandList* list, ID3D12Resource* dep
                bool ao, float aoRadius, uint32_t aoRays, UINT width, UINT height, const Lights* lights)
 {
     if (!Ready() || !HasScene() || !m_heap || !depth || !normal || !viewProj) return;
-    if ((width != m_width || height != m_height) && !CreateTargets(dev.device.Get(), width, height))
-        return;
+    if (width != m_width || height != m_height)
+    {
+        LARGE_INTEGER tt;
+        QueryPerformanceCounter(&tt);
+        const bool made = CreateTargets(dev.device.Get(), width, height);
+        Log("rt: targets %ux%u made in the frame (%.0f ms)", width, height, MsSince(tt));
+        if (!made) return;
+    }
 
     TraceCB cb = {};
     if (!Invert(viewProj, cb.invViewProj)) return;
