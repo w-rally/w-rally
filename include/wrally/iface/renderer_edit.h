@@ -7,7 +7,7 @@
 // ngg-api's editor surface (plugin-rbr ngg/api, removed from W-Rally in phase
 // 4) over the same ngg-core calls, so an editor that used ngg-api.dll can draw
 // through this one and stay on the renderer the game ships. Its client is
-// Wallaby (NGG design 8.2); the game does not use it.
+// Wallaby (NGG design §8); the game does not use it.
 //
 // Reached from RendererApi::editApi with kRendererEditVer, and versioned on its
 // own: editor additions do not move kRendererInterfaceVer, and the game's
@@ -15,7 +15,7 @@
 // one thread, POD, pack 4, nothing thrown across.
 //
 // PLACEMENTS (version 2) are the scene's instanced models placed in it (the .ngg's NGGE, ngg_format.h; NGG design
-// 5.0w): a handle per placement, the file's in its order and then the added ones, never renumbered - a removed one is a
+// §2.6): a handle per placement, the file's in its order and then the added ones, never renumbered - a removed one is a
 // tombstone, so the handles in an editor's undo stack stay good. They are edited in BATCHES, one call for many, which
 // is what keeps a brush stroke or a dragged selection to one rebuild of the renderer's culling cells.
 //

@@ -8,20 +8,17 @@
 // anything. Both are display problems, not lighting problems, and they belong
 // in one pass at the end rather than smeared across every shader that writes
 // colour - which is how the exposure control ended up working on the sky and
-// not on the surfaces (design 5.0).
+// not on the surfaces (design §3.1).
 //
 // TAA IS FIRST BECAUSE IT IS LOAD-BEARING, not because aliasing is the worst
 // artefact. Soft shadows (PCSS), SSAO, stochastic alpha and every RT effect are
 // noisy techniques that are only affordable when a temporal filter is already
 // there to accumulate them. Building them first means building them twice.
 //
-// REPROJECTION NEEDS NO MOTION VECTORS, and that is a property of our content
-// rather than a shortcut: the converter bakes every transform into world space
-// (ngg_format.h; movable meshes are design 9b item 5), so the world is rigid
-// and the only thing that moves is the camera. Camera reprojection from depth
-// is then EXACT, not an approximation. The day per-object transforms land
-// (format v2) this stops being true and a velocity buffer has to appear with
-// them - the assumption is written here so it cannot be forgotten there.
+// REPROJECTION: the static world reprojects from depth and the camera, which is
+// exact for it. What moves (the car, stage objects, placements) writes its own
+// motion in the prepass, and moving glass into a separate target; TAA and the
+// upscalers take both (design §3.7).
 //
 // The matrices follow ngg-core's camera contract (see scene.h): row-major, row
 // vector. PostFx does not build them - it takes `Scene::LastViewProj`, which is
@@ -141,7 +138,7 @@ public:
     void SetTaa(bool on)        { m_taa = on; }
     bool Taa() const            { return m_taa; }
 
-    // How the history is fetched at its reprojected position (design 5.0h).
+    // How the history is fetched at its reprojected position (design §3.7).
     // Catmull-Rom by default; bilinear is kept as the A/B reference, because
     // the softness it causes only exists under motion and is easy to doubt.
     void SetHistoryCubic(bool on) { m_historyCubic = on; }
@@ -162,7 +159,7 @@ public:
     // change the look of the scene the look was tuned on.
     void SetExposure(float e)   { m_exposure = e; }
 
-    // Auto exposure (design 9b item 17): metered from the image being
+    // Auto exposure (design §3.6): metered from the image being
     // tonemapped, adapted over time, entirely on the GPU. On by default.
     void SetAutoExposure(bool on) { if (on != m_autoExposure) m_snapExposure = true; m_autoExposure = on; }
     bool AutoExposure() const     { return m_autoExposure; }

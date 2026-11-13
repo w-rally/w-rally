@@ -79,7 +79,7 @@ LbsGeometry ReadLbsGeometry(const std::vector<uint8_t>& file);
 // open). It reads only the block headers, so the catalog can ask it of every stage.
 //
 // An encrypted stage is never imported, not even its readable parts: decrypting is the licensed install's job, and an
-// importer that turned a protected stage into a plain .ngg would leak it (NGG design 3.7). In the stock RBR folder: 31
+// importer that turned a protected stage into a plain .ngg would leak it (NGG design §2.9). In the stock RBR folder: 31
 // stage files, maps 10 (overcast), 95, 96, 105 and 488-499.
 uint32_t LbsEncryptedVersion(const std::string& path);
 

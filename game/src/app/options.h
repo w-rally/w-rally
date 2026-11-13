@@ -76,7 +76,7 @@ struct Options {
     std::string audioId = "waudio", engine = "Focus03-08", bangs, idleBangs, mix;
     int camera = -1;                     // -1: the replay's TV cameras in a replay, else the chase camera
     float cameraAngle = 0.0f;            // the beside camera's place round the car, radians
-    // The car's lamps (NGG design 5.4 N3b): the ramp (assets::CarLamps' layouts: "ramp" - the car's own -,
+    // The car's lamps (NGG design §5.5): the ramp (assets::CarLamps' layouts: "ramp" - the car's own -,
     // "2 pods", "4 pods", "6 pods", "LED bars", "no ramp"; empty the car's default), and the setup's aim of it - each pod turned further out by `lampSpread` degrees,
     // up by `lampPitch`.
     std::string lampLayout;
@@ -89,7 +89,7 @@ struct Options {
     bool skySet = false;
     float skyClouds = 0, skyFog = 0, skyRain = 0;
     // --time HH:MM [--date YYYY-MM-DD] [--utc-offset h] [--latitude deg] [--longitude deg] [--north deg]: the time and
-    // place, the sun from them over the weather's (NGG design 5.4). Without --time, the weather's own sun.
+    // place, the sun from them over the weather's (NGG design §5.4). Without --time, the weather's own sun.
     bool skyTimeSet = false;
     int skyYear = 2026, skyMonth = 6, skyDay = 21;
     double skyHour = 12.0, skyUtcOffset = 1.0, skyLatitude = 50.0, skyLongitude = 14.4, skyNorth = 0.0;

@@ -1,24 +1,11 @@
-// ---------------------------------------------------------------------------
-// The atmosphere model, as HLSL source shared by the sky pass and the scene
-// pass.
+// The atmosphere model (core/atmosphere_ms.h, sky.h, aerial.h, env.h), shared by the sky, the environment probe, the
+// aerial volume, the multiple-scattering LUT and the scene pass.
 //
-// ONE implementation on purpose. The sky behind the world and the aerial
-// perspective on the world are the same scattering integral over different
-// segments of the same ray; if they were written twice they would drift, and
-// the seam between them - the horizon - is exactly where a disagreement shows.
-// This project has already paid for a duplicated model once (Wallaby's
-// fixed-function ground blend vs RBR's actual shader, design 8.1).
-//
-// Included as a string and prepended to both shaders rather than compiled
-// separately, because D3DCompile has no include handler here and the cost of
-// wiring one up exceeds the cost of a concatenation.
-// ---------------------------------------------------------------------------
-#pragma once
+// ONE implementation on purpose. The sky behind the world and the aerial perspective on the world are the same
+// scattering integral over different segments of the same ray; if they were written twice they would drift, and the
+// seam between them - the horizon - is exactly where a disagreement shows. This project has already paid for a
+// duplicated model once (Wallaby's fixed-function ground blend vs RBR's actual shader, design §8).
 
-namespace ngg {
-namespace core {
-
-const char* const kAtmosphereHlsl = R"(
 
 static const float kPI = 3.14159265;
 
@@ -49,7 +36,7 @@ static const float3 kBetaR = float3(5.8e-6, 13.5e-6, 33.1e-6);
 static const float  kBetaM = 21e-6;
 static const float  kMieG = 0.76;
 
-// Multiple scattering, tabulated (atmosphere_ms.h, design 5.0j): Psi_ms by
+// Multiple scattering, tabulated (atmosphere_ms.h, design §3.2): Psi_ms by
 // (mu_s, altitude). Register SPACE 1 so it can never collide with a consumer's
 // own t0/s0 - every root signature that compiles AtmScatter binds it there.
 // An all-zero table is exactly the single-scattering model.
@@ -80,7 +67,7 @@ bool AtmRaySphere(float3 o, float3 d, float r, out float t0, out float t1)
     return true;
 }
 
-// ---- WEATHER (design 5.0q) -------------------------------------------------
+// ---- WEATHER (design §5.1) -------------------------------------------------
 // Set once at the top of each shader from its constant buffer, so no
 // atmosphere function signature had to change. Defaults are the clear,
 // fog-free day the model was before these existed.
@@ -89,13 +76,13 @@ static float gAtmFogBeta = 0.0;     // ground-level fog extinction, 1/m; 0 = non
 static float gAtmFogH    = 150.0;   // fog layer scale height, m
 static float gAtmGround  = 0.1;     // ground albedo, for light bounced into fog
 
-// The night's own sky (design 5.4, N1b): airglow and starlight, a radiance that is there whatever the sun and the
+// The night's own sky (design §5.4): airglow and starlight, a radiance that is there whatever the sun and the
 // moon do - what lights a moonless night. 0 by day (it is ~1e-9 of it). Brighter towards the horizon (more
 // glowing layer along the line of sight: the van Rhijn effect), dimmed by cloud.
 static float gAtmGlow = 0.0;
 void AtmSetNight(float glow) { gAtmGlow = glow; }
 
-// A second body lighting the sky (design 5.4): the moon's sky at dusk, the sun's twilight at night - added to the
+// A second body lighting the sky (design §5.4): the moon's sky at dusk, the sun's twilight at night - added to the
 // light's own in AtmSkyRadiance, so the sky passes from one body to the other without a jump. 0: none.
 static float3 gAtmLight2Dir = float3(0.0, -1.0, 0.0);   // towards it
 static float  gAtmLight2I   = 0.0;
@@ -367,7 +354,7 @@ float3 AtmSkyRadiance(float3 ray, float3 sunDir, float turbidity,
 }
 
 // Octahedral direction <-> unit square, Y as the pole axis because the runtime
-// is Y-up (design 2.2). Used by the environment map: a 2D texture takes an
+// is Y-up (render axes). Used by the environment map: a 2D texture takes an
 // ordinary mip chain, where a cube map needs per-face filtering and a seam
 // policy to get the same thing.
 float2 AtmOctEncode(float3 n)
@@ -388,7 +375,3 @@ float3 AtmOctDecode(float2 f)
     return normalize(n);
 }
 
-)";
-
-} // namespace core
-} // namespace ngg

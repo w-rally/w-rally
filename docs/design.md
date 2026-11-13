@@ -57,8 +57,8 @@ arena) is not carried over either. It stays in plugin-rbr as the oracle that the
  │
  │  ModuleHost: scans modules/, GetWInterfaceVer → InitWInterface → function tables
  │
- ├── modules/renderer/WRenderer.dll         RendererApi   (ngg-core inside)
- │                     dxcompiler.dll, dxil.dll  (WRenderer's own dependencies, next to it)
+ ├── modules/renderer/WRenderer.dll         RendererApi   (ngg-core inside, its shaders precompiled inside it)
+ │                     FSR / DLSS runtimes  (WRenderer's own dependencies, next to it)
  ├── modules/physics/WPhysicsRBR.dll        PhysicsApi    id "rbr"       (phys/native)
  ├── modules/physics/WPhysics.dll           PhysicsApi    id "wphysics"  (fork of rbr, extended, JSON config)
  ├── modules/physics/<future>.dll           PhysicsApi
@@ -76,7 +76,7 @@ All modules run in one 64-bit process that the game owns. No IPC is needed.
 | **Physics** | the world (stage collision, solids, cars), stepping, the car's state and records, its own config and car files | rendering, timing the stage, reading files except through the VFS |
 | **Audio** | the output device and mixer thread, the car's sound from the records, one-shots, buses, listener | deciding *when* game sounds play (the game does), reading files except through the VFS |
 
-Two rules carry over from NGG design §8.0 ([`ngg-design.md`](ngg-design.md), the renderer's own design record). The renderer knows nothing about RBR. A module includes only
+Two rules carry over from NGG design §1.3 ([`ngg-design.md`](ngg-design.md), the renderer's own design record). The renderer knows nothing about RBR. A module includes only
 `wrally/iface/*`, never the game's headers or another module's.
 
 ---
@@ -159,7 +159,7 @@ public:
 `Scan` does the following for each `*.dll`:
 
 1. `LoadLibraryExW(path, nullptr, LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_DEFAULT_DIRS)`. A module's
-   dependencies (WRenderer's `dxcompiler.dll`) load from its own folder.
+   dependencies (WRenderer's FSR and DLSS runtimes) load from its own folder.
 2. `GetProcAddress("GetWInterfaceVer")`. If it is missing, this is not a module: unload.
 3. `ver = GetWInterfaceVer(kind)`. If it is 0, unload. If it differs from the game's counter, record the DLL as
    incompatible and unload.
@@ -214,7 +214,7 @@ environment → prepass → sun visibility (RT or cascades) → AO → sky → s
   `renderScale` 1) on RTX GPUs. The SDK is fetched at configure, not in git (NVIDIA's headers are proprietary), and
   Release builds only; elsewhere, or without NVIDIA's runtime beside the module, the TAA stays (logged).
 - `kMaterialBlend` (glass) is drawn blended since 2026-10-30: after the opaque, far to near, premultiplied, no
-  shadow and not ray traced (NGG design 5.0u). The car's glass uses it.
+  shadow and not ray traced (NGG design §5.3). The car's glass uses it.
 - UI textures carry a high bit in their handle (`UiPass::kTextureBit`). A UI command naming any other texture draws
   white.
 - Released models and destroyed instances leave their meshes in ngg-core's dynamic pool until the scene goes.
@@ -227,7 +227,7 @@ environment → prepass → sun visibility (RT or cascades) → AO → sky → s
   `kRendererEditVer`, so the two tables move separately. CTest `editor-api-41` (`tests/editor_api.cpp`) is
   ngg-preview's self-test ported to it, and it fails against a stub: planted breaks of the move, the selection and the
   layer mapping each turn it red.
-- **Instanced models** (2026-11-09, NGG design 5.0w; vegetation plan workstream 2): a `.ngg` can carry a model
+- **Instanced models** (2026-11-09, NGG design §2.6; vegetation plan workstream 2): a `.ngg` can carry a model
   library (`NGGD`: LOD meshes, v3 materials, switch distances, a far billboard) and a placement table (`NGGE`: model,
   position, yaw, scale, tint, the NGGP plant it replaces), which the renderer draws with GPU instancing - culled per
   view on the CPU, LODs crossfaded by dither, foliage with hashed alpha, a BLAS per model mesh and a TLAS instance per
@@ -248,10 +248,10 @@ environment → prepass → sun visibility (RT or cascades) → AO → sky → s
   rect). Textured 2D triangles after the tonemap, scissored, alpha-blended.
 - **Display modes**: borderless/fullscreen, vsync, render scale. VR (OpenXR) later behind `kRendererCapVr`.
 - **Wet surfaces** (interface 4, 2026-10-30): `FrameDesc::wetness`, the road's state from the game (dry 0, damp 0.5,
-  wet 1): darker porous surfaces, glossier everything, puddles on the ground from damp on (NGG design 5.0v).
+  wet 1): darker porous surfaces, glossier everything, puddles on the ground from damp on (NGG design §5.2).
 - Later, each as an interface bump: particles (dust, gravel, spray), skid marks, decals, damage deformation (vertex
   offsets on model meshes), rain on glass.
-- **Night** (decided 2026-10-30, NGG design 5.4): any stage at any hour from date + time + place (sun, moon,
+- **Night** (decided 2026-10-30, NGG design §5.4): any stage at any hour from date + time + place (sun, moon,
   stars astronomically); every light ray traced through many-light sampling; car lights the car's own (`car.yaml`,
   else derived from RBR's car `.ini` light points, else a default), with brake, reverse, indicators and hazard;
   stage lights in the `.ngg`. Phases N1 sky and time, N2 light system, N3 car lights, N4 stage lights.
@@ -557,7 +557,7 @@ render : the entry has an .ngg?  ──yes──▶ loadScene(file bytes)
                  │ no (RBR stage without a converted .ngg)
                  ▼
          LegacyStageImporter: .lbs + .dds + TrackSettings.ini  ──▶ .ngg in memory ──▶ loadScene
-         (cached to <cache>/stages/track-41_M.ngg, keyed by the source files' hashes)
+         (not cached: ~0.5 s per load; a hand-finished server .ngg comes before any cache)
 
 gameplay: .trk .col .mat .fnc .lbs (physics) + .dls (cameras, pacenotes, splits) (game)
 ```
@@ -565,7 +565,7 @@ gameplay: .trk .col .mat .fnc .lbs (physics) + .dls (cameras, pacenotes, splits)
 - **RBR stages** use RBR's own gameplay files. Their graphics come from a Wallaby-converted `.ngg` if there is one,
   otherwise from the on-the-fly import.
 - **W-Rally stages** (`stage.yaml`) ship an `.ngg` and gameplay files *in RBR's formats*, written by our tools.
-  That is what NGG design §7 already specifies for native tracks (".ngg + LBS/COL/DLS gameplay stub"). Reusing the
+  That is what NGG design §9 already specifies for native tracks (".ngg + LBS/COL/DLS gameplay stub"). Reusing the
   formats does not need any RBR content, and it lets both physics modules run W-Rally stages from day one. Later the
   gameplay data moves into `.ngg` chunks (decision 10), so a W-Rally stage becomes one file; the manifest is what
   makes that change local.
@@ -575,10 +575,10 @@ is what `Material`'s defaults are designed for (`DefaultMaterial()`, every facto
 
 **W-Rally imports `.lbs` itself** (decision 2): a C++ reader of the `.lbs` geometry and a simple automatic
 importer, written fresh (no Wallaby code). It reads the geometry, the textures and the object keys. It drops RBR's
-baked shading (the sun, ray tracing and AO light the stage), rebuilds the normals by an angle weld, cuts out
-alpha-textured foliage, and takes weather presets from `TrackSettings.ini`. Its result is cached. Wallaby remains
-the tool for a hand-finished `.ngg`, which wins whenever there is one. Until the importer lands, RBR stages without
-an `.ngg` can be driven but not drawn.
+baked shading (the sun, ray tracing and AO light the stage), cuts out alpha-textured foliage, and takes weather
+presets from `TrackSettings.ini`. It keeps the file's normals; the renderer's load-time fallback welds them
+([NGG design §2.7](ngg-design.md)). It does no de-atlas and writes no variants. Wallaby remains the tool for a
+hand-finished `.ngg`, which wins whenever there is one.
 
 Object keys tie the two halves together. The physics moves a solid with `.trk` instance id *k*, and the renderer
 moves every scene object whose NGGK key is *k*. The importer writes those keys for legacy stages too.
@@ -633,7 +633,7 @@ Menu ──▶ pick stage/car/physics/weather (catalog)
   offers "watch as ghost" (poses only).
 - RBR's `.rpl` plays from stored states, without physics, as RBR itself does.
 - Online/competitive: the game reports the physics `buildHash` and the hashes of stage, car and config files. A
-  server accepts times only from approved hashes. That is the fairness profile of NGG design §1.9, moved into a game
+  server accepts times only from approved hashes. That is the fairness profile of NGG design §2.9, moved into a game
   we control. WPhysics' JSON config is part of what is hashed, because it changes the car.
 
 ---
@@ -674,7 +674,7 @@ Output layout, mirroring the runtime:
 
 ```
 W-Rally.exe
-modules/renderer/WRenderer.dll, dxcompiler.dll, dxil.dll
+modules/renderer/WRenderer.dll (+ dxcompiler.dll, dxil.dll in the build tree only: NGG_SHADER_DIR's run-time compile)
 modules/physics/WPhysicsRBR.dll, WPhysics.dll
 modules/audio/WAudio.dll
 content/   config/   cache/   W-Rally.ini
@@ -793,7 +793,7 @@ Each phase ends with a game you can drive. phys-drive works on day one, and ever
       - **Weather:** the importer writes every `TrackSettings.ini` section of the stage's map as an `NGGW` preset
         (`game/src/assets/legacy_weather.*`, reading through `game/src/formats/track_settings.*`), named as the section,
         so `--weather` and the menu select it. The stage's own time of day, crisp and clear, is the default. The
-        translation is plugin-rbr's (NGG design 5.0q): SunDir and the ground's reflectance kept, the condition in the
+        translation is plugin-rbr's (NGG design §5.1): SunDir and the ground's reflectance kept, the condition in the
         name turned into haze, cloud cover, fog visibility, rain and snow, decimal commas read, and daytime suns at or
         below the horizon raised. Checked against plugin-rbr's own translation (`rbrtm --export-weather`): stages 108,
         41 and 4, 61 presets, every field the same to float precision. On stage 41, `--weather 41O_M_lightfog_heavycloud`
@@ -824,7 +824,7 @@ Each phase ends with a game you can drive. phys-drive works on day one, and ever
         Now `formats::LbsEncryptedVersion` finds them from the block headers alone: the reader refuses such a file
         whole ("encrypted - a protected stage ..., not imported", CTest `legacy-import-protected`), and the catalog
         leaves them out (`Catalog::protectedStages`). They are never imported in part either: decrypting is a
-        licensed install's job, and a plain `.ngg` of one would leak it (NGG design 3.7). The menu: 163 stages, 4 from
+        licensed install's job, and a plain `.ngg` of one would leak it (NGG design §2.9). The menu: 163 stages, 4 from
         `.ngg` files, 159 imported. (The other 2 sweep failures were `Clouds.lbs` and `skyboxes.lbs`, not stages.) 32
         stages have no `TrackSettings.ini` section at all and draw the default sky with no weathers to pick.
 9. **Game.** Menus, car/stage selection, settings, wheels + FFB, replays, results.
@@ -868,7 +868,7 @@ Each phase ends with a game you can drive. phys-drive works on day one, and ever
     still accept the RBR formats, because RBR stages keep using them.
 11. **Wallaby draws through WRenderer** (2026-11-07). Its viewport used plugin-rbr's `ngg-api.dll`, an ngg-core copy
     that stopped getting fixes when the renderer moved here - so the editor's preview drifted from what W-Rally draws,
-    the two-renderers problem NGG design 8.2 exists to prevent. It now loads `WRenderer.dll` like the game and takes
+    the two-renderers problem NGG design §8 exists to prevent. It now loads `WRenderer.dll` like the game and takes
     the editor's table (`renderer_edit.h`, §3.1a) from it. That is renderer code, not Wallaby code, so decision 2
     stands. The cost is Wallaby following `kRendererInterfaceVer`, which it meets by generating its bindings from
     the header.
@@ -876,7 +876,7 @@ Each phase ends with a game you can drive. phys-drive works on day one, and ever
 12. **A track is a place; its stages are the routes driven there** (2026-11-08). RBR numbered each route a map, its
     reverse another (Joux Verte 42, Joux Verte II 45) and each time of day a file. W-Rally: one track
     (`fr_joux_verte`), its stages (`joux_verte`, `joux_verte_ii`; `rbr-tracks.yaml`, content-layers §3), and the time
-    of day a weather of a stage. One `.ngg` holds a track's stages (NGG design 3.4b): Wallaby collapses the times of
+    of day a weather of a stage. One `.ngg` holds a track's stages (NGG design §2.4): Wallaby collapses the times of
     day that drive the same and lists the RBR stage names each stage answers to (NGGA); the catalog offers a stage once
     for all of them, and the game asks the renderer for its stage by name (`loadSceneVariant`). The catalog offers a
     route once; the weather chosen (its time of day first) says which of RBR's time-of-day files the run drives and
@@ -886,4 +886,4 @@ Each phase ends with a game you can drive. phys-drive works on day one, and ever
 ## 11. Open questions
 
 - **First own content for a standalone release.** Deferred by decision 7. Revisit after phase 9: Wallaby-authored,
-  generated (NGG design §7), or licensed community content.
+  generated (NGG design §9), or licensed community content.

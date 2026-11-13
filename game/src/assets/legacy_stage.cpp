@@ -211,7 +211,7 @@ public:
     // A vegetation object's connected pieces as PLANTS (the plant table, NGGP): RBR's trees and tufts are crossed
     // flat cards, and without plants the renderer lights each card by its own plane - cardboard - and a card's rays
     // hit the cards crossing it. A piece is the triangles sharing a vertex position (a tree's crossed cards share
-    // their crossing edge, and separate plants do not touch - design 7.2b). Topology only: no tags (what a piece IS
+    // their crossing edge, and separate plants do not touch - design §9.4). Topology only: no tags (what a piece IS
     // stays Wallaby's), nothing merged, pieces wider than 50 m (the renderer's kPlantMaxWidth) left out. The object's
     // triangles are reordered by piece, so each piece is one part and the draw is unchanged.
     void Plants(uint32_t object)

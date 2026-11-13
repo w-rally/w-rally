@@ -83,7 +83,7 @@ ngg::WeatherRecord Translate(const TrackSettingsSection& s, bool& mirrored, bool
     }
     if (const float albedo = Number(s, "terrain_reflectance", 0.0f); albedo > 0.001f) w.groundAlbedo = albedo;
 
-    // The condition in the name, in our units: the translation's choices, made once (NGG design 5.0q).
+    // The condition in the name, in our units: the translation's choices, made once (NGG design §5.1).
     const std::string& n = s.name;
     if (HasWord(n, "hazy")) w.turbidity = 3.0f;
     if (HasWord(n, "lightrain")) w.rain = 0.4f, w.turbidity = 3.0f, w.fogVisibility = 6000.0f, w.fogHeight = 600.0f;

@@ -1,10 +1,8 @@
 // ---------------------------------------------------------------------------
 // Cascaded shadow maps.
 //
-// This is what retires the bake. Lighting mode 2 (RBR's baked vertex colour used
-// as an ambient-occlusion term) exists only because nothing occludes the sun;
-// with real shadows, mode 1 becomes the honest mode and mode 2 should be
-// deleted rather than quietly becoming the shipping default (design 5.0).
+// The sun's shadow where there is no inline ray tracing: the raster path's
+// visibility, beside XeGTAO and the local lights' shadow maps (design §4.6).
 //
 // Four cascades over a rally stage's view distance. Two choices are worth
 // stating because both are about STABILITY, which matters more here than in

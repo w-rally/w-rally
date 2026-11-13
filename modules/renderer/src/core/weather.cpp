@@ -166,7 +166,7 @@ bool WeatherFromJson(const char* text, WeatherPreset& out)
     Num(root.Get("exposure"), "value", out.sky.exposure);
 
     // "time": { "date": "2026-06-21", "local": 22.5, "utcOffset": 2 }, "place": { "latitude": 50, "longitude":
-    // 14.4, "north": 0 } - both or neither (NGG design 5.4).
+    // 14.4, "north": 0 } - both or neither (NGG design §5.4).
     const Json* tm = root.Get("time");
     const Json* pl = root.Get("place");
     if (tm && pl)
@@ -281,7 +281,7 @@ bool ParseWeatherChunk(const void* payload, size_t bytes, std::vector<WeatherPre
         (uint64_t)sizeof(h) + (uint64_t)h.count * h.recordSize > bytes)
     {
         Log("weather: NGGW not understood (version %u, %u record(s) of %u bytes in %zu) - "
-            "re-run rbrtm --import-weather or reconvert", h.version, h.count, h.recordSize, bytes);
+            "re-import the stage or reconvert", h.version, h.count, h.recordSize, bytes);
         return false;
     }
     for (uint32_t i = 0; i < h.count; ++i)

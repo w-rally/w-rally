@@ -51,7 +51,7 @@ struct Settings {
     uint32_t season = 2;                // 0 spring, 1 summer, 2 autumn, 3 winter
     float clouds = 0.3f, fog = 0.0f, rain = 0.0f;   // 0..1 each: the sky's cover, how thick the fog, how hard it rains
 
-    // The lamps each car runs (NGG design 5.4 N3b; in the setup editor once there is one): per car folder its ramp (a
+    // The lamps each car runs (NGG design §5.5; in the setup editor once there is one): per car folder its ramp (a
     // CarLamps layout's name, "" its first) and the ramp's aim - each pod further out, degrees; up, degrees. W-Rally.ini:
     // lamps_<folder> = <ramp>|<spread>|<pitch>.
     struct Lamps {

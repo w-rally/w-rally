@@ -31,7 +31,7 @@ An id is a lowercase slug of `a-z`, `0-9` and `_`, never a bare number:
   `fr_joux_verte`. A track is a PLACE and holds its **stages** (each a slug unique in the track): the routes driven
   there — Joux Verte and its reverse, Joux Verte II, are two stages of `fr_joux_verte` (decided 2026-11-08). A stage's
   times of day and weathers are conditions of it, not other stages: RBR's `_M _N _E _O` that drive the same are one
-  stage (Wallaby collapses them, the `.ngg` lists them; NGG design 3.4b).
+  stage (Wallaby collapses them, the `.ngg` lists them; NGG design §2.4).
 - a **car**: its folder name, as RBR's are (`s_i2003`, `i20_r5`).
 - a **physics variant**: a slug unique within its car (`rbr`, `wphysics_gravel`).
 - a **physics base**: what every car of a format shares, tyres and global defs (`rbr`).

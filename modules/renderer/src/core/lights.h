@@ -1,6 +1,6 @@
 #pragma once
 // ---------------------------------------------------------------------------
-// Local lights (NGG design 5.4, phase N2): point and spot lights, many of them, every one of them shadowed.
+// Local lights (NGG design §5.5): point and spot lights, many of them, every one of them shadowed.
 //
 // HOW THEY ARE SHADED - the ratio estimator (Heitz, Hill and McGuire 2018, "Combining Analytic Direct Illumination
 // and Stochastic Shadows"). The scene pass sums the lights' UNSHADOWED light exactly, every light that reaches the
@@ -28,7 +28,7 @@
 namespace ngg {
 namespace core {
 
-// A BEAM's lobe (design 5.4 N3a): an intensity peak in the lamp's own frame - its axis, its up - that falls to half at
+// A BEAM's lobe (design §5.5): an intensity peak in the lamp's own frame - its axis, its up - that falls to half at
 // the half-width across and the half-height up and down, centred `yawDeg` right and `pitchDeg` up of the axis.
 // `sharpness` 2 is a gaussian; higher, a flatter top with a harder edge (a headlamp's cut-off). A lamp's beam is the
 // sum of a few: a pod's pencil plus its driving spread, an LED bar's one wide flood.
@@ -58,7 +58,7 @@ struct LightDesc
     LightLobe lobes[kMaxLobes];
 };
 
-// One light as the GPU reads it (kLightsHlsl's Light), 208 bytes.
+// One light as the GPU reads it (shaders/lights.hlsli's Light), 208 bytes.
 struct GpuLight
 {
     float    pos[3];    float invRange2;   // 1 / range^2
@@ -69,7 +69,7 @@ struct GpuLight
     float    lobeA[LightDesc::kMaxLobes][4];   // candela, 1/tan(half-width), 1/tan(half-height), sharpness / 2
     float    lobeB[LightDesc::kMaxLobes][4];   // tan(yaw), tan(pitch)
 };
-static_assert(sizeof(GpuLight) == 208, "GpuLight - keep kLightsHlsl in step");
+static_assert(sizeof(GpuLight) == 208, "GpuLight - keep shaders/lights.hlsli in step");
 
 class Lights
 {
@@ -139,11 +139,6 @@ private:
     float     m_shadowVP[kShadowSlots][16] = {};
     float     m_shadowInfo[kShadowSlots][4] = {};
 };
-
-// HLSL shared by the scene pass and the ray tracer: the Light struct, the three buffers (gLights, gClusters,
-// gLightIndex) at the registers the includer #defines as NGG_LIGHTS_T0/T1/T2, the cluster lookup and a light's
-// irradiance, read by index.
-extern const char* kLightsHlsl;
 
 } // namespace core
 } // namespace ngg

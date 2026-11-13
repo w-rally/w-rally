@@ -7,12 +7,12 @@
 // highlight, and everything else in the frame reflected nothing. That reads as
 // flat no matter how good the material data is - which matters right now,
 // because PBR maps are about to arrive and would otherwise be judged on half
-// their signal (design 9b items 14 and 18).
+// their signal (design §3.4).
 //
 // TWO JOBS, ONE TEXTURE, and that is the point rather than a saving:
 //
 //   - it is the prefiltered environment the split-sum specular needs, and
-//   - it is design 9b item 14's LUT, because sky radiance depends only on
+//   - it is design §3.4's LUT, because sky radiance depends only on
 //     direction and sun position, both uniform for the frame. Marching the
 //     atmosphere per pixel to answer a question with 4,096 distinct answers was
 //     always the wrong shape.
@@ -50,7 +50,7 @@ public:
     // policy, no invalidation, and nothing to get wrong.
     enum { kSize = 64, kMips = 7 };     // 64,32,16,8,4,2,1
 
-    // The IRRADIANCE map (design 5.0i): for each normal, the cosine-weighted
+    // The IRRADIANCE map (design §3.4): for each normal, the cosine-weighted
     // integral of the sky over the upper hemisphere - what a Lambertian surface
     // with that normal receives from the sky. Octahedral like the radiance map.
     //
@@ -74,7 +74,7 @@ public:
 
     // Rebuilds the whole chain. Call once per frame BEFORE the scene pass, with
     // the same parameters the sky is drawn with - two sets would drift, which
-    // is the failure design 5.0 already documents.
+    // is the failure design §3.1 already documents.
     //
     // `ms` is the multiple-scattering table AtmScatter reads (the Scene's).
     void Record(ID3D12GraphicsCommandList* list, const SkyParams& params,

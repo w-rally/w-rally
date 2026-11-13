@@ -1,9 +1,12 @@
 #include "rt.h"
 #include "log.h"
+#include "pipeline_cache.h"
+#include "shaders.h"
 
 #include <string>
 #include <cstdlib>
 #include <algorithm>
+#include <chrono>
 #include <math.h>
 
 using Microsoft::WRL::ComPtr;
@@ -13,927 +16,17 @@ namespace core {
 
 namespace {
 
-const char* kRtCommonSrc = R"(
-RaytracingAccelerationStructure gScene        : register(t0);
-Texture2D<float>                gDepth        : register(t1);
-Texture2D<float4>               gNormal       : register(t6);   // prepass, SNORM8
-// For the any-hit test only. Raw views over the SAME buffers the rasteriser
-// draws from, so a leaf is cut out by exactly the pixels that were drawn.
-ByteAddressBuffer               gVerts        : register(t2);
-ByteAddressBuffer               gAlphaIndices : register(t3);
-StructuredBuffer<uint>          gTriMaterial  : register(t4);
-// The editor's dynamic pool, for instances of the meshes it added.
-ByteAddressBuffer               gDynVerts     : register(t7);
-// Per TLAS instance (indexed by InstanceID): where its alpha triangles start
-// in gAlphaIndices/gTriMaterial, what to add to its indices, which vertex
-// buffer they index, and its material when the mesh's triangles do not say.
-// moved: the instance's transform changed since last frame (see Occluded);
-// was0..was3 then its LAST frame's object-to-world rows (row vectors), so a
-// ray's hit point can be put where it was.
-struct Inst { uint triBase; uint vertexBase; uint vb; uint material; uint moved;
-              float3 was0; float3 was1; float3 was2; float3 was3; };
-StructuredBuffer<Inst>          gInst         : register(t8);
-// Foliage: the plant each alpha triangle belongs to (~0 = none), and the
-// prepass's per-pixel plant (+ 1, 0 = none) - scene.cpp FindPlants.
-StructuredBuffer<uint>          gTriPlant     : register(t9);
-Texture2D<uint>                 gPlantId      : register(t10);
-struct Mat { uint tex; float cutoff; };
-StructuredBuffer<Mat>           gMaterials    : register(t5);
-Texture2D                       gTextures[]   : register(t0, space1);
-SamplerState                    gSamp         : register(s0);
-RWTexture2D<float>              gOut          : register(u0);
-RWStructuredBuffer<uint>        gCounters     : register(u1);
 
-cbuffer K : register(b0)
-{
-    row_major float4x4 gInvViewProj;
-    float3 gSunTowards;
-    float  gTMax;
-    uint2  gSize;
-    float  gBias;
-    uint   gStride;         // bytes per vertex; uv0 at +24, colour at +40
-    float3 gCamPos;
-    float  gSunAngle;       // the sun's angular RADIUS in radians; 0 = a point
-    uint   gFrame;          // decorrelates the samples frame to frame
-    float  gAoRadius;       // metres; occluders beyond this do not count
-    uint   gAoRays;         // rays per pixel per frame
-    uint   gPad2;
-    float3 gCamFwd;         // the local lights' clusters: their depth axis (lights.h)
-    float  gLightsOn;
-    float4 gClusterParams;  // tile w, h (px), slices' near plane, their log scale
-};
 
-// A cheap, good integer hash (PCG-style). White noise per pixel per frame;
-// the denoiser does the averaging.
-uint Hash(uint x)
-{
-    x ^= x >> 16; x *= 0x7feb352du; x ^= x >> 15; x *= 0x846ca68bu; x ^= x >> 16;
-    return x;
-}
-float2 Rand2(uint2 pixel, uint frame, uint salt)
-{
-    uint h = Hash(pixel.x * 1973u + pixel.y * 9277u + frame * 26699u + salt * 7919u);
-    return float2((h & 0xFFFFu) / 65535.0, (h >> 16) / 65535.0);
-}
 
-// STRATIFIED over the screen, as the AO's samples are (AoSample): every 4x4
-// tile of pixels takes each of 16 strata once, with a white jitter inside its
-// stratum, the whole pattern shifted every frame. White noise let a 5x5
-// window draw its samples unevenly - one lamp of three for twelve of its
-// pixels and another for five, half the sun's disc for most of them - and
-// that luck was the blotches the denoiser blurred but kept: under the
-// Garage's car, its floor. Stratified, a window's mean has little luck left.
-// StratU: one number (which lamp, Pick), its stratum the tile's (x + 2y,
-// 2x + y) cell in 16ths - any 2x2 block of it spans the four quarters.
-float StratU(uint2 px, uint frame)
-{
-    const uint k = ((px.x + 2u * px.y) & 3u) + 4u * ((2u * px.x + px.y) & 3u);
-    return frac((float(k) + Rand2(px, frame, 101u).x) / 16.0 + float(frame) * 0.6180339887);
-}
-// StratDisc: a point on a light's disc (the square, mapped by the caller); a
-// second bijection of the tile, (x + 3y, 3x + 2y), so which lamp a pixel
-// takes says nothing of where on it the ray goes.
-float2 StratDisc(uint2 px, uint frame)
-{
-    const uint2 cell = uint2((px.x + 3u * px.y) & 3u, (3u * px.x + 2u * px.y) & 3u);
-    const float2 j = Rand2(px, frame, 7u);
-    return frac((float2(cell) + j) * 0.25 + frac(float(frame) * float2(0.7548776662, 0.5698402910)));
-}
 
-// Surface position from depth and the frame's JITTERED matrix, and the
-// prepass normal. Shared by every ray type, because a ray origin that differs
-// between them by half a pixel would be a different bias problem per feature.
-// `plant`: the plant the pixel is a card of, + 1; 0 for anything else. Its
-// normal is then the card's own plane (PSPrepass), w = 0.5.
-bool SurfaceAt(uint2 px, out float3 p, out float3 N, out uint plant)
-{
-    plant = 0u;
-    float depth = gDepth.Load(int3(px, 0));
-    if (depth <= 0.0) return false;                      // reverse-Z far plane: sky
-    float2 uv  = (float2(px) + 0.5) / float2(gSize);
-    float2 ndc = float2(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0);
-    float4 wp  = mul(float4(ndc, depth, 1.0), gInvViewProj);
-    p = wp.xyz / wp.w;
-    const float4 n4 = gNormal.Load(int3(px, 0));
-    N = n4.xyz;
-    plant = (n4.w > 0.25 && n4.w < 0.75) ? gPlantId.Load(int3(px, 0)) : 0u;
-    if (dot(N, N) < 0.25) N = float3(0, 1, 0);
-    N = normalize(N);
-    return true;
-}
 
-// A basis around a direction, for scattering rays about it.
-void Basis(float3 d, out float3 T, out float3 B)
-{
-    float3 up = abs(d.y) < 0.99 ? float3(0, 1, 0) : float3(1, 0, 0);
-    T = normalize(cross(up, d));
-    B = cross(d, T);
-}
 
-// THE ANY-HIT TEST, shared. Opaque geometry (BLAS geometry 0) commits on its
-// own; alpha-tested geometry (geometry 1) surfaces as a candidate and is
-// accepted or refused by the rasteriser's own test - texture alpha times
-// vertex alpha against the material's cutoff - so a leaf blocks exactly the
-// pixels it was drawn with. Returns true if anything blocks the ray, and in
-// `mover` - if what blocked it is an object that moved this frame - how far
-// the point the ray hit moved since last frame and how far along the ray it
-// is, metres; x < 0 when it did not move (Allow).
-//
-// FROM A PLANT (`fromPlant` = its index + 1), that plant's own cards do not
-// count. A tree here is 2-3 crossed flat cards, and a card's ray towards the
-// sun crosses the other cards of the same tree, so visibility flipped card by
-// card: one lit, the one crossing it in shadow - a split no real canopy has.
-// The cascades never showed it because the foliage caster bias (400) is
-// deeper than a tree. Other plants, and everything opaque, still shadow it -
-// EXACTLY its own plant, by id: a first version skipped every plant whose box
-// held the ray's start, and grass under a tree is inside the tree's box, so it
-// lost the tree's shadow and glowed. What shading the plant's own volume gets
-// comes from the PIXEL shader (FoliageSelfShadow), the same on every card.
-// How far from a legacy card its rays ignore other cards, metres: past a grass tuft (~0.5 m) and the near cards of a
-// tree, short of the canopy over the grass.
-static const float kLegacyCardSkip = 1.5;
-bool Occluded(RayDesc ray, bool count, uint fromPlant, out float2 mover)
-{
-    mover = float2(-1.0, 0.0);
-    RayQuery<RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH |
-             RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES> q;
-    // From a legacy card (~0, scene.cpp PSPrepass): the cards within kLegacyCardSkip of the start do not count -
-    // the card's own tuft or tree, whose crossing cards split it card by card - while cards farther off (a
-    // canopy over the grass) still shadow it, as everything opaque does.
-    q.TraceRayInline(gScene, RAY_FLAG_NONE, 0xFF, ray);
-    while (q.Proceed())
-    {
-        if (q.CandidateType() != CANDIDATE_NON_OPAQUE_TRIANGLE) continue;
-        if (fromPlant == 0xFFFFFFFFu && q.CandidateTriangleRayT() < kLegacyCardSkip) continue;
 
-        // Which mesh, and where its alpha triangles live: per INSTANCE now,
-        // because the world, a moved object and an editor-added mesh are
-        // separate BLASes sharing one index buffer and one material table.
-        const Inst  inst = gInst[q.CandidateInstanceID()];
-        const uint  tri  = inst.triBase + q.CandidatePrimitiveIndex();
-        if (fromPlant != 0u && gTriPlant[tri] + 1u == fromPlant)
-        {
-            if (count) InterlockedAdd(gCounters[3], 1);
-            continue;
-        }
-        const uint3 idx  = gAlphaIndices.Load3(tri * 12) + inst.vertexBase;
-        const float2 b   = q.CandidateTriangleBarycentrics();
-        const float3 w   = float3(1.0 - b.x - b.y, b.x, b.y);
 
-        // What a plant casts (scene.cpp Plant::shadow, in its vertices' uv1.y above kPlantShadowPack; a plant's
-        // vertex has a volume normal, shorter than 0.55): grass nothing - its sun and AO shadows are its cards'
-        // outlines - and a bush half its hits, which the denoise turns into a lighter, softer shadow.
-        {
-            const uint at = idx.x * gStride;
-            const float3 pn = asfloat(inst.vb == 0 ? gVerts.Load3(at + 12) : gDynVerts.Load3(at + 12));
-            if (dot(pn, pn) < 0.3025)
-            {
-                const float packed = max(asfloat(inst.vb == 0 ? gVerts.Load(at + 36) : gDynVerts.Load(at + 36)), 0.0);
-                const float mode = floor(packed / 1000.0);
-                if (mode > 0.5 && mode < 1.5) continue;
-                if (mode > 1.5 && frac(sin(dot(ray.Origin + ray.Direction * 7.0 + float(tri) * 0.001,
-                                                float3(12.9898, 78.233, 37.719))) * 43758.5453) < 0.5)
-                    continue;
-            }
-        }
 
-        float2 uv0, uv1, uv2;
-        float  a0, a1, a2;
-        if (inst.vb == 0)
-        {
-            uv0 = asfloat(gVerts.Load2(idx.x * gStride + 24));
-            uv1 = asfloat(gVerts.Load2(idx.y * gStride + 24));
-            uv2 = asfloat(gVerts.Load2(idx.z * gStride + 24));
-            a0 = float(gVerts.Load(idx.x * gStride + 40) >> 24);
-            a1 = float(gVerts.Load(idx.y * gStride + 40) >> 24);
-            a2 = float(gVerts.Load(idx.z * gStride + 40) >> 24);
-        }
-        else
-        {
-            uv0 = asfloat(gDynVerts.Load2(idx.x * gStride + 24));
-            uv1 = asfloat(gDynVerts.Load2(idx.y * gStride + 24));
-            uv2 = asfloat(gDynVerts.Load2(idx.z * gStride + 24));
-            a0 = float(gDynVerts.Load(idx.x * gStride + 40) >> 24);
-            a1 = float(gDynVerts.Load(idx.y * gStride + 40) >> 24);
-            a2 = float(gDynVerts.Load(idx.z * gStride + 40) >> 24);
-        }
-        const float2 tuv = uv0 * w.x + uv1 * w.y + uv2 * w.z;
-        const float  va  = (a0 * w.x + a1 * w.y + a2 * w.z) / 255.0;
 
-        const Mat m = gMaterials[inst.material != 0xFFFFFFFFu ? inst.material : gTriMaterial[tri]];
-        const float ta = gTextures[NonUniformResourceIndex(m.tex)].SampleLevel(gSamp, tuv, 2.0).a;
-        if (ta * va >= m.cutoff)
-        {
-            q.CommitNonOpaqueTriangleHit();
-            if (count) InterlockedAdd(gCounters[2], 1);
-        }
-        else if (count) InterlockedAdd(gCounters[3], 1);
-    }
-    if (q.CommittedStatus() != COMMITTED_TRIANGLE_HIT) return false;
-    const Inst hit = gInst[q.CommittedInstanceID()];
-    if (hit.moved != 0)
-    {
-        const float  t   = q.CommittedRayT();
-        const float3 o   = q.CommittedObjectRayOrigin() + q.CommittedObjectRayDirection() * t;
-        const float3 was = o.x * hit.was0 + o.y * hit.was1 + o.z * hit.was2 + hit.was3;
-        mover = float2(length(ray.Origin + ray.Direction * t - was), t);
-    }
-    return true;
-}
 
-// HOW MUCH HISTORY a pixel may keep when its ray hit a moved object (`mover`,
-// from Occluded), as a history weight; -1 when it hit none. Its history holds
-// the shadow where it was: with weight b the shadow on the ground lags its
-// occluder by b / (1 - b) frames of the occluder's travel. What that costs is
-// the lag against how SOFT the shadow is there - its penumbra, the hit's
-// distance times the light's angular size (`penumbra`, per metre): a lag well
-// inside the penumbra moves the visibility by little, while one frame's own
-// coin tosses are off by far more. So the weight is whatever keeps the lag
-// within kLagShare of the penumbra. A car driving lags a contact shadow by its
-// whole width in one frame: the weight goes to nothing, and the denoiser keeps
-// gBlendMoved, as it always did - no trail. A car on the Garage's turntable
-// moves its sill some 3-7 mm a frame under a soft spotlight's shadow and keeps
-// most of it: at a quarter of history the floor around it boiled every frame
-// it turned (the lights' frame-to-frame noise 6x the standing car's). 0.3:
-// 0.15 left half as much noise again; full history (0.85) a visible lag line
-// along the sill.
-static const float kLagShare = 0.3;
-float Allow(float2 mover, float penumbra)
-{
-    if (mover.x < 0.0) return -1.0;
-    const float w = kLagShare * mover.y * penumbra;
-    return w / (w + mover.x + 1e-6);
-}
-
-// The raw result, and whether a ray of it hit a moved object: R16_FLOAT,
-// negative for "touched" - the value then -(1 + v + 2 k), k the history weight
-// it allows (Allow) in sevenths, rounded down. The denoiser decodes it.
-float EncodeRaw(float v, float allow)
-{
-    return allow < 0.0 ? v : -(1.0 + v + 2.0 * floor(saturate(allow) * 7.0));
-}
-)";
-
-// ---- sun shadow: one ray towards a random point on the sun's disc ---------
-const char* kTraceMainSrc = R"(
-[numthreads(8, 8, 1)]
-void CSMain(uint3 tid : SV_DispatchThreadID)
-{
-    if (tid.x >= gSize.x || tid.y >= gSize.y) return;
-    float3 p, N;
-    uint plant;
-    if (!SurfaceAt(tid.xy, p, N, plant)) { gOut[tid.xy] = 1.0; return; }
-
-    // Normal-offset origin, the normal flipped towards the sun so a two-sided
-    // leaf card is pushed to whichever side the ray leaves from. The offset
-    // grows with distance because depth precision does.
-    if (dot(N, gSunTowards) < 0.0) N = -N;
-    float offset = gBias * (1.0 + length(p - gCamPos) * 0.002);
-
-    // SOFT SHADOWS: the sun is a DISC. A random point on it per pixel per
-    // frame; the denoiser turns the binary answers into the penumbra. Uniform
-    // over the disc (sqrt on the radius), or the centre is over-sampled.
-    float3 dir = gSunTowards;
-    if (gSunAngle > 0.0)
-    {
-        float3 T, B; Basis(dir, T, B);
-        float2 r  = StratDisc(tid.xy, gFrame);
-        float rad = sqrt(r.x) * tan(gSunAngle);
-        float ang = r.y * 6.28318530;
-        dir = normalize(dir + T * (rad * cos(ang)) + B * (rad * sin(ang)));
-    }
-
-    RayDesc ray;
-    ray.Origin    = p + N * offset;
-    ray.Direction = dir;
-    ray.TMin      = 0.0;
-    ray.TMax      = gTMax;
-
-    float2 mover;
-    bool hit = Occluded(ray, true, plant, mover);
-    // The sun's disc: the penumbra per metre of the hit's distance.
-    gOut[tid.xy] = EncodeRaw(hit ? 0.0 : 1.0, Allow(mover, 2.0 * tan(gSunAngle)));
-    InterlockedAdd(gCounters[0], 1);
-    if (hit) InterlockedAdd(gCounters[1], 1);
-}
-)";
-
-// ---- ambient occlusion: cosine-weighted rays over the hemisphere ----------
-const char* kAoMainSrc = R"(
-// STRATIFIED over the screen. A 4x4 tile of pixels takes the 16 cells of a
-// 4x4 grid on the sample square, one each - (x + 2y, 2x + y) mod 4 is a
-// bijection, and any 2x2 block of it already has four different azimuths and
-// four different elevations - with a white jitter inside the cell. The
-// denoiser's AO window spans exactly one period each way (kDenoiseSrc), so on
-// an even surface its mean is a 16-sample STRATIFIED estimate rather than 25
-// independent coin tosses: most of the variance of white noise is the luck
-// of where the samples fall, and this takes the luck out. Every frame the
-// whole grid is shifted on the square (toroidally, by the R2 sequence), which
-// keeps the cells apart and walks each pixel's sample over the hemisphere.
-float2 AoSample(uint2 px, uint frame, uint i, uint n)
-{
-    const uint2  cell = uint2((px.x + 2u * px.y) & 3u, (2u * px.x + px.y) & 3u);
-    const float2 j    = Rand2(px, frame, i + 1u);
-    // n rays split their cell along the azimuth, so they stay apart too.
-    const float2 u    = (float2(cell) + float2((float(i) + j.x) / float(n), j.y)) * 0.25;
-    return frac(u + frac(float(frame) * float2(0.7548776662, 0.5698402910)));
-}
-
-// HOW FAST THE OCCLUSION CHANGES across the ground about an occluder at a
-// distance t, per metre of t: what Allow takes as an AO ray's "penumbra". It
-// was the whole distance (1.0), and behind a driving car - 17 cm a frame at
-// 18 km/h, its bumper some 0.3-1 m from the road its rays leave - that let
-// the road keep over half its history: the car's occlusion where it had been,
-// the road 10-15 grey darker than its rays said, half a metre behind the car;
-// and where the exhaust or the bumper had just uncovered the road, which had
-// no history to lag, it came out right - lighter, in their shape: the GHOST
-// BEHIND THE CAR, a copy of the bumper and the exhaust a frame of travel
-// behind them (view 13, TAA off; tools/car-ghost). The occlusion under a car
-// falls off far faster than its distance: 0.15 leaves a driving car's road
-// nothing to lag (its weight under gBlendMoved, the AO's 0), and the Garage's
-// turning car, its sill a few millimetres a frame, still over two thirds.
-static const float kAoPenumbra = 0.15;
-
-[numthreads(8, 8, 1)]
-void CSMain(uint3 tid : SV_DispatchThreadID)
-{
-    if (tid.x >= gSize.x || tid.y >= gSize.y) return;
-    float3 p, N;
-    uint plant;
-    if (!SurfaceAt(tid.xy, p, N, plant)) { gOut[tid.xy] = 1.0; return; }
-
-    // The prepass normal already faces the camera, which is the side the
-    // ambient light arrives from as far as this pixel is concerned.
-    float offset = gBias * (1.0 + length(p - gCamPos) * 0.002);
-    // A PLANT's card is not a surface facing one way: its lighting uses the
-    // plant's volume normal, and a hemisphere about the card's plane - mostly
-    // horizontal - sends half its rays into the ground. That ground is not
-    // missing sky; the ambient term already lights the card from it (E_ground
-    // * down, scene.cpp). It made grass ~7% darker than under the cascades,
-    // which have no AO. So a plant looks UP: the sky it is occluded from is
-    // the sky, by its neighbours and anything over it. The origin still
-    // leaves the card along its own plane's normal.
-    const float3 axis = plant != 0u ? float3(0.0, 1.0, 0.0) : N;
-    float3 T, B; Basis(axis, T, B);
-
-    // COSINE-WEIGHTED hemisphere: rays are distributed the way the diffuse
-    // ambient integral weights them, so the average of hit/miss IS the
-    // occluded fraction of the ambient term with no extra weighting. The
-    // radius is where this stops being "occlusion" and starts being "global
-    // illumination": an occluder ten metres away blocks sky but a wall that
-    // far away also reflects light we are not simulating, so beyond the radius
-    // the honest answer is "unknown", which is what unoccluded means here.
-    float open = 0.0;
-    float allow = -1.0;       // the least any ray allows (Allow), -1 none touched
-    for (uint i = 0; i < gAoRays; ++i)
-    {
-        float2 r = AoSample(tid.xy, gFrame, i, gAoRays);
-        float phi = r.x * 6.28318530;
-        float cosT = sqrt(1.0 - r.y);            // cosine-weighted
-        float sinT = sqrt(r.y);
-        float3 dir = T * (cos(phi) * sinT) + B * (sin(phi) * sinT) + axis * cosT;
-
-        RayDesc ray;
-        ray.Origin    = p + N * offset;
-        ray.Direction = dir;
-        ray.TMin      = 0.0;
-        ray.TMax      = gAoRadius;
-        float2 mover;
-        if (!Occluded(ray, false, plant, mover)) open += 1.0;
-        // An occluder this far off changes the occlusion over a fraction of
-        // that across the ground: its "penumbra" (kAoPenumbra).
-        const float a = Allow(mover, kAoPenumbra);
-        if (a >= 0.0) allow = allow < 0.0 ? a : min(allow, a);
-    }
-    gOut[tid.xy] = EncodeRaw(open / max(1.0, float(gAoRays)), allow);
-}
-)";
-
-// ---- local lights: one ray to one light, chosen by what it gives (lights.h) -
-// The RATIO ESTIMATOR's stochastic half: among the shadowed lights of this pixel's cluster, one chosen with a
-// probability in proportion to what it gives here (its irradiance's luminance times the cosine - the same terms the
-// scene pass sums), by a single weighted-reservoir pass; then one ray to a random point on its emitter. The 0/1 is
-// then an unbiased estimate of the shadowed fraction of the scene pass's sum, and the denoiser averages it as it does
-// the sun's. No light here: 1, which the scene multiplies into nothing.
-const char* kLightsRegsSrc = R"(
-#define NGG_LIGHTS_T0 t11
-#define NGG_LIGHTS_T1 t12
-#define NGG_LIGHTS_T2 t13
-)";
-
-const char* kLightMainSrc = R"(
-[numthreads(8, 8, 1)]
-void CSMain(uint3 tid : SV_DispatchThreadID)
-{
-    if (tid.x >= gSize.x || tid.y >= gSize.y) return;
-    float3 p, N;
-    uint plant;
-    if (!SurfaceAt(tid.xy, p, N, plant)) { gOut[tid.xy] = 1.0; return; }
-
-    const float viewZ = dot(p - gCamPos, gCamFwd);
-    const uint2 c = gClusters[LightCluster(float2(tid.xy) + 0.5, viewZ, gClusterParams)];
-#if LIGHTS_REF == 2
-    // NGG_LIGHTS_REF=2: the estimator itself, 16 picks per pixel averaged - what the one pick converges to.
-    {
-        float vSum = 0.0;
-        float allow = -1.0;
-        for (uint s = 0; s < 16u; ++s)
-        {
-            float total = 0.0;
-            uint chosen = 0xFFFFFFFFu;
-            for (uint k = 0; k < c.y; ++k)
-            {
-                const uint li = gLightIndex[c.x + k];
-                if ((gLights[li].flags & kLightShadows) == 0u) continue;
-                float3 l;
-                float dist;
-                const float3 E = LightIrradiance(li, p, l, dist);
-                const float w = dot(E, float3(0.2126, 0.7152, 0.0722)) * (plant != 0u ? 1.0 : saturate(dot(N, l)));
-                if (w <= 0.0) continue;
-                total += w;
-                if (Rand2(tid.xy, gFrame * 17u + s, 101u + k).x * total < w) chosen = li;
-            }
-            if (chosen == 0xFFFFFFFFu) { vSum += 1.0; continue; }
-            const float3 lpos = gLights[chosen].pos;
-            const float3 toL = lpos - p;
-            const float3 d0 = toL / max(length(toL), 1e-4);
-            float3 T, B; Basis(d0, T, B);
-            const float2 r = Rand2(tid.xy, gFrame * 17u + s, 7u);
-            const float rad = sqrt(r.x) * gLights[chosen].radius, ang = r.y * 6.28318530;
-            const float3 target = lpos + T * (rad * cos(ang)) + B * (rad * sin(ang));
-            float3 Nn = N;
-            if (dot(Nn, d0) < 0.0) Nn = -Nn;
-            RayDesc ray;
-            ray.Origin = p + Nn * (gBias * (1.0 + length(p - gCamPos) * 0.002));
-            const float3 dv = target - ray.Origin;
-            const float len = length(dv);
-            ray.Direction = dv / max(len, 1e-4);
-            ray.TMin = 0.0;
-            ray.TMax = max(len - 0.02, 0.0);
-            float2 mover;
-            const bool hit = Occluded(ray, false, plant, mover);
-            const float a = Allow(mover, 2.0 * gLights[chosen].radius / max(len, 1e-3));
-            if (a >= 0.0) allow = allow < 0.0 ? a : min(allow, a);
-            vSum += hit ? 0.0 : 1.0;
-        }
-        gOut[tid.xy] = EncodeRaw(vSum / 16.0, allow);
-        return;
-    }
-#elif defined(LIGHTS_REF)
-    // NGG_LIGHTS_REF=1: THE REFERENCE - a ray to EVERY light, the exact weighted visibility. The one-ray estimate below
-    // is checked against it (design 5.4 N3: the lamp lab, the test lamps' shadows).
-    {
-        float sumW = 0.0, sumV = 0.0;
-        float allow = -1.0;
-        for (uint k = 0; k < c.y; ++k)
-        {
-            const uint li = gLightIndex[c.x + k];
-            if ((gLights[li].flags & kLightShadows) == 0u) continue;
-            float3 l;
-            float dist;
-            const float3 E = LightIrradiance(li, p, l, dist);
-            const float w = dot(E, float3(0.2126, 0.7152, 0.0722)) * (plant != 0u ? 1.0 : saturate(dot(N, l)));
-            if (w <= 0.0) continue;
-            const float3 lpos = gLights[li].pos;
-            const float3 toL = lpos - p;
-            const float3 d0 = toL / max(length(toL), 1e-4);
-            float3 T, B; Basis(d0, T, B);
-            const float2 r = Rand2(tid.xy, gFrame, 7u + k);
-            const float rad = sqrt(r.x) * gLights[li].radius, ang = r.y * 6.28318530;
-            const float3 target = lpos + T * (rad * cos(ang)) + B * (rad * sin(ang));
-            float3 Nn = N;
-            if (dot(Nn, d0) < 0.0) Nn = -Nn;
-            RayDesc ray;
-            ray.Origin = p + Nn * (gBias * (1.0 + length(p - gCamPos) * 0.002));
-            const float3 dv = target - ray.Origin;
-            const float len = length(dv);
-            ray.Direction = dv / max(len, 1e-4);
-            ray.TMin = 0.0;
-            ray.TMax = max(len - 0.02, 0.0);
-            float2 mover;
-            const bool hit = Occluded(ray, false, plant, mover);
-            const float a = Allow(mover, 2.0 * gLights[li].radius / max(len, 1e-3));
-            if (a >= 0.0) allow = allow < 0.0 ? a : min(allow, a);
-            sumW += w;
-            sumV += hit ? 0.0 : w;
-        }
-        gOut[tid.xy] = EncodeRaw(sumW > 0.0 ? sumV / sumW : 1.0, allow);
-        return;
-    }
-#endif
-    // Each lamp in proportion to what it gives here: their sum, then the one
-    // whose share of it holds this pixel's stratified number (StratU).
-    float total = 0.0;
-    for (uint k = 0; k < c.y; ++k)
-    {
-        const uint li = gLightIndex[c.x + k];
-        if ((gLights[li].flags & kLightShadows) == 0u) continue;
-        float3 l;
-        float dist;
-        const float3 E = LightIrradiance(li, p, l, dist);
-        // A plant's card takes light from both sides (its shading wraps), any other surface from its front.
-        total += max(dot(E, float3(0.2126, 0.7152, 0.0722)) * (plant != 0u ? 1.0 : saturate(dot(N, l))), 0.0);
-    }
-    if (total <= 0.0) { gOut[tid.xy] = 1.0; return; }
-    float pick = StratU(tid.xy, gFrame) * total;
-    uint chosen = 0xFFFFFFFFu;
-    for (uint k = 0; k < c.y && pick >= 0.0; ++k)
-    {
-        const uint li = gLightIndex[c.x + k];
-        if ((gLights[li].flags & kLightShadows) == 0u) continue;
-        float3 l;
-        float dist;
-        const float3 E = LightIrradiance(li, p, l, dist);
-        const float w = dot(E, float3(0.2126, 0.7152, 0.0722)) * (plant != 0u ? 1.0 : saturate(dot(N, l)));
-        if (w <= 0.0) continue;
-        chosen = li;
-        pick -= w;
-    }
-    if (chosen == 0xFFFFFFFFu) { gOut[tid.xy] = 1.0; return; }
-
-    const float3 lpos = gLights[chosen].pos;
-    const float lradius = gLights[chosen].radius;
-    // A random point on the emitter, a disc of its radius facing this surface: the penumbra, per pixel per frame.
-    const float3 toL = lpos - p;
-    const float3 d0 = toL / max(length(toL), 1e-4);
-    float3 T, B; Basis(d0, T, B);
-    const float2 r = StratDisc(tid.xy, gFrame);
-    const float rad = sqrt(r.x) * lradius, ang = r.y * 6.28318530;
-    const float3 target = lpos + T * (rad * cos(ang)) + B * (rad * sin(ang));
-
-    if (dot(N, d0) < 0.0) N = -N;
-    const float offset = gBias * (1.0 + length(p - gCamPos) * 0.002);
-    RayDesc ray;
-    ray.Origin = p + N * offset;
-    const float3 dv = target - ray.Origin;
-    const float len = length(dv);
-    ray.Direction = dv / max(len, 1e-4);
-    ray.TMin = 0.0;
-    ray.TMax = max(len - 0.02, 0.0);    // short of the emitter itself
-    float2 mover;
-    const bool hit = Occluded(ray, false, plant, mover);
-    // The emitter's disc as seen from here: the penumbra per metre of the hit's distance.
-    gOut[tid.xy] = EncodeRaw(hit ? 0.0 : 1.0, Allow(mover, 2.0 * lradius / max(len, 1e-3)));
-}
-)";
-
-// ---------------------------------------------------------------------------
-// The visibility denoiser. One stochastic ray per pixel is a coin toss inside
-// a penumbra, and the colour TAA cannot be asked to settle it: its variance
-// clip exists to REJECT history that disagrees with the neighbourhood, which is
-// what a converging penumbra looks like, so patches of it never converge and
-// flicker. So the visibility is filtered BEFORE the lighting sees it - a
-// spatial blur of this frame's coin tosses, then a temporal blend with last
-// frame's filtered result reprojected and validated against depth. The
-// lighting then gets a stable term, and the colour TAA has nothing to fight.
-// ---------------------------------------------------------------------------
-const char* kDenoiseSrc = R"(
-Texture2D<float>   gRaw     : register(t0);   // this frame (EncodeRaw: < 0 = hit a moved object)
-// Last frame: x filtered vis, y ndc depth, z 1 = a ray hit a moved object,
-// w 1 = the pixel was a moved object's, else 0.45 x the history weight its
-// rays allowed (Allow) where they hit one.
-Texture2D<float4>  gHist    : register(t1);
-Texture2D<float>   gDepth   : register(t2);
-// Scene::MotionBuffer: w = 1 where an object moved, xy its NDC offset to last
-// frame and z its depth there. Zero (a null view) when there is none.
-Texture2D<float4>  gMotion  : register(t3);
-RWTexture2D<float4> gOut    : register(u0);   // this frame's, the same layout
-
-cbuffer K : register(b0)
-{
-    row_major float4x4 gReproj;   // current NDC+depth -> previous NDC (unjittered)
-    uint2  gSize;
-    float  gBlend;                // history weight
-    float  gValid;
-    float  gMotionOn;
-    float  gBlendMoved;           // history weight where a moved object was hit
-    float  gPeriod4;              // 1 = the window spans 4 pixels each way (the AO's)
-    float  gBlendStill;           // history weight where the pixel stays put on the screen
-};
-
-// The depth one pixel along an axis, as the surface's PLANE predicts it.
-// Reverse-Z NDC depth is linear in screen space across a plane, so the
-// smaller of the two one-sided differences is the slope of the surface this
-// pixel is on (the other may cross a silhouette). A flat 3% depth test on its
-// own rejects most of a road seen at a grazing angle - its depth changes by
-// that much from one row to the next some 30 m out - and the far road then
-// had only its own row to average and its history to lose.
-float Slope(float c, float m, float p)
-{
-    const float a = p - c, b = c - m;
-    const float g = (abs(a) < abs(b)) ? a : b;
-    return (abs(g) < 0.25 * c) ? g : 0.0;          // no plane: a lone pixel
-}
-
-// The group's 12x12 window of depth (negative: a moved object's pixel; 0: sky
-// or off the screen) and raw result, loaded once: 25 taps of three textures
-// per pixel were most of this pass's cost. And whether each moved pixel moves
-// AGAINST THE WORLD there - over half a pixel from where the camera alone
-// takes it (a car standing on the turntable, or parked as the camera passes,
-// does not).
-groupshared float sDepth[144];
-groupshared float sRaw[144];
-groupshared uint  sAgainst[144];
-
-[numthreads(8, 8, 1)]
-void CSMain(uint3 tid : SV_DispatchThreadID, uint3 gid : SV_GroupID, uint gi : SV_GroupIndex)
-{
-    const int2 origin = int2(gid.xy) * 8 - 2;
-    for (uint k = gi; k < 144u; k += 64u)
-    {
-        const int2 q = origin + int2(k % 12u, k / 12u);
-        float d = 0.0, r = 1.0;
-        uint against = 0u;
-        if (all(q >= 0) && all(q < int2(gSize)))
-        {
-            d = max(gDepth.Load(int3(q, 0)), 0.0);
-            r = gRaw.Load(int3(q, 0));
-            const float4 m = (gMotionOn > 0.5) ? gMotion.Load(int3(q, 0)) : float4(0.0, 0.0, 0.0, 0.0);
-            if (m.w > 0.5)
-            {
-                const float2 n = float2((q.x + 0.5) / gSize.x * 2.0 - 1.0, 1.0 - (q.y + 0.5) / gSize.y * 2.0);
-                const float4 c = mul(float4(n, d, 1.0), gReproj);
-                const float2 off = abs(c.w) > 1e-7 ? (n + m.xy - c.xy / c.w) * 0.5 * float2(gSize) : float2(1e3, 1e3);
-                against = dot(off, off) > 0.25 ? 1u : 0u;
-                d = -d;
-            }
-        }
-        sDepth[k]   = d;
-        sRaw[k]     = r;
-        sAgainst[k] = against;
-    }
-    GroupMemoryBarrierWithGroupSync();
-
-    if (tid.x >= gSize.x || tid.y >= gSize.y) return;
-    const int2 px = int2(tid.xy);
-    const int2 lp = int2(tid.xy) - origin;          // px in the window
-    const float depth = abs(sDepth[lp.y * 12 + lp.x]);
-    if (depth <= 0.0) { gOut[px] = float4(1.0, 0.0, 0.0, 0.0); return; }     // sky
-
-    // SPATIAL: a depth-aware 5x5 mean of this frame's tosses. Nine-to-
-    // twenty-five samples cut the per-frame variance by that much before the
-    // temporal blend ever sees it, which is most of why this converges in a
-    // few frames rather than a few dozen. Depth-aware so a shadow does not
-    // bleed across a silhouette onto the thing behind it.
-    //
-    // And IDENTITY-aware: a moved object's pixels and static ones never mix,
-    // even at the same depth. The road just under a bumper is within 3% of
-    // it, so the back of the car - in its own shadow - was averaged into a
-    // thin strip of road every frame, and the history carried each strip off
-    // as the road went by: faint bands, one per frame, behind the car.
-    //
-    // For the AO, whose samples repeat every 4 pixels (AoSample), the outer
-    // ring weighs a half, so each axis spans exactly one period: every cell
-    // of the grid counts once, and the tile leaves no pattern of its own.
-    const bool movedPixel = sDepth[lp.y * 12 + lp.x] < 0.0;
-    // A moving object here that moves against the world (sAgainst, the 3x3): only then is there anything its pixels
-    // and the world's could pass each other - at a standing car's outline the jitter swaps them, frame by frame.
-    bool against = false;
-    [unroll] for (int ay = -1; ay <= 1; ++ay)
-    [unroll] for (int ax = -1; ax <= 1; ++ax)
-        against = against || sAgainst[(lp.y + ay) * 12 + lp.x + ax] != 0u;
-    float sum = 0.0, sum2 = 0.0, wsum = 0.0;
-    bool  touched = false;      // a ray in the window hit a moved object
-    float allow = 1.0;          // the least history weight those rays allow
-    const int c0 = lp.y * 12 + lp.x;
-    const float2 slope = float2(Slope(depth, abs(sDepth[c0 - 1]),  abs(sDepth[c0 + 1])),
-                                Slope(depth, abs(sDepth[c0 - 12]), abs(sDepth[c0 + 12])));
-    [unroll] for (int y = -2; y <= 2; ++y)
-    [unroll] for (int x = -2; x <= 2; ++x)
-    {
-        const int k = (lp.y + y) * 12 + lp.x + x;
-        const float ds = sDepth[k];
-        float d = abs(ds);
-        if (d <= 0.0) continue;
-        // Linear depth ratio from reverse-Z NDC: 1/z is proportional to
-        // distance, so this is a relative distance test - against the depth
-        // the pixel's plane predicts there (Slope).
-        const float e = max(depth + dot(slope, float2(x, y)), 1e-7);
-        float rel = abs(1.0 / d - 1.0 / e) * e;
-        const bool qMoved = ds < 0.0;
-        float w = (rel < 0.03 && (qMoved == movedPixel || !against)) ? 1.0 : 0.0;
-        if (gPeriod4 > 0.5) w *= (abs(x) == 2 ? 0.5 : 1.0) * (abs(y) == 2 ? 0.5 : 1.0);
-        float r = sRaw[k];
-        if (r < 0.0)
-        {
-            r = -r - 1.0;                       // v + 2 k (EncodeRaw)
-            const float a = floor(r * 0.5);
-            r -= 2.0 * a;
-            if (w > 0.0) { touched = true; allow = min(allow, a / 7.0); }
-        }
-        sum  += r * w;
-        sum2 += r * r * w;
-        wsum += w;
-    }
-    float curr = sum / max(wsum, 1e-6);
-    if (wsum <= 0.0)
-    {
-        const float r = gRaw.Load(int3(px, 0));
-        const float a = floor((-r - 1.0) * 0.5);
-        curr = r < 0.0 ? -r - 1.0 - 2.0 * a : r;
-        touched = r < 0.0;
-        if (touched) allow = a / 7.0;
-    }
-
-    // TEMPORAL: reproject into last frame, homogeneous so the sky/far case
-    // needs no special handling (see post.cpp), and accept the history only
-    // where it landed on the same surface - same linear depth within 3%.
-    // A MOVED object's pixel takes the prepass's motion instead: by the
-    // camera alone it lands where the object is not, and loses its history.
-    float2 uv  = (float2(px) + 0.5) / float2(gSize);
-    float2 ndc = float2(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0);
-    float4 mo  = (gMotionOn > 0.5) ? gMotion.Load(int3(px, 0)) : float4(0, 0, 0, 0);
-    float4 pc  = movedPixel ? float4(ndc + mo.xy, mo.z, 1.0)
-                            : mul(float4(ndc, depth, 1.0), gReproj);
-    float  blend = 0.0;
-    float2 hist = float2(curr, depth);
-    float  histDistrust = 0.0;    // the history's z where it was taken, else 0
-    float  histAllow = 0.0;       // and the weight its rays allowed
-    float  histYouth = 0.0;       // a moved pixel's history: 8 one frame old, down to 0 (w)
-    if (gValid > 0.5 && abs(pc.w) > 1e-7)
-    {
-        float3 pn = pc.xyz / pc.w;
-        float2 puv = float2(pn.x * 0.5 + 0.5, 0.5 - pn.y * 0.5);
-        if (all(puv >= 0.0) && all(puv <= 1.0) && pn.z > 0.0)
-        {
-            int2 pp = int2(puv * float2(gSize));
-            pp = clamp(pp, int2(0, 0), int2(gSize) - 1);
-            float4 h = gHist.Load(int3(pp, 0));
-            // STILL: a pixel that stays put on the screen (under a quarter
-            // pixel of motion, as TAA's `still`) reads its history without
-            // resampling it, so a longer one costs no blur: from 0.85 it goes
-            // to gBlendStill. One ray a pixel, among three spotlights in the
-            // Garage, averaged over 5x5 and a dozen frames left the floor's
-            // shadows blotchy under a camera that never moves, the car
-            // standing or turning; three dozen halve that. The neighbourhood
-            // clamp below still pulls a stale value in at once where every
-            // sample disagrees with it. A moving object's pixel too, by its own
-            // motion: the Garage's car stopped is still, as it was before it
-            // counted as moving at all (scene.cpp movedOf).
-            const float still = saturate(1.0 - length(puv * float2(gSize) - (float2(px) + 0.5)) * 4.0);
-            const float top = lerp(gBlend, gBlendStill, still);
-            // Ground the car uncovered: last frame this spot was the moved
-            // object, so its history is cut below - and that, too, is "a moved
-            // object was involved". Without it the distrust broke on every
-            // such strip: they started over as merely fresh, and TAA, which
-            // reads the distrust (post.cpp), kept the shadow each strip was
-            // first seen in - a band behind the car per frame.
-            if (h.y > 0.0 && h.w > 0.5 && !movedPixel && against) { touched = true; allow = 0.0; }
-            const bool histTouched = h.z > 0.5;
-            // IDENTITY first, as TAA's (post.cpp): a moved object's history
-            // never passes to a static pixel, nor the reverse. Depth cannot
-            // tell them apart where they meet - the road just behind a
-            // bumper is within 3% of the bumper - and the back of a car, in
-            // its own shadow, then printed a dark band of itself on the sunlit
-            // road behind it every frame.
-            if (h.y > 0.0 && ((h.w > 0.5) == movedPixel || !against))
-            {
-                float rel = abs(1.0 / h.y - 1.0 / pn.z) * pn.z;
-                // The history is read at the nearest pixel, up to half a pixel
-                // from where this one landed: on a slope that alone is half a
-                // pixel's depth change, which the 3% is widened by.
-                const float tol = 0.03 + 0.5 * (abs(slope.x) + abs(slope.y)) / depth;
-                // MOVED OCCLUDERS. Where a ray hit something that moved -
-                // this frame, or last - the history holds where its shadow
-                // or its occlusion WAS, not where it is: kept at 0.85 it lays
-                // a fading copy on the ground every frame, which is the trail
-                // behind a moving car. The neighbourhood clamp below cannot
-                // catch it under the car, where the ground stays partly in
-                // shadow either way. So there, the history counts for little.
-                // Not on the moved object itself: its pixel was reprojected
-                // by its own motion, and the occluder its rays hit is mostly
-                // itself, moving with it - the car's self-shadow is as valid
-                // a history as a wall's, and dropping it only makes it boil.
-                //
-                // How little is the rays' to say (Allow): the occluder's
-                // travel this frame against the softness of what it casts.
-                // Where none hit it now, the shadow has just left: the weight
-                // its rays allowed then, kept in the history's w.
-                const bool distrust = !movedPixel && (touched || histTouched);
-                if (rel < tol)
-                {
-                    hist.x = h.x;
-                    histAllow = histTouched ? h.w / 0.45 : 0.0;
-                    blend = distrust ? clamp(touched ? allow : histAllow, gBlendMoved, top) : top;
-                    histDistrust = histTouched ? h.z : 0.0;
-                    // A YOUNG moved pixel's history - the car just out from
-                    // behind a panel, which cut it - holds only the frames
-                    // since: a running mean of them, not 0.85 of the first
-                    // one's raw 5x5, which kept the car blotchy for a dozen.
-                    // (A grown one is left to `top`: a standing car's still.)
-                    if (movedPixel)
-                    {
-                        histYouth = round((1.0 - h.w) * 32.0);
-                        const float frames = 9.0 - histYouth;
-                        if (histYouth > 0.0) blend = min(blend, frames / (frames + 1.0));
-                    }
-                }
-            }
-        }
-    }
-    // NEIGHBOURHOOD CLAMP. The depth test above proves the history is the
-    // same SURFACE, not that its lighting is the same: when a shadow moves -
-    // a car's, over a road that did not - the history still holds where it
-    // was, and at 0.85 a dark patch takes a dozen frames to fade, trailing the
-    // car. So the history may not leave the range this frame's own samples
-    // allow: their mean +- their spread, plus a margin for what 25 samples
-    // cannot resolve. Inside a penumbra the spread is wide and nothing
-    // changes; where every sample now says lit (or shadow), a stale opposite
-    // is pulled to within the margin at once.
-    if (blend > 0.0 && wsum > 0.0)
-    {
-        const float sigma  = sqrt(max(0.0, sum2 / wsum - curr * curr));
-        const float spread = sigma + 0.5 / sqrt(wsum);
-        hist.x = clamp(hist.x, curr - spread, curr + spread);
-    }
-    float vis = lerp(curr, hist.x, blend);
-    // The depth for next frame's test, and the two flags it reads: whether a
-    // moved object was involved (so next frame still distrusts this answer)
-    // and whether this pixel is one. z is 0.5 where no history was taken at
-    // all - next frame reads only z > 0.5; kAoWideSrc reads both.
-    //
-    // The distrust FADES: 1 where a ray hit a moved object this frame, then
-    // 0.125 less each frame after, so the four frames after a shadow has left
-    // still take only gBlendMoved of the past. One frame of it was not
-    // enough: the few percent of old shadow it kept then faded at gBlend, and
-    // stayed over 1% for half a dozen frames - a trail too faint to see on a
-    // textured road, but there.
-    const float fresh = blend <= 0.0 ? 0.5 : 0.0;
-    const float fading = histDistrust - 0.125;
-    const float level = touched ? 1.0 : (fading > 0.5 ? fading : fresh);
-    const float allowed = touched ? allow : (fading > 0.5 ? histAllow : 0.0);
-    // A moved pixel's w counts its history's youth down in 32nds, 8 where it
-    // started over: 0.75 to 1, still > 0.5 for the identity tests.
-    const float youth = blend <= 0.0 ? 8.0 : max(histYouth - 1.0, 0.0);
-    gOut[px] = float4(vis, depth, level, movedPixel ? 1.0 - youth / 32.0 : 0.45 * allowed);
-}
-)";
-
-// ---------------------------------------------------------------------------
-// The AO's WIDE pass, after its denoise. Where the history was cut - a ray hit
-// a moved object (0.25 of it, so the car leaves no trail) or none was found
-// (disoccluded, behind the car) - the answer is little more than one frame's
-// 5x5, and the ground around a moving car boiled. So there, and only there,
-// the denoised result is averaged again over a 13x13 footprint: 5x5 taps 3
-// pixels apart, the same depth and identity rules, static pixels only. It is
-// spatial, so it cannot trail; it blurs only what had no history to lose.
-// Not fed back: the history stays the 5x5's, so the next frame's clamp and
-// blend see what they always did.
-// ---------------------------------------------------------------------------
-const char* kAoWideSrc = R"(
-Texture2D<float4>  gIn   : register(t1);   // this frame's denoised AO (kDenoiseSrc's layout)
-RWTexture2D<float> gWide : register(u0);
-
-float Slope(float c, float m, float p)       // as kDenoiseSrc's
-{
-    const float a = p - c, b = c - m;
-    const float g = (abs(a) < abs(b)) ? a : b;
-    return (abs(g) < 0.25 * c) ? g : 0.0;
-}
-
-cbuffer K : register(b0)
-{
-    row_major float4x4 gReproj;
-    uint2  gSize;
-};
-
-[numthreads(8, 8, 1)]
-void CSMain(uint3 tid : SV_DispatchThreadID)
-{
-    if (tid.x >= gSize.x || tid.y >= gSize.y) return;
-    const int2 px = int2(tid.xy);
-    const float4 c = gIn.Load(int3(px, 0));
-    // Static, with a cut or no history: the rest keep their own answer. A
-    // slow occluder's pixels too are widened unless their rays allowed all of
-    // the history (w 0.45, Allow): under the Garage's turning car they keep
-    // 0.7-0.85 of it, a third of what a still pixel keeps (gBlendStill), and
-    // were the grainiest floor there - widened, smoother than the car standing.
-    //
-    // And a moved object's pixels while their history is young (w < 1, its
-    // youth, kDenoiseSrc): the car come out from behind a panel had a single
-    // frame's 5x5 of the sky's occlusion, then a few frames' - the whole side
-    // of it blotchy. Widened over its own pixels only, less as it ages.
-    const bool moved = c.w > 0.5;
-    const float youth = moved ? (1.0 - c.w) * 4.0 : 1.0;     // 1 fresh .. 0 grown up
-    if (c.y <= 0.0 || (moved ? youth <= 0.0 : (c.z < 0.25 || c.w > 0.44))) { gWide[px] = c.x; return; }
-    const float2 slope = float2(Slope(c.y, gIn.Load(int3(px - int2(1, 0), 0)).y, gIn.Load(int3(px + int2(1, 0), 0)).y),
-                                Slope(c.y, gIn.Load(int3(px - int2(0, 1), 0)).y, gIn.Load(int3(px + int2(0, 1), 0)).y));
-    float sum = c.x, wsum = 1.0;
-    [unroll] for (int y = -2; y <= 2; ++y)
-    [unroll] for (int x = -2; x <= 2; ++x)
-    {
-        if (x == 0 && y == 0) continue;
-        const int2 q = px + int2(x, y) * 3;
-        if (any(q < 0) || any(q >= int2(gSize))) continue;
-        const float4 h = gIn.Load(int3(q, 0));
-        if (h.y <= 0.0 || (h.w > 0.5) != moved) continue;
-        const float e = max(c.y + dot(slope, float2(x, y) * 3.0), 1e-7);
-        if (abs(1.0 / h.y - 1.0 / e) * e >= 0.03) continue;
-        sum += h.x; wsum += 1.0;
-    }
-    gWide[px] = lerp(c.x, sum / wsum, youth);
-}
-)";
 
 struct DenoiseCB
 {
@@ -1088,7 +181,7 @@ enum { kSlotTlas = 0, kSlotDepth = 1, kSlotOut = 2, kSlotCounters = 3,
        kSlotDynVerts = 23, kSlotInst = 24,
        // The scene's motion target, for the denoiser (a null view when none).
        kSlotMotion = 25,
-       // The AO's wide pass output (kAoWideSrc).
+       // The AO's wide pass output (rt_ao_wide.hlsl).
        kSlotAoWideUav = 26,
        // Foliage (scene.cpp FindPlants): the plant of each alpha triangle and
        // the prepass's plant per pixel, for the rays that must not hit their
@@ -1098,7 +191,7 @@ enum { kSlotTlas = 0, kSlotDepth = 1, kSlotOut = 2, kSlotCounters = 3,
        // shape.
        kSlotLightOut = 29, kSlotLightCounters = 30,
        kSlotLightPair0 = 31, kSlotLightPair1 = 33, kSlotLightHistUav0 = 35, kSlotLightHistUav1 = 36,
-       // Their wide pass output (kAoWideSrc, as the AO's).
+       // Their wide pass output (rt_ao_wide.hlsl, as the AO's).
        kSlotLightWideUav = 37,
        kSlotTextures = 38 };
 
@@ -1115,7 +208,7 @@ bool Rt::Create(Device& dev)
             dev.rtTier / 10, dev.rtTier % 10, dev.shaderModel >> 4, dev.shaderModel & 0xF);
         return false;
     }
-    if (!m_dxc.Load()) return false;
+    if (!ShaderModel6Available()) return false;
 
     ComPtr<ID3D12Device5> dev5;
     if (FAILED(dev.device.As(&dev5)))
@@ -1198,41 +291,39 @@ bool Rt::Create(Device& dev)
         Log("rt: root signature: %s", err ? (const char*)err->GetBufferPointer() : "?");
         return false;
     }
-    if (FAILED(dev.device->CreateRootSignature(0, sig->GetBufferPointer(), sig->GetBufferSize(),
+    if (FAILED(CreateRootSignature(dev.device, 0, sig->GetBufferPointer(), sig->GetBufferSize(),
                                                IID_PPV_ARGS(&m_rootSig))))
         return false;
 
-    ComPtr<ID3DBlob> cs = m_dxc.Compile(std::string(kRtCommonSrc) + kTraceMainSrc,
-                                        L"CSMain", L"cs_6_5", "ngg_rt_trace");
+    ComPtr<ID3DBlob> cs = LoadShader("rt_trace.hlsl", "CSMain", "cs_6_5");
     if (!cs) return false;
 
     D3D12_COMPUTE_PIPELINE_STATE_DESC pd = {};
     pd.pRootSignature = m_rootSig.Get();
     pd.CS = { cs->GetBufferPointer(), cs->GetBufferSize() };
-    if (FAILED(dev.device->CreateComputePipelineState(&pd, IID_PPV_ARGS(&m_pso))))
+    if (FAILED(CreatePipeline(dev.device, &pd, IID_PPV_ARGS(&m_pso))))
     {
         Log("rt: compute pipeline creation failed - the DXIL was probably rejected");
         return false;
     }
 
-    ComPtr<ID3DBlob> aocs = m_dxc.Compile(std::string(kRtCommonSrc) + kAoMainSrc,
-                                          L"CSMain", L"cs_6_5", "ngg_rt_ao");
+    ComPtr<ID3DBlob> aocs = LoadShader("rt_ao.hlsl", "CSMain", "cs_6_5");
     if (aocs)
     {
         pd.CS = { aocs->GetBufferPointer(), aocs->GetBufferSize() };
-        if (FAILED(dev.device->CreateComputePipelineState(&pd, IID_PPV_ARGS(&m_psoAo))))
+        if (FAILED(CreatePipeline(dev.device, &pd, IID_PPV_ARGS(&m_psoAo))))
             Log("rt: AO pipeline creation failed - shadows still work, AO does not");
     }
 
-    // NGG_LIGHTS_REF=1|2: the local lights' shadows by a reference (kLightMainSrc) - for checking, never for play.
+    // NGG_LIGHTS_REF=1|2: the local lights' shadows by a reference (rt_lights.hlsl) - for checking, never for play.
     const char* refEnv = std::getenv("NGG_LIGHTS_REF");
-    const char* lightsRef = !refEnv ? "" : refEnv[0] == '2' ? "#define LIGHTS_REF 2\n" : "#define LIGHTS_REF 1\n";
-    ComPtr<ID3DBlob> lcs = m_dxc.Compile(std::string(lightsRef) + kRtCommonSrc + kLightsRegsSrc + kLightsHlsl + kLightMainSrc,
-                                         L"CSMain", L"cs_6_5", "ngg_rt_lights");
+    ComPtr<ID3DBlob> lcs = !refEnv ? LoadShader("rt_lights.hlsl", "CSMain", "cs_6_5")
+                         : LoadShader("rt_lights.hlsl", "CSMain", "cs_6_5",
+                                      { refEnv[0] == '2' ? "-DLIGHTS_REF=2" : "-DLIGHTS_REF=1" });
     if (lcs)
     {
         pd.CS = { lcs->GetBufferPointer(), lcs->GetBufferSize() };
-        if (FAILED(dev.device->CreateComputePipelineState(&pd, IID_PPV_ARGS(&m_psoLights))))
+        if (FAILED(CreatePipeline(dev.device, &pd, IID_PPV_ARGS(&m_psoLights))))
             m_psoLights.Reset();
     }
     if (!m_psoLights) Log("rt: local-light pipeline creation failed - local lights go unshadowed");
@@ -1272,29 +363,29 @@ bool Rt::Create(Device& dev)
         drs.pParameters = dp;
         ComPtr<ID3DBlob> dsig, derr;
         if (FAILED(D3D12SerializeRootSignature(&drs, D3D_ROOT_SIGNATURE_VERSION_1, &dsig, &derr)) ||
-            FAILED(dev.device->CreateRootSignature(0, dsig->GetBufferPointer(), dsig->GetBufferSize(),
+            FAILED(CreateRootSignature(dev.device, 0, dsig->GetBufferPointer(), dsig->GetBufferSize(),
                                                    IID_PPV_ARGS(&m_denoiseRootSig))))
         {
             Log("rt: denoise root signature failed");
             return false;
         }
-        ComPtr<ID3DBlob> dcs = m_dxc.Compile(kDenoiseSrc, L"CSMain", L"cs_6_5", "ngg_rt_denoise");
+        ComPtr<ID3DBlob> dcs = LoadShader("rt_denoise.hlsl", "CSMain", "cs_6_5");
         if (!dcs) return false;
         D3D12_COMPUTE_PIPELINE_STATE_DESC dpd = {};
         dpd.pRootSignature = m_denoiseRootSig.Get();
         dpd.CS = { dcs->GetBufferPointer(), dcs->GetBufferSize() };
-        if (FAILED(dev.device->CreateComputePipelineState(&dpd, IID_PPV_ARGS(&m_psoDenoise))))
+        if (FAILED(CreatePipeline(dev.device, &dpd, IID_PPV_ARGS(&m_psoDenoise))))
         {
             Log("rt: denoise pipeline creation failed");
             return false;
         }
-        // The AO's wide pass, on the same root signature (kAoWideSrc). Without
+        // The AO's wide pass, on the same root signature (rt_ao_wide.hlsl). Without
         // it the AO is the denoise's own output, as before.
-        ComPtr<ID3DBlob> wcs = m_dxc.Compile(kAoWideSrc, L"CSMain", L"cs_6_5", "ngg_rt_ao_wide");
+        ComPtr<ID3DBlob> wcs = LoadShader("rt_ao_wide.hlsl", "CSMain", "cs_6_5");
         if (wcs)
         {
             dpd.CS = { wcs->GetBufferPointer(), wcs->GetBufferSize() };
-            if (FAILED(dev.device->CreateComputePipelineState(&dpd, IID_PPV_ARGS(&m_psoAoWide))))
+            if (FAILED(CreatePipeline(dev.device, &dpd, IID_PPV_ARGS(&m_psoAoWide))))
                 m_psoAoWide.Reset();
         }
         if (!m_psoAoWide) Log("rt: AO wide pass pipeline creation failed - the AO goes unwidened");
@@ -1337,6 +428,21 @@ bool Rt::Create(Device& dev)
         }
     }
 
+    // The BLAS builds' own queue (SubmitBlases): COMPUTE, so they overlap the frames instead of going ahead of them on
+    // the frame's queue. Without it a new mesh is never built: no ray tracing.
+    {
+        D3D12_COMMAND_QUEUE_DESC qd = {};
+        qd.Type = D3D12_COMMAND_LIST_TYPE_COMPUTE;
+        if (FAILED(dev.device->CreateCommandQueue(&qd, IID_PPV_ARGS(&m_buildQueue))) ||
+            FAILED(dev.device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&m_buildFence))))
+        {
+            Log("rt: no compute queue for the BLAS builds - the RT path is unavailable");
+            m_pso.Reset();
+            return false;
+        }
+        m_buildQueue->SetName(L"ngg BLAS builds");
+    }
+
     Log("rt: ready - inline RayQuery, tier %d.%d, SM %d.%d",
         dev.rtTier / 10, dev.rtTier % 10, dev.shaderModel >> 4, dev.shaderModel & 0xF);
     return true;
@@ -1354,117 +460,357 @@ void ToInstanceTransform(const float* m, float t[3][4])
     }
 }
 
+namespace {
+double MsSince(const LARGE_INTEGER& t0)
+{
+    LARGE_INTEGER t1, hz;
+    QueryPerformanceCounter(&t1);
+    QueryPerformanceFrequency(&hz);
+    return 1000.0 * double(t1.QuadPart - t0.QuadPart) / double(hz.QuadPart);
+}
+UINT64 AlignAs(UINT64 v) { return (v + D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BYTE_ALIGNMENT - 1) &
+                                  ~UINT64(D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BYTE_ALIGNMENT - 1); }
+// A BLAS at least this big gets a buffer of its own; smaller ones share arenas of up to kArenaBytes. A share is freed
+// only with its whole arena, so a big BLAS that is replaced (the world, after a hide) must not pin a car's parts.
+// SMALL ALLOCATIONS ON PURPOSE: the driver creates a buffer under a lock the frame's own small allocations (the TLAS's
+// instance upload, every frame the car moves) then wait on - with 32 MB arenas the frame after a new car waited
+// 143 ms for the batch's thread. Each 4 MB creation holds it for about a millisecond.
+constexpr UINT64 kOwnBufferBytes = 4ull << 20;
+constexpr UINT64 kArenaBytes     = 4ull << 20;
+// The batch's scratch is reused from the start, past a UAV barrier, once this much is in use (a single bigger build
+// gets what it needs). The builds then run in groups, which costs the build queue a little and the frames nothing.
+constexpr UINT64 kScratchBytes   = 8ull << 20;
+} // namespace
+
+Rt::~Rt()
+{
+    // The batches' threads, then the build queue: it may still read and write memory the batches hold.
+    for (auto& b : m_batches)
+        if (b->work.valid()) b->work.wait();
+    if (m_buildFence && m_buildFence->GetCompletedValue() < m_buildFenceValue)
+    {
+        HANDLE e = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+        if (e && SUCCEEDED(m_buildFence->SetEventOnCompletion(m_buildFenceValue, e))) WaitForSingleObject(e, 5000);
+        if (e) CloseHandle(e);
+    }
+}
+
+bool Rt::IsBuilding(uint64_t key) const
+{
+    for (const auto& b : m_batches)
+        if (std::find(b->keys.begin(), b->keys.end(), key) != b->keys.end()) return true;
+    return std::find(m_failedKeys.begin(), m_failedKeys.end(), key) != m_failedKeys.end();
+}
+
+void Rt::ForgetScene()
+{
+    m_blas.clear();
+    m_tlas.Reset();
+    m_instanceCount = 0;
+    m_appeared.clear();
+    m_appearedFlagged = false;
+    m_publishedKeys.clear();
+    m_failedKeys.clear();
+}
+
+bool Rt::SubmitBlases(Device& dev, uint32_t stride, std::vector<Scene::RtMeshData>& newMeshes)
+{
+    if (!Ready() || !m_buildQueue || newMeshes.empty()) return false;
+    auto b = std::make_unique<BlasBatch>();
+    QueryPerformanceCounter(&b->submitted);
+    for (const Scene::RtMeshData& m : newMeshes)
+    {
+        b->keys.push_back(m.key);
+        // The source vertices, held from now: the build reads them, and the next upload of the dynamic pool replaces
+        // (frees) its buffer - possibly before the thread has started.
+        if (m.vb) b->keep.push_back(ComPtr<ID3D12Resource>(m.vb));
+    }
+    b->meshes.swap(newMeshes);
+    b->device = dev.device.Get();
+    b->stride = stride;
+    // The allocations and the recording on a thread of their own: a car's 71 BLASes took 15-140 ms of CPU, most of it
+    // creating buffers. The thread starts with the NEXT frame (Land): this one is the frame a mesh appears in, which
+    // allocates plenty of its own (the car's materials, the scene's heap), and the driver makes the two wait on each
+    // other - the Fabia's first frame +35 ms when started here.
+    m_batches.push_back(std::move(b));
+    return true;
+}
+
+// On the batch's thread: everything here is the batch's own, or free-threaded (the device's creation calls, the
+// queue's submit under m_submitLock). No Log: the sink is the main thread's - Land reports.
+bool Rt::RecordBatch(BlasBatch& b, ID3D12Device* device, uint32_t stride)
+{
+    std::vector<Scene::RtMeshData>& newMeshes = b.meshes;
+    ComPtr<ID3D12Device5> dev5;
+    if (FAILED(device->QueryInterface(IID_PPV_ARGS(&dev5)))) { b.error = "no ID3D12Device5"; return false; }
+    LARGE_INTEGER t0;
+    QueryPerformanceCounter(&t0);
+
+    // ---- what each needs: its geometries (opaque commits on its own; alpha-tested surfaces as a candidate for the
+    // any-hit test - PrimitiveIndex counts per geometry, which is what lets the alpha one index from 0), and the
+    // driver's sizes. The prebuild ask does not read the addresses, so the index buffer's are filled in later.
+    struct Plan { D3D12_RAYTRACING_GEOMETRY_DESC geos[2]; const std::vector<uint32_t>* src[2]; UINT n;
+                  UINT64 ib[2]; UINT64 result, scratch; };
+    std::vector<Plan> plans(newMeshes.size());
+    UINT64 indexBytes = 0, scratchMax = 0, scratchTotal = 0;
+    for (size_t i = 0; i < newMeshes.size(); ++i)
+    {
+        Scene::RtMeshData& m = newMeshes[i];
+        Plan& p = plans[i];
+        p = Plan{};
+        if (!m.vb) continue;
+        auto describe = [&](const std::vector<uint32_t>& idx, bool opaque) {
+            if (idx.empty()) return;
+            D3D12_RAYTRACING_GEOMETRY_DESC& g = p.geos[p.n];
+            g.Type = D3D12_RAYTRACING_GEOMETRY_TYPE_TRIANGLES;
+            g.Flags = opaque ? D3D12_RAYTRACING_GEOMETRY_FLAG_OPAQUE : D3D12_RAYTRACING_GEOMETRY_FLAG_NONE;
+            g.Triangles.VertexBuffer.StartAddress = m.vb->GetGPUVirtualAddress() + m.vbOffset;
+            g.Triangles.VertexBuffer.StrideInBytes = stride;
+            g.Triangles.VertexCount = m.vertexCount;
+            g.Triangles.VertexFormat = DXGI_FORMAT_R32G32B32_FLOAT;
+            g.Triangles.IndexCount = (UINT)idx.size();
+            g.Triangles.IndexFormat = DXGI_FORMAT_R32_UINT;
+            p.src[p.n] = &idx;
+            p.ib[p.n++] = indexBytes;
+            indexBytes += idx.size() * 4;
+        };
+        describe(m.opaque, true);
+        describe(m.alpha, false);
+        if (!p.n) continue;
+        D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS in = {};
+        in.Type = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL;
+        in.DescsLayout = D3D12_ELEMENTS_LAYOUT_ARRAY;
+        in.Flags = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PREFER_FAST_TRACE;
+        in.NumDescs = p.n;
+        in.pGeometryDescs = p.geos;
+        D3D12_RAYTRACING_ACCELERATION_STRUCTURE_PREBUILD_INFO info = {};
+        dev5->GetRaytracingAccelerationStructurePrebuildInfo(&in, &info);
+        p.result = AlignAs(info.ResultDataMaxSizeInBytes);
+        p.scratch = AlignAs(info.ScratchDataSizeInBytes);
+        scratchMax = (std::max)(scratchMax, p.scratch);
+        scratchTotal += p.scratch;
+    }
+    if (!indexBytes) { b.error = "no triangles"; return false; }
+
+    if (FAILED(device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_COMPUTE, IID_PPV_ARGS(&b.alloc))) ||
+        FAILED(device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_COMPUTE, b.alloc.Get(), nullptr,
+                                             IID_PPV_ARGS(&b.list))))
+    {
+        b.error = "no command list";
+        return false;
+    }
+    b.list->SetName(L"ngg BLAS builds");
+
+    // ---- one upload for every index of the batch
+    ComPtr<ID3D12Resource> indices = MakeBuffer(device, indexBytes, D3D12_HEAP_TYPE_UPLOAD,
+                                                D3D12_RESOURCE_STATE_GENERIC_READ);
+    uint8_t* mapped = nullptr;
+    D3D12_RANGE none = { 0, 0 };
+    if (!indices || FAILED(indices->Map(0, &none, reinterpret_cast<void**>(&mapped))))
+    {
+        b.error = "the index upload failed";
+        return false;
+    }
+    b.keep.push_back(indices);
+
+    // ---- one scratch, reused past a barrier when a batch outgrows kScratchBytes. COMMON: buffers are created in it
+    // whatever is asked, and promote to UNORDERED_ACCESS on first use - asking for UAV only earned a validation
+    // warning per rebuild.
+    const UINT64 scratchBytes = (std::min)(scratchTotal, (std::max)(kScratchBytes, scratchMax));
+    ComPtr<ID3D12Resource> scratch = MakeBuffer(device, scratchBytes, D3D12_HEAP_TYPE_DEFAULT,
+                                                D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
+    if (!scratch) { indices->Unmap(0, nullptr); b.error = "the scratch allocation failed"; return false; }
+    b.keep.push_back(scratch);
+
+    // ---- results: the small ones packed into arenas, each big one in a buffer of its own
+    ComPtr<ID3D12Resource> arena;
+    UINT64 arenaUsed = 0, arenaSize = 0, scratchUsed = 0;
+    auto openArena = [&](size_t from) {
+        arenaSize = 0;
+        for (size_t j = from; j < plans.size(); ++j)
+        {
+            if (!plans[j].n || plans[j].result >= kOwnBufferBytes) continue;
+            if (arenaSize + plans[j].result > kArenaBytes) break;
+            arenaSize += plans[j].result;
+        }
+        arena = MakeBuffer(device, (std::max)(arenaSize, UINT64(256)), D3D12_HEAP_TYPE_DEFAULT,
+                           D3D12_RESOURCE_STATE_RAYTRACING_ACCELERATION_STRUCTURE,
+                           D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
+        arenaUsed = 0;
+    };
+
+    for (size_t i = 0; i < newMeshes.size(); ++i)
+    {
+        Scene::RtMeshData& m = newMeshes[i];
+        Plan& p = plans[i];
+        if (!p.n) continue;
+        for (UINT g = 0; g < p.n; ++g)
+        {
+            memcpy(mapped + p.ib[g], p.src[g]->data(), p.src[g]->size() * 4);
+            p.geos[g].Triangles.IndexBuffer = indices->GetGPUVirtualAddress() + p.ib[g];
+        }
+
+        BlasEntry e;
+        if (p.result >= kOwnBufferBytes)
+            e.as = MakeBuffer(device, p.result, D3D12_HEAP_TYPE_DEFAULT,
+                              D3D12_RESOURCE_STATE_RAYTRACING_ACCELERATION_STRUCTURE,
+                              D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
+        else
+        {
+            if (!arena || arenaUsed + p.result > arenaSize) openArena(i);
+            e.as = arena;
+            e.offset = arenaUsed;
+            arenaUsed += p.result;
+        }
+        if (!e.as) { b.error = "a BLAS allocation failed"; continue; }
+
+        if (scratchUsed + p.scratch > scratchBytes)
+        {
+            D3D12_RESOURCE_BARRIER ub = {};
+            ub.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
+            ub.UAV.pResource = scratch.Get();
+            b.list->ResourceBarrier(1, &ub);
+            scratchUsed = 0;
+        }
+        D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_DESC bd = {};
+        bd.Inputs.Type = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL;
+        bd.Inputs.DescsLayout = D3D12_ELEMENTS_LAYOUT_ARRAY;
+        // PREFER_FAST_TRACE: a BLAS is built when its mesh appears and then traced for as long as it exists - moving
+        // it is the TLAS's job.
+        bd.Inputs.Flags = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PREFER_FAST_TRACE;
+        bd.Inputs.NumDescs = p.n;
+        bd.Inputs.pGeometryDescs = p.geos;
+        bd.ScratchAccelerationStructureData = scratch->GetGPUVirtualAddress() + scratchUsed;
+        bd.DestAccelerationStructureData = e.Va();
+        b.list->BuildRaytracingAccelerationStructure(&bd, 0, nullptr);
+        scratchUsed += p.scratch;
+
+        e.alpha.swap(m.alpha);
+        e.alphaMat.swap(m.alphaMat);
+        e.alphaPlant.swap(m.alphaPlant);
+        if (e.alphaPlant.size() != e.alphaMat.size()) e.alphaPlant.assign(e.alphaMat.size(), 0xFFFFFFFFu);
+        e.vbSelect = m.vbSelect;
+        e.vertexBase = m.vertexBase;
+        b.bytes += p.result;
+        b.triangles += (uint32_t)((m.opaque.size() + e.alpha.size()) / 3);
+        b.entries.emplace_back(m.key, std::move(e));
+    }
+    indices->Unmap(0, nullptr);
+    if (FAILED(b.list->Close()) || b.entries.empty())
+    {
+        b.error = "the builds could not be recorded";
+        return false;
+    }
+    b.scratchBytes = scratchBytes;
+    ID3D12CommandList* lists[] = { b.list.Get() };
+    {
+        std::lock_guard<std::mutex> lock(m_submitLock);   // fence values in the order the queue sees them
+        m_buildQueue->ExecuteCommandLists(1, lists);
+        b.fence = ++m_buildFenceValue;
+        m_buildQueue->Signal(m_buildFence.Get(), b.fence);
+    }
+    b.recordMs = MsSince(t0);
+    return true;
+}
+
+void Rt::StartBatches()
+{
+    for (auto& p : m_batches)
+    {
+        BlasBatch& b = *p;
+        if (b.started) continue;
+        BlasBatch* raw = &b;
+        b.work = std::async(std::launch::async, [this, raw] { return RecordBatch(*raw, raw->device, raw->stride); });
+        b.started = true;
+    }
+}
+
+bool Rt::PrepareTargets(ID3D12Device* device, UINT width, UINT height)
+{
+    if (!Ready() || !width || !height) return false;
+    if (width == m_width && height == m_height && m_result) return true;
+    LARGE_INTEGER t0;
+    QueryPerformanceCounter(&t0);
+    // Without a heap yet the views wait for the first Rebuild, which writes them into the heap it makes.
+    if (!CreateTargets(device, width, height)) { m_width = m_height = 0; return false; }
+    Log("rt: targets %ux%u made ahead of the first ray (%.0f ms)", width, height, MsSince(t0));
+    return true;
+}
+
+bool Rt::Land()
+{
+    if (m_batches.empty()) return false;
+    bool landed = false;
+    for (auto it = m_batches.begin(); it != m_batches.end(); )
+    {
+        BlasBatch& b = **it;
+        if (!b.started) { StartBatches(); ++b.frames; ++it; continue; }   // (the renderer starts them: StartBatches)
+        if (b.work.valid())
+        {
+            if (b.work.wait_for(std::chrono::seconds(0)) != std::future_status::ready) { ++b.frames; ++it; continue; }
+            b.ok = b.work.get();
+            Log("rt: %zu BLAS(es) %s (%u triangles, %.1f MB, scratch %.1f MB): recorded in %.1f ms on their thread%s%s",
+                b.entries.size(), b.ok ? "submitted" : "NOT submitted", b.triangles, b.bytes / 1048576.0,
+                b.scratchBytes / 1048576.0, b.recordMs, b.error ? " - " : "", b.error ? b.error : "");
+        }
+        if (b.ok && m_buildFence->GetCompletedValue() < b.fence) { ++b.frames; ++it; continue; }
+        if (b.ok)
+        {
+            for (auto& e : b.entries)
+            {
+                m_appeared.push_back(e.first);
+                m_blas[e.first] = std::move(e.second);
+            }
+            Log("rt: %zu BLAS(es) built, in the TLAS %.0f ms / %u frame(s) after the submit", b.entries.size(),
+                MsSince(b.submitted), b.frames + 1);
+        }
+        else    // not tried again until the next scene: a failure every frame would be a submit every frame
+            m_failedKeys.insert(m_failedKeys.end(), b.keys.begin(), b.keys.end());
+        it = m_batches.erase(it);
+        landed = true;
+    }
+    return landed;
+}
+
 bool Rt::Rebuild(Device& dev, const Scene::RtShared& shared,
-                 std::vector<Scene::RtMeshData>& newMeshes,
                  const std::vector<uint64_t>& liveKeys,
                  const std::vector<Scene::RtInstanceDesc>& instances)
 {
     if (!Ready() || !shared.staticVb) return false;
-    ComPtr<ID3D12Device5> dev5;
-    if (FAILED(dev.device.As(&dev5))) return false;
-
-    LARGE_INTEGER t0, t1, hz;
+    LARGE_INTEGER t0;
     QueryPerformanceCounter(&t0);
-    QueryPerformanceFrequency(&hz);
 
-    // ---- drop the BLASes nothing uses any more
+    // ---- drop the BLASes nothing uses any more - except a superseded WORLD while its successor builds: hiding or
+    // first moving a static object rebuilds the world's BLAS, and dropping the old one at once would take the whole
+    // stage out of the rays for the frames the new one takes. It keeps its identity instance until then. (A new
+    // scene is not this case: ForgetScene has emptied the cache.)
+    bool worldBuilding = false;
+    for (uint64_t k : liveKeys)
+        if (Scene::IsRtWorldKey(k) && !m_blas.count(k) && IsBuilding(k)) worldBuilding = true;
+    std::vector<uint64_t> held;
     for (auto it = m_blas.begin(); it != m_blas.end(); )
     {
-        if (std::find(liveKeys.begin(), liveKeys.end(), it->first) == liveKeys.end())
-            it = m_blas.erase(it);
-        else
-            ++it;
-    }
-
-    // ---- build the new ones, in one list. Each has its own scratch, so they
-    // need no barriers between them; all scratch dies after the wait.
-    std::vector<ComPtr<ID3D12Resource>> keep;      // uploads + scratch, alive until EndAndWait
-    UINT64 blasBytes = 0;
-    uint32_t builtTris = 0;
-    ComPtr<ID3D12GraphicsCommandList4> list4;
-    if (!newMeshes.empty())
-    {
-        if (!dev.Begin()) return false;
-        if (FAILED(dev.list.As(&list4))) { dev.EndAndWait(); return false; }
-
-        for (Scene::RtMeshData& m : newMeshes)
+        if (std::find(liveKeys.begin(), liveKeys.end(), it->first) != liveKeys.end()) { ++it; continue; }
+        if (worldBuilding && Scene::IsRtWorldKey(it->first))
         {
-            ComPtr<ID3D12Resource> ibo = m.opaque.empty() ? nullptr :
-                MakeUploadBuffer(dev.device.Get(), m.opaque.data(), m.opaque.size() * 4);
-            ComPtr<ID3D12Resource> iba = m.alpha.empty() ? nullptr :
-                MakeUploadBuffer(dev.device.Get(), m.alpha.data(), m.alpha.size() * 4);
-            keep.push_back(ibo); keep.push_back(iba);
-
-            // Opaque geometry commits on its own; alpha-tested geometry surfaces
-            // as a candidate for the any-hit test. PrimitiveIndex counts per
-            // geometry, which is what lets the alpha one index from 0.
-            D3D12_RAYTRACING_GEOMETRY_DESC geos[2] = {};
-            UINT n = 0;
-            auto describe = [&](ID3D12Resource* ib, size_t count, bool opaque) {
-                if (!ib || !count) return;
-                D3D12_RAYTRACING_GEOMETRY_DESC& g = geos[n++];
-                g.Type = D3D12_RAYTRACING_GEOMETRY_TYPE_TRIANGLES;
-                g.Flags = opaque ? D3D12_RAYTRACING_GEOMETRY_FLAG_OPAQUE : D3D12_RAYTRACING_GEOMETRY_FLAG_NONE;
-                g.Triangles.VertexBuffer.StartAddress = m.vb->GetGPUVirtualAddress() + m.vbOffset;
-                g.Triangles.VertexBuffer.StrideInBytes = shared.stride;
-                g.Triangles.VertexCount = m.vertexCount;
-                g.Triangles.VertexFormat = DXGI_FORMAT_R32G32B32_FLOAT;
-                g.Triangles.IndexBuffer = ib->GetGPUVirtualAddress();
-                g.Triangles.IndexCount = (UINT)count;
-                g.Triangles.IndexFormat = DXGI_FORMAT_R32_UINT;
-            };
-            describe(ibo.Get(), m.opaque.size(), true);
-            describe(iba.Get(), m.alpha.size(), false);
-            if (!n) continue;
-
-            D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS in = {};
-            in.Type = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL;
-            in.DescsLayout = D3D12_ELEMENTS_LAYOUT_ARRAY;
-            // PREFER_FAST_TRACE: a BLAS is built when its mesh appears and then
-            // traced for as long as it exists - moving it is the TLAS's job.
-            in.Flags = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PREFER_FAST_TRACE;
-            in.NumDescs = n;
-            in.pGeometryDescs = geos;
-            D3D12_RAYTRACING_ACCELERATION_STRUCTURE_PREBUILD_INFO info = {};
-            dev5->GetRaytracingAccelerationStructurePrebuildInfo(&in, &info);
-
-            BlasEntry e;
-            e.as = MakeBuffer(dev.device.Get(), info.ResultDataMaxSizeInBytes, D3D12_HEAP_TYPE_DEFAULT,
-                              D3D12_RESOURCE_STATE_RAYTRACING_ACCELERATION_STRUCTURE,
-                              D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
-            // COMMON: buffers are created in it whatever is asked, and promote
-            // to UNORDERED_ACCESS on first use - asking for UAV only earned a
-            // validation warning per rebuild.
-            ComPtr<ID3D12Resource> scratch = MakeBuffer(dev.device.Get(), info.ScratchDataSizeInBytes,
-                              D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_COMMON,
-                              D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
-            if (!e.as || !scratch) { Log("rt: BLAS allocation failed"); continue; }
-            keep.push_back(scratch);
-
-            D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_DESC bd = {};
-            bd.Inputs = in;
-            bd.ScratchAccelerationStructureData = scratch->GetGPUVirtualAddress();
-            bd.DestAccelerationStructureData = e.as->GetGPUVirtualAddress();
-            list4->BuildRaytracingAccelerationStructure(&bd, 0, nullptr);
-
-            e.alpha.swap(m.alpha);
-            e.alphaMat.swap(m.alphaMat);
-            e.alphaPlant.swap(m.alphaPlant);
-            if (e.alphaPlant.size() != e.alphaMat.size()) e.alphaPlant.assign(e.alphaMat.size(), 0xFFFFFFFFu);
-            e.vbSelect = m.vbSelect;
-            e.vertexBase = m.vertexBase;
-            blasBytes += info.ResultDataMaxSizeInBytes;
-            builtTris += (uint32_t)((m.opaque.size() + e.alpha.size()) / 3);
-            m_blas[m.key] = std::move(e);
+            held.push_back(it->first);
+            ++it;
+            continue;
         }
-        dev.EndAndWait();
+        it = m_blas.erase(it);
     }
+    std::vector<uint64_t> published;              // what the TLAS can hold now: built and live (and a held world)
+    for (uint64_t k : liveKeys)
+        if (m_blas.count(k)) published.push_back(k);
+    std::sort(published.begin(), published.end());
+    m_publishedKeys = published;
+    published.insert(published.end(), held.begin(), held.end());
 
     // ---- the shared alpha index buffer and per-triangle materials: every
     // live mesh's alpha triangles end to end, each BLAS knowing where its own
     // start. Rebuilt whenever the mesh set changes, which is not per drag.
     std::vector<uint32_t> alpha, alphaMat, alphaPlant;
-    for (uint64_t k : liveKeys)
+    for (uint64_t k : published)
     {
         auto it = m_blas.find(k);
         if (it == m_blas.end()) continue;
@@ -1474,9 +820,30 @@ bool Rt::Rebuild(Device& dev, const Scene::RtShared& shared,
         alphaPlant.insert(alphaPlant.end(), it->second.alphaPlant.begin(), it->second.alphaPlant.end());
     }
     if (alpha.empty()) { alpha.assign(3, 0); alphaMat.assign(1, 0); alphaPlant.assign(1, 0xFFFFFFFFu); }   // never an empty view
-    m_triPlant = MakeUploadBuffer(dev.device.Get(), alphaPlant.data(), alphaPlant.size() * 4);
-    m_ibAlpha = MakeUploadBuffer(dev.device.Get(), alpha.data(), alpha.size() * 4);
-    m_triMaterial = MakeUploadBuffer(dev.device.Get(), alphaMat.data(), alphaMat.size() * 4);
+    // Written into the buffers the last Rebuild made when they are big enough (a third to spare when made): a car's
+    // BLASes landing then allocates nothing here. Safe to overwrite - the frames are synchronous, and this runs before
+    // the frame's first ray.
+    auto write = [&](ComPtr<ID3D12Resource>& buf, const std::vector<uint32_t>& v) {
+        const size_t bytes = v.size() * 4;
+        void* p = nullptr;
+        D3D12_RANGE none = { 0, 0 };
+        if (buf && buf->GetDesc().Width >= bytes && SUCCEEDED(buf->Map(0, &none, &p)))
+        {
+            memcpy(p, v.data(), bytes);
+            buf->Unmap(0, nullptr);
+            return;
+        }
+        buf = MakeBuffer(dev.device.Get(), bytes + bytes / 3, D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_STATE_GENERIC_READ);
+        if (buf && SUCCEEDED(buf->Map(0, &none, &p)))
+        {
+            memcpy(p, v.data(), bytes);
+            buf->Unmap(0, nullptr);
+        }
+    };
+    write(m_triPlant, alphaPlant);
+    write(m_ibAlpha, alpha);
+    write(m_triMaterial, alphaMat);
+    if (!m_triPlant || !m_ibAlpha || !m_triMaterial) return false;
     m_materials = shared.materials;
     m_vertexStride = shared.stride;
     m_staticVb = shared.staticVb;
@@ -1489,7 +856,9 @@ bool Rt::Rebuild(Device& dev, const Scene::RtShared& shared,
     hd.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
     m_heap.Reset();
     if (FAILED(dev.device->CreateDescriptorHeap(&hd, IID_PPV_ARGS(&m_heap)))) return false;
-    m_width = m_height = 0;        // the output UAVs live in the new heap: recreate on first Trace
+    // The outputs' views live in the heap: into the new one, with the targets and their histories kept (a new mesh
+    // used to drop every history on the screen). Without targets yet, the first Trace makes them.
+    if (!m_result || !WriteTargetViews(dev.device.Get())) m_width = m_height = 0;
 
     auto slot = [&](UINT i) {
         D3D12_CPU_DESCRIPTOR_HANDLE h = m_heap->GetCPUDescriptorHandleForHeapStart();
@@ -1536,16 +905,34 @@ bool Rt::Rebuild(Device& dev, const Scene::RtShared& shared,
         dev.device->CreateShaderResourceView(r, &sd, slot(kSlotTextures + (UINT)i));
     }
 
-    const bool ok = UpdateInstances(dev, instances);
+    std::vector<Scene::RtInstanceDesc> all = instances;
+    for (uint64_t k : held) all.push_back(Scene::RtInstanceDesc{ k });
+    const bool ok = UpdateInstances(dev, all);
 
-    QueryPerformanceCounter(&t1);
-    Log("rt: %zu BLAS(es) built (%u triangles, %.1f MB) in %.0f ms; %zu live, %zu instance(s), "
-        "%zu alpha-tested triangles for the any-hit test, %zu textures",
-        newMeshes.size(), builtTris, blasBytes / 1048576.0,
-        1000.0 * double(t1.QuadPart - t0.QuadPart) / double(hz.QuadPart),
-        m_blas.size(), instances.size(), alphaMat.size(), shared.textures.size());
+    Log("rt: published %zu BLAS(es)%s: %u instance(s) in the TLAS, %zu alpha-tested triangles for the any-hit test, "
+        "%zu textures - %.1f ms", published.size(), held.empty() ? "" : " (the old world kept while the new builds)",
+        m_instanceCount, alphaMat.size(), shared.textures.size(), MsSince(t0));
     return ok;
 }
+
+void Rt::FollowDynamicPool(ID3D12Device* dev, ID3D12Resource* dynVb, uint32_t dynVertexCount)
+{
+    if (!m_heap || !m_staticVb) return;
+    ID3D12Resource* r = dynVb && dynVertexCount ? dynVb : m_staticVb;   // never a holed table (Rebuild)
+    D3D12_SHADER_RESOURCE_VIEW_DESC sd = {};
+    sd.Format = DXGI_FORMAT_R32_TYPELESS;
+    sd.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
+    sd.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    sd.Buffer.NumElements = (UINT)(r->GetDesc().Width / 4);
+    sd.Buffer.Flags = D3D12_BUFFER_SRV_FLAG_RAW;
+    D3D12_CPU_DESCRIPTOR_HANDLE h = m_heap->GetCPUDescriptorHandleForHeapStart();
+    h.ptr += (SIZE_T)kSlotDynVerts * m_stride;
+    dev->CreateShaderResourceView(r, &sd, h);
+    m_dynVb = dynVb;
+}
+
+// How far away a newly built mesh "was" last frame (UpdateInstances): far beyond any penumbra, so no history.
+constexpr float kRtAppearedFrom = 1.0e4f;
 
 // The TLAS and the instance table only. What a drag costs: a handful of
 // instances, rebuilt whole - FAST_BUILD, because it is rebuilt far more often
@@ -1569,15 +956,24 @@ bool Rt::UpdateInstances(Device& dev, const std::vector<Scene::RtInstanceDesc>& 
         id.InstanceMask = Scene::kRtMaskAll | (d.focus ? Scene::kRtMaskFocus : 0u);   // (the rays here: 0xFF, all)
         id.Flags = d.forceOpaque ? D3D12_RAYTRACING_INSTANCE_FLAG_FORCE_OPAQUE
                                  : D3D12_RAYTRACING_INSTANCE_FLAG_NONE;
-        id.AccelerationStructure = it->second.as->GetGPUVirtualAddress();
+        id.AccelerationStructure = it->second.Va();
         descs.push_back(id);
+        // A mesh whose BLAS landed since the last table (Land) is NEW to the rays: what they hit there was nothing
+        // last frame. It goes in as an occluder that was far away (kRtAppearedFrom), so Allow gives the pixels whose
+        // rays hit it no history - its shadow and AO come in at once instead of fading in over the old "unoccluded"
+        // (design 4.5). One frame: the next table (InstancesStale) is the ordinary one.
+        const bool appeared = std::find(m_appeared.begin(), m_appeared.end(), d.mesh) != m_appeared.end();
         InstInfo in = { it->second.triBase, it->second.vertexBase, it->second.vbSelect, d.material,
-                        d.moved ? 1u : 0u };
+                        d.moved || appeared ? 1u : 0u };
         for (int r = 0; r < 4; ++r)                  // the rows' xyz (row vectors)
             for (int c = 0; c < 3; ++c) in.was[r * 3 + c] = d.prevXform[r * 4 + c];
+        if (appeared)
+            for (int c = 0; c < 3; ++c) in.was[9 + c] += kRtAppearedFrom;
         info.push_back(in);
     }
-    if (descs.empty()) { m_tlas.Reset(); return false; }
+    m_appearedFlagged = !m_appeared.empty();
+    m_appeared.clear();
+    if (descs.empty()) { m_tlas.Reset(); m_instanceCount = 0; return false; }
 
     m_instances = MakeUploadBuffer(dev.device.Get(), descs.data(), descs.size() * sizeof(descs[0]));
     m_instInfo  = MakeUploadBuffer(dev.device.Get(), info.data(), info.size() * sizeof(info[0]));
@@ -1651,234 +1047,98 @@ bool Rt::CreateTargets(ID3D12Device* dev, UINT width, UINT height)
     d.Format = DXGI_FORMAT_R16_FLOAT;
     d.SampleDesc.Count = 1;
     d.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
-
-    m_result.Reset();
-    if (FAILED(dev->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &d,
-                                            D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
-                                            nullptr, IID_PPV_ARGS(&m_result))))
-        return false;
-
-    D3D12_UNORDERED_ACCESS_VIEW_DESC uv = {};
-    uv.Format = DXGI_FORMAT_R16_FLOAT;
-    uv.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
-    D3D12_CPU_DESCRIPTOR_HANDLE h = m_heap->GetCPUDescriptorHandleForHeapStart();
-    h.ptr += (SIZE_T)kSlotOut * m_stride;
-    dev->CreateUnorderedAccessView(m_result.Get(), nullptr, &uv, h);
-
-    // Raw visibility as an SRV, for the denoiser - twice, at the head of each
-    // [raw, hist] pair.
-    {
-        D3D12_SHADER_RESOURCE_VIEW_DESC rs = {};
-        rs.Format = DXGI_FORMAT_R16_FLOAT;
-        rs.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
-        rs.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-        rs.Texture2D.MipLevels = 1;
-        D3D12_CPU_DESCRIPTOR_HANDLE a = m_heap->GetCPUDescriptorHandleForHeapStart();
-        a.ptr += (SIZE_T)kSlotPair0 * m_stride;
-        dev->CreateShaderResourceView(m_result.Get(), &rs, a);
-        a = m_heap->GetCPUDescriptorHandleForHeapStart();
-        a.ptr += (SIZE_T)kSlotPair1 * m_stride;
-        dev->CreateShaderResourceView(m_result.Get(), &rs, a);
-    }
-
-    // The filtered history, two of them, RGBA16F: filtered visibility, the
-    // NDC depth it was computed at - so next frame can tell whether a
-    // reprojected sample landed on the same surface - and two flags (a ray
-    // hit a moved object; the pixel is a moved object's), see kDenoiseSrc.
+    // The filtered histories, RGBA16F: filtered visibility, the NDC depth it was computed at - so next frame can tell
+    // whether a reprojected sample landed on the same surface - and two flags (a ray hit a moved object; the pixel is
+    // a moved object's), see rt_denoise.hlsl.
     D3D12_RESOURCE_DESC hd2 = d;
     hd2.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
+
+    auto make = [&](const D3D12_RESOURCE_DESC& desc, D3D12_RESOURCE_STATES state, ComPtr<ID3D12Resource>& out) {
+        out.Reset();
+        return SUCCEEDED(dev->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &desc, state, nullptr,
+                                                      IID_PPV_ARGS(&out)));
+    };
+    const D3D12_RESOURCE_STATES uav = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+    const D3D12_RESOURCE_STATES srv = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+    if (!make(d, uav, m_result) || !make(d, uav, m_aoResult) || !make(d, uav, m_lightResult) ||
+        !make(d, uav, m_aoWide) || !make(d, uav, m_lightWide))
+        return false;
     for (int i = 0; i < 2; ++i)
     {
-        m_hist[i].Reset();
-        if (FAILED(dev->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &hd2,
-                                                D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
-                                                nullptr, IID_PPV_ARGS(&m_hist[i]))))
+        if (!make(hd2, srv, m_hist[i]) || !make(hd2, srv, m_aoHist[i]) || !make(hd2, srv, m_lightHist[i]))
             return false;
-        m_histState[i] = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
-
-        D3D12_SHADER_RESOURCE_VIEW_DESC hs = {};
-        hs.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
-        hs.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
-        hs.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-        hs.Texture2D.MipLevels = 1;
-        D3D12_CPU_DESCRIPTOR_HANDLE sh = m_heap->GetCPUDescriptorHandleForHeapStart();
-        sh.ptr += (SIZE_T)((i == 0 ? kSlotPair0 : kSlotPair1) + 1) * m_stride;
-        dev->CreateShaderResourceView(m_hist[i].Get(), &hs, sh);
-
-        D3D12_UNORDERED_ACCESS_VIEW_DESC hu = {};
-        hu.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
-        hu.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
-        D3D12_CPU_DESCRIPTOR_HANDLE uh = m_heap->GetCPUDescriptorHandleForHeapStart();
-        uh.ptr += (SIZE_T)(i == 0 ? kSlotHistUav0 : kSlotHistUav1) * m_stride;
-        dev->CreateUnorderedAccessView(m_hist[i].Get(), nullptr, &hu, uh);
+        m_histState[i] = m_aoHistState[i] = m_lightHistState[i] = srv;
     }
-    m_histValid = false;
-
-    // ---- the same again for ambient occlusion ------------------------------
-    m_aoResult.Reset();
-    if (FAILED(dev->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &d,
-                                            D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
-                                            nullptr, IID_PPV_ARGS(&m_aoResult))))
-        return false;
-    {
-        D3D12_UNORDERED_ACCESS_VIEW_DESC au = {};
-        au.Format = DXGI_FORMAT_R16_FLOAT;
-        au.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
-        D3D12_CPU_DESCRIPTOR_HANDLE ah = m_heap->GetCPUDescriptorHandleForHeapStart();
-        ah.ptr += (SIZE_T)kSlotAoOut * m_stride;
-        dev->CreateUnorderedAccessView(m_aoResult.Get(), nullptr, &au, ah);
-
-        D3D12_UNORDERED_ACCESS_VIEW_DESC acv = {};
-        acv.ViewDimension = D3D12_UAV_DIMENSION_BUFFER;
-        acv.Buffer.NumElements = 4;
-        acv.Buffer.StructureByteStride = sizeof(uint32_t);
-        ah = m_heap->GetCPUDescriptorHandleForHeapStart();
-        ah.ptr += (SIZE_T)kSlotAoCounters * m_stride;
-        dev->CreateUnorderedAccessView(m_aoCounters.Get(), nullptr, &acv, ah);
-
-        D3D12_SHADER_RESOURCE_VIEW_DESC rs = {};
-        rs.Format = DXGI_FORMAT_R16_FLOAT;
-        rs.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
-        rs.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-        rs.Texture2D.MipLevels = 1;
-        ah = m_heap->GetCPUDescriptorHandleForHeapStart();
-        ah.ptr += (SIZE_T)kSlotAoPair0 * m_stride;
-        dev->CreateShaderResourceView(m_aoResult.Get(), &rs, ah);
-        ah = m_heap->GetCPUDescriptorHandleForHeapStart();
-        ah.ptr += (SIZE_T)kSlotAoPair1 * m_stride;
-        dev->CreateShaderResourceView(m_aoResult.Get(), &rs, ah);
-    }
-    for (int i = 0; i < 2; ++i)
-    {
-        m_aoHist[i].Reset();
-        if (FAILED(dev->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &hd2,
-                                                D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
-                                                nullptr, IID_PPV_ARGS(&m_aoHist[i]))))
-            return false;
-        m_aoHistState[i] = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
-
-        D3D12_SHADER_RESOURCE_VIEW_DESC hs = {};
-        hs.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
-        hs.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
-        hs.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-        hs.Texture2D.MipLevels = 1;
-        D3D12_CPU_DESCRIPTOR_HANDLE sh = m_heap->GetCPUDescriptorHandleForHeapStart();
-        sh.ptr += (SIZE_T)((i == 0 ? kSlotAoPair0 : kSlotAoPair1) + 1) * m_stride;
-        dev->CreateShaderResourceView(m_aoHist[i].Get(), &hs, sh);
-
-        D3D12_UNORDERED_ACCESS_VIEW_DESC hu = {};
-        hu.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
-        hu.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
-        D3D12_CPU_DESCRIPTOR_HANDLE uh = m_heap->GetCPUDescriptorHandleForHeapStart();
-        uh.ptr += (SIZE_T)(i == 0 ? kSlotAoHistUav0 : kSlotAoHistUav1) * m_stride;
-        dev->CreateUnorderedAccessView(m_aoHist[i].Get(), nullptr, &hu, uh);
-    }
-    m_aoHistValid = false;
-
-    // ---- and again for the local lights (no wide pass) ----------------------
-    m_lightResult.Reset();
-    if (FAILED(dev->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &d,
-                                            D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
-                                            nullptr, IID_PPV_ARGS(&m_lightResult))))
-        return false;
-    {
-        D3D12_UNORDERED_ACCESS_VIEW_DESC lu = {};
-        lu.Format = DXGI_FORMAT_R16_FLOAT;
-        lu.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
-        D3D12_CPU_DESCRIPTOR_HANDLE lh = m_heap->GetCPUDescriptorHandleForHeapStart();
-        lh.ptr += (SIZE_T)kSlotLightOut * m_stride;
-        dev->CreateUnorderedAccessView(m_lightResult.Get(), nullptr, &lu, lh);
-
-        D3D12_UNORDERED_ACCESS_VIEW_DESC lcv = {};
-        lcv.ViewDimension = D3D12_UAV_DIMENSION_BUFFER;
-        lcv.Buffer.NumElements = 4;
-        lcv.Buffer.StructureByteStride = sizeof(uint32_t);
-        lh = m_heap->GetCPUDescriptorHandleForHeapStart();
-        lh.ptr += (SIZE_T)kSlotLightCounters * m_stride;
-        dev->CreateUnorderedAccessView(m_lightCounters.Get(), nullptr, &lcv, lh);
-
-        D3D12_SHADER_RESOURCE_VIEW_DESC rs = {};
-        rs.Format = DXGI_FORMAT_R16_FLOAT;
-        rs.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
-        rs.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-        rs.Texture2D.MipLevels = 1;
-        lh = m_heap->GetCPUDescriptorHandleForHeapStart();
-        lh.ptr += (SIZE_T)kSlotLightPair0 * m_stride;
-        dev->CreateShaderResourceView(m_lightResult.Get(), &rs, lh);
-        lh = m_heap->GetCPUDescriptorHandleForHeapStart();
-        lh.ptr += (SIZE_T)kSlotLightPair1 * m_stride;
-        dev->CreateShaderResourceView(m_lightResult.Get(), &rs, lh);
-    }
-    for (int i = 0; i < 2; ++i)
-    {
-        m_lightHist[i].Reset();
-        if (FAILED(dev->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &hd2,
-                                                D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
-                                                nullptr, IID_PPV_ARGS(&m_lightHist[i]))))
-            return false;
-        m_lightHistState[i] = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
-
-        D3D12_SHADER_RESOURCE_VIEW_DESC hs = {};
-        hs.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
-        hs.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
-        hs.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-        hs.Texture2D.MipLevels = 1;
-        D3D12_CPU_DESCRIPTOR_HANDLE sh = m_heap->GetCPUDescriptorHandleForHeapStart();
-        sh.ptr += (SIZE_T)((i == 0 ? kSlotLightPair0 : kSlotLightPair1) + 1) * m_stride;
-        dev->CreateShaderResourceView(m_lightHist[i].Get(), &hs, sh);
-
-        D3D12_UNORDERED_ACCESS_VIEW_DESC hu = {};
-        hu.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
-        hu.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
-        D3D12_CPU_DESCRIPTOR_HANDLE uh = m_heap->GetCPUDescriptorHandleForHeapStart();
-        uh.ptr += (SIZE_T)(i == 0 ? kSlotLightHistUav0 : kSlotLightHistUav1) * m_stride;
-        dev->CreateUnorderedAccessView(m_lightHist[i].Get(), nullptr, &hu, uh);
-    }
-    m_lightHistValid = false;
-
-    // The AO's wide pass output: visibility only, read by the scene like the
-    // histories (its SRV follows this format).
-    m_aoWide.Reset();
-    if (FAILED(dev->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &d,
-                                            D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
-                                            nullptr, IID_PPV_ARGS(&m_aoWide))))
-        return false;
-    m_aoWideState = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
-    {
-        D3D12_UNORDERED_ACCESS_VIEW_DESC wu = {};
-        wu.Format = DXGI_FORMAT_R16_FLOAT;
-        wu.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
-        D3D12_CPU_DESCRIPTOR_HANDLE wh = m_heap->GetCPUDescriptorHandleForHeapStart();
-        wh.ptr += (SIZE_T)kSlotAoWideUav * m_stride;
-        dev->CreateUnorderedAccessView(m_aoWide.Get(), nullptr, &wu, wh);
-    }
-    // And the local lights' (the same pass, the same format).
-    m_lightWide.Reset();
-    if (FAILED(dev->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &d,
-                                            D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
-                                            nullptr, IID_PPV_ARGS(&m_lightWide))))
-        return false;
-    m_lightWideState = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
-    {
-        D3D12_UNORDERED_ACCESS_VIEW_DESC wu = {};
-        wu.Format = DXGI_FORMAT_R16_FLOAT;
-        wu.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
-        D3D12_CPU_DESCRIPTOR_HANDLE wh = m_heap->GetCPUDescriptorHandleForHeapStart();
-        wh.ptr += (SIZE_T)kSlotLightWideUav * m_stride;
-        dev->CreateUnorderedAccessView(m_lightWide.Get(), nullptr, &wu, wh);
-    }
-
-    D3D12_UNORDERED_ACCESS_VIEW_DESC cv = {};
-    cv.ViewDimension = D3D12_UAV_DIMENSION_BUFFER;
-    cv.Buffer.NumElements = 4;
-    cv.Buffer.StructureByteStride = sizeof(uint32_t);
-    h = m_heap->GetCPUDescriptorHandleForHeapStart();
-    h.ptr += (SIZE_T)kSlotCounters * m_stride;
-    dev->CreateUnorderedAccessView(m_counters.Get(), nullptr, &cv, h);
+    m_aoWideState = m_lightWideState = uav;
+    m_histValid = m_aoHistValid = m_lightHistValid = false;
+    // Without a heap yet (PrepareTargets before the first Rebuild), Rebuild writes the views.
+    if (m_heap && !WriteTargetViews(dev)) return false;
 
     m_width = width;
     m_height = height;
     m_resultReadable = false;
+    return true;
+}
+
+bool Rt::WriteTargetViews(ID3D12Device* dev)
+{
+    if (!m_heap || !m_result) return false;
+    auto at = [&](UINT slot) {
+        D3D12_CPU_DESCRIPTOR_HANDLE h = m_heap->GetCPUDescriptorHandleForHeapStart();
+        h.ptr += (SIZE_T)slot * m_stride;
+        return h;
+    };
+    auto uav2d = [&](ID3D12Resource* r, DXGI_FORMAT f, UINT slot) {
+        D3D12_UNORDERED_ACCESS_VIEW_DESC u = {};
+        u.Format = f;
+        u.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
+        dev->CreateUnorderedAccessView(r, nullptr, &u, at(slot));
+    };
+    auto srv2d = [&](ID3D12Resource* r, DXGI_FORMAT f, UINT slot) {
+        D3D12_SHADER_RESOURCE_VIEW_DESC v = {};
+        v.Format = f;
+        v.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+        v.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        v.Texture2D.MipLevels = 1;
+        dev->CreateShaderResourceView(r, &v, at(slot));
+    };
+    auto counters = [&](ID3D12Resource* r, UINT slot) {
+        D3D12_UNORDERED_ACCESS_VIEW_DESC c = {};
+        c.ViewDimension = D3D12_UAV_DIMENSION_BUFFER;
+        c.Buffer.NumElements = 4;
+        c.Buffer.StructureByteStride = sizeof(uint32_t);
+        dev->CreateUnorderedAccessView(r, nullptr, &c, at(slot));
+    };
+    const DXGI_FORMAT r16 = DXGI_FORMAT_R16_FLOAT, rgba16 = DXGI_FORMAT_R16G16B16A16_FLOAT;
+
+    // The sun: the raw output, and the raw visibility as an SRV for the denoiser - twice, at the head of each
+    // [raw, hist] pair - then the histories' SRVs (second in each pair) and UAVs.
+    uav2d(m_result.Get(), r16, kSlotOut);
+    srv2d(m_result.Get(), r16, kSlotPair0);
+    srv2d(m_result.Get(), r16, kSlotPair1);
+    counters(m_counters.Get(), kSlotCounters);
+    // The same again for ambient occlusion: its raw output (u0) followed by counters (u1).
+    uav2d(m_aoResult.Get(), r16, kSlotAoOut);
+    counters(m_aoCounters.Get(), kSlotAoCounters);
+    srv2d(m_aoResult.Get(), r16, kSlotAoPair0);
+    srv2d(m_aoResult.Get(), r16, kSlotAoPair1);
+    // And for the local lights.
+    uav2d(m_lightResult.Get(), r16, kSlotLightOut);
+    counters(m_lightCounters.Get(), kSlotLightCounters);
+    srv2d(m_lightResult.Get(), r16, kSlotLightPair0);
+    srv2d(m_lightResult.Get(), r16, kSlotLightPair1);
+    for (int i = 0; i < 2; ++i)
+    {
+        srv2d(m_hist[i].Get(), rgba16, (i == 0 ? kSlotPair0 : kSlotPair1) + 1);
+        uav2d(m_hist[i].Get(), rgba16, i == 0 ? kSlotHistUav0 : kSlotHistUav1);
+        srv2d(m_aoHist[i].Get(), rgba16, (i == 0 ? kSlotAoPair0 : kSlotAoPair1) + 1);
+        uav2d(m_aoHist[i].Get(), rgba16, i == 0 ? kSlotAoHistUav0 : kSlotAoHistUav1);
+        srv2d(m_lightHist[i].Get(), rgba16, (i == 0 ? kSlotLightPair0 : kSlotLightPair1) + 1);
+        uav2d(m_lightHist[i].Get(), rgba16, i == 0 ? kSlotLightHistUav0 : kSlotLightHistUav1);
+    }
+    // The wide passes' outputs (rt_ao_wide.hlsl): visibility only, read by the scene like the histories.
+    uav2d(m_aoWide.Get(), r16, kSlotAoWideUav);
+    uav2d(m_lightWide.Get(), r16, kSlotLightWideUav);
     return true;
 }
 
@@ -1897,8 +1157,14 @@ void Rt::Trace(Device& dev, ID3D12GraphicsCommandList* list, ID3D12Resource* dep
                bool ao, float aoRadius, uint32_t aoRays, UINT width, UINT height, const Lights* lights)
 {
     if (!Ready() || !HasScene() || !m_heap || !depth || !normal || !viewProj) return;
-    if ((width != m_width || height != m_height) && !CreateTargets(dev.device.Get(), width, height))
-        return;
+    if (width != m_width || height != m_height)
+    {
+        LARGE_INTEGER tt;
+        QueryPerformanceCounter(&tt);
+        const bool made = CreateTargets(dev.device.Get(), width, height);
+        Log("rt: targets %ux%u made in the frame (%.0f ms)", width, height, MsSince(tt));
+        if (!made) return;
+    }
 
     TraceCB cb = {};
     if (!Invert(viewProj, cb.invViewProj)) return;
@@ -2028,7 +1294,7 @@ void Rt::Trace(Device& dev, ID3D12GraphicsCommandList* list, ID3D12Resource* dep
     }
     if (m_timestamps) list->EndQuery(m_timestamps.Get(), D3D12_QUERY_TYPE_TIMESTAMP, 2);
 
-    // LOCAL LIGHTS: one ray per pixel to one of them (kLightMainSrc), into their own output.
+    // LOCAL LIGHTS: one ray per pixel to one of them (rt_lights.hlsl), into their own output.
     if (!doLights) m_lightHistValid = false;
     if (doLights)
     {
@@ -2055,7 +1321,7 @@ void Rt::Trace(Device& dev, ID3D12GraphicsCommandList* list, ID3D12Resource* dep
         // car's own shadow from boiling, little enough that a stale one is
         // gone in two or three frames (0.25^3 < 2%).
         dc.blendMoved = 0.25f;
-        // A pixel still on the screen: three times the samples (see kDenoiseSrc's STILL).
+        // A pixel still on the screen: three times the samples (see rt_denoise.hlsl's STILL).
         dc.blendStill = 0.95f;
         // The sun's and the lamps' samples are stratified over 4x4 tiles (StratU, StratDisc), as the AO's.
         dc.period4 = 1.0f;
@@ -2133,7 +1399,7 @@ void Rt::Trace(Device& dev, ID3D12GraphicsCommandList* list, ID3D12Resource* dep
 }
 
 // Spatial + temporal filter of one binary-per-frame ray result; see
-// kDenoiseSrc. Generic over which pair of history textures it works on, so the
+// rt_denoise.hlsl. Generic over which pair of history textures it works on, so the
 // shadow and the AO share the shader, the root signature and the reasoning.
 void Rt::Denoise(ID3D12GraphicsCommandList* list, const DenoiseCB& base, ID3D12Resource* raw,
                  UINT pair0, UINT pair1, UINT uav0, UINT uav1,
@@ -2187,7 +1453,7 @@ void Rt::Denoise(ID3D12GraphicsCommandList* list, const DenoiseCB& base, ID3D12R
     histValid = true;
 }
 
-// kAoWideSrc over this frame's denoised result (the history just written, of
+// rt_ao_wide.hlsl over this frame's denoised result (the history just written, of
 // the pair pair0/pair1), into `wide`, which then is what the scene reads.
 void Rt::Widen(ID3D12GraphicsCommandList* list, const DenoiseCB& dc,
                Microsoft::WRL::ComPtr<ID3D12Resource>* hists, D3D12_RESOURCE_STATES* histState,

@@ -1,4404 +1,2126 @@
-# NGG renderer — design record
+# NGG renderer — design
 
-> **Moved here from plugin-rbr** (`doc/rendering-overhaul-design.md`, last changed there in commit `e756b11`) on
-> 2026-10-29. The renderer now lives in W-Rally (`modules/renderer/`: ngg-core, the `.ngg` format, the WRenderer
-> module), and new renderer work is recorded **here**. "NGG design §N" in W-Rally's docs and "design N" in
-> ngg-core's comments mean the sections of this file.
->
-> Everything up to the move is kept as written, so it describes the renderer **as an RBR plugin**: the d3d9 proxy
-> (`ngg/bridge`), the IPC block, `rbrtm.exe` as launcher and host, the RBRTM plugin, and paths in plugin-rbr's tree
-> (`ngg/...`, `tools/...`). Those parts stayed in plugin-rbr and are not in W-Rally (see `imported.md`).
+NGG (New Generation Graphics) is W-Rally's renderer: a D3D12 renderer with physical sky and lighting, ray-traced
+shadows, AO and local lights, a raster fallback for GPUs without inline ray tracing, and the `.ngg` scene format.
+It lives in `modules/renderer/` and ships as `WRenderer.dll`. The game reaches it only through
+[`include/wrally/iface/renderer.h`](../include/wrally/iface/renderer.h), and the editor through
+[`renderer_edit.h`](../include/wrally/iface/renderer_edit.h). The module ABI, the game's side and the phasing are
+in [design.md](design.md). **This file is how the renderer works inside, and why.**
 
-*Original title: Modern renderer for RBR — design*
+This document describes the renderer **as it is now**. Until 2026-11 it was a running log written while NGG was an
+RBR plugin: a d3d9 proxy, a 64-bit host process, IPC, resource tagging. That history was dropped in the
+2026-11-11 rewrite and stays in git (`git log -- docs/ngg-design.md`). Older commit messages and plugin-rbr still cite the old section numbers
+("design 5.0e", "9b item 30"); [Appendix A](#appendix-a-old-section-numbers) maps them to the new ones.
 
-Status: **design draft, rev 4**. P0 in progress. `tools/interop-probe/` and `ngg/bridge/` are real, build, pass
-their checks, and RBR itself now runs on D3D12 through the proxy.
-Name: **NGG - New Generation Graphics**, following the RBR community's existing NGP
-(New Generation Physics). Deliberately not tied to any site or organisation, and deliberately
-not `RX`-adjacent - `rbr_rx` already exists and an earlier working title (`orx`) read as "o-RX".
+**The decisions everything else rests on:**
 
-**Build and verify what exists so far**
-
-```
-tools/interop-probe/build-probe.ps1     # 17 checks: cross-process D3D12<->D3D9 interop (1.2)
-ngg/build-ngg.ps1                       # builds BOTH halves (d3d9.dll + ngg-host.exe) + proxycheck
-ngg/build-ngg.ps1 -Deploy               # also installs both into the game dir
-ngg/bridge/build-bridge.ps1             # bridge only
-```
-
-`proxycheck` is the end-to-end test and needs no game: with `EnableHost=1` it drives the full path — bridge
-creates the shared texture on the 9on12 device, launches the 64-bit host, the host renders a known marker, the
-bridge unwraps the D3D9 backbuffer and copies into it — then reads the pixel back through D3D9 and verifies it.
-
-Deployed proxy is one file; remove `<gamedir>\d3d9.dll` to undo completely. It writes `ngg-bridge.log` beside
-itself, and reads an optional `ngg.ini` (`[ngg] Enable9On12=1, Log=1`).
-
-Goal: render the track environment (and later the car) ourselves with modern techniques, driven by a converted
-asset format that stores geometry + materials and **no baked lighting**, while the game keeps drawing its UI and
-menus. Target quality bar: current-generation, including believable night lighting, which the original renderer
-never had.
-
-Rev 2 incorporates these decisions:
-
-| Decision | Consequence |
+| decision | consequence |
 |---|---|
-| 64-bit address space for textures | Renderer moves **out of process** into a 64-bit host. This is the single most structural decision in the document. |
-| VR supported | Renderer owns stereo and OpenXR; the game must be driven to render the car twice per frame. |
-| No compatibility burden for legacy D3D9 plugins | We may take the D3D9 device over aggressively. Detect and **warn**, don't accommodate. |
-| Prepare for car rendering, implement later | Tagging, format and material system must cover the car from day one; only the renderer work is deferred. |
-| Unlimited named weather/daylight presets, each mapping to a chosen `.MAT` | Weather becomes a first-class authored entity, decoupled from RBR's 4 time-of-day variants. |
-| Night with realistic lights | Forces a many-light architecture (clustered), emissive materials, punctual light data in the format, and a light-authoring workflow. |
-| Encryption postponed, not closed | Container gets an envelope + key-id field now; no crypto implemented. |
-| Converter lives in Wallaby | Wallaby becomes the authoring tool: convert, override materials, place lights, preview, validate. |
-| Be ready for AI-generated tracks | `.ngg` must be a **first-class authorable format**, not merely a conversion output. Conversion becomes one producer among several (§7). |
+| **The renderer knows nothing about RBR** | RBR content reaches it as `.ngg` bytes or as models through the interface. The importers (Wallaby, the game's `.lbs` import) own every RBR fact (§2, §1.3) |
+| **No baked lighting** | RBR's vertex colours and shadow textures are discarded. All light is computed: physical sky, sun and local lights, ray-traced or raster visibility (§3, §4, §5) |
+| **Ray tracing first, raster as the fallback** | inline RayQuery (DXR 1.1, SM 6.5) gives sun shadows, AO and local-light shadows. Without it, cascades + XeGTAO + spot shadow maps fill the same slots (§4.1) |
+| **Physical units** | the sky, sun and lamps are in physical radiometric units, and auto exposure meters the result. There are no per-scene fudge factors (§3.5) |
+| **One frame for every client** | `core::Renderer::RecordFrame` owns pass order and correctness for the game, the Garage and the editor (§1.4) |
+| **Shaders in files, compiled at build** | `modules/renderer/shaders/*.hlsl` are compiled into `WRenderer.dll`, and the shipped game runs no shader compiler (§1.6) |
 
-Rev 3 settles the remaining questions:
+Sections:
 
-| Decision | Consequence |
-|---|---|
-| **DX12 Ultimate baseline** (mesh shaders, sampler feedback, hardware RT) | Deletes whole subsystems: CSM as the primary shadow path, SSAO, the CPU culling hierarchy, and most of the un-baking work (§1.8). Floor is ~RTX 20-series / RDNA2. Creates one real tension: RT vs. VR at 90 Hz (§1.8.4). |
-| **Vanilla RBR + our plugin only; no RSF** | We own device creation outright → `d3d9.dll` proxy becomes the default hooking method, and the clean D3D9On12 path is available without negotiation. Implies our own distribution/launcher. |
-| **Auto-derived lights + editor for key tracks** | P3 needs a real Wallaby light-placement mode with live preview, not just the extraction pass. |
-| **Both AI-assisted asset upgrade *and* fully generated stages** | Full generation is in scope, so the minimum-viable-LBS experiment moves onto the **critical path in P0**, and Wallaby must generate gameplay data (drive line, collision, triggers, pacenotes), not only visuals. |
-
-Rev 4 — first measurements and one scope relaxation:
-
-| Change | Consequence |
-|---|---|
-| **Interop verified by experiment** (§1.2) | Rev 3's directional constraint was avoidable. Shared textures are created by *us* on the 9on12 device; the D3D9↔D3D12 hop stays in-process. Nothing the game creates needs to be shareable. P0's #1 risk is retired. |
-| **The car is not rendered at all in early phases** | Much larger simplification than it appears: with no car in the frame there is nothing to depth-composite against, so **INTZ, the depth write-back pass, and stencil car-harmonization all leave the P1 critical path** (§2.4). P1 renders our world plus the game's UI, nothing else. |
-
-**Answering the question directly: no, keeping a D3D9 path would not close the door to D3D12 later — but given the
-decisions above, a D3D9 renderer backend is now throwaway work and should not be written at all.** D3D9 survives in
-this design only as the *interception and hand-off surface*, never as a renderer. See §1.
+1. Baseline, structure and the frame
+2. Assets: the `.ngg` format and where scenes come from
+3. Sky, atmosphere, exposure and post
+4. Shadows, ambient occlusion and ray tracing
+5. Weather, surfaces and night
+6. The car
+7. Upscaling
+8. Editor integration (Wallaby)
+9. Native and generated tracks
+10. Measuring and debugging
+11. Open work
+- Appendix A: old section numbers
 
 ---
 
-## 0. What we already have
+## 1. Baseline, structure and the frame
 
-| Asset | Where | Why it matters |
+### 1.1 Feature floor: what the code actually requires
+
+The design target is DX12 Ultimate hardware (RTX 20 / RDNA2 and newer). **What the code requires is much less, and
+everything above it is probed and degrades:** `Device::Create` makes the device at `D3D_FEATURE_LEVEL_11_0` and logs
+the ray-tracing tier and highest shader model at start-up, rather than letting a feature discover them by failing.
+
+| capability | used now | where / fallback |
 |---|---|---|
-| `ParseLBS` / `ParseCOL` detours | [RBRTMHelp.h:717](../RBRTMHelp.h#L717), [RBRTMPlugin.cpp:2414](../RBRTMPlugin.cpp#L2414) | Gives us the raw LBS stream and the track filename during load — useful for reading our sidecar. **Not** a place to tag rendering resources: the parse creates no D3D objects (§2.1). |
-| `LoadFileMem` / `CreateFileA` / `fopen` hooks | RBRTMHelp.h | File redirection already exists — this is how a weather preset swaps the `.MAT` (§3.4) with no new plumbing. |
-| Full LBS/COL/MAT/FNC/DLS/SGS parsers in C# | `wallaby/Fileparser.cs`, `wallaby/MapObjects/**` | The converter reuses these instead of re-deriving formats in C++. |
-| Vertex-format table | `wallaby/MeshTools.cs:181` | Exact layouts for mesh types 3/4/6/7/8/9/11/14/17 — which slot is baked diffuse, which UV is the shadow map, where the foliage-sway parameters live. |
-| `.MAT` surface maps | `wallaby/MapObjects/MAT/Materials.cs` | Per-texel surface classification per weather. Ground truth for automatic PBR material assignment. |
-| TOD variants `_M` / `_N` / `_E` / `_O` | `RBRTMCheckers.h:139` | Same geometry baked under 4 lighting conditions → the un-baking solve (§3.2) **and** the night-light seeding trick (§5.3). |
-| Tournament CRC/key infrastructure | `Tournament.*`, `RBRTMCheckers.h` | The fairness profile (§3.6) plugs into this rather than inventing a parallel mechanism. |
+| inline ray tracing (RayQuery, DXR tier 1.1 + SM 6.5) | **yes** - sun shadows, AO, local lights' shadows (`rt_*.hlsl`, `cs_6_5`), the car's reflection rays (`scene.hlsl` `ps_6_5`) | `Rt::Create` declines on an adapter without it; the frame takes the cascades + XeGTAO. `Device::SupportsInlineRaytracing` |
+| full DXR pipelines (ray-gen/hit/miss, shader tables) | no | inline queries only: one PSO per pass |
+| SM 6.0 DXIL | yes - scene pass, XeGTAO | precompiled; FXC 5.1 fallback for the scene in the run-time compile only |
+| mesh / amplification shaders | **no** | vertex + index draws, `DrawIndexedInstanced` with an instance stream (`models.cpp`) |
+| sampler feedback, tiled / reserved resources | **no** | every texture is uploaded whole at load (`textures.inl`, `mipgen.cpp`) |
+| temporal upscalers | optional | FSR 3.1 (FSR 4 on RDNA 4) via ffx-api DLLs, DLSS SR via NGX on RTX; absent DLLs = our TAA |
+| VR / stereo | not built | the quality tiers (1.5) are the hook |
 
-Known gap: `DLS/AnimationSetItem.cs` is a stub — DLS stores only animation *set names*; the curves live in SGS
-files that `SGS/AnimMesh.cs` parses only partially. §4 is built around that fact rather than wishing it away.
+**The old baseline's promises that are not in the code:** meshlet clusters as the primary geometry path with GPU
+cluster culling, sampler-feedback texture streaming, RT global illumination. None is started; they remain the
+direction, not the design.
 
----
+**RT cost was measured before anything was built on it** (dev iGPU, Radeon, tier 1.1, SM 6.7): one shadow ray per
+pixel is **~2 ns per ray**, linear from 194k to 967k rays (0.47-2.0 ms); the BLAS for a 594k-triangle stage is
+92 MB. That is why RT shadows are on in every tier and the cascades are the fallback, not the other way round.
+Alpha-tested geometry is cut out in the ray by the rasteriser's own test (texture alpha x vertex alpha against the
+material cutoff, alpha sampled at fixed LOD 2) at no measurable cost.
 
-## 1. Architecture: two processes
+### 1.2 Code map: `modules/renderer`
 
-```
-┌─ RBR.exe (32-bit) ────────────────────────┐      ┌─ ngg-host.exe (64-bit) ─────────────┐
-│                                            │      │                                     │
-│  game logic, physics, audio  (untouched)   │      │  D3D12 renderer                     │
-│                                            │      │   · all track geometry + materials  │
-│  ngg-bridge (our DLL, inside the plugin)   │      │   · shadows, clustered lights, GI   │
-│   · d3d9 interception                      │◄────►│   · sky/atmosphere, night lighting  │
-│   · resource tagging + draw suppression    │ IPC  │   · post/tonemap                    │
-│   · camera + transform harvesting          │      │   · stereo + OpenXR                 │
-│   · car/UI rendered into shared RTs        │      │   · texture streaming (>4 GB)       │
-│   · composite + Present (flat screen)      │      │   · composite + submit (VR)         │
-└────────────────────────────────────────────┘      └─────────────────────────────────────┘
-              shared textures (colour, linear depth, car, UI)  +  shared-memory frame state
-```
-
-### 1.1 Why out-of-process
-
-You asked for 64-bit address space for textures. RBR is a 32-bit executable and cannot be made otherwise, so the
-renderer has to live somewhere else. Worth being precise about what this does and doesn't buy:
-
-- The 32-bit ceiling limits **CPU-side working set**, not VRAM. A 32-bit process can technically drive a 10 GB
-  texture set by streaming through small upload buffers.
-- What it actually costs you in-process: no memory-mapping whole asset packages, constant fragmentation pressure,
-  bounded decompression/staging pools, no room for CPU-side caches (BVH, probe data, LOD pools), and every
-  third-party library you'd want is happier at 64-bit.
-- The out-of-process split additionally gives: modern toolchain and debuggers for the renderer, a crash in the
-  renderer that doesn't take the game down (fall back to vanilla and keep the session alive — valuable for a
-  competition platform), and worker threads that cannot stall RBR's game loop.
-
-So: it's the right call, and the incidental wins are worth more than the address space itself.
-
-### 1.2 Interop — VERIFIED, and simpler than rev 3 assumed
-
-> **Rev 4: measured, not assumed.** `tools/interop-probe/` implements this section as a headless test and it now
-> passes end-to-end on AMD Radeon / Windows 11 26200. Re-run it with `tools/interop-probe/build-probe.ps1` on any
-> new driver or GPU; it is the executable version of this section.
-
-Rev 3 assumed a hard directional constraint — D3D9 creates, D3D12 opens, never the reverse — and built the whole
-architecture around it. **That constraint turned out to be avoidable**, because unwrapping is an *in-process*
-operation. The verified design is:
-
-1. **The renderer's shared textures are created by us on the game process's 9on12 D3D12 device**, with
-   `D3D12_HEAP_FLAG_SHARED`, and shared to the 64-bit host by NT handle. This is D3D12 → D3D12 cross-process and
-   cross-bitness, which is fully supported. *(probe check C: passes.)*
-2. **The D3D9 backbuffer is unwrapped locally, in the game process**, via
-   `IDirect3DDevice9On12::UnwrapUnderlyingResource()`, and the shared texture is blitted into it with ordinary
-   D3D12 commands, then handed back with `ReturnUnderlyingResource()`. *(probe check D: passes — D3D9
-   `GetRenderTargetData` reads back exactly the pixels the 64-bit process wrote.)*
-
-So the D3D9↔D3D12 boundary never crosses the process boundary, and the process boundary is D3D12 on both sides.
-Nothing the *game* creates ever has to be shareable.
-
-For the record, rev 3's assumed path is genuinely unavailable: unwrapping a D3D9 texture succeeds, but
-`CreateSharedHandle` on the result **fails** — 9on12's internal allocations don't carry `D3D12_HEAP_FLAG_SHARED`.
-*(probe check B: not available.)* Had we built on that assumption we'd have discovered it much later and much
-more expensively. It stays in the probe as a regression check in case a future Windows build changes it.
-
-**Mechanism: D3D9On12.** Proxy `Direct3DCreate9` → `Direct3DCreate9On12`. The game keeps plain D3D9 semantics
-(including `D3DPOOL_MANAGED`, which RBR needs and which D3D9Ex would take away). The old objection to 9On12 —
-"it slows the game's draw calls" — is void here, because after suppression the game only draws the UI.
-
-**Fallback, and no longer merely theoretical:** D3D9Ex legacy shared surfaces (secondary D3D9Ex device, legacy
-handle across the process boundary, `ID3D11Device::OpenSharedResource` in the renderer). Keep this path alive —
-see the 9on12 defect below.
-
-> **Measured defect: 9on12 progressively loses resources.** With `Enable9On12=1`, RBR **stops rendering trees
-> after roughly a minute** of driving. With `Enable9On12=0` (same bridge, same wrapper, real D3D9 driver) the trees
-> render correctly for the whole stage. So this is D3D9On12, not our wrapper and not the game.
->
-> Most likely memory pressure: 9on12 backs `D3DPOOL_MANAGED` resources with its own D3D12 allocations, roughly
-> doubling residency, and the test machine is a 2 GB integrated Radeon. That fits "works, then degrades".
->
-> Why this probably does not sink the architecture: in the finished design the game's world rendering is
-> suppressed, so what still flows through 9on12 collapses to the UI and (later) the car. The pressure that
-> triggers this should largely disappear. **But that is a prediction, not a measurement** — it must be re-tested
-> once suppression is permanently on, and on a discrete GPU. If it survives that, the D3D9Ex fallback above
-> becomes the primary interop path, which is why it stays documented.
-
-**Still required: same adapter.** Both processes must resolve to the same GPU. The 32-bit side reads its LUID from
-`ID3D12Device::GetAdapterLuid()` and the 64-bit side binds with `IDXGIFactory4::EnumAdapterByLuid()` — "the default
-adapter" is not the same device in both processes on a switchable-graphics laptop. Already implemented in the
-probe; refuse to start and fall back to vanilla if it can't be satisfied.
-
-### 1.3 Compositing and who presents
-
-Because all shared textures are created game-side, the compositor's *location* is a switch rather than an
-architectural commitment:
-
-- **Flat screen:** the renderer writes the finished frame into a game-created shared texture; the bridge draws it
-  as a full-screen quad and the game presents as normal. Window ownership, input, focus and frame pacing are all
-  untouched. Lowest risk.
-- **VR:** the renderer composites per eye and submits to OpenXR itself; the desktop window shows a mirror via the
-  flat path. This is the natural VR shape and avoids the old approach of bolting VR onto a D3D9 device.
-
-Keep both. They share everything except the final 5%.
-
-**When in the frame we composite decides how much of §1.4 we need.** Compositing at `Present` puts our world over
-everything the game drew, UI included — fine as a proof that the host path works, useless as a product.
-Compositing at the game's **first draw call of the frame** lands us after its `Clear` but ahead of everything it
-draws, so the UI paints over us through ordinary D3D9 draw order. No shared depth, no draw-order negotiation, no
-cooperation from the game at all.
-
-**This works for 2D and only for 2D.** Measured in-game: with the world suppressed and the UI composited this
-way, the UI is correct — but every piece of *3D* content the game still draws (fences, 3D course markers) floats
-on top of our world, because it depth-tests against a buffer that knows nothing about what we drew. Ordinary draw
-order gets us layering, not occlusion.
-
-So the rule is narrower than "anything drawn after us composites for free":
-
-| game content drawn after our composite | works without shared depth? |
+| file | holds |
 |---|---|
-| 2D UI, HUD, menus (no depth test) | **yes** |
-| 3D geometry that should be *occluded by* our world | **no — needs §1.4** |
-| 3D geometry that should *occlude* our world | **no — needs §1.4** |
+| `src/core/device.*` | `Device`: D3D12 device, queue, ONE allocator + list + fence, synchronous `Begin`/`EndAndWait`; `CreateSecondary` (a second context on the same queue, for BVH builds mid-frame); DRED, `CheckRemoved`, debug-layer message drain, `NGG_PIX` |
+| `src/core/renderer.*` | `core::Renderer`: the frame (`RecordFrame`), quality tiers, upscaler choice and render size, `KeepRtCurrent` (BVH follows the scene), whole-frame GPU timer |
+| `src/core/scene.*` | `Scene`: `.ngg` load (`Load`, `LoadFromMemory`, variants), materials, the 41 scene pipelines, prepass + main pass (`RecordPass`), cascades and local-light shadow maps' draws, deferred local lights, glass, cube-probe faces, editor overlays / labels / selection, pixel probe, debug and light modes, RT input description |
+| `src/core/textures.inl` | DDS loading for the NGGT chunk (BC1/BC2, BC4/5/7 behind a DX10 header) - included by `scene.cpp` |
+| `src/core/models.cpp` | instanced models (NGGD/NGGE): model library, placements, culling, LOD, per-frame instance stream |
+| `src/core/visibility.*` | `VisibilityProvider`: `RtVisibility` (ray tracer) or `CascadeVisibility` (cascades + XeGTAO) - the sun's visibility and AO for the main pass |
+| `src/core/rt.*` | `Rt`: BLAS per mesh key + TLAS, `Trace` (sun, AO, local lights), denoiser, reflection TLAS |
+| `src/core/shadow.*` | `ShadowMaps`: cascaded sun maps (2048) and the local lights' maps (1024) |
+| `src/core/gtao.*` | `Gtao`: Intel XeGTAO (`third_party/xegtao`, unchanged) on the prepass's depth and normals |
+| `src/core/lights.*` | local lights: records, clusters, shadow-slot choice, analytic shading (ratio estimator) |
+| `src/core/sky.*`, `atmosphere_ms.*`, `aerial.*`, `env.*`, `astronomy.*` | physical sky; multiple-scattering LUT; aerial-perspective froxel table; sky prefiltered by roughness; sun / moon from date, time, place |
+| `src/core/probe.*` | `ReflectionProbe`: dynamic cube probe around the car (reflection focus) |
+| `src/core/weather.*` | weather presets (our format) |
+| `src/core/post.*`, `upscaler.h`, `fsr.cpp`, `dlss.cpp` | `PostFx`: HDR target, TAA, exposure meter, tonemap + sharpen; the `Upscaler` interface and its FSR / DLSS backends |
+| `src/core/mipgen.*` | mip chains for BC textures shipped without them |
+| `src/core/shaders.*`, `shaders_embedded.h`, `shader_compiler.*` | `LoadShader` (precompiled table, or run-time compile under `NGG_SHADER_DIR`); FXC + DXC wrappers shared with the build tool |
+| `src/core/pipeline_cache.*` | `CreatePipeline`, `CreateRootSignature`, `PipelineBatch`, the opt-in pipeline library |
+| `src/core/log.*` | the one log sink; the host points it somewhere |
+| `src/format/ngg_format.h` | the `.ngg` container: chunks, records, vertex layout |
+| `src/format/ngg_scene.*` | `.ngg` writer + strict reader (the legacy importer writes through it; `tools/ngg-check` round-trips it against the renderer's own loader) |
+| `src/module/module.cpp` | `WRenderer.dll`: `RendererApi` / `RendererEditApi` over the core - swap chain on the game's window, settings, models / instances, the frame, capture, stats |
+| `src/module/ui.*` | the game's UI pass: alpha-blended, scissored draw lists onto the back buffer after the frame |
+| `src/shaderc/main.cpp` | `ngg-shaderc`: compiles `shaders.txt` at build time into `generated/ngg_shaders.cpp` |
+| `shaders/scene.hlsl` | the scene pass: prepass, main (opaque / alpha-tested / blended / G-buffer / reflection-ray variants), shadow and lamp maps, deferred local lights |
+| `shaders/rt_trace, rt_ao, rt_ao_wide, rt_lights, rt_denoise.hlsl` | ray-traced visibility and its denoiser (`cs_6_5`) |
+| `shaders/gtao.hlsl` | XeGTAO entry points with our registers (`cs_6_0`) |
+| `shaders/sky, env, aerial, atmosphere_ms, probe.hlsl` | sky, environment, aerial table, MS LUT, reflection probe (FXC 5.1) |
+| `shaders/post.hlsl`, `meter.hlsl` | TAA, tonemap, upscaler inputs; exposure (FXC 5.1) |
+| `shaders/select.hlsl`, `ui.hlsl` | editor selection / labels / lines (FXC 5.1); the UI (FXC 5.0) |
+| `shaders/atmosphere, lights, rt_common, brdf.hlsli` | shared: the one atmosphere model, light records + clusters, RT common part (alpha test), GGX / specular AA / roughness packing |
+| `shaders/shaders.txt` | every shader the renderer loads, one line each (1.6) |
 
-Two ways out, and they are not alternatives so much as a sequence:
+The ABI the game sees (`include/wrally/iface/renderer.h`, `renderer_edit.h`) is in [design.md §3](design.md).
 
-1. **Suppress it too** — correct while the plan is that we eventually draw everything anyway. Costs nothing and
-   is the right move for the content we are about to convert (scenery, movable meshes). This is what P1 does.
-2. **Export depth (§1.4)** — unavoidable the moment the game keeps 3D content we do *not* intend to own. The car
-   is the obvious case, and so is any object we have not converted yet but still want on screen.
+### 1.3 Rules
 
-The practical consequence: §1.4 is deferrable exactly as long as the suppression list is *complete*. Every piece
-of game 3D content we leave drawing is a thing that will render wrongly until depth export exists.
+- **`src/core` and `src/format` include nothing of the game, of the module ABI or of RBR.** Only `src/module`
+  includes `wrally/iface`. The core is what `ngg-check`, the game and the editor share; the moment it knows the game,
+  a second renderer appears.
+- **The camera contract** (`scene.h`): view and proj are row-major, row-vector (`v * M`); the client hands a
+  conventional near->0 / far->1 projection and **`Scene` applies reverse-Z itself** - clients must not pre-flip.
+  Depth is `R32_TYPELESS` (D32 view for the DSV, R32 for SRVs), cleared to 0.
+- **Jitter:** `Scene::LastViewProj` is reverse-Z included, jitter EXCLUDED; `LastViewProjJittered` includes it.
+  **TAA reprojects into a stable grid and must not see the jitter; anything reconstructing a surface from depth
+  (ray origins, AO, deferred lights) must** - a half-pixel of world space at a grazing road is the size of the
+  shadow-ray bias.
+- **The client owns** its window, input, overlays and presentation; **the renderer owns** order and correctness from
+  "here is a camera" to "the tonemapped image is in your target". Settings are the client's; the pass order is not.
+- **The frame is synchronous:** one list, `EndAndWait` at the end of every frame. Readbacks (timers, probe, overlay
+  stats, exposure) are therefore last frame's and are read after the wait. Frame overlap needs per-frame allocators
+  and a constant ring; it comes with the change that needs it.
+- **Never key a descriptor on a resource pointer.** A recreated texture can land at the freed one's address; the
+  RT visibility / AO descriptors are rewritten on every set (`Scene::SetRtVisibility`, `SetRtAo`).
+- **Work that must happen while the client's list is open** (BVH builds) goes on `Device::CreateSecondary`'s context:
+  `Rt::Rebuild` is blocking on the context it gets and completes on the queue before the frame's list is submitted.
 
-### 1.4 Depth
+### 1.4 One frame: `core::Renderer::RecordFrame`
 
-> **Rev 4: not needed until the car comes back.** Depth exchange exists solely so the game's car can occlude and
-> be occluded by our world. With the car absent from early phases there is nothing to composite against — P1 draws
-> our world, then the UI on top, and needs no depth interop whatsoever. Everything below applies from the phase
-> where the car returns (P3 harmonization, or P5 takeover), and is kept here so that phase isn't designed from
-> scratch. **Do not build it in P1.**
+`WRenderer`'s `renderFrame` (`module.cpp`) first applies the frame's description - stage-object moves, instance
+placements, reflection focus, weather, wetness, local lights, overlay lines, `camera.cut` -> `ResetHistory` - then
+opens the list, sets sky time, and records. The order is the code's:
 
-#### What actually forces depth interop
-
-§1.3 establishes that game 3D content drawn after our composite renders wrongly without shared depth. That is
-not, however, an argument for building depth exchange — it is an argument for *not leaving that content to the
-game*. Split what remains by a single question: **can we reproduce it from source data we can read?**
-
-| game 3D content | source | verdict |
+| # | step | code |
 |---|---|---|
-| 3D pacenote marks, direction signs, distance markers | generated at runtime from the **`.trk`** driveline + scripts | **re-implement** |
-| fences, scenery, movable meshes | `.lbs` blocks 1/1, 1/3, 1/6 | **convert** (in progress) |
-| the **car** | live physics state — suspension travel, wheel rotation, damage deformation, dirt | **needs depth interop** |
+| 0 | PIX capture trigger; follow the output size; camera planes for the upscaler; read last frame's GPU time, start this one's | `PixFrame`, `OnResize`, `PostFx::SetCamera` |
+| 1 | tonemap rule: debug view -> raw, baked light mode -> sRGB, else the client's curve (the module: ACES); exposure; TAA on unless a debug view | `PostFx::SetCurve` |
+| 2 | one atmosphere for every consumer; the MS switch mirrored to the sky | `Scene::SetAtmosphere`, `Sky::SetMultipleScattering` |
+| 3 | **jitter set before the prepass** (every rasterising pass the same sub-pixel offset; the main pass tests `GREATER_EQUAL` against the prepass's depth) | `PostFx::Jitter` -> `Scene`/`Sky::SetJitter` |
+| 4 | the instance stream starts over | `Scene::BeginFrame` |
+| 5 | BVH follows the scene: finished BLAS batches land; same mesh set -> instances + TLAS only; new meshes -> their BLASes queued for the build thread and queue (never waited for), dropped ones leave; TLAS on the secondary context | `Renderer::KeepRtCurrent` |
+| 6 | local lights' clusters for this view | `Scene::PrepareLights` |
+| 7 | **prepass: depth + normal + motion + plant** at the render size | `Scene::RecordPrepass` |
+| 8 | shadow source: RT if preferred, prepass drawn, BVH valid and shadows on; reflection TLAS set wherever RT exists (cascades too) | `m_rtActive`, `Scene::SetReflectionTlas` |
+| 9 | sun visibility + AO (+ local lights' shadows): `RtVisibility` (trace + denoise; AO traced or XeGTAO) or `CascadeVisibility` (XeGTAO, cascades, local-light maps) | `VisibilityProvider::Record` |
+| 10 | HDR target; sky, or clear | `PostFx::Begin`, `Sky::Record` |
+| 11 | main pass: MS LUT + environment for this sun; last frame's probe faces resolved; aerial table for this camera; dynamic pool flush; this frame's cube-probe faces (2 of 6); opaque world front to back (solid, then alpha-tested); instanced models; deferred local lights; glass far to near | `Scene::Record` -> `RecordPass` |
+| 12 | resolve: upscaler or TAA; exposure meter on what is about to be tonemapped; tonemap + sharpen into the output | `PostFx::Resolve` |
+| 13 | end GPU timestamp | `LastFrameMs` |
 
-The marks are the instructive case. They are *not geometry in the track file* — the game builds them from the
-driveline spline and script markers in the `.trk`, which uses the **same block framing this project's converter
-already parses** (type 2 subtypes 10–15: `DrivePoints`, `DriveLine`, `Scripts`, `ScriptsObjects`; type 3/20).
-Drawing them ourselves needs no interop, no asset conversion, and no cooperation from the game — just a reader
-for data we can already frame.
+After step 12 the frame starts the threads of the BLAS batches step 5 queued (`Rt::StartBatches`), so their
+allocations overlap the frame's wait for the GPU (4.2). Then the module draws the editor overlay (only at native render size: it depth-tests against the render-size depth),
+the UI pass, the optional capture copy, `EndAndWait`, the probe / overlay readbacks, `DrainMessages` and
+`CheckRemoved`. `present` is a separate call (`vsync` from the settings).
 
-So depth interop's scope collapses to **exactly one thing: the car.** Everything else is either convertible or
-regenerable. That is a much stronger reason to defer §1.4 than "the car is absent" — it means §1.4 will never be
-needed for anything *except* the car, and if we eventually own the car too (P5) it may never be needed at all.
+**Upscaling:** everything up to step 12 runs at the render size (`RenderWidth/Height`); the materials' mip bias is
+`log2(render/output)`. When the render size has at most half the output's pixels, AO traces twice the tier's rays
+(`AoRaysTraced`) so it keeps roughly native rays per output pixel instead of blotches 1.5-2x the size.
 
-**Fairness makes this the preferred answer, not merely the cheaper one (§3.6).** Pacenote marks are gameplay
-information. Left as a game-drawn overlay we composite around, what the driver sees is outside our control and
-outside any audit. Regenerated by us from the same source data under the sanctioned profile, their appearance is
-deterministic and checkable. A renderer that could quietly emphasise or suppress course markers would be a
-competitive-integrity problem; owning them removes the question.
+### 1.5 Quality tiers and `RenderSettings`
 
-**The cost, and it is real:** pacenote marks are safety- and gameplay-critical. Placement or orientation that
-differs subtly from vanilla would mislead drivers who learned a stage. This needs the same
-screenshot-diff-against-vanilla validation as the lighting solve (§3.2), and that validation is a requirement of
-the work, not a refinement of it.
+**One lighting path scaled by tier, never a second renderer** - VR at 90 Hz is why. A tier changes only what was
+measured to matter: AO is 75-80 % of the ray tracing, the RT sun shadow is cheap (cheaper than the cascades on real
+geometry), so every tier keeps RT shadows and the tiers differ in AO (`Renderer::Tier`, `QualityTier`):
 
-**Our own depth buffer is reverse-Z** (`D32_FLOAT`, near→1, far→0, clear 0, `GREATER`). RBR hands us a
-conventional projection, which is the worst possible pairing with a float depth buffer: float precision is
-densest near 0 and a conventional projection already crowds distant geometry there, so the far field ends up with
-almost no usable bits. Reversing puts float's dense region where the projection is sparse and the two curves
-cancel. The bridge does not need to know — the host flips the matrix it receives (`col2 = col3 - col2`, row-vector
-convention) rather than asking the game to change anything.
-
-> When depth interop below is eventually built, remember the game's depth is **not** reverse-Z; the resolve has to
-> flip back.
-
-Compositing the game's car against our world needs shared depth, and depth-stencil formats are not shareable.
-Solution both directions:
-
-- Ours → game: the renderer writes **linear depth into a shared `R32_FLOAT` colour texture**; the bridge runs a
-  tiny full-screen pass that writes `oDepth` into the game's depth-stencil so subsequent game draws depth-test
-  correctly against our world.
-- Game → ours: force the game's depth-stencil to **INTZ** (readable depth, a long-standing FOURCC hack supported
-  on all three vendors) via the proxy, then resolve it into a shared `R32_FLOAT` for the renderer's post passes.
-
-### 1.5 Frame protocol
-
-One shared-memory control block plus two fences per frame. Per frame the bridge sends: view/projection per view
-(and per eye), time, weather preset state, car transform, and the harvested transform table (§4.1). The renderer
-signals completion; the bridge composites. Synchronous by default — the GPU work is the same as in-process, only
-the submission crosses a process boundary, and a shared D3D12 fence makes that cheap.
-
-Non-negotiable rule: **the bridge never blocks on GPU readback in the frame path**, and a renderer that misses its
-deadline gets the previous frame's image rather than stalling RBR's game loop.
-
-### 1.6 One protocol, three clients
-
-The same IPC surface serves the game bridge, **Wallaby's preview viewport**, and a standalone viewer. That means
-the editor previews through the exact renderer that ships, and it sidesteps Wallaby's 32-bit SlimDX/WinForms
-viewport entirely — Wallaby keeps its existing D3D9 editing view and launches `ngg-host` for preview. This is a
-large practical payoff and is the reason to build the IPC boundary early rather than "extract it later".
-
-### 1.7 Hooking method and legacy plugin detection
-
-Because the target is vanilla RBR plus our own plugin — no RSF, no third-party D3D9 hookers — we take the
-strongest option: **a `d3d9.dll` proxy**, which owns device creation and therefore makes the D3D9On12 path in §1.2
-available without negotiation. (Under an RSF-compatibility requirement this would have had to be cooperative
-vtable hooking instead; that constraint is gone.)
-
-At init, enumerate loaded modules for known hookers (RBRVR, ReShade and other `d3d9.dll` proxies, RBRHUD,
-NGPCarMenu) and check whether device vtable entries point outside `d3d9.dll`. On detection: log it, show an
-on-screen warning naming the module, and offer to continue in vanilla rendering. We warn; we do not interoperate.
-
-### 1.8 Renderer feature baseline: DX12 Ultimate
-
-Baseline is mesh shaders, sampler feedback and hardware ray tracing — roughly RTX 20-series / RDNA2 and newer.
-This is the decision that most shapes `ngg-core`, and it mostly *removes* work:
-
-**1.8.1 Mesh shaders make our cluster format the primary geometry path.** `NGGC` meshlets stop being an
-optimisation and become the representation: amplification shader does cluster culling (frustum, normal cone,
-occlusion) on the GPU, mesh shader emits triangles. Consequences: the `NGGN` CPU BVH shrinks to coarse
-streaming/residency decisions only, and per-draw CPU cost — the thing that makes 2004-era geometry slow — largely
-stops mattering. The §5.9 re-batching work gets easier, not harder.
-
-**1.8.2 Sampler feedback streaming is the answer to the 64-bit texture requirement.** Tiled resources plus
-feedback maps means we stream only the mip tiles actually sampled, which is exactly what an open rally stage with
-long sightlines wants. This is the mechanism that makes "more texture data than fits in VRAM" work properly rather
-than by heuristic prefetch.
-
-**1.8.3 Ray tracing deletes most of the un-baking problem.** With RT shadows, RT ambient occlusion and RT global
-illumination, we no longer need to *recover* occlusion from the baked vertex colours — we compute it. That
-substantially reprioritises §3.2 (see the note there) and removes CSM, SSAO and the irradiance probe grid from the
-critical path. RT reflections also matter more here than in most games: wet tarmac and car paint are the two
-surfaces players look at constantly.
-
-**1.8.4 The one real tension: ray tracing versus VR at 90 Hz.** Stereo at 90 Hz with a full RT lighting pipeline
-is demanding even on baseline-Ultimate hardware. Do **not** resolve this by writing two renderers. Resolve it with
-**quality tiers over one technique-agnostic lighting interface**: RT-heavy for flat screen, RT-light for VR
-(RT shadows only, screen-space or probe-based indirect), with the same material and light data feeding both. The
-tiering must exist in the architecture from P1 even though VR lands in P4 — retrofitting it means rewriting the
-lighting pass.
-
----
-
-### 1.8.5 The ray-tracing probe — MEASURED, and the cost is not the problem
-
-`ngg/core/rt.h/.cpp` plus `ngg/core/dxc.h/.cpp`. Built to answer one question before anything is designed on top
-of it: **what does ray tracing actually cost on the floor hardware?** §1.8.3 already makes RT the baseline and
-takes SSAO, CSM-as-primary and the probe grid off the critical path — but that argument was never checked
-against a number.
-
-**Measured on the development machine — an integrated AMD Radeon, which is at or below the intended floor:**
-
-| | |
-|---|---|
-| adapter | raytracing **tier 1.1**, highest shader model **6.7** |
-| BLAS | **92.2 MB** over 594,058 triangles (`track-108`), built **once** at load |
-| TLAS | 1.8 KB, one identity instance |
-| one shadow ray per pixel | **0.47 ms** for 194k rays, **1.8–2.0 ms** for 967k rays |
-
-That is roughly **2 ns per ray**, linear across a 5× range, on an integrated GPU. Against a 44 ms frame it is
-1–4%. **The cost objection to the RT path does not survive contact with a measurement.**
-
-**Three prerequisites, and only the second was a surprise:**
-
-1. **Tier 1.1 + SM 6.5** for inline RayQuery. Confirmed on the adapter, and `Device::Create` now logs both at
-   startup rather than letting a feature discover it by failing to create.
-2. **A SECOND SHADER COMPILER.** Everything here compiles with `D3DCompile` (FXC), which tops out at SM 5.1 and
-   cannot emit DXIL at all. So the RT path does not begin with an acceleration structure — it begins with DXC,
-   loaded at runtime so a machine without it gets one log line instead of an executable that will not start.
-   `dxil.dll` has to travel with it: without the signing library DXC still produces DXIL, but leaves it
-   *unsigned*, and the runtime rejects unsigned DXIL outside developer mode — a works-on-this-machine-only
-   failure worth a file copy in `build-ngg.ps1` to avoid. FXC stays for every other shader; porting them
-   wholesale would be a large diff with no visible change.
-3. **Geometry in a shape a BLAS can take.** Free, and that is a property of the format rather than luck: `.ngg`
-   bakes every transform into world space, position is the first 12 bytes of the vertex, and indices are
-   `R32_UINT`. **One BLAS, built once, never refitted** — the same rigidity that let TAA skip motion vectors
-   (§5.0c). When per-object transforms land (§9b item 7) the TLAS starts needing a per-frame rebuild, and that
-   is the line to remember.
-
-**The first ray is a SHADOW ray, not ambient occlusion, and deliberately.** Its answer can be checked against
-the cascaded shadow map, which we already have. AO has nothing to be checked against, so it is the wrong thing
-to write first.
-
-> **The correctness check caught a real bug, and the counter was right.** First run: ray count stable at a
-> static camera, but the shadowed fraction cycled 32.6% → 51.9% → 69.0% → 37.2% and back, with camera and sun
-> both logged as unchanged. The obvious reading — after §8.0b — was a broken instrument. It was not.
->
-> The rays were being reconstructed with the **unjittered** view-projection (`Scene::LastViewProj`, which is
-> unjittered *on purpose* for TAA, §5.0c) while the depth buffer was rasterised **with** the jitter. For TAA that
-> half-pixel disagreement is the accepted error. For a ray origin it is a half-pixel of *world space* —
-> centimetres on a grazing road surface, the same size as the 5 cm bias meant to clear it — so self-intersection
-> flipped in and out with the jitter phase and took a third of the screen with it. Same camera, different answer
-> every frame.
->
-> `Scene::LastViewProjJittered` now exists beside the unjittered one, and the rule is written on both: **TAA
-> reprojects into a stable grid and must not see the jitter; anything reconstructing a real surface point from
-> depth must.** After the fix: **13.6% shadowed, identical on every sample.** Views 11 and 12 (`V`) put the RT
-> visibility and its disagreement with the shadow map on screen — red where the rays say shadow and the map
-> says lit, blue the reverse, grey where they agree.
-
-**Foliage is cut out by an any-hit test now, and it cost nothing measurable.** The BLAS holds two geometries —
-opaque (`GEOMETRY_FLAG_OPAQUE`, the traversal commits on its own) and alpha-tested (no flag, every hit surfaces
-as a candidate the shader accepts or refuses). `Scene::BuildRtInputs` splits the index buffer into the two
-contiguous ranges a BLAS geometry needs, and hands over a per-triangle material index, a `{texture, cutoff}`
-table and every scene texture; the shader reconstructs uv0 and vertex alpha from the barycentrics and runs *the
-rasteriser's own test* — texture alpha × vertex alpha against the material's cutoff — so the shadow is cut out by
-exactly the pixels the leaf was drawn with. Same 0.47 ms.
-
-Measured, and worth keeping because it corrects an intuition: **13.6% of pixels shadowed with solid cards →
-1.3% with the test, and the test passes 43% of the candidates it sees** (2,422 pass / 3,259 fail), so it is
-discriminating rather than rejecting. On `track-108` 376k of 594k triangles are alpha-tested; at the start line
-the old shadow was mostly *grass* blocking the ground between its own blades. Cut out properly, grass casts
-almost nothing at a 49° sun — of 2,614 shadowed pixels ~2,420 are leaf hits and opaque geometry contributes
-about 200. The pass/fail counter stays: it is the one number that distinguishes "cutting leaves out" from
-"silently rejecting everything", and those look identical on screen from a distance.
-
-Two approximations, both recorded: the alpha texture is sampled at a **fixed LOD 2** (a shadow ray has no
-screen footprint to derive a mip from, and mip 0 on a 256² leaf card gives a shadow with more detail than the
-leaf on screen has), and the **bias is along the ray**, not the normal, because there is no normal buffer yet.
-
-## 2. Separating our world from the game's car and UI
-
-### 2.1 Resource tagging (the core mechanism)
-
-Do **not** classify draw calls heuristically by texture name, primitive count or render state. That approach is
-fragile and is why most "replace the world" mods die.
-
-> **Rev 4 correction — the earlier mechanism in this section was wrong.**
-> Revisions 1–3 proposed bracketing RBRTM's `ParseLBS` detour as a "tagging window": tag every D3D resource
-> created while the parse runs. That rests on the assumption that parsing uploads geometry to D3D. It doesn't.
-> **Measured: every vertex buffer, index buffer and texture in RBR is created inside `HedgeHog3D.DLL`** — the
-> Hedgehog engine RBR is built on — not in the exe. `ParseLBS` parses the file format; it creates no D3D
-> resources, so the bracket would have tagged nothing. (Bracketing `ParseCOL` was doubly wrong: COL is
-> collision/physics data and never reaches the renderer at all.)
-
-**The mechanism that actually works: tag by creating call site.**
-
-1. Every `CreateVertexBuffer` / `CreateIndexBuffer` / `CreateTexture` records `_ReturnAddress()` — the exact game
-   function that asked for the resource — as a *call site*, identified by its **RVA within its own module**
-   (stable across runs; raw addresses are not, since `HedgeHog3D.DLL` relocates every launch).
-2. The site index is written into the resource's private data as its tag.
-3. At draw time, the bound stream-0 VB's tag says which function created its geometry. Suppression is then
-   "skip draws whose vertex buffer came from site X".
-
-This is better than the window it replaces on every axis: it needs **no cooperation from the plugin**, no
-modification to anti-cheat-adjacent hook installation, no assumption about load ordering, and it states what a
-resource *is* rather than when it happened to be made. It also extends to the car for free — a different creating
-function, a different tag.
-
-> **Measured: creation call sites, one screen, one session.** 27 sites total. Per-frame draw attribution:
->
-> | site | module | RVA | created | draws/frame |
-> |---|---|---|---|---|
-> | 19 | HedgeHog3D.DLL | `0x08881C` | 450 VBs, 14.4 MB | **242** |
-> | 22 | HedgeHog3D.DLL | `0x0876D4` | 8 VBs, 1.25 MB | **152** |
-> | 9 | HedgeHog3D.DLL | `0x0135D8` | 17 VBs, 295 KB | 20 |
-> | 21 | HedgeHog3D.DLL | `0x0B9BC3` | 2 VBs, 47 KB | 7 |
-> | 0 | RichardBurnsRally_SSE | `0x017DCA` | 44 VBs, 4.9 MB | 4 |
->
-> Two sites account for ~95% of all draws. That is a very encouraging shape for suppression: if one of them turns
-> out to be the track, the partition is a single config line. Identifying which requires a **stage load** —
-> the table above is from a non-driving screen.
-
-> **Measured in live stages: the engine partitions the world by content type, and each part is separately
-> suppressible.** Determined by suppressing one creating call site at a time in-game and observing. The cycle order
-> is sorted by (module, RVA) so it is reproducible across runs and track positions.
->
-> | module | RVA | draws | notes |
-> |---|---|---|---|
-> | RichardBurnsRally_SSE | `0x017DCA` | **UI** | keep |
-> | RichardBurnsRally_SSE | `0x20513D` | unidentified | 2 buffers, ~9 MB, ~3 draws/frame |
-> | HedgeHog3D | `0x0135D8` | **car shadow** | external view only |
-> | HedgeHog3D | `0x023511` | unidentified | external view only |
-> | HedgeHog3D | `0x029780` | **car shadow**, and gates the **sun glare** | suppressing it makes the glare appear — almost certainly the occluder geometry behind an occlusion query |
-> | HedgeHog3D | `0x0876D4` | **water, trees, grass, far scenery, animated objects** | |
-> | HedgeHog3D | `0x08881C` | **car AND road/ground** | |
-> | HedgeHog3D | `0x0B9BC3` | **skybox** | |
->
-> Three consequences that change planning:
->
-> 1. **The car shares a creating function with the ground** (`0x08881C`). Suppressing the world therefore takes the
->    car with it. "Don't render the car in early phases" (rev 4) turns out to be not just acceptable but *forced* —
->    and when the car does come back it cannot simply be left to the game while we replace the ground.
-> 2. **`0x0876D4` is coarse** — water, trees, grass, scenery and animated objects all come from one function, so
->    that content cannot be phased in separately. Ground (`0x08881C`) and sky (`0x0B9BC3`) still can.
-> 3. **Two sites appear only in external view**, so the site set is view-dependent. Any shipped site table must be
->    a set keyed by RVA, never an ordered list with indices.
->
-> Method note, learned the hard way: an earlier version ordered the cycle by draws/frame. The two biggest sites
-> differ by one draw (449 vs 450) and swapped places mid-session, making a whole round of observations
-> unattributable. **Never order a diagnostic by a quantity that fluctuates.**
->
-> **Caveat: RVAs are per-binary — RESOLVED by a content check.** Valid only for the exact `HedgeHog3D.DLL`
-> measured. This looked like an open-ended fragility, but it is not: RBR has been unsupported since 2004 and
-> every install ships identical files, so there is effectively **one** binary to recognise. That turns the
-> problem from "the addresses might drift" into "is this the build we measured" — a yes/no answered before
-> anything is suppressed.
->
-> Implemented as a gate on size, PE timestamp **and a CRC32 of the file on disk**, checked once at first use:
->
-> | binary | bytes | CRC32 |
-> |---|---|---|
-> | `HedgeHog3D.DLL` | 2,007,040 | `0xD4308BAB` |
-> | `RichardBurnsRally_SSE.exe` | 4,378,624 | `0x31A75453` |
->
-> The CRC is not redundant with size + timestamp: a patched binary can preserve both, and a wrong suppression is
-> close to undebuggable from a screenshot — some arbitrary function's geometry silently disappears. On any
-> unrecognised build the bridge logs which module failed and **refuses to suppress at all**, so the game renders
-> normally rather than incorrectly. The F9 cycler is gated too, since it steers by the same site indices.
-> `AllowUnknownBinaries=1` overrides, which is only useful for adding a new known-good build to the table.
->
-> The CRC is taken over the **file**, not the mapped image: the mapping carries relocations and pages other
-> plugins may have modified, so it would not be reproducible.
-
-#### A second axis: vertex transform state — VERIFIED, and build-independent
-
-Call site is not always fine enough. **Measured: RBR draws its 3D course markers from the same creating call
-site as its UI** (exe `0x017DCA`), with the same texture atlas, so `SuppressSiteRva` cannot remove one without
-the other. The frame dump for that site:
-
-| draws | triangles | FVF | position type | what |
+| tier | AO | XeGTAO (where AO is screen-space) | sharpen | RT ms, plugin-era lab forest / track-108 start (dev iGPU) |
 |---|---|---|---|---|
-| 8 | 2 | `0x142` | **`XYZ`** — untransformed | 3D course markers |
-| 1 | 214 | `0x144` | `XYZRHW` — screen space | UI |
-| 1 | **2** | `0x144` | `XYZRHW` — screen space | UI |
-| 1 | 274 | `0x144` | `XYZRHW` — screen space | UI |
-
-Note the markers share a triangle count with a UI element, so "suppress 2-triangle draws from this site" would
-take a piece of the UI with them. The reliable key is the **vertex transform state**:
-
-- `XYZRHW` / `POSITIONT` — vertices are *already in screen space*. No view or projection applies, so by
-  definition the draw is an overlay and cannot be part of our world.
-- `XYZ` / `POSITION` — world space, i.e. content that belongs in our scene.
-
-Implemented as `SuppressDraw=RVA:3D` (also `:2D`, and `:N` for a triangle count when neither fits). `SetFVF` and
-`SetVertexDeclaration` are intercepted so the state is tracked as it is set, keeping the draw path free of COM
-getters; the declaration path scans elements for `POSITIONT`, so it works whichever API the game uses.
-**Verified in-game: markers gone, UI intact.**
-
-> **One caution on how this was arrived at.** Tested *globally*, the transform test looks useless — only 3 of 152
-> draws in a frame are transformed, because of course nearly everything is world space. It is only meaningful
-> **within a call site**, as a tiebreaker once the site has already narrowed the candidates. Site first, transform
-> state second.
-
-This partly answers the RVA-fragility caveat above: world-space vs screen-space is a property of *what the
-content is*, not of where the code happens to live, so it carries across builds in a way an RVA never can. It
-does not replace the site table — it needs the site to narrow the field first — but it means the per-binary part
-of the mechanism does less of the work.
-
-Everything else passes through untouched, and the design degrades safely: anything tagging misses simply renders
-the old way — visible and ugly, but not broken.
-
-Per suppressed draw we record `(VB, IB, base vertex, start index, prim count, world matrix, textures, states)`.
-That tuple is simultaneously the **identity key** into the converted asset and the source of animation transforms (§4).
-
-> **Measured (P0a): RBR creates its device with `D3DCREATE_MULTITHREADED`** (behaviour flags `0x44` =
-> `HARDWARE_VERTEXPROCESSING | MULTITHREADED`), so every structure here must be thread-safe. In practice all draw
-> calls observed so far come from a **single** thread, so the fast path is uncontended — but correctness cannot
-> rest on a game that merely happens not to use the freedom it asked for.
->
-> **Tags live in the resource's own private data**, not a side table keyed by pointer. RBR creates and destroys
-> geometry constantly; a pointer-keyed map lets a recycled address inherit a stale tag, which would misattribute
-> draws in a way that is almost impossible to debug. Private data dies with the resource. Cost is one
-> `GetPrivateData` per draw, absorbed by a one-entry cache since consecutive draws overwhelmingly share a buffer.
-
-> **Measured (P0a): what a frame actually contains.** In-game, at 1024×728:
->
-> | | |
-> |---|---|
-> | draw calls / frame | ~355 average, 400 in the captured frame |
-> | triangles / frame | ~261k average, 305k captured |
-> | unique vertex buffers | 129 |
-> | unique textures | 55 |
-> | draw threads | 1 |
->
-> The shape matters more than the totals: one large draw (3968 tris) followed by hundreds of tiny ones — 14, 20,
-> 30, 36, 44 triangles each — with the *same* vertex buffer rebound repeatedly and only the index range and
-> texture changing. That is exactly the fragmentation §5.9 predicted, and it confirms re-batching in the converter
-> is worth real effort. It is also encouraging for suppression: 129 buffers is a small enough set that tagging is
-> cheap and auditable.
-
-Extend the same mechanism to the car load path now, even though the car renderer comes later. Tagging is cheap;
-retrofitting identity into an already-shipped asset format is not.
-
-### 2.2 Camera — RESOLVED by measurement
-
-Needed exactly, or the car swims relative to the world. The rev 3 text guessed this would be a hard RE task. It
-isn't:
-
-> **Measured (P0a):** RBR sets `D3DTS_VIEW` and `D3DTS_PROJECTION` through **`SetTransform`**, and the values are
-> real. Sanity check that confirms it: the captured projection gives `proj[0][0]=1.5968`, `proj[1][1]=2.2460`, a
-> ratio of **1.4066 — exactly the 1024/728 backbuffer aspect**. A wrong or stale matrix would not land on the
-> aspect ratio by chance.
->
-> RBR *also* uploads vertex-shader constants (`c0`, `c4`, `c8`, 4 vectors each) that look like a per-draw composed
-> world-view-projection — the `w` component tracks per-object translation. So both paths exist. **Use
-> `SetTransform` for the camera** and treat the VS constants as per-object transforms, which is exactly the
-> harvesting source §4.1 needs.
-
-Reading the game's camera structs directly (`StageObj` `0x007c36a8`, `CarObj` `0x007c28cc`) stays available as a
-cross-check, but is no longer on the critical path.
-
-> **Measured (P1, test scene): RBR's runtime world space is Y-up, and every stage has its own arbitrary origin.**
-> A flat test grid on the Y=0 plane renders horizontal, not as a wall, so the runtime is Y-up — Wallaby's Y/Z swap
-> is a *file*-space concern and does not apply to the runtime camera. Camera positions are per-stage arbitrary and
-> **negative Y is normal** (stage start heights differ, some below zero).
->
-> Two consequences for the converter: it must not assume anything about world origin or ground altitude, and
-> `.ngg` geometry has to be emitted in the *same per-stage world space the game uses at runtime* — the camera we
-> receive is in that space, and nothing rebases it.
->
-> **Confirmed under motion.** A world-locked test grid rendered by the 64-bit host now sits correctly under the
-> car on every stage tried, and tracks the world while driving — sliding underneath and rotating about the car
-> exactly as ground should. The camera contract with RBR is settled: `SetTransform` matrices, used unchanged as
-> row-major with row-vector multiplication, are sufficient to place geometry in the game's world.
->
-> One bug worth remembering, because its symptom was misleading: recovering the eye position from the view matrix
-> initially indexed columns instead of rows (`-t*R` rather than `-t*R^T`). The result was not obviously broken —
-> the position had a plausible magnitude but pointed elsewhere, and because the error depends on camera heading it
-> looked like a *per-stage* problem ("below us here, in front of us there"). Transposed-matrix bugs rarely look
-> like bugs; the fix is guarded by a one-time dump of the view matrix rows and their lengths.
-
-Multi-view from day one: rear-view mirror, replay cameras, and both VR eyes. Detect via `SetRenderTarget`/viewport
-changes, run the environment pass per view. Retrofitting multi-view is painful; designing for it is nearly free.
-
-Coordinate convention: Wallaby swaps Y/Z between file space and render space (`Tools.getSwapedVector`). Pick one
-canonical convention in the converter, document it, and never let the swap leak into the runtime.
-
-### 2.3 VR and the car
-
-Stereo needs the car rendered twice per frame with different view matrices. Mechanism: the proxy already
-intercepts every non-suppressed 3D draw, so **record them into a command list rather than executing immediately,
-then replay the list once per eye** with our injected camera constants into per-eye shared RTs. UI renders once
-and is composited onto a VR panel.
-
-This is the single largest piece of VR-specific work and it should be prototyped early (P0c) — if RBR's car
-rendering turns out to depend on per-frame state that can't be replayed, VR shifts from "hard" to "needs a
-different approach", and that's much better to know in month one.
-
-### 2.4 The mismatched-car problem, before we own the car
-
-> **Rev 4: deferred entirely.** Early phases don't render the car at all, so there is no mismatch to solve. This
-> section applies from the phase where the vanilla car is switched back on — if it ever is, since P5 may simply
-> take the car over directly and skip the harmonization work below.
-
-Until the car renderer exists, the game draws it with 2004 materials into our modern world. Mitigations:
-
-1. **Stencil-tag car pixels** in the proxy, then apply our fog, exposure and tonemap to those pixels in the
-   composite pass. Cheap; gets most of the way.
-2. Override the ambient/sun constants the car shader reads, and replace the car's environment/cube map with one we
-   render. Bigger payoff for reflections.
-3. **Own the car** (§6) — the real fix, deferred.
-
----
-
-## 3. Assets: format and conversion
-
-### 3.0 The conversion spine: LBS → glTF → `.ngg` — DECIDED
-
-**The shipping path for a converted track is `LBS → glTF → (edit) → .ngg`.** The direct `LBS → .ngg` converter
-(`wallaby-cli convert`) still exists, but it is a development shortcut — the fastest way to re-check the pipeline
-against the source of truth — and it is expected to be removed. Assume the glTF spine when reasoning about
-conversion; §7.2's `authored glTF → .ngg` is then not a second pipeline but the same one entered further down.
-
-```
-                 wallaby-cli gltf                        wallaby-cli import
-track.lbs ──────────────────────────► project ──────────────────────────► track.ngg
-           de-atlas, shading           .glb                                (runtime only)
-           overrides, weld,           .scene.json   ◄── Blender / Wallaby
-           texture bundle             .textures.zip     (only what automation got wrong)
-```
-
-**Why the detour is the point.** The value of the overhaul is in what a human decides — remodelled vegetation,
-material classes, normal maps, light placement — and none of that can be expressed against a binary the converter
-regenerates from scratch on every run. glTF is where the human works, so it has to be *on* the path, not beside it.
-
-**The ordering is load-bearing: automation first, human second.** The export runs the same de-atlas, shading-override
-and weld passes as the `.ngg` path, so the author opens geometry that is already as good as the converter can make
-it. Exporting raw and fixing by hand was tried and is backwards — an author would spend the session correcting
-normals the converter corrects anyway, then fight it on the next reconversion.
-
-**A project is three files, not one.** `.glb` + `.scene.json` + `.textures.zip`. glTF has nowhere to put an RBR
-layer id, a material flag, or a two-stage texture pairing, and a bare `.glb` import silently gives you
-scenery wearing foliage flags. The sidecar and the bundle are files only our own tooling writes, which is exactly
-why they survive a round trip through a DCC tool that rewrites the `.glb` and drops extensions it does not know.
-The player's RBR install is an import-time input only; after that the project stands alone.
-
-**Equivalence is measured, not assumed.** On Joux Verte a project-only rebuild — archive never consulted — matches
-a direct `convert` on layers, material flags, materials (119), two-stage bindings (87) and textures (74,
-byte-identical, the 45 de-atlased cells included). The one remaining difference is 10 zero-area triangles that
-SharpGLTF drops on export, which draw nothing.
-
-**What this changes on the renderer side: nothing in `.ngg`, everything about where requests land.** `.ngg` stays
-export-only — never edited, never round-tripped (§3.1). But a converter request from this side is now only real if
-it survives the glTF hop, which means it must be either a pass that runs *before* export or a field in the sidecar.
-Per-object culling bounds (§3.3e, §9b item 4) are the live example: they cannot live in the `.glb`, so they are
-sidecar data or they are recomputed on import.
-
-### 3.1 Principle: sidecar for converted tracks, native for new ones
-
-For a *converted* track, `<track>_<tod>.ngg` sits **next to** the original and carries rendering data only. The
-game keeps loading the original LBS/COL/MAT and keeps owning collision, drive line, triggers, scripts, physics
-surfaces and timing. For a *native or generated* track the relationship inverts — see §7 — but the runtime treats
-both identically, because in each case the game owns gameplay and `.ngg` owns pixels.
-
-- No risk of changing gameplay or invalidating existing tournament CRCs.
-- Fallback is trivial: no `.ngg`, or CRC mismatch against the source LBS → render vanilla.
-- **The converter must never move a vertex.** Visual/collision divergence is the fastest way to lose a competitive
-  community. Additional LOD levels beyond gameplay-relevant distance are the only exception.
-
-### 3.2 Un-baking the lighting
-
-Old vertices carry `D3DCOLOR diffuse` = baked sun + ambient + occlusion, plus for ground meshes a baked shadow
-texture on a second UV set (`meshtype 11`: "pos + colour + tx0 + tx1 + shadow tx"). Light dynamically while keeping
-those and everything double-darkens.
-
-> **Rev 3 reprioritisation.** With ray-traced AO and GI in the baseline (§1.8.3), we no longer need to *recover*
-> occlusion from the bake — we compute it. **Tier 0 becomes the default and ships in P1.** Tier 2 survives, but its
-> value is now (a) estimating each variant's sun direction and colour, which we'd otherwise author by hand per
-> track, and (b) seeding night light candidates from `_N` (§5.3) — not occlusion recovery. Tier 1 becomes a
-> fallback for the VR quality tier, where full RT indirect isn't affordable. This meaningfully shrinks P2.
-
-**Tier 0 — discard and re-derive.** Drop vertex colour. Recompute smooth normals from topology (angle threshold +
-UV-seam splitting) and tangents. Correct on convex geometry, flat and wrong wherever the original relied on baked
-occlusion (under bridges, inside forests, building interiors).
-
-> **Measured, and it constrains this section: the baked colour is stored at HALF scale, 7-bit precision, and its
-> alpha is not lighting at all.** Across 178k vertices of Joux Verte no RGB channel exceeds **128** — a hard cap,
-> not a rolloff. Two consequences for the solve: every baked value must be doubled before it means anything, and
-> the input is quantised to 0..128, i.e. ~7 bits per channel. That is the precision ceiling on any albedo or
-> occlusion recovered from it, and worth knowing before fitting a model that assumes 8-bit inputs.
->
-> Separately, the **alpha** channel takes all 256 values (68% at zero) and is the *terrain blend weight* between
-> the two ground textures. So a D3DCOLOR here is two unrelated quantities — RGB is half-scale baked light, A is a
-> blend factor — and a solver that treated the whole thing as lighting would be fitting noise.
->
-> **CORRECTED AGAIN — the half-scale finding is a property of the EDITOR, not of the format or the track.**
-> Measured across two tracks:
->
-> | track | authored in | p50 | p99 | scale needed |
-> |---|---|---|---|---|
-> | Joux Verte (42) | Kangaroo, the original tool | 71 | **128** | **1.99** |
-> | track-108 | Wallaby | 255 | **255** | **1.00** |
->
-> Kangaroo bakes at half scale; Wallaby bakes at full scale and near-saturated. A constant tuned on one drives
-> the other to solid white, which is exactly what happened when a Wallaby-authored community track was first
-> rendered. Since community tracks are a mix of both, the scale **must come from the asset**: the converter now
-> measures it and writes it into `SceneHeader::bakedScale` (format v2).
->
-> Use a **percentile, not the maximum**. Joux Verte's max is 255 on the strength of a handful of stray vertices
-> while its p99 is 128 — taking the max would have concluded that track needed no scaling at all. p99 recovers
-> 1.99 for Kangaroo and 1.00 for Wallaby, independently reproducing the value that had been hand-tuned.
->
-> A second observation with consequences for §3.2: **the Wallaby track's bake carries almost no shading
-> information** (p50 = 255, i.e. half its vertices are pure white). There is nothing there to un-bake. Tracks
-> authored this way gain the most from dynamic lighting and lose nothing to Tier 0 discarding the bake — but they
-> are also useless as input to the Tier 2 photometric solve.
-
-> **Correction from §3.2b: the factor of 2 is not a format convention, it is the sun colour.** The measurement
-> above is right; the `MODULATE2X` explanation for it was wrong. RBR's own vertex shader multiplies the baked
-> colour by a per-frame lighting constant and lets `ps_1_1` saturate the result. The doubling is what that
-> constant happens to equal in clear daylight — it is *weather- and time-dependent*, which is exactly the knob
-> §3.4 wants. Do not bake 2.0 into the format.
-
-**Tier 1 — baked colour as occlusion.** `AO ≈ luminance / percentile95(luminance)` per mesh, stored per vertex,
-applied to the ambient/sky term only, never to direct sun.
-
-**Tier 2 — photometric solve across `_M`/`_N`/`_E`/`_O`.** The payoff, and only possible because RBR ships the same
-geometry baked under up to 4 lighting conditions. Per vertex we have up to 4 observations under different
-(sun direction, sun colour, ambient) conditions; solve a small least-squares system for
-`(albedo_scale, skyOcclusion, sunVisibility_i)` — coarse photometric stereo with 4 samples. It yields:
-
-- a real **sky-occlusion / AO** term,
-- **directional occlusion** hints that validate our shadow maps,
-- an estimate of each variant's **sun direction and colour**, which we would otherwise author by hand per track,
-- and from the `_N` variant, a map of where the original artists *intended* light to be at night (§5.3).
-
-Match vertices across variants by position hash, falling back to a spatial kd-tree with tolerance. Variants can
-differ in geometry (night versions add/remove objects), so the solver must handle partial coverage and drop to
-Tier 1 per vertex when fewer than 3 observations match.
-
-> **Measured on Joux Verte (Map 42), `_M` vs `_O`** — the assumption this whole tier rests on, now checked:
->
-> | | |
-> |---|---|
-> | `_M` vertices | 178,594 |
-> | matched in `_O` **by exact position** | 178,594 (**100%**) |
-> | of those, baked colour differs | 174,718 (97.8%) |
-> | of those, baked colour identical | 3,876 (2.2%) |
->
-> Identical geometry, different baked lighting, and the correspondence is *exact* — no tolerance or kd-tree
-> needed for this pair, position equality is bit-for-bit. That is the photometric solve's premise confirmed on
-> real data.
->
-> **But the variants are not structurally identical.** `_M` has 398 sub-meshes and `_O` has 245, for the same
-> total triangle count and bounding box: the same terrain is partitioned differently and stored with *different
-> vertex formats* per region (overcast needs no sun-shadow mesh types). So there is no index correspondence
-> between variants, and matching must be by position — as this section already required, now for a demonstrated
-> reason rather than a cautious one. `_O` also has far fewer distinct positions (47,486) than `_M` has vertices,
-> i.e. the variants duplicate shared vertices differently; the solver must deduplicate before fitting.
-
-**Validation harness:** re-render the converted track under the solved `_M` lighting and diff against a vanilla
-screenshot from the same camera. That diff is the regression test for the entire converter, and it lives in Wallaby.
-
-### 3.2b The original lighting model, recovered exactly
-
-RBR ships its shaders as loose `ps_1_1`/`vs_1_1` bytecode in `PixelShaders/` and `VertexShaders/`, **with debug
-info and original source paths intact** (`l:\Rally_7\SourceMaterial\CodeBase\Game\Pc\HedgeHog3D\…`). They
-disassemble cleanly with `fxc /dumpbin`. Full listing of all 61: [`rbr-shaders.txt`](rbr-shaders.txt).
-
-This replaces inference with ground truth for the un-bake. The ground pipeline is:
-
-```
-vs:  oD0.rgb = vertexColour.rgb * r3      r3 = extinction(depth) * sunColour * exposure  (c55,c56,c65)
-     oD0.a   = vertexColour.a             passed through untouched — the blend weight
-     oD1     = r4                          in-scatter (Rayleigh/Mie), per-vertex
-     oFog    = saturate((fogEnd - depth) * fogScale)
-
-ps:  weight = tex1.a * oD0.a
-     base   = lerp(tex0.rgb, tex1.rgb, weight) * oD0.rgb
-     base  += 4 * texSpec.rgb * oD1.a                      [Specular variants]
-     base  *= texShadow.rgb                                [Shadow variants]
-     result = base + oD1.rgb                               in-scatter add
-     result = lerp(result, fogColour, fogAmount)            fixed-function fog
-```
-
-Four things follow that we had wrong or missing:
-
-1. **The blend weight is `tex1.a * vertexAlpha`,** not vertex alpha alone. Joux Verte's ground textures are
-   opaque so the two agree there — but they will not agree on a track whose blend layer carries alpha.
-2. **The `×2` is `r3`, the sun colour × exposure**, saturated by `ps_1_1`. Weather-dependent, not a constant (see
-   the correction in §3.2).
-3. **In-scatter is a separate per-vertex term that is ADDED**, not modulated. Any solve that models the bake as
-   purely multiplicative will mis-attribute it — this is an additive haze the un-bake must subtract.
-4. **Fog and in-scatter are the distance compressors.** RBR's far field is heavily fog-blended; we render none,
-   which is why our distant ground shows contrast the original never does.
-
-**Sub-mesh index *is* shader variant** — measured over Joux Verte's 558 drawn ground chunks, the mapping is
-perfectly clean, with no mixing inside a sub-mesh:
-
-| sub-mesh | vertex type | shadow map | specular map | pixel shader | chunks |
-|---|---|---|---|---|---|
-| 1 | 8  | — | — | `RLDoubleTexture` | 304 |
-| 2 | 14 | — | ✓ | `…Specular` | 60 |
-| 3 | 11 | ✓ | — | `…Shadow` | 117 |
-| 4 | 17 | ✓ | ✓ | `…SpecularShadow` | 77 |
-
-So **35% of ground chunks carry a baked shadow map**, and 25% a specular map. The converter discards
-`shadowMapIndex` / `specularTxtrIndex` (`lbs2ngg.py:132`), and **that stays discarded — by decision, not
-oversight** (see the scoping rule below).
-
-#### Scoping rule: matching the old renderer is a debugging tool, not the goal
-
-Reproducing RBR's output exactly is *not* a requirement. Baked shadows in vertices and textures are precisely
-what this project exists to replace with dynamic lighting, so a faithful reproduction of them is work spent on
-something we intend to delete. Concretely:
-
-- **Baked shadow maps, baked specular: dropped.** Not converted, not rendered. Their replacement is RT shadows
-  and real specular from §1.8.3.
-- **Fog and in-scatter: not reproduced.** RBR's are a fixed per-track linear fog and a `vs_1_1`-era scattering
-  approximation. We want real atmospherics driven by the weather preset (§3.4), so copying theirs is a detour.
-- **Baked vertex colour: scaffolding with an expiry date.** It is currently the *only* lighting we have, so it
-  stays until the dynamic path lands — then Tier 0 discards it (§3.2). It is not part of the destination.
-- **What we DO owe the original:** geometry, UVs, texture assignment, and the terrain blend weight. Those are
-  authored content, not lighting, and they must survive conversion exactly.
-
-This also gives a clean stopping rule for the seam investigation: if a difference from vanilla traces to a
-*missing bake* (shadow map, fog, in-scatter), it is out of scope and we stop. If it traces to *our own pipeline*
-(depth precision, geometry, sampling, blend weight), it is a bug and we fix it. Reverse-Z (§1.4) is the current
-test that discriminates between the two.
-
-One nuance kept open: the baked shadow map is directional-occlusion data, so it is a *potential* input to the
-Tier 2 photometric solve even though it will never be rendered. With RT shadows in the baseline that value is
-marginal — recorded here so the option is not lost, not scheduled.
-
-**Animation, unexpectedly cheap** (bears on §4): `…Anim` variants are a single instruction —
-`mad oT0.xy, c85.x, c85.yzzz, v7.xyyy`, i.e. UV scroll by `time × direction`. And `…Sway` compiles to *no vertex
-motion at all* — it declares two extra inputs and never reads them, emitting the same `oPos` as the static
-variant. Whatever sway RBR has is not in its vertex shaders.
-
-### 3.3 Materials
-
-Inputs for automatic assignment: texture name and content; mesh type (ground 8/11 vs general 6/7/9/14/17 vs
-movable) which already separates road from prop from foliage; the type-9 flag whose vertices carry **grass tilt
-amplitude and time base** (`MeshTools.cs:234`), i.e. the format tells us "this is foliage"; and the **`.MAT`
-per-texel surface classification** (gravel/tarmac/grass/snow), which maps directly onto roughness/specular presets
-and wetness response.
-
-Pipeline: heuristics produce a per-track `materials.json` listing every texture with its guessed class and
-parameters → humans override entries in Wallaby → reconvert. Improvable without touching converter code.
-
-Generated per texture: BC7 albedo (optional AI upscale as a separate offline step), BC5 normal (luminance
-high-pass by default, hand-authored where it matters), packed roughness/AO, and an **emissive mask** — which
-matters far more now that night lighting is in scope. Derived maps go in a content-addressed cache so reconversion
-is fast.
-
-### 3.3b RBR's ground textures are ATLASES — and that is the road-seam bug
-
-**MEASURED** on `track-42.ngg` and then **confirmed by experiment in the viewer**, closing §9b item 8. The route
-there is worth keeping, because the first attempt got the mechanism wrong while having the right suspect, and the
-negative result was what corrected it.
-
-"Plate" in RBR's texture names means **atlas page**:
-
-| | |
-|---|---|
-| `TrackTexturePlateOpaque.dds` | 2048×2048, **4 mips**, **18 distinct cells** of 256×256 |
-| road material | 406 objects, 72,168 tris, all UVs inside 0..1, each chunk in ONE cell |
-| authored gutter | UVs inset ≈ 2.25 texels from the cell edge |
-
-The gutter is sized for mip 0. It halves with every mip:
-
-| mip | page | cell | gutter | |
-|---|---|---|---|---|
-| 0 | 2048 | 256 | 2.25 texels | fine |
-| 1 | 1024 | 128 | 1.13 | marginal |
-| 2 | 512 | 64 | **0.56** | bilinear tap crosses into the neighbouring cell |
-| 3 | 256 | 32 | **0.28** | well across |
-
-And the road's cell is bordered by **measurably darker content** — decoded from the DDS itself:
-
-| region | luma |
-|---|---|
-| cell interior | **163** |
-| just outside left | **100** |
-| just outside bottom | **112** |
-| just outside right / top | ~165 (similar content) |
-
-So any filter tap that leaves the cell darkens the pixel.
-
-#### The wrong mechanism, and the negative result that fixed it
-
-The first write-up said the cause was mip-chain contamination, and predicted that clamping `MaxLOD` to 1 would
-remove the seams. **It did not** — the clamp visibly changed other objects, so it was reaching the shader, and
-the road was untouched. That looked like a falsification of the atlas theory entirely, and the constraint was
-re-stated as "distance-dependent but NOT mip-dependent", which points away from sampling and towards geometry.
-
-Debug view 8 (flat grey — no texture, no vertex colour, no blend) then came back **clean**, ruling out geometry,
-depth and rasterisation, while view 3 (tex0 only) still showed the bands. The artefact really was in the texture
-fetch. So what reaches outside a cell without depending on the mip level?
-
-**Anisotropy.** Aniso spreads its taps along the major axis *independently of the mip level it selects*. At the
-grazing angle a road is viewed from, that is a long line of taps running well past the cell edge into the
-luma-100 region. Confirmed in the viewer: switching to plain linear filtering (key `M`, mode 1) makes the bands
-**almost entirely disappear**.
-
-Two mechanisms, then, both of them the atlas:
-
-| | contribution |
-|---|---|
-| anisotropic tap spread crossing the cell edge | **dominant** — removing aniso removes most of it |
-| bilinear tap (±0.5 texel) at high mips, where the 2.25-texel gutter is sub-texel | **residual** — the faint banding still visible with aniso off |
-
-The original gutter arithmetic was therefore right but second-order, which is exactly why clamping mips alone
-showed nothing. **A negative result that contradicts the stated prediction is worth more than the story it
-kills** — this one was misread once (as "not the atlas") before being read correctly (as "not the mip *level*").
-
-Sampler mode 1 is a diagnostic, not a fix: losing anisotropy costs sharpness on every surface in the game to work
-around 18 texture cells.
-
-**The fix is de-atlasing in the converter:** split each cell
-into its own texture and rescale that cell's UVs to 0..1. Then mip chains are correct at every level, address
-modes mean something again, and later BC7 recompression and streaming operate on real textures. Cheap here
-because textures are already embedded per track (§3.5) and this plate holds only 18 cells.
-
-Three things to get right when doing it:
-
-- **16 of 406 road objects span >90% of the page**, so they cross cell boundaries and cannot simply be rescaled.
-  Check whether individual *triangles* stay within one cell (they probably do, since chunks do) and split the
-  object per cell; if any single triangle genuinely spans cells, that geometry needs its own handling.
-- **Not every ground texture is atlased.** `MB_04_GROUND_C` is a standalone 256×256 that genuinely tiles
-  (measured u 0..2.5), and rescaling its UVs would be exactly wrong. De-atlas by texture, not globally.
-- **Address mode per extracted cell is a real decision, not a default.** Once a cell is its own texture, `WRAP`
-  makes it tile with itself and `CLAMP` smears its edge row. Road chunks appear to tile along the road, so `WRAP`
-  is likely right there — but a cell that is a one-off decal would want `CLAMP`, and picking wrong reintroduces
-  an edge artefact that looks exactly like the bug being fixed. Decide it from the UV range per cell.
-
-If de-atlasing turns out to be blocked by the page-spanning objects, the fallback is a per-material UV rectangle
-in the format plus a shader clamp to `rect ± half a texel`. That is the standard fix when you cannot split an
-atlas — strictly worse than de-atlasing (it does not fix mips, BC7 or streaming), so it is a fallback and not a
-plan.
-
-Found along the way, unrelated but real: **material 13 has a garbage UV** — `v` reaching 3.1e36 across 52
-triangles. That is a converter defect, not a rendering one.
-
-### 3.3c The blend weight is NOT dead — measured across two tracks
-
-While isolating the road seams, debug view 5 showed the blend weight as solid black over the visible road on
-Joux Verte, and that was nearly written up as "RBR's second texture stage is inert on road surfaces". It is not,
-and the generalisation was wrong on both counts:
-
-| | vertex alpha > 0 |
-|---|---|
-| track-42 (Kangaroo), road material | **24.9%** |
-| track-42, other ground materials | 55% – 85% |
-| **track-108 (Wallaby), every material** | **100%** |
-
-So even on Joux Verte the road blends in a quarter of its area — the stretch on screen simply happened to be in
-the unblended majority — and on a Wallaby-authored track the second stage is live everywhere. Any lighting work
-must reproduce the two-stage blend properly; treating it as single-texture would look right on one track and
-wrong on the next, which is the same trap `bakedScale` fell into (§3.2b).
-
-### 3.3d RBR ships its own visibility data — MEASURED, and one block is misnamed
-
-`wallaby-cli info track-42_M.lbs` lists 14 blocks. Two bear on culling:
-
-**`(2,10)` "ground bounding boxes", 3796 bytes — usable as-is.** A `uint32` count of **158** (exactly Joux Verte's
-ground region count) followed by 158 × 24-byte records. The records are **`(origin, size)`, not `(min, max)`**:
-the second triple is positive in every record, ranging 0.3–77.9 m and averaging ~50 × 17 × 46, which is a
-plausible ground-region size. Mistaking it for a min/max pair would put 152 of 158 boxes inside-out on one axis
-alone.
-
-**`(1,4)` "clipping planes", 2916 bytes — NOT planes.** Leading count is 12, and `2912 / 12` is not an integer,
-so it is not an array of 16-byte planes. The payload reads as all-zero floats but as integers gives packed 16-bit
-pairs (`0x00010000`, `0x00030002`, `0x00050004`) alongside larger index-like values — i.e. *geometry*, likely a
-clipping volume or portal mesh. **The name is one of Wallaby's reverse-engineered guesses** (its own `CLAUDE.md`
-warns those are informed guesses rather than documentation) and this one appears to be wrong. Whether RBR's
-runtime still consults the block is a separate question that can only be answered by watching the game, not by
-reading the file.
-
-Neither is needed to start culling — see §3.3e.
-
-### 3.3e Culling bounds belong to the CONVERTER, with a load-time fallback
-
-RBR's `(2,10)` boxes are per **ground region** — 158 of them. Our draw unit is the **object** (one index range,
-one material), of which Joux Verte has 1569+. So the game's own data culls at roughly 10× coarser granularity
-than we can actually skip work at, which is reason enough not to build on it.
-
-The converter should emit a per-object AABB, for three reasons and not just the obvious one:
-
-1. **Free at runtime** — no load-time pass over 1.3M indices on every stage load.
-2. **Exactly the right granularity** — the converter creates the draw unit, so it can bound it precisely.
-3. **It can change the granularity, which is the real win.** Objects today come straight from RBR's
-   `GMeshRenderChunk` partitioning, which was built for a 2004 renderer's batching rather than for culling.
-   The converter can cluster spatially coherent objects that share a material, so each bound encloses something
-   compact instead of something scattered across a hillside. That is §1.8's meshlet direction reached cheaply,
-   and it is not something a renderer-side load-time pass can do — by then the partitioning is fixed.
-
-**Keep a load-time fallback in the renderer** for files with no bounds chunk. `Scene::Load` already holds the
-vertex and index arrays, so it is one O(indices) pass. Without the fallback, culling would not work until every
-existing `.ngg` had been reconverted, and the renderer would gain a hard dependency on a converter version — the
-kind of coupling that turns a cheap optimisation into a migration.
-
-### 3.3f Single-stage materials — and the guard that never fired
-
-`kMaterialSingleStage` (`ngg_format.h`) says: sample texture0 only, do not read uv1 or texture1. The scene
-shader branches on it per draw — a uniform branch, so the second fetch genuinely does not happen — and
-`weight` is forced to zero rather than merely small.
-
-This is how an **object** mesh differs from a **ground** mesh, and RBR draws the same distinction: object meshes
-run `RLSingleTexture.pso`, three instructions, `t0` only (§3.2b). Two consequences follow from stage 1 never
-being read there, and both bite us:
-
-- **uv1 on object meshes is unvalidated data.** It was never wrong for RBR because RBR never looked at it.
-- **Vertex alpha means COVERAGE on objects and BLEND WEIGHT on ground** — the same channel, two meanings. Used
-  as a weight on an object mesh it blends toward a texture the artist never intended, in proportion to a number
-  that means something else.
-
-> **The isfinite() guard had never once fired, and the reason is worth keeping.**
->
-> The vertex shader has carried `o.uv1 = all(isfinite(i.uv1)) ? i.uv1 : i.uv0;` since the problem was first
-> found, and this file described the bad data as "non-finite". **It is not non-finite — it is finite garbage.**
-> The largest values measured are around `3.1e36`, comfortably inside float's `3.4e38` range, so `isfinite` is
-> true for every one of them and the fallback branch is dead code. Measured directly on the shipped assets:
-> `track-42` has **0 non-finite uv1** and **233,730 vertices with |uv1| > 1e6**.
->
-> A guard that cannot fail is worse than no guard, because it gets read as protection and stops the question
-> being asked again.
-
-**What separates good uv1 from garbage is magnitude, and the threshold is not arbitrary.** Past about `1e6` the
-UV derivative across a triangle is thousands of texels per pixel, so the sampler collapses to the top mip and
-returns the texture's average colour whatever the coordinate was. At that point stage 1 carries no information
-and can only dilute stage 0.
-
-**It is worse than a wasted fetch on a de-atlased track.** Measured on `track-42`, every affected material has
-flags `AlphaTest|TwoSided` — foliage and objects, exactly as predicted — but de-atlas moved *stage 0* to the
-extracted cell and left *stage 1* pointing at the whole page:
-
-| material | stage 0 | stage 1 | refs with unusable uv1 |
+| **low** | none (the VR baseline) | - | 0.25 | 1.55 / 0.59 |
+| **medium** (default) | RT, 1 ray | medium (2 slices x 2 steps) | 0.50 | 3.0 / 1.22 |
+| **high** | RT, 2 rays | high (3 x 3) | 0.50 | 4.27 / 1.56 |
+
+New techniques join by adding a field to `QualityTier`. The individual setters (`SetAoRays`, `SetAoSource`,
+`ScreenSpaceAo()`...) stay for A/B; changing one takes the client off its tier.
+
+`RenderSettings` (game -> module, `Apply` in `module.cpp`): `quality` -> `SetQuality`; `rayTracing` ->
+`SetPreferRayTracedShadows`; `shadows` -> `Scene::SetShadowsOn`; `autoExposure`; `upscaler` + `renderScale` ->
+`SetUpscaling` (the game's modes: off/TAA, FSR native/quality 0.67/balanced 0.59/performance 0.5, DLAA, DLSS
+quality/balanced 0.58/performance, `game/src/app/settings.h`); `taa` per frame; `vsync` at present; `mode` windowed
+only. The module always draws the sky and uses ACES. `UpscalerAvailable` (probed once at `Create`) is what a
+settings menu may offer.
+
+### 1.6 Shaders and pipelines
+
+**The HLSL lives in `shaders/*.hlsl` and is compiled at build time into `WRenderer.dll`.** `shaders/shaders.txt`
+lists every shader the renderer loads, `<file> <entry> <profile> [args]` (58 entries), and that line is the key
+the C++ asks by: `LoadShader("scene.hlsl", "PSMain", "ps_6_0", { "-HV", "2018", "-DALPHA_TEST=1" })`. Profiles
+`*_5_x` compile with FXC (`d3dcompiler_47`, DXBC), `*_6_x` with the vendored DXC (`third_party/dxc`, DXIL, signed by
+its `dxil.dll`; the build fails on unsigned DXIL). The 5.1 shaders stay FXC: porting changes their code. `ngg-shaderc`
+compiles the list in parallel (~1 s) with `core/shader_compiler.cpp` - the same code and arguments as the run-time
+path - into byte arrays + a sorted table + a hash of the set (~750 KB); `WRENDERER_BUILD_HASH` covers the shaders.
+**The shipped game compiles nothing and needs neither `dxcompiler.dll` nor `dxil.dll`** (RT included).
+
+- Pitfall: `dxcompiler.dll` loads `dxil.dll` by bare name, and under MSBuild the Windows SDK's came first on PATH -
+  `dxil.dll` is now loaded first, from our folder.
+- **Development:** `NGG_SHADER_DIR=<repo>/modules/renderer/shaders` compiles from the files at run time (restart, no
+  rebuild; the log names a shader `shaders.txt` does not list). No hot reload.
+
+**Every pipeline goes through `CreatePipeline` / `CreateRootSignature`** (`pipeline_cache.h`): counted, timed
+(`LogPipelineStats`), named by a hash of the whole description including the root signature's bytes. 72 pipelines:
+24 at start-up; at the first scene load the scene's 41 (`Scene::EnsurePipelines` -> one `PipelineBatch`, made again
+only when the HDR format or the mip bias changes) plus 7 per load (the environment is 1.35 s of their 1.5 s cold).
+
+**The pipeline library is OFF** (`NGG_PIPELINE_CACHE=library` turns it on): an `ID3D12PipelineLibrary` in
+`UserDir()/cache/wrenderer/pipelines.bin`, keyed by vendor/device/subsystem/revision (not the LUID, new every boot),
+driver version and the shader-set hash; any mismatch or refusal deletes and rebuilds it; not used under
+`NGG_SHADER_DIR` or PIX. **On AMD it saves nothing:** the driver keeps 181 KB for 72 pipelines (no GPU code) and a
+"hit" compiles again when the driver's cache is cold. Kept to measure on NVIDIA.
+
+**Pipelines are created one at a time.** Parallel creation (8 threads, and the scene's batch ahead on its own thread
+from start-up) cut a cold start by ~5 s, but AMD's compiler (`amdxc64.dll`, driver 32.0.31021.5001, Radeon 780M)
+crashed or hung in ~1 run of 12-28, warm or cold, whenever two compiles ran at once; sequential never did. A crash on
+4-8 % of starts is worse than 5 s on the first start after an install or driver update. `NGG_PIPELINE_THREADS=<n>`
+re-enables threads for testing another driver or vendor. No "compiling shaders" screen: 72 pipelines and the driver's
+own cache make it a first-start-only cost.
+
+Measured (Radeon 780M, 1080p, track 42, RT on; cold = `NGG_DRIVER_SHADER_CACHE=clear`):
+
+| | run-time compile (before) | precompiled (now) |
+|---|---|---|
+| shaders at start-up / per scene load | ~1.6 s / ~1.8 s | 0 / 0 |
+| renderer "ready" | ~1.9 s | **0.29 s** |
+| pipelines, driver cache warm | 16-32 ms | 10-15 ms |
+| pipelines, driver cache cold | ~8 s | ~8 s (2.2 s start-up + ~6 s first load) |
+
+
+## 2. Assets: the .ngg format and where scenes come from
+
+### 2.1 Two producers, one renderer path
+
+**The renderer draws only `.ngg`.** The game hands it file bytes (`iface::RendererApi::loadScene`, or
+`loadSceneVariant` with the stage's name, interface 19); where those bytes came from is the game's business
+([design.md §6.3](design.md)). Two producers write them today:
+
+| producer | path | what it guarantees |
+|---|---|---|
+| **Wallaby** (separate repo, `NggWriter`) | `LBS -> glTF project -> (Blender / Wallaby edit) -> wallaby-cli import -> .ngg`; the direct `wallaby-cli convert` survives as a development shortcut | v3 materials; de-atlased ground textures; welded normals (exact positions, area weighting, per layer); tagged plants (`NGGG`/`NGGP`); collapsed stages with variants and aliases (`NGGR`/`NGGQ`/`NGGA`, its `StagePlan`); `NGGK` keys; `NGGS` start; weather from the project's JSON; models and placements (`NGGD`/`NGGE`) as the vegetation work lands. A human may have corrected any of it. |
+| **W-Rally's legacy importer** (`game/src/assets/legacy_stage.cpp`, `ImportLegacyStage`) | `Maps/<stage>.lbs` + `<stage>_textures.rbz` + `TrackSettings.ini` -> `.ngg` in memory at stage load, no cache (~0.5 s on stage 41) | automatic, nobody needed: layers 0 ground / 1 vegetation / 2 scenery / 3 movable; the ground's two-texture blend; `DefaultMaterial()` everywhere; untagged plants by topology; `NGGK` for movable placements; `NGGW` from `TrackSettings.ini`; `kSceneFlagLegacyImport` set. **Not:** de-atlas, weld, tags, variants, `NGGS`. |
+
+**The Wallaby project is three files, `.glb` + `.scene.json` + `.textures.zip`, and the order is automation first,
+human second.** glTF has nowhere for a layer id, a material flag or a detail-texture pairing, so those live in the
+sidecar only our tools write, and survive a DCC tool rewriting the `.glb`. The export already runs de-atlas, shading
+overrides and weld, so the author starts from the best automatic result. A converter request from the renderer side
+is therefore only real if it survives the glTF hop: a pass before export, or a sidecar field. `.ngg` itself is
+export-only, never edited or round-tripped.
+
+**Which one draws a stage, best first** (`game/src/assets/catalog.cpp`): the track's own `.ngg` (by stage, map
+or track name), then an `.ngg` in the development folders, then the `.lbs` imported (`StageTime::imported`). A
+hand-finished `.ngg` from the stage server is planned ahead of all of them; the catalog has the seam. In the stock
+RBR folder: 163 stages in the menu, 4 from `.ngg`, 159 imported.
+
+**The source stays authoritative for gameplay.** For an RBR stage the physics and the game keep reading `.trk .col
+.mat .fnc .lbs .dls`; the `.ngg` owns pixels only. **No producer moves a vertex** that collision depends on: visual
+and collision divergence is a gameplay change. `NGGK` is the one link: the physics moves the `.trk` solid with
+instance id *k*, the renderer moves every object keyed *k*.
+
+### 2.2 Container and chunks
+
+Little-endian, every payload 4-byte aligned, an unknown chunk skipped by size (`Scene::Load`). `FileHeader` is
+`'NGG0'`, version, chunk count. **Only `kFormatCurrent` (3) is read**; an older file is refused with "reconvert
+the asset", never upgraded. `ngg_format.h` is the truth; `modules/renderer/src/format/ngg_scene.*` is the
+strict reader and the writer (the legacy importer writes through it; tools and tests read through it), and the
+renderer keeps its own loader in `core/scene.cpp`. `tools/ngg-check` and CTest `ngg-roundtrip` keep writer, reader
+and loader in step; `ngg-producer-wallaby` does the same for a Wallaby file.
+
+| chunk | content | required | record versioning |
 |---|---|---|---|
-| 82 | `ObjectTexturePlateOpaque_c0r0.dds` | `ObjectTexturePlateOpaque.dds` | 182,097 of 182,097 |
-| 84 | `ObjectTexturePlateOpaque.dds` | `ObjectTexturePlateOpaque.dds` | 25,179 of 25,179 |
-| 81 | `ObjectTexturePlateTransparent.dds` | (same) | 161,292 of 685,644 |
+| `NGGH` | `SceneHeader` 40 B: bbox, vertex/index counts, flags (`kSceneFlagAnchorToCamera` test scene only, `kSceneFlagLegacyImport`), `bakedScale` | yes | file version |
+| `NGGV` | `Vertex` 44 B: pos, normal, uv0, uv1, colour `0xAABBGGRR` | yes | file version |
+| `NGGI` | uint32 indices | yes | - |
+| `NGGM` | `Material` 64 B, v3 (§2.3) | no | file version |
+| `NGGO` | `Object` 16 B: layerId, materialId, firstIndex, indexCount | no | - |
+| `NGGT` | embedded DDS: count, then name + bytes per texture | no | - |
+| `NGGS` | `SpawnPoint`: position, facing | no | - |
+| `NGGK` | per object int32 source key (`.lbs` (1,6) instance id = `.trk` solid), -1 none | no | - |
+| `NGGR` | `VariantChunkHeader` + `VariantRecord` 68 B (32 B records still read as the prefix) | no | `version` 1, `recordSize` |
+| `NGGQ` | per object uint32 variant mask | no | - |
+| `NGGA` | `VariantAlias` 36 B: variant index, name | no | `version` 1, `recordSize` |
+| `NGGG` | tag names (UTF-8) | no | - |
+| `NGGP` | plant table: `PlantTableHeader`, `PlantRecord` 32 B, `PlantPart` 16 B, tag refs | no | - |
+| `NGGW` | `WeatherChunkHeader` + `WeatherRecord` 160 B (§2.5) | no | `version` 1, `recordSize` >= 124 |
+| `NGGD` | model library (§2.6) | no | `kModelVersion` 1 |
+| `NGGE` | placements, `Placement` 40 B | no | `kPlacementVersion` 1, `recordSize` >= 40 |
 
-So what was being mixed into every leaf is *the average colour of the entire atlas page*, at a weight given by
-the leaf's coverage. That is a real contributor to foliage reading flat, not a tidiness matter.
+**Textures are embedded, not referenced, so a stage is one file and one hash** (§2.8). **Records grow by
+appending:** a reader takes min(`recordSize`, its own size) over defaults and skips a longer tail; a chunk
+`version` changes only when an existing field changes meaning, and an unknown `NGGD`/`NGGE` version is refused
+(the cards are drawn instead), never guessed.
 
-**`Scene::MeasureSingleStage` is the load-time fallback**, in the same shape as `WeldNormals`: measure first,
-act only where the data is unambiguous, log what it did, and stand down by itself once the converter sets the
-flag. Two decisions in it:
+**`bakedScale` is measured per asset, not a constant.** Kangaroo-authored stages bake vertex colour at half scale
+(Joux Verte p99 = 128), Wallaby-authored ones at full (track-108 p99 = 255); a constant tuned on one blows the other
+out. Producers write 255 / p99 of the brightest channel (percentile, not max: a few stray vertices read a dim bake
+as full). Only light mode 0, the A/B reference, uses the bake; the default lighting ignores it.
 
-- **Per object, not per material.** A material can be shared by geometry that disagrees — material 81 above is
-  23% unusable and 77% fine — and flagging the whole material would break the 77%.
-- **All of an object's vertices, not most.** A partial object has uv1 that is usable somewhere, and silently
-  dropping a real blend layer would look exactly like a missing detail texture. Partials are counted and
-  reported, not touched.
+**`NGGS` is written but nothing reads it** (neither the renderer nor the game); nor does anything read a variant's
+own start.
 
-Measured through the renderer's own log: `track-42` → **323 objects flagged, 126 mixed and left alone**;
-`track-108` → nothing at all, its uv1 is clean. Neither number comes from the converter yet.
+### 2.3 Materials: metallic-roughness, v3
 
-### 3.3g Materials are metallic-roughness now — `.ngg` v3, and the 2004 model is gone
-
-**DECIDED, by the user: stop carrying RBR's format design forward.** v2's material was RBR's model wearing our
-names — two texture stages, a blend weight in vertex alpha, lighting baked into vertex colour. That was the
-right shape while the job was reproducing 2004 output faithfully enough to A/B against it. It is the wrong shape
-for the renderer that now exists: nowhere to put a normal map, nowhere to say how rough a surface is, no way to
-make something emit light. That is most of what separates a 2004 image from a modern one.
-
-`Material` is therefore **replaced, not extended** — 16 bytes to 64, format v3:
-
-```
-baseColour  detail  normal  orm  emissive  flags        (5 texture slots + flags)
-baseColourFactor[4]
-roughness  metallic  normalScale  occlusionStrength  emissiveStrength  alphaCutoff
-```
-
-**It is glTF metallic-roughness, near enough 1:1, and that is the whole argument.** §7.2 already decided glTF
-is the interchange format and §3.0 made it the conversion spine; a runtime material model that maps onto it
-means an authored material survives the trip without a translation layer inventing values along the way. `orm`
-uses glTF's own channel packing (R occlusion, G roughness, B metallic) so an exported material needs no shuffle.
-
-**Two things are kept from RBR, and both earned it by measurement rather than inheritance.** The `detail` layer
-blended by vertex alpha — §3.3c measured it live on both test tracks and it is what hides terrain chunk seams;
-detail texturing is a standard technique in its own right, so this is not a legacy stage. And `baseColour.a` as
-coverage on alpha-tested geometry. **One thing is deliberately absent:** the baked vertex colour stays in the
-vertex data as the A/B reference (§3.2), not as a material property — it is a record of one particular sun on
-one particular day.
-
-**`kMaterialSingleStage` disappeared, and its absence is the design.** §3.3f needed a flag only because the
-format could not express "this material has no second layer". v3 can: `detail == kNoTexture`. The renderer
-derives the draw flag at load, so the file states the fact once instead of twice in a way that can disagree
-with itself. Same for the normal map.
-
-**Factors multiply their map rather than replacing it**, which is glTF's rule and the reason an untextured
-material is a *complete* material rather than a special case: an empty slot binds the 1×1 white fallback, so
-`map * factor == factor`. That is what lets the converter ship plausible PBR for RBR's 6,515 textures before a
-single map has been authored — and `DefaultMaterial()` gives an unconsidered material a rough dielectric rather
-than a black or mirror-finish one.
-
-#### The tangent frame comes from screen-space derivatives
-
-Two reasons, and the second decided it: the `.ngg` vertex is 44 bytes with no tangent, so adding one is a format
-break *and* a converter change — and **RBR's geometry carries no tangents either**, so they would have to be
-derived somewhere regardless (§3.2b: the disassembly has zero `dcl_tangent`/`dcl_binormal` and zero `texbem`,
-because RBR has no normal mapping anywhere). Four derivative instructions in the pixel shader works on converted
-and authored content alike, with no format cost.
-
-The normal map is gated on a **flag**, not on the sampled value: an empty slot binds the white fallback, which
-decodes to (1,1,1) and would tilt every normal 54° off true. Neutral for a normal map is (0.5,0.5,1), and no
-single fallback texture can be neutral for every slot at once.
-
-#### sRGB is a per-SLOT decision, and only the material knows the slot
-
-`baseColour`, `detail` and `emissive` are artwork and decode through sRGB. `normal` and `orm` are **numbers**,
-and pushing them through the sRGB decode bends every value — a 0.5 roughness would arrive as 0.21. Nothing in a
-DDS says which it is, so `Scene::Load` collects the indices bound to normal/ORM slots and hands them to
-`UploadTextures`, which picks `BC*_UNORM` instead of `BC*_UNORM_SRGB`. This is the same class of bug as §5.0's
-colour-management failure and it is being closed *before* any such map exists, rather than after four rounds of
-tuning around it.
-
-#### Specular, and the units note that has to be here
-
-GGX: Trowbridge-Reitz, height-correlated Smith, Schlick Fresnel. Nothing bespoke — the value of a standard BRDF
-is that an authored glTF material looks the same in Blender as it does here.
-
-> **The diffuse term in this renderer is `albedo * E`, which is π times the physical `albedo/π * E`.** That
-> convention is inherited from the first lighting pass and absorbed into `sunDiffuse`. Specular therefore carries
-> the same factor explicitly (`kSpecScale = π`), or the two are out of balance by π and everything wears a chrome
-> sheen. Both collapse to the physical form together when exposure becomes physical (§9b item 17). This project
-> has lost two rounds to exactly this kind of missing π; it is written down rather than remembered.
-
-**No specular on foliage, deliberately.** A leaf card's normal is a shading fiction already
-(`SphericalFoliageNormals`), and a highlight computed from a fiction lands in the wrong place and flickers as
-the camera moves. **No ambient specular yet** either: it needs a prefiltered environment and a split-sum BRDF,
-which is exactly what §9b item 14's environment LUT is for. Faking it with a roughness-scaled `f0` would be a
-fudge that then has to be un-tuned when the real thing lands.
-
-#### Live editing: the API exists, the dialog belongs in Wallaby
-
-`ngg_get_material` / `ngg_set_material` / `ngg_material_name` / `ngg_object_material` (design 8.2's C DLL), on
-top of `Scene::GetMaterial` / `SetMaterial`. **A scalar edit costs a memcpy and shows on the next frame** — the
-material reaches the shader as root constants read from the renderer's table every frame, so there is nothing
-to upload and nothing to rebuild. That is the reason the material is root constants rather than a buffer, and
-it is what lets a slider feel like a slider instead of like a reconversion.
-
-Three decisions inside it:
-
-- **The whole descriptor goes in and out**, not one field at a time. No partial-update state, and no list of
-  per-field setters that grows every time the material does.
-- **The derived flags are not exposed.** "Single layer" is `detail == kNoTexture`; the renderer recomputes it
-  on every set, so a caller cannot put the flags and its own texture handles into disagreement.
-- **The MEASURED single-stage decision survives a material edit.** §3.3f's fallback came from the geometry, not
-  from the material, so it is stored per object and re-applied when flags are recomposed — otherwise an
-  unrelated slider would silently restore the atlas-average blend.
-
-Only a texture-slot change rewrites the SRV heap, and the renderer detects that by comparing slots rather than
-trusting the caller. Persistence is Wallaby's: these values belong in the scene-description sidecar beside the
-shading overrides, keyed on the **material** for the reason §3.0 gives — object indices move when the converter
-regroups. `rbrtm.exe --view` drives the same calls from `1`/`2` and `3`/`4`, so the path is testable before any
-UI exists.
-
-#### v2 was readable for a transition, and that has ended
-
-The converter is in another repository. A hard cut would have meant both sides landing the same change in the
-same hour or every asset stops loading, so `Scene::Load` read a v2 material table for a while and filled the PBR
-fields from `DefaultMaterial()`, logging that it did. Measured then: `track-42` (119 materials) and `track-108`
-(92) both loaded and rendered unchanged apart from the new specular lobe and §3.3f's single-stage fix.
-
-**Ended 2026-11-07:** Wallaby's `NggWriter` writes v3, so the branch, `MaterialV2` and the v2 version test are
-gone from `Scene::Load` and from `ngg_scene.*`. A v2 file is refused with "reconvert the asset"; the
-`ngg-producer-wallaby` test file (`phys-data/m5/track-41.ngg`) was re-exported as v3 by `wallaby-cli convert`.
-
-### 3.4a `TrackSettings.ini` already IS the weather preset system — 762 presets
-
-**MEASURED.** `Maps\TrackSettings.ini` holds **762 sections** keyed `<map><variant>_<sky>_<cloud>`, e.g.
-`[42M_crisp_clear]`, `[42O_M_heavyrain_heavycloud]`, `[108M_lightfog_clear]`. This is §3.4's design, shipped in
-2004, and it means the weather presets do not have to be invented — they can be read, matched, and then
-extended.
-
-What each section carries is not a set of magic constants but a **physically parameterised atmosphere**:
-
-| key | meaning |
-|---|---|
-| `SunDir` | the sun direction, per track and variant — this is what §3.2's photometric solve was going to recover |
-| `Sun_Intensity`, `AmbientRGB`, `DiffuseRGB` | the lighting constants behind `bakedScale` (§3.2b) |
-| `Turbidity`, `Rayleigh_Multiplier`, `Mie_Multiplier`, `Greenstein_Value` | Preetham/Mie scattering parameters — RBR was running an analytic sky model |
-| `Extinction`, `Inscattering` | the `r3` and `oD1` terms in `RLDoubleTexture.vso` (§3.2b), now named |
-| `FogStart/End/RGB`, `UseFog`, `SuperbowlFogStart/End` | fog, including a separate distant-terrain range |
-| `SkyboxName`, `SkyboxSaturation`, `Skybox_Scale`, `CloudName`, `Cloud_Scale` | which sky and cloud layer |
-| `MipMapBias = -3.0` | RBR biased mips *sharper*, worth remembering next to §3.3b |
-
-Two consequences:
-
-- **The sky work starts from RBR's own parameters rather than from taste.** A physical sky driven by `SunDir`,
-  `Turbidity` and the Rayleigh/Mie multipliers matches vanilla by construction, and improving on it afterwards is
-  then a deliberate choice rather than an accident.
-- **It reduces §3.2's photometric solve from "recover the sun" to "verify the sun".** The solve is still worth
-  doing for tracks whose settings are missing or wrong, but it stops being on the critical path.
-
-Note the layering this implies for §3.4: our preset system should *read* these as the baseline, not replace them.
-
-> **Superseded by 5.0q (measured):** the scattering numbers are art knobs, not physics (turbidity −2.8…9, g =
-> 1.0). Only the category in the section name, the fog distances and `SunDir` translate. Our presets are our own
-> physical format, stored in the `.ngg`, and this file is an import source.
-And `SunDir` belongs in the `.ngg` weather preset, not re-parsed from the game directory at runtime — a native
-or generated track has no `TrackSettings.ini`.
-
-### 3.4 Weather and daylight presets
-
-Weather becomes an authored, named, unbounded set — decoupled from RBR's four TOD variants, which are demoted to
-*source data for the solve* rather than the runtime lighting model.
-
-A preset (`weather/<name>.json`) declares:
+**The material is glTF metallic-roughness near enough 1:1**, so an authored material crosses the glTF spine without
+a translation layer inventing values. It replaced v2's RBR-shaped two-stage material outright (v2 reading removed
+2026-11-07, once Wallaby wrote v3).
 
 ```
-name, description
-sun:      elevation, azimuth, colour, intensity        (or datetime + latitude → computed)
-sky:      model params (turbidity/cloud coverage/type), cloud speed
-atmos:    fog curve, visibility distance, rain/snow rate, wind vector+gust
-ground:   wetness 0..1, puddle density, snow cover
-night:    streetlight/window emissive multiplier, headlight profile, moon
-exposure: EV bias, tonemap curve
-bindings: mat: "<file>.mat"        ← physical surface map the game must load
-          gameWeather: <RBR enum>   ← what physics/sound/pacenotes see
-          tod: <M|N|E|O>            ← which baked variant to source geometry lighting from
+baseColour detail normal orm emissive  (NGGT indices, kNoTexture = 0xFFFFFFFF when empty)   flags
+baseColourFactor[4]  roughness  metallic  normalScale  occlusionStrength  emissiveStrength  alphaCutoff
 ```
 
-Two hard rules:
+- **Slots are sRGB or linear by role**: `baseColour`, `detail`, `emissive` sRGB; `normal` and `orm` (glTF packing:
+  R occlusion, G roughness, B metallic) linear. Nothing in a DDS says which, so `Scene::Load` collects the textures
+  bound to normal/ORM slots (`m_linearTextures`) and the upload picks `*_UNORM` for them, `*_UNORM_SRGB` otherwise;
+  the first binding wins if a DDS is used both ways.
+- **Factors multiply their map; an empty slot binds 1x1 white**, so `map * factor == factor` and an untextured
+  material is complete. `DefaultMaterial()` is a rough dielectric (roughness 0.75, metallic 0, opaque, cutoff
+  170/255 = RBR's AlphaRef) - what the legacy importer emits for every RBR texture.
+- **Kept from RBR because measured, not inherited:** `detail` blended by vertex alpha (live on 25-100 % of ground
+  area on both test tracks; it hides chunk seams), and `baseColour.a` as coverage on alpha-tested geometry. The baked
+  vertex colour stays in the vertex as the A/B reference, not as a material property.
+- **Derived at load, never stored:** `kDrawSingleStage` when `detail == kNoTexture` (the shader then never reads
+  uv1), `kDrawNormalMap` when `normal` is filled. The normal map is gated on that flag, not on the sample: the
+  white fallback decodes to (1,1,1), and no single fallback is neutral for every slot.
+- **No tangents in the vertex:** RBR's geometry has none and the 44-byte vertex has no room, so the tangent frame
+  comes from screen-space derivatives in `scene.hlsl`.
 
-- **Render weather is a pure function of the game's weather state.** A wet-looking road with dry grip is worse than
-  the old graphics. The preset picks the `.MAT` *and* declares the game weather enum; they must agree.
-- The `.MAT` swap goes through the existing `LoadFileMem`/`CreateFileA` hooks — no new plumbing.
-
-Preset id is part of the event definition and hashed into the fairness check (§3.6).
-
-### 3.4b Layers and stage variants
-
-A stage is not one fixed set of geometry. The base terrain and road are shared, while walls, spectators,
-vegetation and props vary between a stage's variants — and RBR ships those variants as separate LBS files whose
-object sets genuinely differ (night versions add and remove things). Converted assets have to express that, or
-every variant becomes a full copy.
-
-**Model:**
-
-- **Object** — the unit of addressing. Stable id, owning layer, geometry range, transform, material, binding
-  mode. Everything below is a selection over objects, so *nothing* works unless geometry is stored per-object
-  rather than as one merged blob (which is exactly what format v0 does today, and why v0 cannot express any of
-  this).
-- **Layer** — a named group of objects: `terrain`, `road`, `walls`, `spectators`, `vegetation`, `props`.
-  Layers are the granularity at which content is included, replaced or authored.
-- **Variant** — a named selection: which layers are present, plus per-object add/remove/replace overrides, plus
-  which lighting set applies. `42_M` and `42_O` become two variants over one shared geometry pool.
-
-**Geometry is stored once.** This is measured, not assumed: `_M` and `_O` of Joux Verte match bit-exactly by
-position (§3.2), so a variant that re-listed the same terrain would duplicate ~180k vertices for nothing, across
-207 shipped track files.
-
-**One container per stage, holding the shared pool and all its variants** — rather than a base file plus variant
-sidecars. The deciding factor is §3.6: one file is one CRC in the fairness chain. Sidecars would mean validating
-a set, and a set is something an attacker can make inconsistent.
-
-**Community and generated content reuse the same mechanism**: an overlay adds a layer (§7.1), so "better trees",
-"AI-scattered detail" and "this stage variant has different walls" are one feature, not three.
-
-New chunks, all additive to the existing container:
-
-```
-NGGL  layers      [id, name, flags]
-NGGO  objects     [id, layerId, vertex/index range, transform, materialId, binding mode, bbox]
-NGGR  variants    [id, name, layer set, override list (add|remove|replace objectId), lightingSetId]
-```
-
-A reader that knows none of them still renders the shared pool, which keeps v0 files valid.
-
-**DONE (2026-11-08), smaller than sketched, because the measurement said so.** Over 57 RBR variant pairs (Wallaby,
-`<RBR>\Maps`): the DRAWN terrain is the same triangles (0 of 86,510 differ on track-42; 0.45% on 108) -- compared
-per sub-mesh it looks different only because variants split the same ground across RBR's per-format sub-meshes
-differently; the objects mostly match (exactly on 42; 112 plants and 8 placements on 108); the baked vertex colour
-differs almost everywhere; and of the textures that differ under one name, 108 of 230 are the `_O` copy darkened
-(down to 0.68x), 17 lighter, the rest re-encodes. Track-99's `_M` and `_O` share no terrain at all. Two of the
-three things a variant varied are therefore things W-Rally now does LIVE -- the baked light (only light mode 0, the
-A/B reference, reads it) and the darkened overcast/wet textures (weather and `SetWetness`) -- so a variant is only
-WHICH OBJECTS it has:
-
-```
-NGGR  variants      VariantChunkHeader {1, count, 32, 0}, then VariantRecord {char name[16]; flags; reserved[3]}
-                    the first is the MAIN variant: its vertex colours and textures are the file's
-NGGQ  object masks  uint32 count (= objects), uint32 mask[count]; bit v = in variant v (at most 32)
-```
-
-No NGGL (the object's layerId already is one) and no per-variant colour or texture set. Names are RBR's letters
-("M", "O") for one map's stages and map-qualified ("42_M", "45_N") when the file also holds a REVERSED stage of
-another map number -- Joux Verte 42 is 45 driven the other way, and one file for both is the aim. `loadSceneVariant`
-(renderer interface 19) takes the game's stage name; the loader matches the full name first and a bare letter only
-when one variant alone ends in it, else draws the main one and logs it. Objects outside the variant are loaded and
-marked REMOVED, not dropped, so object indices -- which NGGK, NGGP and the editor's handles all are -- stay the file's;
-`SetObjectVisible` can no longer show a removed object (a physics-keyed prop of another variant stays out). Checked in
-`editor-api-41` (each variant's count, a stage name, a reversed stage, an ambiguous letter, a file without variants,
-masks of the wrong length) and `ngg-roundtrip` (both chunks through `ngg_scene`).
-
-**Then (same day): each variant's own car start, and a variant at ANOTHER ORIGIN.** `VariantRecord` grew to 68 bytes
-(32-byte records still read, as the prefix): `spawnPosition`/`spawnFacing` (a reversed stage starts where the other
-ends; NGGS stays the main one's) and `offset`. Measured over RBR's own reversed pairs (Wallaby CLAUDE.md has the table):
-23 of 25 merge, and two of them are the same terrain built elsewhere -- 55 is 51 moved by (-1193, +665, +1793) m, 66 is
-63 moved by (-51, 0, +3350) -- with physics, cameras and start in their own frame. The file stores every object in the
-main variant's frame and the loader moves a copy of the vertices, the bounds and the plant boxes by the drawn variant's
-offset before anything reads them. `editor-api-41` checks an object moves by exactly the offset; Wallaby's
-`WRendererCheck` does it on the real 51/55 file.
-
-**Revised (the user, 2026-11-08): a variant is a STAGE, and the renderer guesses nothing.** RBR's `_M _N _E _O` are
-times of day with the light baked in; W-Rally lights live and picks the time of day as weather. So Wallaby collapses
-siblings that draw the same and are the same physics into ONE stage (its `StagePlan`, measured over `<RBR>\Maps`: every
-time-of-day pair of RBR's own maps is one stage except where RBR's data really differs -- a reversed stage's `_O`
-that kept the original stage's plants, a wrong fence file, another build of 61), and only a stage that differs is a
-variant. A reversed stage always is. Variants are named by map number (`42`, `45`; `125_O` for a sibling kept apart)
-and the new optional **NGGA** chunk lists the other names each answers to -- RBR's stage names of the siblings
-collapsed into it (`track-42_M`, `track-42_O`). `loadSceneVariant` matches the request EXACTLY (ignoring case)
-against the names and then NGGA; the earlier rules -- strip `track-`, a bare letter when unambiguous -- are gone,
-because which names a stage answers to is the converter's decision and is written in the file. The game passes its
-stage name (`track-42_O`) and the file resolves it. Interface unchanged (19). `editor-api-41` checks an alias picks
-its stage, a name only LIKE a variant's does not, and a letter is not a name; `ngg-roundtrip` carries NGGA.
-
-### 3.5 Format sketch
-
-Chunked, GPU-ready, little-endian, memory-mappable, every chunk independently skippable so a version bump never
-means "reconvert everything or nothing".
-
-```
-NGGH  header      magic, version, producer id+version, TOD id, flags,
-                  origin: {converted | native | generated}
-                    converted → source LBS CRC32+size          (drives the vanilla-fallback check)
-                    generated → generator id, seed, input hash (drives reproducibility + fairness)
-                  encryption envelope: {scheme=none, keyId=0, reserved}      ← reserved now, unused
-NGGM  materials   name, class, texture ids, roughness/metal/normalScale, alpha mode,
-                  emissive colour+intensity, foliage params, car-paint flags (clearcoat, flake)
-NGGT  textures    ids → BC7/BC5/BC4 blobs, or external .nggtex package for streaming
-NGGV  vertices    pos f32x3 | normal+tangent (10-10-10-2) | uv0 f16x2 | uv1 f16x2 |
-                  AO+skyOcclusion u8x2 | foliage phase/amp u8x2
-NGGI  indices     u16/u32
-NGGC  clusters    64–128-tri meshlets: bbox, normal cone, material id, ranges, LOD level
-NGGN  nodes       BVH over clusters for CPU/GPU culling
-NGGO  objects     per object: id, cluster ranges, default transform, animated flag, and a
-                  binding mode:
-                    bound   → VB/IB identity key, rendered at the harvested transform of a
-                              suppressed game draw          (converted tracks)
-                    free    → rendered unconditionally from its own transform/animation
-                              (generated tracks, and added content on converted ones)
-NGGL  lighting    solved sun dir/colour per source TOD, sky params, SH2 irradiance probe grid
-NGGP  lights      punctual lights: type (point/spot/area), position, direction, cone, colour,
-                  intensity, radius, shadow flag, on/off schedule, provenance (auto|authored)
-NGGS  skeletons   bones + bind poses for animated/skinned objects (car and props)
-NGGX  provenance  per-object source block type/subtype, for debugging and the diff harness
-```
-
-**As built** (2026-11-09) the instanced models are two optional chunks of their own, `NGGD` (the model library) and
-`NGGE` (the placements), laid out in `ngg_format.h` and described in 5.0w; `NGGP` became the PLANT table (the
-vegetation's plants, `ngg_format.h`), so lights will take another tag.
-
-`NGGP` and `NGGS` exist from v1 even though nothing writes much into them yet — reserving them costs nothing and
-retrofitting a chunk that the runtime, converter and editor all need is expensive.
-
-### 3.6 Fairness
-
-This is an online racing platform, so rendering changes are potentially competitive changes: longer view distance
-means seeing corners earlier; thinner fog, brighter night or thinner foliage means information the reference client
-doesn't give. Night lighting makes this sharper, not softer — "how bright is night" is now a *tunable*.
-
-So: a **sanctioned render profile** — view distance, fog/visibility, foliage density, night exposure and light
-intensity, LOD fade distances — locked per event and hashed into the same check chain the track CRC uses. Free
-settings offline and in practice. This constrains the config system, so it belongs in v1.
-
-### 3.7 Encryption (deferred, not closed)
-
-No crypto now. What v1 must do: keep the `NGGH` envelope field, route all converter output through a single sink
-interface, and keep chunk framing such that payloads can be encrypted independently. When protected tracks matter,
-the converter runs client-side at install from the already-licensed original, using the Blowfish infrastructure
-already in the plugin. Until then, the converter should still *refuse* to write output for a keyed source, so we
-don't accidentally ship a content-leak tool before the protection exists.
-
----
-
-## 4. Animation
-
-### 4.1 Harvest it, don't reimplement it
-
-The game still runs animation logic for objects whose *draws* we suppress. So each suppressed draw hands us, free
-and per frame, the world matrix the game computed — and for CPU-skinned meshes, the **already-skinned vertex data**
-in the dynamic VB.
-
-Phase plan: match the suppressed draw's identity key to an `NGGO` object and render our replacement at the
-harvested transform. Zero animation code, exact fidelity, no RE required. This is a much better trade than
-reimplementing `DriveEvents`/`AnimTriggers`/`AnimationSets`, especially since `AnimationSetItem` is an unparsed
-stub and the curves live in SGS files Wallaby reads only partially.
-
-The same mechanism is how the **car's runtime damage deformation** gets handled when we take the car over (§6) —
-RBR deforms the car mesh at runtime, so reading the deformed result beats re-deriving the deformation model.
-
-> **Confirmed in-game, and it makes harvesting mandatory rather than merely convenient.** Block 1/6
-> (`MovableMeshes`) converts and renders correctly — fences, banners, rally signs, the start clock; 24 objects at
-> 625 instance matrices on Joux Verte. But **they no longer move when hit.** The physics still runs and the
-> game's own copy still moves; what does not move is *our* copy, because the converter **baked** each instance
-> matrix into vertices.
->
-> The block name is literal: these are driven by the collision/physics engine, so their placement is **runtime
-> state, not asset data** — the file stores only the initial transform. Two consequences:
->
-> 1. **Stop baking movable transforms.** They belong in the format as a per-object transform the runtime
->    overwrites, not folded into vertices. Baking is correct only for genuinely static content (terrain,
->    vegetation, scenery).
-> 2. **This is the first real customer for §2.1's harvested world matrix.** That tuple was recorded speculatively
->    for "animation later"; block 1/6 is the concrete case, and it shows the moment a player clips a fence —
->    which is often. A knocked-over fence that springs back to attention is worse than one we never drew.
->
-> This is *not* an argument for depth interop or for letting the game draw them (§1.3). The transform is cheap to
-> read at the suppressed draw. It is an argument about where the transform lives in our data.
-
-### 4.1a The .lbs image is transient — MEASURED, and it settles the mechanism
-
-An attractive idea, and worth recording why it fails, because it would have been the cheapest possible solution.
-
-**The proposal.** We already know where the loaded `.lbs` lives — RBRTM's `ParseLBS` detour recovers the buffer,
-and RBR reads the whole file into *one contiguous allocation*, so a file offset is also a memory offset. The
-converter therefore records the file offset of every movable-mesh instance matrix, and at runtime we read
-`base + offset` once per object per frame. No draw harvesting, no identity mapping between game draws and our
-objects, no gaps when the game culls something we still draw. The offset *is* the identity.
-
-**The measurement.** Instrumented the bridge to check, every N frames, which 4 KB pages of the image are still
-readable and which have changed (`WatchLbsPages`). Two tracks, two loads:
-
-| track | image | outcome |
+| flag | bit | meaning |
 |---|---|---|
-| Joux Verte | 30,586,235 bytes at `0x16ECC020` | **unmapped 0.8 s after load**, 0 bytes readable |
-| Map 4 | 1,922,782 bytes at `0x15AE4020` | **unmapped 0.14 s after load**, 0 bytes readable |
+| `kMaterialAlphaTest` | 0 | `clip()` against `alphaCutoff` |
+| `kMaterialTwoSided` | 1 | no back-face culling |
+| (was `kMaterialSingleStage`) | 2 | unused, so an old bit can never read as something else |
+| `kMaterialBlend` | 3 | glass: drawn after opaque, far to near; no depth write, no shadow, not ray traced |
+| `kMaterialFoliage` | 4 | implies AlphaTest + TwoSided (the loader ORs them in); lit with wrap and transmission; hashed alpha edge |
 
-`0 of N bytes readable` — the whole allocation is released, not trimmed. **RBR parses the file into its own
-structures and frees the buffer immediately.** There is no persistent file image, so there is nothing to read at
-an offset, and the scheme is dead.
+**Live editing goes through `renderer_edit.h`** (`getMaterial` / `setMaterial` / `materialName` /
+`objectMaterial`, version 2): the whole descriptor in and out, the derived flags recomputed on every set, only a
+texture-slot change touches the descriptor heap. A scalar edit shows on the next frame because the material
+reaches the shader as root constants. The measured single-stage decision (§2.7) is stored per object and survives
+a material edit. Persisting edits is Wallaby's, keyed by material (object indices move when the converter regroups).
 
-> **Corollary, and it matters for §7.** The related idea of shipping a *minimal `.lbs`* for natively-authored
-> tracks survives, but only in one direction. It is still a valid way to get objects **into** RBR's collision
-> engine — which is required regardless of who renders them, since they must collide with the car. It cannot be
-> used to read transforms back **out**. Input yes, output no.
+### 2.4 Objects, layers, variants
 
-So both movable meshes and fences resolve to the same mechanism: **harvest at the suppressed draw.** The two
-mechanisms in §4.1b collapse to one, which is a simpler outcome than the taxonomy suggested — at the cost of the
-identity-mapping problem, which now has to be solved for real.
+**The object is the unit of drawing and of addressing:** one index range, one material, one layer. Layer ids are
+the producer's (the legacy importer: 0 ground, 1 vegetation, 2 scenery, 3 movable); there is no layer table chunk.
 
-> **Open, and worth deciding rather than defaulting into: how deeply to couple to RBR's collision engine.**
-> Everything above treats the physics as a black box we observe through draw calls. There is a stronger option —
-> engaging the collision/physics engine directly, the way `.col` and the movable/fence systems already do — which
-> would give object state as *data* rather than as an inference from rendering, and would sidestep both the
-> identity mapping and the culling gaps.
->
-> It is a bigger commitment: more surface against a 2004 binary, and it makes the renderer depend on internals
-> that the fairness profile (§3.6) then has to account for. But note it is not purely a rendering question — native
-> tracks (§7) must feed RBR's collision anyway for the car to hit anything, so *some* coupling is required no
-> matter what. The question is whether the same channel can serve both. **Deferred deliberately; the answer
-> changes what the format needs to store, so it should be settled before format v2 (item 7) is cut.**
+**A variant is a STAGE, and the file says which names it answers to; the renderer guesses nothing.** RBR shipped each
+time of day as its own `.lbs` with the light baked in. W-Rally lights live and treats time of day as weather, so
+Wallaby collapses siblings that draw the same and are the same physics into one stage; only a stage that really
+differs is a variant (a reversed stage always is). Measured over 57 RBR sibling pairs: the drawn terrain is the same
+triangles (0 of 86,510 differ on 42, 0.45 % on 108), the objects mostly match, and what differs is the bake and
+darkened overcast copies of textures - both things W-Rally now does live. So **a variant is only which objects it
+has**, plus its own start and origin:
 
-### 4.1b Runtime state is not one problem — a taxonomy
+- `NGGR`: name (map number, `"42"`, `"45"`; `"125_O"` for a sibling kept apart), `kVariantHasSpawn`, spawn
+  position/facing, `offset`. The first record is the main variant; its vertex colours and textures are the file's.
+  At most 32.
+- `NGGQ`: bit *v* = object in variant *v*. Without it every object is in every variant.
+- `NGGA`: the other names a variant answers to (RBR's `track-42_M`, `track-42_O`).
+- **Matching is exact, ignoring case**, names first then aliases (`Scene::SetVariant`); no match or no request draws
+  the main variant and logs it. The game passes its stage name.
+- **Objects outside the variant are loaded and marked removed, not dropped**, so object indices - which `NGGK`,
+  `NGGP` and editor handles all are - stay the file's; `SetObjectVisible` cannot show a removed object.
+- **`offset` moves the world:** a reversed stage can be the same terrain built elsewhere (RBR's 55 is 51 moved by
+  (-1193, +664, +1793) m; 66 is 63 moved by (-51, 0, +3350)). Everything is stored in the main variant's frame; the
+  loader moves a copy of the vertices, the bounds and the plant boxes before anything reads them.
 
-Movable meshes turned out to carry runtime state (§4.1). They are not the only ones, and the others do not all
-want the same solution. Sorting the cases by *what* the game changes at runtime:
+Tests: `editor-api-41` (variant counts, a stage name, a reversed stage, an alias, a name only like one, masks of the
+wrong length), `ngg-roundtrip` (all three chunks through `ngg_scene`).
 
-| content | source | what changes at runtime | mechanism |
-|---|---|---|---|
-| terrain, vegetation, scenery | `.lbs` 1/0, 1/1, 1/3 | nothing | **bake at conversion** |
-| movable meshes | `.lbs` 1/6 | a rigid **transform** per instance | read the live matrix |
-| **fences** | **`.fnc`** | **per-panel deformation** | harvest drawn vertices |
-| pacenote marks / signs | `.trk` driveline | placement, from a spline | regenerate (§1.4) |
-| car | physics | pose **and** mesh deformation | harvest (§6) |
+### 2.5 Weather records
 
-**Fences are the awkward one, and they are not a variant of movable meshes.** Measured on Joux Verte: `.fnc` v2
-holds 39 fence groups and 642 points, with a `FenceTileID` / `FenceStolpeID` per group. So a fence is *not stored
-as geometry at all* — it is a point list, and the game generates panels and posts along it, the same shape of
-problem as the pacenote marks. Three consequences:
+**`NGGW` is binary records; the JSON form is for projects and the editor.** The preset is inside the file, not
+beside it, because it is part of an event and must be covered by the same hash as the geometry (a thinner fog is
+a competitive change). `WeatherRecord` (160 B): a 64-byte name, sun direction, intensity, turbidity, ground albedo
+and colour, cloud cover, fog visibility (Koschmieder, 0 = none) and height, rain, snow, exposure; appended
+2026-10-30: `timeFlags` (`kWeatherTimeSet`), date, local hour, UTC offset, latitude, longitude, north - with the
+time set, sun and moon follow astronomically and `sunDirection` is unused. A 124-byte record reads as no time set.
+The first record is the default. `DefaultWeatherRecord()` lives in the format so a producer outside the renderer can
+start from it; `core/weather.cpp` checks at compile time that it matches `core::SkyParams`.
 
-1. **Different memory image.** `.fnc` is a separate file, so the "base + offset" scheme of §4.1 needs a *second*
-   base. The identity stored in `.ngg` must therefore be **`(imageId, offset)`**, not a bare LBS offset — with
-   `imageId` naming lbs / fnc / col. Cheap to generalise now; a painful retrofit later.
-2. **Generated, not stored.** Converting them means replicating RBR's panel generation, with the same
-   fidelity risk as the pacenote marks (§1.4) — a fence in the wrong place is a wall the driver did not expect.
-3. **Deformation, not placement.** RBR fences *bend* when hit. A per-object transform cannot express that, so
-   reading a matrix is not enough. This is precisely the case §4.1 already anticipated: harvest the
-   **already-deformed vertex data** from the dynamic vertex buffer at the suppressed draw, exactly as planned for
-   the car's damage mesh.
+- **Runtime:** `core::ParseWeatherChunk` / `PackWeatherChunk` (`core/weather.h`); the game selects by name
+  (`findWeatherPreset`), and the catalog lists a file's presets from its chunk headers alone (`NggWeathers`).
+- **Project form:** `core::WeatherToJson` / `WeatherFromJson`, the `ngg-weather` schema; Wallaby's sidecar holds it
+  and its writer packs it.
+- **The name is the identity:** for a preset the game selects, RBR's `TrackSettings.ini` section name
+  (`41M_crisp_clear`, `04E_hazy_partcloud`).
 
-So the two mechanisms are complementary rather than competing: **offset-reads for rigid transforms, draw
-harvesting for deformed geometry.** Movable meshes want the first, fences want the second, and the car wants the
-second. Neither subsumes the other.
+**`TrackSettings.ini` is an import source, not a preset system** (`game/src/assets/legacy_weather.cpp`,
+`LegacyWeather`). Its scattering numbers are art knobs for RBR's 2004 shader (turbidity -2.8..9, Mie g = 1.0), so they
+are not copied. What translates: the section name; `SunDir` and ground reflectance; the condition in the name (hazy
+-> turbidity 3; part/light/heavy cloud -> cover 0.35/0.6/0.95; light/heavy fog -> visibility from `FogEnd`, else
+1500/300 m, under a 150 m layer; rain and snow 0.4/1). Two repairs: decimal commas, and 48 suns at or near the horizon
+raised to ~10 degrees on their bearing (else a physical sky draws night). RBR has no night stages: `M` morning, `N`
+noon, `E` evening. The default is the stage's own time of day, crisp-clear if it has one. 32 stock stages have no
+section and draw the default sky.
 
-> **Also note: the `.fnc` fences are currently missing from our render.** What we draw are fence *pieces* from
-> blocks 1/1 and 1/6 (textures `FENCE01`, `MB_FENCE002`, `FENCE_WOOD03`, `FENCE_PIG01`). The long roadside fences
-> come from `.fnc`, which the converter does not read, and the game's own copy is suppressed. Worth knowing
-> before judging completeness of the current picture.
+### 2.6 Plants and instanced models
 
-### 4.2 Where harvesting is not enough
+**Plants (`NGGG`/`NGGP`)** are the alpha-tested geometry grouped into individual trees, bushes and tufts: a plant is
+a list of parts, each a contiguous run of one object's indices, with a box and tags (`tree-card`, `bush-card`,
+`grass-card` for the old crossed cards; the tagger's classes otherwise; unknown tags carried). The producer reorders an
+object's triangles by plant so draws are unchanged. **Tags come from the producer, never from renderer heuristics.**
+The legacy importer writes plants without tags: connected pieces over 1 cm-quantised positions (separate plants do not
+touch), pieces wider than 50 m (`kPlantMaxWidth`) left out.
 
-- **Objects beyond the game's cull distance.** Longer draw distance is the point; if the game culls an animated
-  object we get no matrix. Answer: idle/static pose at distance (nobody sees a spectator's arms at 400 m), with a
-  native animation player only if it visibly matters.
-- **Full takeover**, if we ever stop the game rendering 3D entirely.
+**Instanced models replace the cards** (2026-11-09). `NGGD` holds each model once, `NGGE` places it.
 
-Scope a native DLS/SGS animation player as a separate investigation with its own RE budget, starting by completing
-`AnimationSets` and SGS animation-track parsing in Wallaby — where there's an interactive viewer to validate against.
+- **`NGGD` layout:** `ModelChunkHeader` (counts), `ModelRecord` 80 B (name, LOD range, model-space box, `fadeWidth`,
+  `rtLod`), `ModelLod` 16 B (submesh range, `maxDistance`, `kModelLodBillboard`), `ModelSubmesh` 20 B, v3
+  `Material`s (texture slots index the file's `NGGT`), 44-byte vertices in model space, indices relative to the
+  submesh. Every array is its struct's exact size, so the chunk is checked whole (`ngg::CheckModels`). Model space:
+  +y up, origin at the base, metres.
+- **`Placement` 40 B:** model, the `NGGP` plant it replaces (`kNoPlant` none), base position, yaw, `scaleXZ`,
+  `scaleY`, tint, variant mask. **Upright on purpose:** a plant on a slope grows up, and the fit from a card plant is
+  exactly these numbers; a full matrix waits for a producer that needs one (`recordSize` grows then).
+- **The replaced cards are made degenerate in the index buffer at load**, so object ranges, plant parts and
+  triangle numbering stay the file's; `BuildRtMesh` leaves them out; an object left with no triangle is removed.
+  Only against the file's own plant table (without one, the cards stay and the load says so).
+- LODs switch by distance from the camera scaled by the placement's height and `NGG_MODEL_LOD_SCALE`; over the last
+  `fadeWidth` metres two LODs are drawn dithered to complementary pixels; the last LOD dithers out. The billboard LOD
+  turns about the placement's up axis and is never ray traced. One `rtLod` per model keeps the TLAS fixed as the
+  camera moves. Drawing, culling and ray tracing: `modules/renderer/src/core/models.cpp`, §4.2.
+- **A ray-tracing-only LOD** (`kModelLodRayOnly`, `ModelLod` flag bit 1; NGGD **version 2**, 2026-11-10): the mesh
+  the BLAS is built from and nothing else - never drawn (prepass, main pass, shadow maps), never picked by distance.
+  For a coarse shell with few alpha layers (the generator's `<id>_RT`: a ray crosses 2 alpha surfaces of it against
+  18-24 of LOD0's). Rules, each refusing the chunk (the cards drawn instead): at most one per model and it is the
+  model's LAST LOD; at least one drawn LOD before it; `rtLod` names it; not also a billboard; `maxDistance` 0. The
+  drawn LODs keep their rules (`maxDistance` above 0 and increasing - the renderer's loader checks that too now).
+  `ModelRecord`'s box covers the drawn LODs only. Its materials are alpha-tested and two-sided, not foliage. A
+  version-1 chunk (same layout) still loads; one carrying the flag is refused. In the renderer `ModelDef::drawLods`
+  counts the drawn LODs: the distance pick, the crossfade's next LOD and a cell's `reach` stop there (with the shell
+  in place, `lods.back()` had made every reach 0 and faded the billboard into the shell). The editor table is
+  unchanged (version 2).
 
-### 4.3 Vertex animation
+**Measured on stage 41** (dev iGPU, RBR's run replayed in lock-step, TAA and vsync off, GPU frame), with
+`ngg-check --trees` placing a code-generated conifer (LOD0 142 tris to 50 m, LOD1 40 to 150 m, billboard to 900 m)
+in place of all 3,743 tree-card plants:
 
-Foliage sway ships in phase 1: type-9 meshes already carry per-vertex tilt amplitude and time base; carry them
-through conversion into `NGGV` and reproduce the sway in our vertex shader, improved with a wind field, gusts and
-distance-based amplitude damping.
-
----
-
-## 5. Night and lighting
-
-The original renderer has no dynamic lights at all, so this is genuinely new content, not a port.
-
-### 5.0 Physical sky — DONE (first version), and it settles the skybox question
-
-`ngg/core/sky.*` renders a single-scattering Rayleigh + Mie atmosphere per pixel as a fullscreen pass, replacing
-the colour clear in both the launcher and the viewer.
-
-**This closes §9b item 6 by making it moot.** RBR's skybox is a painted mesh; a painted sky cannot respond to a
-sun that moves, and dynamic time of day is the point of the overhaul. So the skybox is not converted at all — the
-sky is evaluated. That also gives the ambient term a real source, which matters because "directional light plus a
-hardcoded ambient constant" is the kind of placeholder that never gets removed.
-
-**What is and is not taken from the game.** `SunDir` is used directly from `TrackSettings.ini` — it is
-unambiguous, per track *and* per variant, and it is exactly what §3.2's photometric solve existed to recover.
-`Terrain_Reflectance` becomes the ground albedo (0.084 on Joux Verte). But `Turbidity`, `Rayleigh_Multiplier`,
-`Mie_Multiplier` and `Greenstein_Value` are **deliberately not** used as physical quantities: Joux Verte ships
-`Turbidity = 0.0` and `Greenstein_Value = 1.0`, both degenerate for any real scattering model, so they are
-internal scales for RBR's ps_1_1 constants. Feeding them to a physical model would produce garbage that looked
-like a bug in the model. Physical constants are used instead, with turbidity as our own haze control.
-
-The RBR-specific half lives in `ngg/host/tracksettings.*` and `ngg-core` takes a plain `SkyParams`, keeping §8's
-rule intact — the viewer drives the same sky with no game present.
-
-#### Aerial perspective — DONE, and it shares ONE model
-
-The world now gets the same scattering integral the sky does, over the camera-to-surface segment instead of the
-whole ray. Distant geometry is **both dimmed by transmittance and tinted by in-scatter**; applying only the tint
-is what makes cheap distance fog look like paint laid over the world rather than air in front of it.
-
-The model lives once, in `ngg/core/atmosphere_hlsl.h`, and is prepended to both shaders at compile time. That is
-deliberate and not tidiness: the sky and the aerial perspective are the same integral over different segments,
-and the seam between them — the horizon — is exactly where two implementations would visibly disagree. This
-project has already paid once for a duplicated model (Wallaby's fixed-function ground blend against RBR's real
-shader, §8.1).
-
-The scene pass marches 8×3 against the sky's 16×6, because it runs on every geometry pixel rather than only where
-sky shows. The viewer's title bar carries a frame-time readout for exactly this reason — the dev machine has an
-integrated GPU, and "is per-pixel marching affordable" is a question to answer with a number. If it is not, the
-answer is a precomputed aerial-perspective LUT, not a cheaper hand-written fog.
-
-#### Dynamic surface lighting — DONE (unshadowed)
-
-Viewer key `G` cycles three modes, and mode 0 is kept deliberately:
-
-| mode | |
-|---|---|
-| 0 **baked** | RBR's vertex colour × `bakedScale`. Kept as the **A/B reference**, not as a fallback |
-| 1 **dynamic** | sun + sky from the same atmosphere that draws the sky; the bake is discarded entirely |
-| 2 **dynamic + AO** | as 1, but the bake's *luminance* darkens the **ambient only**, never the sun |
-
-Sun colour comes from `AtmSunTransmittance` — a single march, no inner loop, along the sun ray. Low-sun
-reddening therefore falls out of the model rather than being an authored gradient, which is the whole reason for
-a physical sky. It also returns black when the sun is below the horizon, so the ground does not stay lit through
-the earth at night.
-
-**Mode 2 exists for a specific reason and has an expiry date.** RBR's bake contains real occlusion — valleys,
-undersides, the shaded side of a cutting — that we cannot yet reproduce because there are no dynamic shadows.
-Using its luminance as an ambient-occlusion term keeps that information while still letting the sun move.
-Applying it to the sun term as well would re-introduce the baked sun direction and defeat the point. **Once
-shadows land, mode 1 becomes the honest one and mode 2 should go.** Left undocumented, a stopgap like this
-quietly becomes the shipping default.
-
-**Mode 2's first implementation broke exactly the rule stated above.** It multiplied ambient by the bake's *raw
-luminance* — but RBR's vertex colour is not occlusion, it is **full baked lighting including the directional sun
-term**. So a wall facing away from the *baked* sun had its ambient crushed by that baked sun, which is precisely
-what "never the sun" existed to prevent. Shaded walls rendered below sRGB 0.1, and it was mistaken for missing
-multiple scattering.
-
-What caught it was evaluating the shader's own model offline and comparing numbers: the model puts that wall at
-**sRGB ≈ 0.31/0.36/0.40, a ratio of 0.42 to the lit side** — if anything on the bright side of realistic. The
-frame showed near-black. **When a render disagrees with the model that produced it, the bug is between them**,
-and tuning either end will never find it.
-
-Two guards now bound it, neither of which makes it correct:
-
-- normalise by the scene's **mean baked luminance** (computed at load; 0.571 on Joux Verte) so the term is
-  relative occlusion rather than absolute brightness — otherwise a track with a globally dark bake, which
-  `bakedScale` shows is common, has its ambient crushed everywhere;
-- **cap the darkening at 50%**, so a dark bake can never cancel the ambient outright.
-
-Separating occlusion from direct light properly is §3.2's photometric solve. Until then **mode 1 is the honest
-mode**; mode 2 trades correctness for the shape RBR's artists baked in.
-
-#### RBR's normals were NEVER used for shading — and it shows
-
-**MEASURED, and it explains the faceted look of the first dynamic build.** RBR's ground vertex shader declares
-`dcl_position v0`, `dcl_color v5`, `dcl_texcoord v7`, `dcl_texcoord1 v8` — **there is no `dcl_normal`**
-(`doc/rbr-shaders.txt:1825`). Lighting came entirely from the baked vertex colour, so the normals in the track
-data have sat unexercised for twenty years. Our dynamic lighting is their first consumer.
-
-Unsurprisingly, they are not shading normals. Sampled over `track-42.ngg`: all are unit length and none are
-degenerate — but of co-located vertex groups, **2920 of 3355 carry DIFFERENT normals**. They are split, not
-welded, so a smooth hillside shades as hard facets and foliage cards flip between fully lit and fully unlit.
-
-The fix is to **weld by position and average, with an angle threshold** so genuine hard edges (walls, kerbs,
-building corners) stay hard while terrain smooths. That belongs in the converter — it is asset data, done once,
-rather than on every load.
-
-**The converter now does this** (`wallaby-cli`, on by default), and the renderer fallback **defers to it**.
-
-The first fallback would have made a converted asset *worse*, not merely wasted time, and it is worth recording
-why because the failure was silent:
-
-- it bucketed positions at 1 cm, which merges across layers the converter deliberately isolates — 1,572
-  cross-layer groups against 914 at exact equality, i.e. welding a fence post into the terrain it stands on;
-- it averaged each vertex with its own in-threshold neighbours, and **"within 60°" is not transitive**. Given
-  A–B and B–C inside the threshold but A–C outside, that leaves all three disagreeing. The converter partitions
-  by complete linkage instead. Re-running the naive version would have undone that.
-
-So `Scene::WeldNormals` now **measures before acting**: it counts co-located pairs that are within threshold and
-checks whether they already agree. On a converted `track-42` — **302,496 agree, 24,378 differ** — it logs that
-the converter did it better and does nothing. It uses exact position keys now rather than buckets, matching the
-converter's own measurement that RBR's duplicated vertices are bit-identical.
-
-`SphericalFoliageNormals` gained the same guard, measuring the mean angle between the stored normal and the
-outward direction: 89.1° means card normals (apply it), under 30° means the converter's `spherical` override is
-already in place (skip, or the blend compounds and over-rounds the canopy). It currently reports 89.1°, so the
-renderer pass is still doing real work — the converter has the *mechanism* but not yet the classification.
-
-**The general rule for every renderer-side fallback: measure whether the converter already did it, and defer.**
-A fallback that cannot tell is a fallback that corrupts good input.
-
-One measurement error worth recording, since it caused the wrong conclusion first: the original pass reported
-"268,706 of 749,342 vertices smoothed" on an already-welded asset. It was counting vertices that *had an
-in-threshold neighbour*, not vertices whose normal changed — a number describing the input rather than the work,
-and it made a no-op look like a substantial pass. It now counts actual movement.
-
-This is worth generalising: **any RBR vertex attribute the game's shaders do not declare is unvalidated data.**
-It was never wrong for RBR because RBR never read it. Before relying on one, check the `dcl_` list.
-
-#### THE actual cause of "everything is too dark": no colour management
-
-Found by the pixel probe, after four rounds of adjusting ambient terms that were never the problem. On a shaded
-wall the probe reported a fully self-consistent chain — `albedo × ambient = 0.1937` matching `lit`, tonemapped to
-`0.1437`, aerial correctly negligible at 47 m. **The model was right. The output was in the wrong colour space.**
-
-Two errors, and they partly cancel, which is what hid them:
-
-| | effect |
-|---|---|
-| textures decoded as `BC*_UNORM` when the artwork is **sRGB** | albedo too bright in linear space |
-| output written to an 8-bit target with **no sRGB encode** | everything too dark on screen, shadows crushed hardest |
-
-Linear 0.144 written raw displays as 0.144; its correct sRGB encoding is **0.42**. Highlights barely move,
-shadows are crushed — precisely the reported symptom of "the lit side looks fine, the shadow is black". Every
-ambient fix was fighting a transfer function.
-
-Fixed as: textures use `BC*_UNORM_SRGB` so the hardware decodes to linear on sample, and `LinearToSrgb` is
-applied at the end of both the scene and sky shaders. **The encode is in the shader rather than via an `_SRGB`
-render-target format** because the game path renders into a texture the 32-bit bridge creates, whose format we do
-not control from here — one encode, both paths.
-
-The lesson is the expensive one: **before tuning any lighting value, verify the colour pipeline end to end.**
-Linear-space lighting written to a display-space buffer looks exactly like "the ambient is too weak", and no
-amount of adjusting the ambient will ever fix it.
-
-#### The constant buffer was misaligned — and it invalidated several rounds of judgement
-
-**HLSL packs constants into float4 registers and will not let a `float3` straddle a register boundary; it inserts
-padding. A tightly packed C++ struct does not.** When `gGroundColour` (a float3) was added after two floats, HLSL
-pushed it to the next register and **every field after it read the wrong two floats**:
-
-| field | HLSL float index | C++ float index |
+| stage 41 | GPU frame | ray tracing |
 |---|---|---|
-| `gSunDiffuse`, `gSkyAmbient` | 52, 53 | 52, 53 |
-| `gGroundColour` | **56–58** | **54–56** |
-| `gGroundBounce` | 59 | 57 |
-| `gBakeMean` | 60 | 58 |
-| `gProbeOn` | 63 | 61 |
-
-Consequences: the pixel probe never fired (`gProbeOn` read padding, always 0, reporting all zeros), and the
-ground bounce colour, bounce strength and bake mean read **each other's values** from the moment they were
-introduced. Several rounds of "still too dark / now it's red" were therefore judged against a shader that was
-not receiving the constants it was being tuned with.
-
-The fix is structural, not a corrected offset: **every group from there on is exactly one float4**, so the two
-layouts agree by construction rather than by careful counting, plus a `static_assert` that the struct is a whole
-number of registers. Counting offsets by hand is what produced the bug; it cannot be the thing that prevents it.
-
-Two lessons worth more than the bug:
-
-- **A silent binary-layout mismatch presents as a plausible-looking wrong picture**, never as an error. Every
-  hypothesis in the preceding rounds was about lighting maths, because the picture *looked* like a lighting
-  problem. Only instrumentation that reported a value the shader could not plausibly hold — a probe returning
-  exactly 0.0000 for eight unrelated terms — pointed at plumbing rather than physics.
-- **Enabling the D3D12 debug layer while discarding its messages is worse than not enabling it**, because it
-  looks like validation is running. `Device::DrainMessages` now pumps the info queue into the log. It did not
-  catch this one (constant-buffer contents are not validated) but it caught a resource-state warning in the same
-  session, and the cost is a few lines.
-
-#### Navy-blue shadow — the ambient was sky-only
-
-Buildings rendered with their sun-facing walls correct and their shaded walls **saturated navy blue**. The colour
-is the diagnosis: ambient was a single sample of the *sky*, so a surface facing away from the sun received pure
-Rayleigh scatter and nothing else. Real shadow is dominated by light bounced off the ground in front of the
-surface, which is why it reads desaturated and slightly warm rather than blue.
-
-Ambient is now hemispherical — sky above, ground bounce below, mixed by how much of the lower hemisphere the
-normal sees (0 facing up, 0.5 for a vertical wall, 1 facing down). The bounce colour is **RBR's own
-`Terrain_Reflectance_R/G/B`** (§3.4a), so it is measured rather than invented: Joux Verte gives 0.49/0.49/0.50.
-
-The sky sample is reused as the light arriving at the ground rather than marching a second time toward the
-zenith. That is a real approximation, but the alternative doubles the per-pixel cost of the pass for a term that
-is then multiplied by a ~0.5 albedo.
-
-**This took three attempts, and all three failures were the SAME units error.** `ambient` is added to
-`sunColour * ndl` and the sum multiplied by albedo, so it must be an **irradiance** — the same units as
-`sunColour`. `AtmScatter` returns a **radiance**. Over a hemisphere the two differ by a factor of π.
-
-| attempt | error | symptom |
-|---|---|---|
-| sky-only ambient, radiance used directly | π too **dark**, and blue | shaded walls navy |
-| ground bounce added without its 1/π | π too **bright**, and warm | shaded walls red |
-| corrected bounce, sky still radiance | both too dark again | shaded walls near-black |
-
-The two errors partly cancelled, which is why fixing either one alone appeared to break the other side. Written
-out properly:
-
-```
-E_sky    = PI * skyRadiance
-E_ground = groundAlbedo * (sunIrradiance * cos(sunZenith) + E_sky)
-ambient  = lerp(E_sky, E_ground, howMuchGroundThisNormalSees)
-```
-
-The ground term needs no explicit 1/π: the one converting irradiance to bounced radiance and the π converting
-that back to irradiance on our surface cancel.
-
-**`skyAmbient` went from 1.6 back to 1.0** as part of this. The 1.6 was a fudge compensating for the missing π —
-which is exactly how a wrong model gets locked in behind a constant that "looks about right", and why the next
-two fixes then had to fight it.
-
-The lesson worth keeping: **"shadows are the wrong colour" is almost never a hue problem.** It is an energy
-balance problem, and a colour correction would have buried it three times over. The reliable tell is ambient
-*overpowering the albedo* — a shaded red-brick wall should still read as red brick, only dimmer. When it reads
-as the ambient's hue instead, the ambient term is wrong in magnitude, whatever colour it happens to be.
-
-**This is also why "just flatten the lighting on general meshes" was the wrong fix.** The proposal was to stop
-applying `N·L` to general meshes because their shaded sides looked wrong. But buildings have genuine, welded
-normals — their `N·L` was correct, and the darkness was a *missing ambient term*. Flattening them would have
-hidden the bug rather than fixed it, and left the same missing bounce quietly darkening terrain in every valley.
-The distinction that matters is **whether a surface has a meaningful normal**, not which LBS block it came from:
-
-| | |
-|---|---|
-| terrain, buildings, rocks | keep `N·L` — normals are real |
-| foliage cards | normals are measured garbage (89.1° off outward); heavy wrap, near-flat |
-| sunset warming/dimming | already normal-independent, via `AtmSunTransmittance` |
-| real occlusion | shadow maps — not something a shading term can stand in for |
-
-It belongs as a **per-material lighting mode**, not a hardcoded category rule, because it expires twice: once
-when shadow maps land, and again when §7.2b replaces cards with geometry that has real normals.
-
-#### Black foliage — TWO causes, both fixed
-
-Once the exposure bug was gone, trees and grass facing away from the sun rendered as black silhouettes. That
-turned out to be two independent problems that happened to look like one:
-
-1. **Everything is rasterised `CullMode NONE`,** so the back of a surface is routinely visible — and a back
-   face's interpolated normal points *away* from the viewer. `N·L ≤ 0` follows, and the surface goes black even
-   when the sun is on the side being looked at. Fixed with `SV_IsFrontFace`: flip the normal on back faces. This
-   applies to all geometry, not just foliage.
-2. **A leaf with the sun behind it is backlit, not unlit.** Real foliage transmits light; a pure Lambert term
-   drops it to ambient alone, which reads as a black cut-out against a bright sky. The alpha-tested PSO is
-   exactly the foliage path, so it now uses **wrap diffuse** (0.4, softening the terminator) plus a
-   **transmission** term (0.5 × `saturate(dot(-N, L))`). Both are cheap stand-ins for subsurface scattering.
-
-Worth separating in the record because fixing only the first would have left backlit vegetation black and looked
-like the fix had failed.
-
-#### Foliage cards need SPHERICAL normals — a third, separate cause
-
-After the facing flip and the transmission term, trees still showed a hard difference between faces meeting at
-roughly 90°. Measured on `track-42`: **1167 alpha-tested objects, median 20 triangles carrying 15 distinct
-normals.** RBR's trees are a handful of crossed cards, each with its own plane normal — so two cards at 90° have
-normals 90° apart. `WeldNormals` deliberately refuses to merge those, and it is right to: geometrically they
-*are* a hard edge. The consequence is one card catching the sun while the card behind it goes dark.
-
-The fix is to stop pretending a billboard has a meaningful surface normal. `SphericalFoliageNormals` (viewer key
-`B`, on by default) points the normal outward from the object's own centre, blended 75% with the original so
-trunks keep some orientation. A canopy then shades as a rounded volume rather than as crossed cardboard.
-
-**Three distinct causes, one symptom.** Back-face normals, missing transmission, and card normals all produced
-"dark vegetation", and each needed its own fix — fixing any one alone would have looked like failure. Worth
-remembering the next time a single visual complaint gets a single hypothesis.
-
-**STILL NOT FULLY SOLVED, and the reason is structural.** Large single cards remain visibly darker than their
-neighbours. The spherical trick derives curvature from the spread of vertex positions about the object centre —
-but every vertex of one big planar quad sits on the same side of that centre, so it resolves to a single
-direction for the whole card. There is no curvature to recover because the geometry has none.
-
-Knobs that would reduce it, none of which fix it: raise the blend from 0.75 toward 1.0, raise `kFoliageWrap`
-and `kFoliageTransmission`, or make foliage ambient-dominant so directional light barely varies across it. All
-of those trade correctness elsewhere for hiding this.
-
-**The honest framing: this is a 2004 asset limitation, not a shading bug.** RBR's vegetation is a handful of
-crossed cards with per-plane normals, authored for a renderer that lit from baked vertex colour and never
-sampled a normal at all. No shading model fully rescues that. It gets properly fixed by §7's content path —
-replacing vegetation with geometry that has real volume — and the shading work here is what makes that
-replacement worth doing rather than a substitute for it.
-
-#### Tonemapping — a bug the first build shipped with
-
-The first dynamic build blew every surface to white, and the exposure control visibly worked on the sky while
-doing nothing to the ground. Both were one defect: the scene pass applied `gExposure` to the aerial in-scatter
-term only and **never tonemapped `lit` at all**. Dynamic lighting is linear HDR radiance and the target is 8-bit
-UNORM, so it hard-clipped at 1.0.
-
-Now `lit = 1 - exp(-lit * gExposure)` in the dynamic modes, matching the sky pass. **Baked mode is deliberately
-left untonemapped** — RBR's vertex colour is already display-referred, and pushing it through the curve would
-darken the very reference the A/B exists to compare against.
-
-Known gaps: single scattering only, so deep shadow reads too dark until a multiple-scattering term is added; the
-sky ambient is one biased sample rather than a hemisphere integral, so a surface facing a cliff still sees full
-sky; no clouds, though `CloudName` and `Cloud_Scale` sit in the preset; the tonemap is a placeholder
-`1 - exp(-x)`; `sunDiffuse`/`skyAmbient` are hand-set scales that exist only because sky and surfaces are not yet
-in the same units, and they disappear when exposure becomes physical.
-
-**The next real step is shadows.** Until then, mode 1 will look flatter than the bake in places — that is the
-expected consequence of removing baked occlusion, not a regression.
-
-#### Cost, and the optimisation it implies
-
-Sun transmittance (8 steps) and sky ambient (6×2) are evaluated **per pixel**, on top of aerial perspective
-(8×3). All three depend only on the sun direction and the pixel's normal, so almost all of that work is
-redundant. The proper fix is a small **environment LUT** rendered once per frame — sun colour plus a few sky
-directions — sampled instead of marched. The viewer's frame-time readout is there to say whether that is needed
-now or later; the dev machine is an integrated Radeon, which makes it the honest place to measure.
-
-### 5.0b Cascaded shadow maps — DONE (hard shadows)
-
-`ngg/core/shadow.*`. Four cascades at 2048², depth-only passes reusing the scene's own vertex shader — rendering
-from the light is just a different view/proj.
-
-Choices that are about **stability**, which matters more here than in most scenes because a rally camera moves
-fast and rotates constantly, and an edge that crawls is far more objectionable than an edge that is soft:
-
-| | |
-|---|---|
-| **bounding-sphere fitting** per cascade | a sphere's extent does not change as the camera rotates, so the projection stops breathing |
-| **texel snapping** of the light-space origin | without it, sub-texel camera motion changes which texel a world point lands in — the classic shimmer, and it reads as a *filtering* bug, sending you to the wrong place |
-| **normal-offset bias**, not depth bias | offsetting along the normal by the shadow texel's own world size is scale-correct by construction; depth bias trades acne for peter-panning and must be retuned per cascade because texel size changes |
-
-Alpha-tested foliage casts through a dedicated shadow pixel shader — otherwise a tree casts the shadow of its
-bounding cards. Those casters are drawn two-sided (a card culled by winding casts nothing); opaque casters use
-front-face culling so residual acne lands where the camera cannot see it. A sun below the horizon skips the pass
-entirely rather than fitting a degenerate projection.
-
-**Not built: soft shadows.** Three different things get conflated — *occlusion* (built), *filtering* (3×3
-hardware PCF, built) and *penumbra* (edge widening with distance from the caster, **not** built; needs PCSS or
-ray-traced shadows). Edge softness currently varies with distance because each cascade has a different world
-size per texel — roughly 4 cm at cascade 0 against ~2 m at cascade 3. That is inherent to cascades, not a defect.
-Cross-fading between cascades is also not implemented, so a resolution step may be visible at the boundaries.
-
-#### The bug that made everything shadowed, and why it took a probe to find
-
-`ShadowMaps::CreateSrv` was written and **never called**. The heap slot was reserved, the heap sized for it, the
-descriptor table bound to it — and the descriptor itself never written.
-
-**An unwritten D3D12 descriptor reads as zero, and it is not an error.** The debug layer said nothing. Every
-`SampleCmp(0.498 <= 0)` failed, so the entire world came back shadowed.
-
-The probe distinguished it in one click, and the distinguishing value is worth remembering:
-
-| STORED depth reads | meaning |
-|---|---|
-| **1.0** | shadow map is empty — cleared, nothing rendered into it |
-| **0.0** | descriptor never written — *not* the same thing, and the difference is the whole diagnosis |
-| ≈ receiver depth | the surface is its own occluder — bias too small |
-
-"Reserve the slot, bind the table, forget to write the descriptor" produces a plausible picture, no validation
-message, and a symptom ("everything is in shadow") that invites hours of matrix debugging.
-
-### 5.0c HDR intermediate, TAA and a real tonemap — DONE
-
-`ngg/core/post.h/.cpp`. Sky and scene now render into an **RGBA16F intermediate**; one pass at the end does
-temporal anti-aliasing, then exposure, a tonemap curve and the sRGB encode, into whatever the client's real
-target is (the swap chain, or the shared texture in-game). Both clients go through it — `viewer.cpp` and the
-`Renderer` in `main.cpp` — because a post chain that only exists in the viewer is a post chain that is wrong
-in the game.
-
-**TAA was done first, and not because aliasing was the worst artefact.** Soft shadows (PCSS), SSAO, stochastic
-alpha and every ray-traced effect are noisy techniques that are only affordable once a temporal filter exists to
-accumulate them. Building any of them before TAA means building them twice.
-
-**Reprojection needs no motion vectors, and that is a property of the content rather than a shortcut.** The
-converter bakes every transform into world space, so the world is rigid and the only thing that moves is the
-camera — camera reprojection from depth is then *exact*, not an approximation. That stops being true the day
-per-object transforms land (§9b item 7), and a velocity buffer has to appear with them. The assumption is
-written into `post.h` so it cannot be forgotten there.
-
-Three decisions inside it are worth keeping:
-
-- **Reprojection stays in homogeneous coordinates.** Reconstructing a world position first needs a divide by
-  `w`, and for a sky pixel — reverse-Z depth 0, the far plane — that point is at infinity and the divide gives a
-  NaN. Carried as `float4(ndc, depth, 1) * (invVP · prevVP)`, one matrix maps the finite geometry *and* the point
-  at infinity correctly, and the sky reprojects as pure camera rotation with no special case at all.
-- **PostFx is handed `Scene::LastViewProj`** rather than rebuilding the product from view and proj, because
-  reverse-Z is applied inside `Scene::Record` and a reprojection that differs from the rasteriser by one term
-  produces a wrong image that reads as a TAA tuning problem.
-
-> **The jitter must NOT be in that matrix, and getting it wrong shakes the whole picture.** First version
-> reprojected with jittered matrices on both sides, on the reasoning that the reprojection should match the
-> rasteriser exactly. It matched — and the image visibly wobbled, reported straight away as "why is the picture
-> shaking when TAA is enabled".
->
-> The reasoning was wrong about *what* TAA aligns. It accumulates into a **fixed pixel grid**; the jitter varies
-> only where inside a pixel the scene is *sampled*. Reproject through it and the history follows the jitter
-> rather than staying put, so the resolved image oscillates across the whole Halton pattern — up to a full pixel
-> of whole-image movement, every frame.
->
-> `LastViewProj` is therefore reverse-Z **included**, jitter **excluded**, and the asymmetry is the point:
-> reverse-Z is part of what the depth buffer means, the jitter is not. Reprojecting an unjittered ray against a
-> depth value that *was* jittered is wrong by at most half a pixel of parallax — real, universally accepted, and
-> orders of magnitude smaller than the shake it replaces.
-- **The jitter goes to the sky too.** `Sky` subtracts it when building its ray. A sky that does not jitter with
-  the geometry anti-aliases the world against a static background, and the horizon — the one place the two meet
-  — crawls.
-
-**Exposure and the encode moved out of the shaders that write colour.** This closes the bug in §5.0 properly
-rather than by hand: the sky pass applied exposure and the scene pass did not, which is exactly why the exposure
-control appeared to work on the sky and do nothing to surfaces. There is now one place that can get it wrong.
-
-Five curves, and the last three are the only ones a user picks:
-
-| curve | when | why it exists |
-|---|---|---|
-| raw | any debug view | debug views carry **false colour, not radiance**; a curve would silently change the numbers they exist to show, and TAA would blend them |
-| sRGB only | baked lighting (mode 0) | RBR's vertex colour is display-referred already, so mode 0 stays byte-identical and the A/B against vanilla stays honest |
-| `1-exp(-x)` | `T` | what dynamic lighting shipped with — kept so the change can be judged against it rather than remembered |
-| **ACES** (Narkowicz) | `T`, **default** | punchy, cheap, the familiar game look |
-| AgX | `T` | rotates towards the achromatic axis in log space, so a clipping channel loses saturation instead of hue — ACES turns a blown sun disc yellow before it turns white, and this does not |
-
-Viewer keys: `T` cycles the curve, `Y` toggles TAA. History is dropped on reload and on resize, because in both
-cases the previous image describes something else.
-
-Still open here: no history rectification beyond a 3×3 variance clip (a Catmull-Rom history filter is the usual
-next step), no sharpening to recover what the temporal filter softens, and the exposure is still a hand-set
-constant rather than a measured or auto-adapted one.
-
-### 5.0d Ambient specular — the prefiltered sky, and half of the environment LUT
-
-`ngg/core/env.h/.cpp`. A 64×64 octahedral RGBA16F map with a 7-level mip chain, rebuilt **every frame** from the
-same `SkyParams` the sky pass draws with. The scene samples it along the reflection vector, weighted by Karis'
-analytic split-sum BRDF fit.
-
-**What it fixes is a hole, not a subtlety.** Until now only the *sun* had a specular lobe. Everything else in
-the frame reflected nothing at all, so a polished surface and a rough one differed solely in the size of one
-highlight. That reads as flat however good the material data is — and it mattered right now rather than later,
-because PBR maps are about to arrive (§3.3g) and would otherwise have been judged on half their signal, with
-roughness looking like it barely did anything.
-
-**One texture, two jobs, and the second is the point of §9b item 14.** Sky radiance depends only on direction
-and sun position — both uniform for the frame. Marching the atmosphere per pixel to answer a question with
-4,096 distinct answers was always the wrong shape. The map costs 4,096 marches for the whole frame against one
-per pixel.
-
-**Octahedral, not a cube map.** A 2D texture takes an ordinary mip chain and an ordinary bilinear sampler; a
-cube map needs per-face filtering and a seam policy to get the same thing. The cost is a small filtering error
-along the octahedron's own boundary, invisible for a sky — which is nearly a gradient — and the wrong trade for
-a sharp reflection probe, so it should be revisited when one exists.
-
-**The mip chain IS the roughness axis.** Mip 0 is the mirror, each level a 2×2 box downsample of the last, and
-roughness picks a level. A GGX-weighted prefilter is more correct at the middle levels; successive downsampling
-is what most engines actually ship, and calling it an approximation is more useful than pretending otherwise.
-
-Four decisions worth keeping:
-
-- **`AtmSkyRadiance` is now shared** — scatter plus the below-horizon ground blend, called by both the sky pass
-  and the environment pass. Same argument as the top of `atmosphere_hlsl.h`: they meet at the horizon, which is
-  exactly where two copies would disagree. The sky pass previously carried its own copy of the ground blend.
-- **The sun disc is deliberately NOT in the shared function.** The environment feeds a specular term that
-  already has its own direct sun lobe; a disc in both counts the sun twice, as a hard bright spot in every
-  reflection.
-- **Rebuilt every frame, with no caching policy.** The whole chain is under 40 KB, so following a moving sun
-  costs less than any rule for deciding when it went stale — and a staleness rule is a thing that can be wrong.
-- **The same `×π`** as the direct lobe, for the reason §3.3g spells out: the diffuse here is `albedo * E`
-  rather than `albedo/π * E`, so every specular term has to carry the factor or the balance is off by π.
-
-**The failure mode this was written against:** an unwritten D3D12 descriptor reads zero with no validation
-error. That cost a day when `ShadowMaps::CreateSrv` was never called and every pixel came back in shadow
-(§5.0b). Here it would be quieter still — nothing would reflect anything, which looks exactly like "the feature
-is subtle". So the environment SRV is created on first use, logged with its heap slot, and the probe reports
-the term by name (`ambient SPECULAR (rgb) / envOn`).
-
-`J` toggles it in the viewer, because a term that cannot be A/B'd cannot be judged.
-
-**The ambient DIFFUSE is a lookup too now**, which closes item 14. `E_sky` used to march `AtmScatter` for every
-pixel in direction `normalize(N + up)`; it samples the map in that direction instead. The swap is faithful
-rather than approximate: `N + up` is in the upper hemisphere for *every* possible normal, and that is exactly
-where `AtmSkyRadiance` and `AtmScatter` agree term for term.
-
-**Measured on track-108, same camera: 17.7 fps (56.65 ms) → 19.0 fps (52.54 ms).** A 4.1 ms saving, about 7%.
-Smaller than the removal of a 6×2-step march per pixel suggests, and the reason is worth having on record:
-**aerial perspective is now the dominant per-pixel atmosphere cost**, at 8×3 steps — twice what was removed —
-and it cannot use this map because it integrates over the camera-to-surface segment, which varies per pixel by
-distance. The standard answer is a froxel aerial-perspective LUT, and that is now the next thing worth doing to
-this pass rather than a guess about what is slow.
-
-One honest caveat: this is not bit-identical to what it replaced. The scene's own march used 6×2 steps and the
-environment map is built at 16×4, so the ambient is now computed *more* accurately than before, not identically.
-Any small brightness difference is the old approximation being replaced, not a new one being introduced.
-
-`gEnvReady` gates this and is deliberately separate from `gEnvOn`: `J` toggles ambient specular only, so
-turning it off to judge the specular term does not silently change the diffuse underneath it. A client that
-never sets an environment still gets the march, because a renderer that quietly drops ambient when a caller
-forgets a setter is worse than one that is merely slow.
-
-### 5.0e Ray-traced sun shadows are the lighting's shadow term — and the frame got faster, not slower
-
-The probe (§1.8.5) became the real thing. `R` in the viewer switches the sun-visibility source between the
-cascaded shadow map and the ray tracer, and **RT is the default whenever an acceleration structure exists.**
-
-**Measured on `track-108`, same camera, integrated Radeon:**
-
-| | fps | frame |
-|---|---|---|
-| cascades, no prepass | 18.7–19.0 | 53 ms |
-| **depth+normal prepass, RT shadows** | **28.9–29.8** | **34 ms** |
-
-Nineteen milliseconds *back*, from adding ray tracing. Two things stacked, and both are structural rather than
-tuning:
-
-- **The cascades are not rendered at all in RT mode.** Four extra full-scene passes were the single most
-  expensive thing in the frame (§5.0b: they took 40 fps to 12 before culling recovered it to 25). The ray
-  tracer costs 0.5 ms for one ray per pixel and replaces all four.
-- **The depth+normal prepass makes the main pass shade every pixel exactly once.** `Scene::RecordPrepass`
-  draws the geometry with a trivial shader into depth and an `R8G8B8A8_SNORM` normal buffer; the main pass then
-  tests `GREATER_EQUAL` against depth it already has. That is the classic Z-prepass win, it applies whichever
-  shadow source is on, and it is the reason the prepass runs even in cascade mode once RT exists.
-
-**Why a prepass and not "trace in the pixel shader".** Inline RayQuery inside the lighting shader would need no
-G-buffer and no reordering — but it would put every ray-traced term into a pixel shader with overdraw, and
-ambient occlusion (next) wants several rays plus a denoise, which is compute work. Depth+normal → compute RT
-passes → forward lighting consumes textures is the shape that scales to AO, reflections and GI. The prepass
-also removed the one-frame lag the probe had: depth and normal now exist before the trace, in the same frame.
-
-**The normal-offset bias, finally.** The probe offset along the ray because it had no normal; the prepass
-provides one. The origin steps 2 cm along the geometric normal — flipped towards the sun, so a two-sided leaf
-card is pushed to whichever side the ray leaves from — growing 0.2%/m with distance because depth precision
-does. Measured effect: shadowed fraction 1.3% → 5.1%, leaf-test passes 2.4k → 9.7k. More shadow, and it is the
-*correct* extra: the old 5 cm step along the ray skipped every occluder within 5 cm of the origin, which is
-exactly where grass shades the ground beneath it.
-
-> **One bug on the way, and it took the device down.** The prepass parked its constant buffer in the same
-> keep-alive slot the main pass uses, so the main pass released it before the GPU had read it. A freed upload
-> buffer under a root CBV is a GPU page fault: `DXGI_ERROR_DEVICE_HUNG`, then a cascade of barrier-mismatch
-> errors that were all fallout from that one release. The first validation message in the log named it —
-> "resource deleted prior to closing the command list" — and it was the only one that mattered. When the debug
-> layer prints five errors, the first is the cause and the rest are weather.
-
-> **A second bug, reported by the user as "the screen blinks between two scenes every frame", and it was not
-> TAA.** It vanished with TAA off, so it looked like a TAA bug; the depth+normal buffers dumped from two
-> consecutive frames were identical, and the HDR target was not — so the *main pass* was drawing differently
-> on alternate frames against a constant prepass depth. The cause was one line's position: `SetJitter` sat
-> *after* `RecordPrepass`, so the prepass rasterised with **last frame's** sub-pixel offset and the main pass
-> with this frame's. A different jitter is a different depth; `GREATER_EQUAL` failed wherever the main pass
-> landed fractionally farther, the sky's below-horizon colour showed through, and the pattern flipped with the
-> Halton sequence's alternating sign. TAA off means jitter zero means both passes agree — which is why the
-> symptom pointed at the wrong suspect.
->
-> The rule, now written where the jitter is set: **every pass that rasterises a frame must use the same
-> offset, and it must be set before the first of them.** And the method that found it in four runs rather than
-> an afternoon: `--dump N` writes the back buffer *and every intermediate* (HDR, TAA history, depth, normal) for
-> N consecutive frames, and `--rt 0|1|2` plus `--keys` bisect the pipeline from the command line. "The picture
-> is wrong" became "this buffer is wrong" became "these two passes disagree", and each step was a diff of two
-> files.
-
-**Soft shadows, and the denoiser they forced.** The user's remark that RT shadows were "too sharp" was right for
-the wrong reason: they were correct *for a point sun*. The sun is a disc about 0.53° across, so each pixel's ray
-now goes to a random point on that disc — uniform over the area (`sqrt` on the radius, or the centre is
-oversampled and the penumbra hardens in its middle) — scaled by the same `sunDiscSize` the sky pass draws, so the
-visible disc and the shadow's softness agree by construction. Cost 0.50 → 0.57 ms.
-
-That immediately produced shadows that "blink and jitter in places", and it was the colour TAA doing exactly its
-job: its variance clip exists to *reject* history that disagrees with the neighbourhood, which is what a
-converging penumbra looks like from inside it, so patches never converged. **The visibility is now filtered
-before the lighting sees it** (`kDenoiseSrc` in `rt.cpp`): a depth-aware 5×5 mean of this frame's coin tosses,
-then a temporal blend at 0.85 with last frame's filtered result, reprojected through the *unjittered* matrix (the
-same rule as PostFx) and accepted only where it lands on the same surface — linear depth within 3%. The lighting
-reads the RG16F history (visibility, depth) rather than the raw R8. Measured: raw has 2 distinct values and a
-frame-to-frame diff of 0.78; filtered has 256 and 0.34, and 0.7% of pixels sit in a genuine penumbra. The colour
-TAA then has nothing to fight.
-
-`--dump` writes both (`rtraw`, `rtvis`), which is how the above was checked rather than eyeballed.
-
-> **And then the RT shadows vanished, silently.** The denoiser ping-pongs two history textures, so
-> `Rt::Filtered()` returns a different pointer every frame; `Scene::SetRtVisibility` saw a new resource each
-> frame and reset its "SRV written" flag each frame; and the camera constant buffer, filled *before* the block
-> that rewrites the descriptor, read that flag as "not ready" on every main pass. `gRtReady` was 0, the lighting
-> fell back to the shadow map, and in RT mode the shadow map is not rendered — so no shadows, and no error,
-> because every individual step was valid. The flag now gates only the descriptor write; the constant buffer
-> tests the resource. A "ready" flag that a *legitimate* change of resource resets is a flag that turns a
-> feature off by accident, and it did.
->
-> Also from the same round: `H` (shadows off) now applies to both sources. It switched off the cascades and
-> left the ray-traced term running, which reads as "the other mode has no shadows" the moment `R` is pressed.
-
-#### Ray-traced ambient occlusion — the term that was exactly zero
-
-Same acceleration structure, same surface reconstruction, same any-hit test, same denoiser. `kAoMainSrc` in
-`rt.cpp` fires cosine-weighted hemisphere rays from the prepass position and normal — cosine-weighted so the
-plain average of hit/miss *is* the occluded fraction of the diffuse ambient integral with no extra weighting —
-out to a 3 m radius, 2 rays per pixel per frame, into its own R8 output, through its own pair of RG16F histories
-in the shared `Denoise`. The lighting multiplies it into `matAo`, which scales the **ambient terms only** — sky,
-ground bounce, ambient specular — and never the sun, which has its own visibility. That is what occlusion means:
-how much of the sky this point can actually see. Until now that was "all of it", everywhere, which is most of why
-props read as pasted onto the terrain.
-
-**The radius is where occlusion stops and global illumination starts.** An occluder ten metres away blocks sky,
-but a wall that far away also reflects light this renderer does not simulate; beyond the radius the honest
-answer is "unknown", and unknown means unoccluded here. 3 m is the scale of what should darken — the base of a
-wall, the gap between tyre and tarmac, the inside of a canopy — not a hillside.
-
-Measured: shadow + AO together **1.5 ms at 224k pixels** on the integrated Radeon (AO ≈ 1 ms of it), rising to
-7.4 ms at 930k pixels in dense foliage with the camera moved — 2.8M rays. On the intended floor hardware that is
-around a millisecond; here it is the place to spend the half-resolution or one-ray budget if it ever has to be
-spent. Frame rate with everything on: 26.8 fps, from 29 with RT shadows alone.
-
-`O` toggles it, view 13 shows it raw (`V`), `--dump` writes `rtao`. On the start-line field it darkens the tree
-crowns and the ground under the hedgerow and little else, which is correct for open ground and a 3 m radius.
-
-**What the cascades still do:** exist, one key away, as the reference. Their bias, PCF and per-cascade fitting
-are not deleted yet, because the RT path has been seen on one GPU in one viewer. When it has been seen in-game
-on discrete hardware, §9b gets an item to remove them.
-
-**Known and recorded:** the normal buffer is the *geometric* normal, not the normal-mapped one — a ray-origin
-offset wants the surface, not the paint. And `SunVis` still samples the shadow map in debug views 11+ so view 12
-can compare the two; that lookup is a few taps and is not where the map's cost was.
-
-### 5.0f Aerial perspective is a froxel table — the last per-pixel atmosphere march is gone
-
-§9b item 21. After the environment map took the ambient march out of the pixel shader (5.0d), the one march
-left was aerial perspective: `AtmScatter` over the camera-to-surface segment, 8 view × 3 light steps, on every
-geometry pixel. The environment map could not answer it, because it tabulates direction only; aerial
-perspective depends on **direction and distance**. So that is the table: `AerialLut` (`ngg/core/aerial.h`),
-two RGBA16F volumes of **64 × 64 screen cells × 32 distance slices** holding in-scatter and transmittance. One
-compute dispatch fills it per frame; the scene pass replaces the march with two trilinear fetches.
-
-**Same integral, same quadrature.** Each froxel calls the shared `AtmScatter` with the same 8×3 steps the
-per-pixel path used. 16×4 was tried first: it cost 0.60 ms of fill for no difference that survived the
-tonemap. Matching the reference has a second payoff: the per-pixel march survives as an *exact* reference
-(`L` cycles table → march → off), so any difference between the two is the table's own interpolation error
-and nothing else.
-
-Design points, each of which would be a bug if done the other way:
-- **Radial distance, not view depth.** The integral is along the ray, and the march measured `length(wpos -
-  camPos)`. Slices are quadratic (`w = sqrt(d / maxDist)`) so the near field, where contrast is judged against
-  the road, gets most of the resolution.
-- **Below the first slice centre** (a few metres), the lookup scales towards zero in-scatter and full
-  transmittance by `d / d0`. Both are linear in distance that close, so this is exact to first order. Clamping
-  to slice 0 would put that much air between the camera and its own bonnet.
-- **Reach = 1.5 × the far plane**, read from the projection per frame: the far plane bounds view depth, and
-  radial distance at the frame corners runs ~1.4× further. Unreadable projection → 12 km.
-- **Unjittered matrix for the cell directions.** A cell spans ~30 px, so the TAA jitter is irrelevant to it,
-  and following the jitter would only make the table shimmer. This is the jitter rule from 5.0c applied the
-  other way round: nothing here reconstructs a surface point.
-- **CLAMP sampler (s4).** Wrapping in `w` would blend the farthest slice into the nearest.
-- **Owned by `Scene`, filled inside `Scene::Record`**, so the game host, the viewer and Wallaby's API all
-  get it without being wired up, the way the environment map had to be. The prepass does not pay for it.
-- **Camera-fixed, history-free.** The model puts the camera at a constant altitude on a planet-sized sphere,
-  so the table depends only on view orientation and the sun. It is rebuilt from scratch each frame with
-  nothing to reproject.
-
-**Measured, on track-108 at the start camera, GPU timestamps on the main pass** (new: `Scene::LastPassMs` /
-`LastAerialMs`, on the HUD and in the log every ~120 frames):
-
-| aerial | main pass | aerial's share |
-|---|---|---|
-| off | 1.65 ms | — |
-| per-pixel march (old) | 3.55 ms | **1.9 ms** |
-| table, 16×4 fill | 2.42 ms | 0.77 ms (0.60 fill) |
-| **table, 8×3 fill** | **2.14 ms** | **0.50 ms** (0.29 fill + ~0.2 lookup) |
-
-Image A/B on the same frame: **table vs march, max 1/255 on the HDR buffer, 99.4 % of pixels bit-identical**;
-table vs aerial off, up to 66/255 with 7 % of pixels moving by more than 4. So the term is real at this camera
-and the table reproduces it.
-
-**The saving grows with what is on screen.** The march costs ~10 ns per *geometry* pixel. At the start camera
-only ~194k pixels are geometry; the rest is sky. The fill is a fixed 0.29 ms whatever the view. In the 930k-pixel
-foliage view of 5.0e the march would extrapolate to ~9 ms and the table to under 1.5 ms. That is an
-extrapolation from per-pixel costs, not a measurement at that camera.
-
-**Whole-frame fps did not move** (24.6–26.1 across all three modes) and that is not a contradiction. The
-viewer's frame is synchronous, so fps is CPU recording + GPU execution + readbacks in series, and at this camera
-the frame is not bound by the main pass. That is why the pass timer exists: fps cannot attribute a change, and
-a pass can lose 40 % of its cost without fps showing it. Anything perf-related from here on is judged by GPU
-timestamps.
-
-Knobs, if they are ever needed: 32×32 screen cells would cut the fill ~4× (UE4 ships 32×32×32). It was not
-taken because 64×64 already costs less than the lookup it feeds, and the Mie lobe towards a low sun is the
-one feature that would test a coarser grid. That case has not been looked at yet.
-
-### 5.0g Auto exposure — metered from the image, adapted on the GPU
-
-§9b item 17. Exposure was a hand-set constant (`SkyParams::exposure`, 0.8). It was right for the view it was
-tuned on, and wrong for any view much darker or brighter: under a canopy, with the sky off, or at a low sun.
-`PostFx` now meters the image it is about to tonemap and adapts. It is two compute passes in the same command
-list, with no CPU in the loop:
-
-1. **`CSHistogram`**: 128 bins of log2 luminance over [2^-12, 2^8], one sample per 2×2 block (a statistic over
-   a million pixels does not need all of them). It meters the *resolved* image (the TAA output, or the raw HDR
-   without TAA), because that is what the tonemap sees. **Centre-weighted 4:1**, aspect-corrected: the driver
-   looks down the road, and a stage puts the most sky at the top edge and the most verge at the bottom corners.
-2. **`CSAdapt`**: one group. It takes the mean log2 luminance between the **40th and 90th percentiles**,
-   counting straddling bins fractionally so the result moves smoothly, and clears the histogram for the next
-   frame. It then adapts **exponentially in log space**, so a step of N EV settles in the same time whatever
-   N is. Adaptation is asymmetric: 3/s towards bright (closing down to glare), 1.2/s towards dark (opening up
-   to shade). A forest exit into sun is the case that matters. The result is clamped to ±3 EV around the dial,
-   so night stays night.
-
-A **histogram, not a log-average**, because a plain mean is dominated by exactly the pixels metering should
-ignore: the sun disc pulls it up and deep shadow pulls it down. Percentiles drop both tails.
-
-**The dial keeps one meaning.** With auto on, `SkyParams::exposure` is the exposure at *reference brightness*:
-`exposure = dial × 2^clamp(ref − adapted, ±3)`. The reference was **measured, not chosen**: the track-108 start
-camera, the view the 0.8 dial was tuned on, meters at log2 **−2.025**. So switching auto on leaves that view as
-it was: **0.798 auto against 0.800 manual**, measured. `-`/`=` still move the dial, and `X` turns auto off for
-A/B. Darker views get more exposure, brighter ones less.
-
-**Measured step response:** sky off (`K`) makes the frame 1.58 EV darker. Exposure goes 0.80 → 1.54 → 2.02 →
-2.24 → 2.38 at ~30-frame log intervals and settles at exactly +1.58 EV with no overshoot. A static camera
-meters identically frame to frame (±0.001 EV): the TAA jitter does not make the meter hunt.
-
-Details that would be bugs the other way round:
-- **Buffers decay to COMMON at the end of every `ExecuteCommandLists`.** The first version declared the
-  exposure buffer `PIXEL_SHADER_RESOURCE` "between frames", which is false from frame 2 on. Both buffers now
-  start each frame from COMMON, and the state buffer's state is tracked through the frame (TAA reads it, the
-  meter writes it, a copy reads it, the tonemap reads it).
-- **TAA's firefly weight uses exposed luminance**: `1/(1 + luma × exposure)`. The weight is meant to behave
-  like a display-referred average, which only holds if 1.0 means "bright on screen". With exposure fixed near
-  1 the difference was invisible; with exposure swinging several EV it is not. TAA runs before the meter, so
-  it uses last frame's exposure, which is exact enough for a weight.
-- **Only the exposing curves meter** (1-exp, ACES, AgX). The baked-reference and raw-debug curves never apply
-  exposure, and the meter snaps instead of adapting when it resumes, because whatever it held is stale.
-- **Snap on `ResetHistory`** (reload, teleport): adapting from the previous world is wrong.
-- **dt is measured inside `PostFx`** (QPC, clamped to 0.1 s) so every client adapts without having to pass a
-  frame time, and a breakpoint does not count as seconds of adaptation.
-- **The editor must be able to lock it**: `ngg_set_auto_exposure(scene, 0)`. A meter partly undoes a
-  brightness edit: brighten a material that fills the view and exposure comes down to meet it. Noted in
-  Wallaby's CLAUDE.md for the material inspector.
-
-**Not done, and not what it was sold as.** §9b item 17 said a physical exposure "finally removes `sunDiffuse` /
-`skyAmbient` as separate fudges". It does not, and could not: exposure is one global multiplier, and those two
-scale *surfaces relative to the sky*. Whether they can go is a units question about the lighting (item 24),
-and auto exposure is neutral to it. Cost of the two passes: not timed separately. The read is quarter-resolution
-and the second pass is one 128-thread group; the main-pass timer did not move.
-
-### 5.0h TAA history filtering and sharpening
-
-§9b item 16. TAA was soft for **two separate reasons**, and they need different fixes:
-
-1. **History resampling, under motion only.** The history was fetched with one bilinear tap at its
-   reprojected position. Any camera motion that is not a whole number of pixels (every frame of driving)
-   makes that a small blur. At a 0.9 history weight the blurs **compound**, so the image converges to
-   something softer than any single frame. At a static camera the tap lands on texel centres and costs
-   nothing, which is why this was easy to miss in still-frame comparisons. **Fix: Catmull-Rom**, the standard
-   5-tap form (the middle rows/columns of the 4x4 kernel merged into bilinear taps placed at the ratio of their
-   weights, the four negligible corners dropped and the rest renormalised). It interpolates rather than
-   smooths, so detail survives repeated resampling. Clamped at 0, because its negative lobes can undershoot
-   next to a bright edge and a negative value must never reach the 1/(1+luma) weight.
-2. **Accumulation, always.** Averaging jittered samples integrates over the pixel footprint, a 1-pixel box
-   filter, so TAA is softer than one aliased sample even at rest. That is inherent. **Fix: a post-tonemap
-   sharpen**: an unsharp mask on the 4-neighbour cross, **clamped to that cross's min/max**. The clamp is the
-   whole safety argument: an edge can get steeper, but no value is created that was not already among the
-   pixel and its neighbours, so there are no halos or ringing to tune away. It runs on display values
-   (after the curve, before the encode) because in HDR a sharpen is dominated by the brightest edge in the
-   frame (the sun against the sky) and does almost nothing to the road texture next to it. Applied only to
-   a TAA-resolved image, since without TAA there is nothing to give back.
-
-**Measuring motion needed a new instrument**: `--pan <deg/frame>` turns the camera by a fixed amount per
-*frame*, not per second, so frame N has the same camera in every run, TAA on or off. Metric: mean |Laplacian|
-of luma below the HUD (detail energy), and mean frame-to-frame change across two consecutive dumps
-(temporal stability, meaningful at a static camera). track-108, start camera:
-
-| | TAA off (aliased ref) | bilinear | Catmull-Rom | CR + sharpen 0.5 |
-|---|---|---|---|---|
-| panning 0.5°/frame (~10 px/frame) | 4.97 | 1.63 (33 %) | 2.12 (43 %) | **2.55 (51 %)** |
-| static | 7.96 | = CR | 4.20 (53 %) | **5.10 (64 %)** |
-
-The TAA-off column includes aliasing energy (stair edges, sparkle), so 100 % is not the target; it is the
-ceiling. At a static camera sharpen 0.5 raises frame-to-frame change from 0.206 to 0.238 (+15 %, out of 255):
-it re-amplifies a little of the jitter residual. That is the cost, and it is why the amount is a dial. Checked
-by eye at 2x on the horizon band: bilinear is visibly smeared under the pan, Catmull-Rom clearly crisper,
-sharpened closest to the no-TAA frame without its stair-stepping, no halos.
-
-Defaults: Catmull-Rom on, sharpen 0.5. Viewer: `I` toggles the history filter (bilinear is the reference),
-`P` cycles sharpen 0 / .25 / .5 / .75; both on the HUD.
-
-**What is left, measured rather than guessed:** under the pan TAA still keeps only half the detail it keeps
-at rest (51 % vs 64 %). That remainder is the variance clip and the fixed 0.9 blend, not the fetch. The
-standard next step is a motion-adaptive blend (less history as reprojection velocity rises). It is not taken
-here because 10 px/frame is a fast pan, and driving speeds should be judged in the game before tuning for them.
-
-### 5.0i The units audit: what `sunDiffuse` and `skyAmbient` were compensating for
-
-§9b item 24. The two dials scale surface lighting *relative to the sky*, so no exposure can remove them (5.0g).
-The question was whether they hide a units error or a model deficit. They hide **two deficits**, and then
-overshoot.
-
-**Where the code stood, relative to physical Lambert + GGX** (the sky pass is physical radiance, 1×):
-
-| term | code | physical | code ÷ physical |
-|---|---|---|---|
-| diffuse, sun | `albedo · 0.18 · E_sun` | `albedo/π · E_sun` | 0.57× |
-| diffuse, ambient | `albedo · 1.0 · E_amb` | `albedo/π · E_amb` | 3.14× |
-| specular, sun / ambient | `π ·` either | no factor | 0.57× / 3.14× |
-
-Internally consistent (specular tracks diffuse), but ambient is **5.5× stronger relative to the sun** than the
-physics. The ground bounce also mixed a sunDiffuse-scaled sun with an unscaled sky.
-
-**What the model itself says.** I ported `AtmScatter`/`AtmSunTransmittance` line for line to numpy and
-integrated the sky over the hemisphere (a cosine-weighted 24×48 quadrature):
-
-| sun elevation | E_sun horizontal | E_sky true | shader's `π·L(N+up)` | model sun:sky | code sun:sky |
-|---|---|---|---|---|---|
-| 50° (track-108) | 14.79 | 0.973 | 0.635 (**0.65×**) | 15.2 : 1 | 4.2 : 1 |
-| 30° (default) | 9.10 | 0.905 | 0.446 (0.49×) | 10.1 : 1 | 3.7 : 1 |
-| 10° | 2.21 | 0.699 | 0.300 (0.43×) | 3.2 : 1 | 1.3 : 1 |
-
-A real clear sky at 50° has a diffuse fraction of ~10–15 %, i.e. ~6–9 : 1. The two deficits:
-
-1. **The sky-irradiance estimate was a different, smaller number.** `π · L(N + up)` is one sample, and for an
-   upward surface it looks at the zenith, the darkest part of a clear sky. It was 0.43–0.65× the true
-   integral, worst at low sun.
-2. **The model is single-scattering only**, so its sky is about 2× too dim against real diffuse fractions.
-   That is a known property of single scattering, worst at low sun and near the horizon.
-
-**Built: the irradiance map** (`Environment`, 16×16 octahedral). For each normal it holds the cosine-weighted
-integral of the sky over the upper hemisphere, by 16×32 quadrature with exact per-ring solid angle. It is
-rebuilt every frame with the radiance map. **Verified against the numpy integral for the same direction:
-GPU 0.6221 / 1.0234 / 1.6709, reference 0.6220 / 1.0247 / 1.6755, within 0.3 %.**
-
-**Built: a physical balance**, `Z` in the viewer (`Scene::SetPhysicalLighting`). It uses diffuse `albedo/π`,
-specular with no factor, the sun at its model irradiance, the sky from the irradiance map, and the ground as
-a uniform Lambertian plane (`ρ_g · (E_sun·sinα + E_sky,up) · (1−N.y)/2`, where the π's cancel). There is no
-lerp and no dials. **Default stays the established balance** until item 25 (below) lands.
-
-**Measured, start camera, aerial off and manual exposure, ACES inverted to scene radiance, lit/shadow
-classified by the RT visibility mask:** physical is **1.51× brighter in sun and 1.29× in shade**, so
-lit:shadow contrast is only **×1.17** higher. The absolute 1.5× is what auto exposure absorbs. The contrast
-barely moved, against the 3.6× the horizontal-surface table predicts, because of the **ground bounce**:
-physically it is driven by the full sun, against 0.18× before, and at RBR's ground albedo (~0.35) it is the
-dominant light on anything facing sideways or down. 2,752 of the 2,783 shadowed pixels here are foliage and
-vertical faces. **Only 31 face upward**, so cast shadows on open ground, where physical *will* be darker
-(the sky term is 0.49× of before), cannot be judged at this camera.
-
-**Found on the way, and fixed:**
-- **The environment map existed only in the viewer.** The game host and Wallaby's API never built one, so
-  in-game there was **no ambient specular**, and the sky ambient fell back to the per-pixel march. `Scene`
-  now owns the environment and rebuilds it at the start of each main pass (as it owns the aerial table), so
-  every client gets the same lighting. *In-game ambient specular is new behaviour from this change.*
-- **`ngg_set_sun` never reached the scene's lighting**: it updated the API's sky parameters, which reached
-  `Scene` only in `ngg_set_sky`. Moving the sun in the editor moved the sky's sun and not the shading.
-  `ngg_render` now syncs every frame, as the viewer and the game host already did.
-
-**What is left, in order:** multiple scattering in the atmosphere (item 25) is the remaining deficit. When it
-lands, physical becomes the default and `sunDiffuse`/`skyAmbient`/`kSpecScale` are deleted rather than
-re-tuned.
-
-### 5.0j Multiple scattering, and physical lighting becomes the default
-
-§9b item 25, the deficit 5.0i left. `AtmosphereMs` (`ngg/core/atmosphere_ms.*`) is Hillaire 2020's section 5.5:
-a 32×32 table Ψ_ms(altitude, μ_s). It computes second-order scattering (isotropic, from 64 directions × 20
-steps, including the ground as a Lambertian reflector) plus the fraction f_ms of isotropic light the
-surroundings scatter back, and sums all higher orders as `1/(1 − f_ms)`. `AtmScatter` adds
-`σ_s · Ψ_ms · T_view` per view step, so the sky, the radiance and irradiance maps, the aerial table and the
-fallback marches all change together, from the one implementation.
-
-**The table does not depend on where the sun is.** μ_s is a lookup coordinate, so the table changes only with
-the atmosphere's composition (turbidity, ground albedo). It is recomputed only when those change. That removes
-any ordering problem: the sky pass runs before the Scene, so each keeps its own instance, and the same inputs
-give the same table. It binds at `t0/s0 space1` in all four root signatures (sky, environment, aerial, scene)
-through `MsSrvRange()` / `MsSampler()`. Off is an all-zero table, which is *exactly* the old
-single-scattering model, so the A/B (`C`) costs no shader branch.
-
-**Verified:** the GPU texel at (937.5 m, μ_s 0.781) is `0.02319 0.02943 0.04071` against a numpy port of the
-same integral at `0.02319 0.02944 0.04073`, i.e. fp16 precision.
-
-**Cost**, with the timer split into environment / aerial / draws (see below): environment + irradiance
-**0.32 ms**, aerial fill **0.48 ms** (from 0.29: the per-step table lookup, paid whether the table is zero
-or not), main pass 2.87 ms on track-108. Switching multiple scattering on costs nothing over off.
-
-**Measured in the lab** (5.0k), with an 18 % grey upward ground in sun and in the wall's shadow, exact linear
-values from the pixel probe:
-
-| | sun : sky on flat ground | lit : shadow |
-|---|---|---|
-| established, single scattering (the old default) | 4.2 : 1 | 4.95 : 1 |
-| established + multiple scattering | 3.2 : 1 | 3.94 : 1 |
-| physical, single scattering | 14.0 : 1 | 15.5 : 1 |
-| **physical + multiple scattering** | **10.6 : 1** | **11.8 : 1** |
-
-The lab reproduces the numpy audit of 5.0i (14 : 1 and 4.2 : 1), which validates both. Multiple scattering adds
-32 % sky light (E_sky 0.97 → 1.28). **10.6 : 1 is clean, clear air** at a 45° sun; real clear skies run about
-5–10 : 1 by haze, and `turbidity` is the dial for a hazier day. The established balance behaves like an
-overcast-to-hazy sky, with shadows about 3× too bright against the sun.
-
-**So physical + multiple scattering is now the default** (`Scene::m_physical = true`). Auto exposure keeps the
-overall brightness: it maps the metered average to the same key (dial × 2^ref ≈ 0.2, a middle grey), so the
-track-108 start view meters at exposure 0.506 and looks like it did, with a cleaner blue sky and more depth in
-the shaded tree lines. **The established balance stays behind `Z` for one round** of in-game comparison; then
-`sunDiffuse`, `skyAmbient`, `kSpecScale` and the lerp ambient are deleted (item 26).
-
-**Found on the way:** the main-pass timer billed the environment pass, now recorded inside `Scene`, to "aerial
-fill". The HUD showed 1.35 ms for a 0.48 ms pass. The timer now has one timestamp per stage (`LastEnvMs`), and
-the lesson is general: *a stage recorded before another stage's first timestamp silently bills its time to
-that stage.*
-
-### 5.0k The lab — a synthetic scene for measuring, not judging
-
-Every measurement on a real track needed a paragraph of caveats: baked textures of unknown albedo, 31
-upward-facing shadowed pixels at the start view, exposure dominated by an 85 % sky. `--lab` loads a scene built
-in memory (`ngg/host/testscene.*`) through the ordinary `Scene::LoadFromMemory`, so the real path is what gets
-measured. It contains:
-
-- a 12 km **ground plane** at albedo 0.18, so the horizon and aerial perspective are real;
-- an 8 m **wall** whose shadow falls on open ground in the middle of the frame, giving lit and shadowed upward
-  ground side by side;
-- **spheres** at albedo 0.04 / 0.18 / 0.50 / 0.90 plus a glossy one (every normal, and the albedo axis);
-- **cubes** square and turned 45°;
-- a **checkerboard** panel and 3 cm **poles** at 10/20/40/80 m for TAA;
-- **distance markers** from 50 m to 5 km, scaled with range.
-
-Everything is untextured with an exact linear albedo. The sun is fixed (45° up, from the right and behind the
-wall), the camera is fixed, and the lab's ground-bounce colour and atmosphere ground albedo are its own 0.18.
-
-**`--probe "x,y;x,y"`** fires the pixel probe at those pixels, one per frame from frame 100, and logs every
-lighting term in linear HDR. With a known camera, a world point projects to a pixel by the viewer's own
-`fovY = 1.204` (checked: a sphere centre landed within one pixel). Together with `--keys` and `--pan`, a lab
-experiment is a fixed command line, with no mouse and no track caveats.
-
-The track stays for what only real content shows: performance, texture behaviour, and how it looks.
-
-### 5.0l Mip chains for textures that shipped without one — a renderer fallback
-
-§9b item 20. track-108 ships **76 of its 88 textures with no mip chain**: 73 DXT5 and 3 DXT3, 17 of them
-alpha-tested (trees, fences, houses, the backdrop scenery). The cure belongs in the converter. This is the
-**renderer fallback** in the same pattern as single-stage detection and normal welding: it checks each texture
-first, leaves any DDS that has mips exactly as it is, and so stands down by itself once the converter does it.
-
-`GenerateDdsMips` (`ngg/core/mipgen.*`) is a pure function of the DDS bytes, run at load on up to 8 threads:
-
-- **Mip 0's blocks are copied verbatim.** Full resolution is byte-identical to what shipped; only the missing
-  levels are created.
-- **Each level is built from the previous one in linear light.** Colour slots are decoded from sRGB, averaged
-  and re-encoded; averaging encoded values darkens every minified edge.
-- **Alpha-tested textures keep their coverage (Castaño 2010).** A box filter pulls alpha towards the middle,
-  so at the cutoff a tree loses leaves at every level until it vanishes at distance, which is a worse artefact
-  than the shimmer being fixed. Each level's alpha is rescaled (by bisection) so the fraction of texels
-  passing the material's own `alphaCutoff` matches mip 0. Colour is alpha-weighted, so the colour of discarded
-  texels (often black) does not bleed into the kept ones.
-- **Levels 1+ are re-encoded in the source format** (DXT1/3/5, principal-axis endpoints, nearest-palette
-  indices). The chain costs a third more memory rather than 4–8× as uncompressed.
-
-**Measured on track-108:**
-- **Load:** 76 textures in **203 ms** on 8 threads. Memory **21.2 → 28.3 MB** (+33 %, a mip chain's
-  theoretical cost), against 113 MB for an uncompressed chain. Re-encode error **3.55/255** mean, normal for BC.
-- **Start camera, horizon band** (rows 290–430):
-  - Shimmer at rest with TAA on (mean frame-to-frame change): **0.79 → 0.47** (−41 %).
-  - Aliasing energy with TAA off (mean |Laplacian|): **27.1 → 15.6** (−43 %).
-- **Coverage, per alpha-tested texture at level 4** (mip 0 / box / as written):
-
-| texture | mip 0 | box | written |
-|---|---|---|---|
-| FIELD01_FENCE | 36.5 % | 26.6 % | 37.5 % |
-| divaci | 51.1 % | 44.6 % | 51.2 % |
-| divaci1 | 56.0 % | 51.6 % | 56.0 % |
-| ObjectTexturePlateOpaque3 | 93.9 % | 92.1 % | 93.9 % |
-| FENCE_WOOD03 | 73.4 % | 81.2 % | 76.6 % |
-
-The box filter can err either way, and preservation holds mip 0's coverage to within the resolution of the
-alpha values. Whole-frame geometry coverage at the start view barely moved (151,234 / 151,108 / 151,167 px)
-because the band is mostly opaque terrain. Distant tree lines are where this shows, and that is a driving
-judgement.
-
-`--mips 0|1|2` (off / plain box / coverage-preserving, default 2) selects the mode at load for A/B. The
-load log lists the coverage table above for every alpha-tested texture.
-
-### 5.0m What ray tracing actually costs — foliage, AO and the cascades, measured
-
-Item 23 named three unmeasured risks for an RT-only shadow path. This is the first: **alpha-tested foliage**. The
-lab gained a forest (`--lab`; `--lab-bare` without it): 120 RBR-style trees, each a trunk and three crossed,
-two-sided, alpha-tested 7×7 m leaf cards on a generated DXT5 leaf texture (~50 % coverage, shipped without
-mips, so the mip fallback builds them too). The cascade pass got its own GPU timer (`LastShadowMapMs`), and
-`--cam x,y,z,yaw,pitch` fixes the view so every configuration sees the same frame. All times are GPU ms on the
-integrated Radeon. The RT figure is the trace dispatches; the denoiser is separate.
-
-| view | geometry px | RT shadow only | RT shadow + AO (2 rays) | cascades |
-|---|---|---|---|---|
-| lab, forest | 965 k | **1.89** | 7.90 | 0.85 |
-| lab, bare | 789 k | **1.29** | 4.88 | 0.56 |
-| track-108 start | 194 k | **0.86** | 2.25 | **2.93** |
-
-Three findings, two of them against expectation:
-
-1. **Foliage any-hit is not the problem.** It makes the shadow ray 46 % more expensive (1.29 → 1.89 ms), with
-   227 k leaf tests per frame. That is manageable, and it is the risk item 23 worried about most.
-2. **On real track geometry the cascades cost MORE than RT shadows** (2.93 vs 0.86 ms at the track-108 start
-   view). The lab flatters cascades because its geometry is tiny; four full-scene passes over 600 k triangles
-   are not.
-3. **AO is the real cost**: 75–80 % of the ray tracing (3.6–6.0 ms at full coverage), from 2 incoherent
-   hemisphere rays per pixel against 1 coherent sun ray. The ~7.4 ms seen driving through foliage (5.0e) was
-   mostly AO.
-
-**So AO now traces one ray per pixel by default** (`--ao-rays N`, design default 1), and the existing temporal
-denoiser does the accumulating. Measured in the forest view: RT **7.87 → 4.28 ms (−46 %)**. Mean AO is
-identical (231.6 / 231.6), so one ray is unbiased. The two converge to the same picture (mean difference
-1.27/255). The cost is +17 % frame-to-frame noise in the denoised AO at rest (5.34 → 6.27/255), on a term that
-only scales the ambient light.
-
-**A waste fixed on the way:** `O` hid the AO term but still traced its rays, so switching AO off saved nothing.
-The viewer now traces AO only when it is applied, and a frame without AO drops the AO history so re-enabling
-does not reproject a stale one.
-
-**And the finding that reorders the plan: the game host does not ray trace at all.** Its frame is sky →
-cascaded shadows → scene → post. There is no depth prepass, no RT shadows, no AO, and Wallaby's API is the
-same. Everything in 5.0e lives in `viewer.cpp`: the prepass, the trace, the denoiser, and the jitter-before-
-prepass ordering whose absence made the screen blink. This is the class of bug the environment map was (5.0i):
-a feature wired up by one client. Item 23's prerequisite, "RT shadows seen in-game", cannot happen until the
-frame is orchestrated in `ngg-core` and every client records the same one (item 27).
-
-### 5.0n One frame for every client — `ngg::core::Renderer`
-
-§9b item 27. The frame now lives in `ngg-core` (`ngg/core/renderer.*`). The viewer, the game host and Wallaby's
-API each call one `RecordFrame`. The split of responsibility:
-
-- **The client owns** its window, its input, its overlays and its presentation.
-- **The renderer owns** everything from "here is a camera" to "the tonemapped image is in your target":
-  curve rules, the multiple-scattering switch mirrored to the sky, the jitter set *before* the prepass, the
-  depth + normal prepass, ray-traced shadows and AO or the cascades, sky, scene, TAA, exposure and tonemap.
-- **Settings are the client's** (shadow source preference, AO, sky, TAA, curve); **order and correctness are
-  not**. A client can no longer reintroduce the blinking of 5.0e by recording the prepass before the jitter.
-
-**What each client gained.** The **game host** goes from sky + cascades + scene + post to the full frame:
-prepass, ray-traced shadows and AO, the environment and aerial tables. This is the first time any of 5.0e
-onwards can run in-game. The **API** gets the same frame. The **viewer** is unchanged by construction. Its
-ray-traced shadow mask is *bit-identical* before and after (max difference 0), and the final frame differs by
-a mean of 0.07/255, which is the intended AO change from 2 rays to 1.
-
-**The renderer also owns whether RT shadows are valid** for the scene as it stands. The BVH holds the file's
-static geometry at its authored positions. `Scene` now keeps a **geometry revision** (bumped by load, add,
-remove, hide, move, compact) and answers **`RtRepresentsScene()`**:
-
-- **Hide or remove** an object: representable, so the BVH is rebuilt. Hidden objects are now left out of the
-  BVH input too; they used to keep casting shadows.
-- **Add a dynamic mesh or move an object** (the editor does both): not representable, so the frame uses the
-  cascades and logs why once, rather than casting shadows from where things used to be. Item 7 (per-object
-  instancing) is what lifts this.
-
-**The rebuild needed its own command context.** `Rt::Build` is synchronous on the context it is given. Called
-from inside `RecordFrame` on the client's list, which is open, it reset the allocator mid-recording: a D3D12
-error, a failed build, and RT silently off. `Device::CreateSecondary` makes a second allocator/list/fence on the
-same device and queue. The rebuild executes and completes on the queue before the client's list is even
-submitted, so GPU ordering is free and clients need no "call this between frames" rule.
-
-**Verified without Wallaby:** `ngg-api-smoke <file.ngg>` (new, `ngg/api/smoke.cpp`) drives the C API the way the
-editor does. On track-108 all 8 checks pass:
-- the BVH is built once;
-- hiding object 0 rebuilds it once (176 alpha-tested triangles leave the BVH), RT stays active;
-- showing it again rebuilds once more;
-- moving it pauses RT, logged once;
-- restoring the identity transform rebuilds and resumes RT;
-- no D3D12 errors. The API creates its device *without* the debug layer, so this check is weak there; the
-  viewer runs with it and stays at the baseline 5 warnings.
-
-**Deployment had the same gap one level down.** RT compiles its shaders at runtime with `dxcompiler.dll` +
-`dxil.dll`. Without them beside the binary, ray tracing declines quietly and the frame renders cascades, which
-looks like nothing changed. `build-ngg.ps1` now copies them beside `ngg-api.dll`, and `-Deploy` copies them into
-the game folder with `rbrtm.exe`. The `rbrtm.exe` in `<RBR>` was from 2026-08-14, so none of 5.0f onwards has
-been in the game yet.
-
-**Not yet verified: the game host itself.** It compiles and records the same `RecordFrame`, but it runs only
-inside RBR. That is the user's check: `build-ngg.ps1 -Deploy` with RBR closed, then drive.
-
-### 5.0o Instancing in the BVH — moving geometry keeps its ray-traced shadow
-
-The renderer half of §9b item 7. Item 27 made the editor fall back to cascades whenever an object was added or
-moved, because the one BVH held the file's geometry at its authored positions. The same limitation would block
-movable meshes in-game (item 5) and the car (P5). The BVH is now organised the way the draw list is: **meshes
-and instances**.
-
-- `Scene::DescribeRt` lists mesh keys and instances:
-  - the **world**: every static object at its authored position, one BLAS. Its key hashes which static
-    objects it *leaves out*;
-  - each **moved** static object: its own BLAS at its authored position, placed by its instance transform;
-  - each editor-added **dynamic** mesh: one BLAS, as many instances as use it, the material per instance
-    (`FORCE_OPAQUE` on instances drawn with an opaque material).
-- `Rt` caches one BLAS per key. `Rebuild` builds only the keys it lacks, drops dead ones, and rebuilds the
-  shared any-hit buffers. `UpdateInstances` rebuilds the TLAS and the instance table and nothing else.
-- The any-hit test now looks its triangle up through `gInst[CandidateInstanceID()]`: the alpha-triangle base,
-  the vertex base, which vertex buffer (static or the dynamic pool), and the material when the mesh's triangles
-  do not carry one.
-- `Scene` keeps a CPU copy of the static indices (~9 MB on track-108). Rebuilding the world BLAS used to read
-  them back from an upload heap, which is write-combined memory.
-
-**The two speeds this buys.** A change in *which meshes exist* rebuilds BLASes: a load, an object's first
-move, a hide or show (the world's key changes), an added mesh. A change in *where things are* rebuilds only
-the TLAS. **Dragging an object is TLAS-only.**
-
-**Verified:**
-- `ngg-api-smoke` on track-108 (updated, all pass):
-  - first frame: one rebuild, a 92 MB world BLAS in 65–94 ms;
-  - hide or show: one rebuild each;
-  - first move: one rebuild building the world and the object's own BLAS (141 ms), and **RT shadows stay
-    active**;
-  - **ten drag steps build no BLAS**;
-  - restoring identity: one rebuild.
-- **Lab, wall moved 8 m (`--move 1,8,0,0`):** at the probe that was in the wall's shadow, visibility went
-  0 → 1; at the probe 8 m to the right, 1 → 0. **The shadow moved with the instance.**
-- **Track-108:** shadow fraction and AO are as before (AO mean 253.5 vs 253.7).
-
-Two side fixes:
-- Scratch buffers are created in COMMON, which is what they are anyway. Asking for UAV earned a validation
-  warning per rebuild; the viewer baseline is now 4 warnings.
-- The viewer gained `--move index,dx,dy,dz` (the editor's operation, for lab experiments).
-
-**Not measured here:** RT timing on the instanced path. These runs had a different window size (1600×900) and
-erratic GPU clocks (aerial fill 0.35 → 0.09 ms, env 0.5–2.1 ms on the same adapter), probably the GPU being
-shared. Times from them are not evidence either way.
-
-**What item 7 still needs:** per-object transforms *in the format*, so the converter can keep movables as
-instances, and draw harvesting to animate them in-game (items 4 and 5). The renderer side, instancing that
-follows the scene, now exists.
-
-### 5.0p Quality tiers — §1.8.4's interface, built
-
-§1.8.4 requires tiers over one lighting path from P1, so VR at 90 Hz (P4) does not mean a second renderer. They
-now exist in `ngg::core::Renderer` (`Quality::Low/Medium/High`, `Renderer::Tier`), set the same way by every
-client:
-- the viewer: `--quality low|medium|high`, `F3` to cycle, shown on the readout;
-- the game host: `ngg.ini` beside `rbrtm.exe`, `[Renderer] Quality=…`, default medium;
-- the API: `ngg_set_quality`.
-
-**What a tier changes is only what has been measured to matter** (5.0m). The RT sun shadow is cheap, and on
-real geometry cheaper than the cascades, so every tier keeps it (falling back to cascades only where RT is
-unavailable). The tiers differ in AO, which is most of the ray-tracing cost:
-
-| tier | contents | RT ms, lab forest (965 k px) | RT ms, track-108 start |
-|---|---|---|---|
-| **low** | RT sun shadows, no AO, sharpen 0.25 (the VR baseline) | **1.55** | **0.59** |
-| **medium** (default) | + RT AO, 1 ray | 3.0 | 1.22 |
-| **high** | + RT AO, 2 rays (less noise at rest) | 4.27 | 1.56 |
-
-Stable within the run (a few percent). Absolute times are lower than 5.0m's in the same view, because the GPU's
-clock state differs between sessions, so the *ratios* are the result: low is about a third of high's ray
-tracing in the forest. Whole-frame fps cannot separate medium and high there: both sit at exactly 30.0, which
-looks like vsync dividing a 60 Hz display.
-
-New techniques join a tier by adding a field to `QualityTier`, not a mode: half-resolution AO, probe-based
-indirect for VR, or a single cascade for low if item 23's in-game measurement says so. The individual setters
-remain for A/B work; changing one takes the client off its tier.
-
-### 5.0q Weather — our own presets, stored in the `.ngg`, rendered by the one atmosphere
-
-**Why now:** of `TrackSettings.ini`'s 757 presets, about 70 % are not clear sky (overcast 207, rain 193, clouded
-131, partly 46). NGG rendered every one of them as a clear blue sky with a hard sun, which made weather the
-largest fidelity gap left against vanilla content.
-
-**§3.4a was half wrong, measured.** It assumed RBR's scattering parameters were physical and could drive our
-model "by construction". They are art knobs for a 2004 shader:
-- `Turbidity` runs −2.8…9 with a median of 0;
-- `Greenstein_Value` (the Mie phase g) is 1.0, a delta function, in most presets;
-- track-108's clear sky has `Rayleigh_Multiplier = 0.025`.
-
-What *does* translate is the weather **category** in every section name (`<map><variant>_<haze>_<cloud>`) and
-the fog distances, which are visibilities. The data also has authoring bugs: 8 presets write `SunDir` with
-**decimal commas**, and **31 daytime presets put the sun below the horizon** (mostly overcast ones, where RBR's
-hand-set ambient made the sun irrelevant). A physical sky renders those as night.
-
-**So the presets are ours, physical, and inside the `.ngg`:**
-- **Format** (`ngg/core/weather.*`): versioned `ngg-weather` JSON with sun, turbidity, ground albedo, cloud
-  cover, fog visibility (Koschmieder, metres) and fog height, rain, snow, and `source` provenance. Unknown keys
-  are ignored, so it grows without breaking. JSON is the authoring and interchange form (Wallaby edits it).
-- **Storage: the `NGGW` chunk.** The presets live *in* the file, covered by its CRC and (later) its
-  encryption envelope. A preset is part of an event's definition (§3.6), and a loose file beside the game
-  would let a competitor thin the fog. The runtime never reads loose JSON. A file with no `NGGW` falls back to
-  translating its legacy section on the fly, logged as the transition path. *(The chunk first held the JSON
-  itself; since 5.0t it holds binary records.)*
-- **Import** (`host/tracksettings.*`, now an *import source* only):
-  - `rbrtm --import-weather <track.ngg>` writes every legacy section for that map into the file's `NGGW`. It
-    refuses non-plaintext files (§3.7), keeps every other chunk byte-identical, and keeps a `.bak`;
-  - `rbrtm --export-weather <dir>` writes all 757 as JSON for authoring;
-  - the translation: `crisp`/`hazy` set turbidity 1/3; `lightfog`/`heavyfog` set fog visibility from
-    `FogEnd`; `partcloud`/`lightcloud`/`heavycloud` set cover 0.35/0.6/0.95; rain and snow set visibility
-    and precipitation; decimal commas are parsed; a daytime sun below the horizon is mirrored to a low sun on
-    the same bearing; night keeps its own. *(Corrected 2026-10-30, in W-Rally's port: `N` is NOON, not night -
-    its suns stand ~50 degrees up, and RBR has no night stages. 17 overcast noon presets with the sun 2.8 degrees
-    up were left as dusk; the port raises every preset's low sun, 48 in all.)*
-- **Selection:** the viewer's `--weather <name>`; the game host uses the file's default until the bridge
-  passes the event's chosen preset (item 28).
-
-**Rendering, in the one shared `AtmScatter`**, so the sky, environment, irradiance and aerial table all follow:
-- **Fog** is an exponential height layer on the camera's own ground, composited *analytically*. The view
-  march's kilometre steps would step over a 150 m layer. Its optical depth along a ray has a closed form; it is
-  lit by the sun reaching into it (Mie phase) and by a diffuse field (half sky, half ground bounce); and the
-  direct sun at a surface inside it is attenuated through the whole layer. Visibility is met by construction:
-  2.1 % contrast at `FogEnd`.
-- **Clouds** dim the direct sun (`1 − 0.98·smoothstep(0.3, 1, cover)`), turn the sky toward a CIE overcast
-  dome whose brightness is 30 % of the clear global irradiance, and light the air with the deck's diffuse
-  light. Clear-sky diffuse irradiance uses a fit to this model's own integral, `0.064 · I · sin(elev)^¼`
-  (within ~5 % from 10° to 50°, from 5.0j's numbers).
-- A clear, fog-free preset returns from the weather path untouched, so the clear look is unchanged.
-
-**Found and fixed on the way: the sky pass's constant buffer was mis-packed for as long as the sky has been
-jittered.** HLSL starts a `float2` on a new register when it would straddle one. The C++ `SkyCB` packed
-`jitterX` into the previous slot, so the sky read its TAA jitter one slot off (x from `jitterY`, y from
-padding). The new weather fields after it read their neighbours: the fog *height* became fog *extinction*,
-and the clear sky turned to fog. It now has a pad and `static_assert`s on the offset. It is the same class of
-bug 5.0 recorded for the scene's buffer.
-
-**Verified on track-108** (the injected copy, 11 presets): crisp_clear is unchanged; heavycloud is a grey
-dome with flat diffuse light; lightfog (4.4 km) fades the distance; heavyfog (130 m) is a white-out at the
-start view; heavyrain is grey and soft. Exposure adapts, and validation stays at 4.
-
-**Not done:** cloud *shapes* (partly cloudy is a uniform blend for now; the choice between RBR's cloud textures
-and volumetric clouds is open), rain and snow themselves (wet surfaces, particles), night, and fog/cloud in
-the multiple-scattering table.
-
-### 5.0r A GPU hang (TDR) from a reused pointer — and DRED, which named it
-
-**Symptom.** The user's AMD driver reset several times in an evening (Windows LiveKernelEvent 0x141,
-VIDEO_ENGINE_TIMEOUT_DETECTED, with "send report" dialogs). The resets clustered at 23:41 and 00:11–00:13,
-and the second cluster matched a loop of `ngg-api-smoke` runs exactly. The smoke test had been "flaky"
-(roughly one run in three failing) in a telling way: once a run failed, *every* later structural change in
-it was silently skipped. That is what a removed device looks like when nothing checks for removal.
-
-**Making it visible first.** Nothing in the renderer checked for device removal, so a GPU reset showed up only
-as later calls failing quietly. `Device` now:
-- enables **DRED** (Device Removed Extended Data) before creating the device: auto-breadcrumbs (the last
-  command each command list completed) and page-fault data (the faulting address and recently freed
-  allocations near it);
-- names its command lists (`ngg frame`, `ngg secondary (BVH builds)`);
-- calls `CheckRemoved` after every submit and on a failed `Begin`, which logs the removal reason, the
-  breadcrumb window around the hang, and the page fault. Once per device.
-
-**Caught on the 3rd of 10 runs:**
-- `DEVICE_HUNG`, in `ngg frame` at command 2200 of 4370: a `DrawIndexedInstanced` straight after a `Dispatch`.
-  That is the main pass, just after the ray tracing.
-- A **page fault**, with the nearby allocations being **recently freed resources** (DRED type 34).
-- On the frame of the object's first move, a rebuild, which recreates the ray tracer's output textures.
-
-**The bug.** `Scene::SetRtVisibility`/`SetRtAo` rewrote their descriptor only when the texture **pointer**
-changed: `if (tex != m_rtVis) …`. When the ray tracer recreates its targets, the new texture can be allocated
-**at the address the old one had** (ABA). Same pointer, so no rewrite, and the main pass sampled the *freed*
-texture's memory: a page fault, then a hang, then the driver reset. It is intermittent because address
-reuse is luck. It predates instancing: any recreation could hit it, including a **viewer window resize**.
-Instancing (5.0o) made recreation frequent enough to see. The 23:41 burst, during viewer runs, is plausibly
-the same bug.
-
-**The fix.** Those two descriptors are rewritten on every set. Two descriptor writes a frame cost nothing, and
-a pointer is not an identity. Nothing else in the renderer keys a descriptor on a pointer (checked); the ray
-tracer already rewrites its depth and normal views every trace.
-
-**Verified:** 10 of 10 smoke runs pass, against about one failure in three before; Windows filed no GPU reports
-after the fix; the viewer with the debug layer stays at its 4 baseline warnings, with moved-object shadows
-correct.
-
-**Lesson, general:** a cache of "what I last bound" keyed on a raw pointer is a use-after-free waiting for the
-allocator to reuse an address. Key on a generation, or rewrite.
-
-### 5.0s The game tells the renderer which weather (9b item 28)
-
-Until now the game host rendered every stage under the `.ngg`'s DEFAULT preset, whatever the event said. The
-weather is decided where RBRTM starts a stage: it writes the event's codes into the game (`SetWeather`: time of
-day, the overcast variant's time of day, "special weather" and clouds), and RBR then lights the stage from one
-`TrackSettings.ini` section, named after those codes. **That section name is already the preset's name**: the
-importer (5.0q) names each preset after the section it came from. So the identity needed no new scheme; it
-needed one string passed through.
-
-**The path.**
-- RBRTM, right after `SetWeather`, reads the four fields back from the game. It reads them back rather than
-  taking the event's codes, because a code the event leaves unset (-1) leaves the game's own value in place,
-  and the read-back names what RBR actually uses. It builds the section name with the scheme the plugin's
-  `CheckTrackSettingsCRC` already uses (`GetWeatherSectionName`, RBRTMHelp.h), e.g. `108M_crisp_clear` or
-  `108O_M_heavyfog_clear`. It then calls the bridge's new **`nggSetWeather`** export, resolved dynamically
-  like `nggSetTrack`, so no bridge means no change.
-- The bridge keeps the name across a link that is not up yet and publishes it in `FrameState.weatherName`
-  (protocol **v4**, block 320 bytes). Weather is published before the track, so a stage and its weather that
-  arrive in the same frame land in that order.
-- The host re-selects whenever the name changes, and after every track load (a load resets to the default):
-  `Scene::FindWeather(name)`. A name the file does not carry falls back to the default, **logged**: the wrong
-  sky is better than none, but it must not be silent. A file without NGGW translates that legacy section.
-
-**Found on the way: single-digit maps.** `TrackSettings.ini` zero-pads them (`04M_crisp_clear`), but the
-importer searched for `4M_...`, so stages 1–9 imported no presets at all. Map 4 now imports 43. The
-plugin's own `CheckTrackSettingsCRC` builds `"%2d"` (`" 4M_..."`), which matches no section for those maps
-either. Left alone: it is the event-integrity check, outside the renderer's remit, and noted here.
-
-**Verified:** all 11 presets in track-108's NGGW have names the plugin's formula can produce; proxycheck
-resolves `nggSetWeather`; the bridge, host and plugin build (`build.ps1`), and `loadcheck` loads the new
-RBRTM.dll. **Not verified here:** the in-game run. That run is the check: the host log should
-say `weather: [<section>] from the .ngg` with the event's condition.
-
-**Consequence for authoring:** a preset the game should ever select must carry the section name of the
-condition it stands for. Free-text names are fine for experiments, but the game never selects them. Noted for
-Wallaby's weather editor.
-
-### 5.0t Weather in the `.ngg` is binary records; JSON is the project form
-
-The first `NGGW` held length-prefixed JSON. The argument was that the schema could grow without a format bump,
-and that the file is protected by its CRC and envelope, not by being binary. Both still hold, but they argued
-for the wrong layer. The `.ngg` is the *runtime* format (§8.1: it must not become the editing format), and
-every other chunk in it is a fixed binary layout. A text parser in the load path, for 17 numbers per preset,
-is the odd one out. So the split is now explicit:
-
-- **Project / editor form: the `ngg-weather` JSON** (`core/weather.h`). Wallaby's sidecar holds it (request in
-  its CLAUDE.md), `--export-weather` writes it, and the flat API speaks it (`ngg_weather_to_json`/`_from_json`).
-  It can carry what the runtime does not need, such as `source` (provenance).
-- **Runtime form: `NGGW` = `WeatherChunkHeader` + `count` × `WeatherRecord`** (`format/ngg_format.h`):
-  `version` 1, `recordSize`, then per record a 64-byte name and 15 floats (124 bytes). Converters pack the
-  JSON into these records (`core::PackWeatherChunk`; Wallaby's `NggWriter` mirrors it).
-- **Growth without a bump:** new fields are *appended* to `WeatherRecord`. A reader takes
-  min(`recordSize`, its own size) and keeps defaults for what an older record lacks; a newer record's tail
-  is skipped. `version` changes only if an existing field changes meaning. That is the property JSON was
-  bought for, kept at a fraction of the cost.
-
-**Old files:** a JSON-era chunk is *refused*, not misread. Its first word is a preset count, not 1, and its
-sizes cannot add up. The load logs `NGGW not understood (version 11, ...) - re-run rbrtm --import-weather`,
-and the track renders its built-in default. Only local test files ever had the JSON form.
-
-**Verified:** the JSON-era scratch file is refused with that message. Re-injected, track-108's chunk is
-16 + 11 × 124 = 1,380 bytes (JSON: 5,612), and `ngg-api-smoke` passes all 13 checks, including preset
-selection, live edit and the JSON round trip. The game's `<RBR>\ngg\track-108.ngg` is re-injected; the
-pristine original is kept as `track-108.ngg.orig`.
-
-### 5.0u Glass: blended materials (2026-10-30, in W-Rally)
-
-`kMaterialBlend` existed in W-Rally's renderer interface and nothing drew it: the car's transparent material went in
-as alpha-TESTED, so a window was either solid or a hole. The i20's glass texture (DXT3, 2048²) is dark tint, rgb
-~34/255, at alpha ~85/255 over the windows (53 % of its texels). Below the 170/255 cutoff that made every window a
-clean hole: the cabin behind, black, and **no reflection at all**.
-
-**What a blended material is now:**
-- **Format:** `kMaterialBlend` = bit 3. Bit 2 stays unused: it was v2's single-stage, and the v2 upgrade masks it,
-  but a reused bit is a misread waiting to happen. The interface keeps its bit 2, and the module maps it. Blend wins
-  over the alpha test.
-- **Its own pass, after everything opaque:** sorted far to near by the box centre, depth tested (GREATER_EQUAL,
-  reverse-Z), no depth write. It is drawn over the sky too, which comes first. It has no part in the prepass, so
-  the depth, normals and motion that the ray tracer and TAA read are those of what lies behind the pane.
-- **PREMULTIPLIED** (ONE, INV_SRC_ALPHA). The shader's `BLEND` variant scales the tint's light (diffuse, baked
-  colour, aerial in-scatter) by coverage (base colour alpha × vertex alpha × factor). The reflection (sun GGX and
-  the environment's split sum) stays whole. A clear pane reflects as much sky as a tinted one does; only the tint
-  is partial. glTF's `BLEND` alpha mode scales everything, reflection included, which reads as a matt film.
-- **Lit without the screen buffers:** the ray-traced sun visibility and AO are per *pixel*, and the pixel is the
-  opaque surface's behind the glass. So glass takes AO 1, and under RT the sun unshadowed. Under the cascades it
-  looks its world position up as anything else does.
-- **No shadow, not in the BVH:** the cascade pass skips it, and so do `DescribeRt` and the world BLAS. The sun
-  reaches the seats through the windows.
-- **The car:** `assets::CarRender` sends the `.sgc`'s transparent materials as `kMaterialBlend | TwoSided` with
-  roughness 0.05 (smooth glass; the body stays 0.45).
-
-**Measured** (stage 41, imported, chase camera, tick 162, lockstep, the same frame before and after): every changed
-pixel lies inside the car's windows (a 410×252 box, 37,792 pixels). The rear window's centre went from 0–5 (the
-black cabin through a hole) to ~85: the sky's reflection, ~10 % of it at that angle, which is what Fresnel gives a
-dielectric there. It is physically right, but it reads lighter than RBR's own dark windows, so it is the first
-thing to judge when driving. `ngg-check`'s made-up scene carries a blended material (round trip and the renderer's
-loader); all fast CTests pass.
-
-**Not done:** within one object, faces are not sorted, so a closed glass shell draws its two layers in index
-order. RBR's glass is single sheets, drawn two-sided, so a pixel is covered once. Coloured transmission (a red
-taillight lens filtering what is behind it) needs dual-source blending; this tint is grey. Wallaby's `NggWriter`
-mirrors the flags and should learn bit 3 when the editor gets glass.
-
-### 5.0v Wet surfaces and puddles (2026-10-30, in W-Rally)
-
-The presets carried `rain` from the start (5.0q), and the physics drove a wet road (`--road wet`), but nothing looked
-wet. The wetness the picture shows is the **road's**, not the sky's: rain that has stopped still leaves the road
-wet, and a light shower on a dry road is not yet a wet one. So it comes from the game, which knows the road: renderer
-interface **v4** adds `FrameDesc::wetness` (0 dry .. 1 wet), and the game sends its road state (dry 0, damp 0.5, wet
-1). It reaches the shader through the camera constants' former pad (`gWetness`), so no buffer layout changed.
-
-**The shading** (opaque, non-foliage materials; after Lagarde's "Water drop 2b"):
-- **Exposure to rain:** an upward face takes it all, a wall half, an overhang none. Sheltered surfaces (the
-  ray-traced AO's dark: a canopy, the car over the road) take as little as 0.35.
-- **Darker where porous:** water fills the pores and traps light. Porosity is taken from roughness (the rough are
-  the porous: asphalt, gravel), and albedo scales to 0.45 there, 0.85 on smooth surfaces.
-- **Glossier:** the water film puts a ceiling on roughness, 0.25 when fully wet. With the sky's reflection, which
-  the environment's split sum already gives, that is most of the wet look, the sheen of sky down a wet road.
-- **Puddles** on the ground layer, from damp on: a world-fixed two-octave value noise (cells of ~3 m and ~1 m) above
-  a threshold that falls as it gets wetter (0.74 damp, 0.62 wet), on flat ground only (N.y > 0.93). A puddle is
-  dark (albedo 0.35x), near-mirror (roughness 0.02) and LEVEL: its normal turns to straight up.
-- **Not on grass:** green ground soaks the water up, so it neither pools nor turns to a mirror. RBR's materials
-  carry no tag, but the albedo tells: green-dominant ground gets no puddles, and its wet roughness only falls to
-  0.6. Without this the lawns went to blue-grey mirror sheets.
-
-**Measured** on stage 41 at the start, same frame: Wallaby's `.ngg` dry, damp and wet under the sun ("after the
-rain"), and the imported `.lbs` under `41O_M_lightrain_heavycloud`, dry vs wet. The wet road darkens, reflects the
-overcast sky down its length and catches the sun where it is lit. The import's own wet textures (RBR's wet set)
-and this shading stack sensibly. All fast CTests pass at interface 4.
-
-**Not done:**
-- The puddles reflect **only the sky**: the environment map is the sky. Under a canopy that is wrong: it should be
-  the dark trees. Ray-traced reflections for the mirror-like pixels (puddles, glass) are the cure, and they are
-  measurable against the RT budget (5.0m).
-- Rain itself: drops, spray and splashes (particles, design.md 3.2), rain on the glass.
-- Drying: wetness is a step today (dry, damp, wet), with no time in it.
-- Snow cover, and the cloud shapes (item 29).
-
-### 5.0w Instanced models - the replacement for the card vegetation (2026-11-09, in W-Rally)
-
-Vegetation plan workstream 2 (Wallaby `docs/vegetation-plan.md`): the format and the renderer for **models placed
-many times**, which is what replaces RBR's ~25k crossed-card plants per stage (Cote d'Arbroz, map 41: 3,743 trees,
-16,087 bushes, 5,317 grass). Until now a model existed only as the runtime API (`createModel`, what a car is), every
-draw was `DrawIndexedInstanced(n, 1, ...)`, and there was no level of detail.
-
-**The format** (`ngg_format.h`, both chunks optional and versioned; a reader without them draws the cards):
-- `NGGD`, the **model library**: a header with the counts, then models (name, LOD range, model-space box, crossfade
-  width, the ray-traced LOD), LODs (submesh range, `maxDistance`, `kModelLodBillboard`), submeshes (material, index
-  and vertex range), v3 materials (their texture slots index the file's `NGGT`), the vertices in the file's own
-  44-byte form and the indices. Model space: +y up, origin at the base.
-- `NGGE`, the **placements**: model, the `NGGP` plant it replaces (`kNoPlant` none), position, yaw, scale across and
-  up, tint, a variant mask. Upright on purpose: a plant on a slope grows up, and the fit from a card plant is exactly
-  these numbers. `recordSize` lets a later record grow (a full matrix, when a producer needs one).
-- `kMaterialFoliage` (bit 4): alpha-tested, two-sided, lit with the transmission and wrap terms (5.0, "black
-  foliage"), its alpha edge hashed.
-- **A ray-tracing-only LOD** (`kModelLodRayOnly`, `ModelLod` flag bit 1; NGGD **version 2**, 2026-11-10, the user's
-  decision in the vegetation plan, "a ray-tracing-only LOD"): the mesh the BLAS is built from and nothing else - never
-  drawn (no prepass, main pass or shadow map), never picked by distance. For a coarse shell with few alpha layers
-  (workstream 4's `<id>_RT`: a ray crosses 2 alpha surfaces of it against 18-24 of LOD0's). The rules, each refusing
-  the chunk (the cards drawn instead): at most one per model and it is the model's LAST LOD; at least one drawn LOD
-  before it; `rtLod` names it whenever it exists; it is not also a billboard; its `maxDistance` is 0. The drawn LODs
-  before it keep every rule they had (nearest first, `maxDistance` above 0 and increasing, the last drawn one's is how
-  far the model is drawn). `ModelRecord`'s box covers the DRAWN LODs only - not the billboard, not the ray-only LOD:
-  the culling box is a drawing matter, the TLAS has the BLAS's own bounds. Its materials are alpha-tested and
-  two-sided but need not be `kMaterialFoliage` (a binary alpha needs no hashing, and transmission would only cost ray
-  hits); the renderer depends on neither.
-- **Versions:** version 1 could not state the flag - a v1 reader would refuse the shell's zero distance, or draw a
-  shell given one as a LOD - so the bump makes "a reader refuses a version it does not know" do the refusing. A
-  version-2 reader (both `ngg_scene` and the renderer, `kModelVersionMin` 1) still reads version 1, whose layout is the
-  same; a version-1 chunk carrying the flag is refused. The writer writes 2. Nothing shipped NGGD before, so the bump
-  cost no content.
-- `ngg_scene` (the format library) reads and writes them structured and checks them whole on both sides
-  (`CheckModels`, `CheckPlacements`); `ngg-check` round-trips a made-up model and the stage-41 file.
-
-**The renderer** (`core/models.cpp`, hooks in `scene.cpp`):
-- A model's submeshes go into the **dynamic pool** (one mesh each), its materials into the scene's table, each
-  opaque one with an alpha-tested **twin** whose cutoff nothing reaches - so a crossfading opaque submesh can dither
-  without giving every opaque pipeline a `clip()` and losing the terrain's early depth test.
-- **The instance stream:** the root signature was at its 64 DWORDs, so the transforms come as a second vertex
-  stream (slot 1, per instance, 64 bytes: three rows of `p' = A p + t`, tint, fade, flags), in **every** scene
-  pipeline. A draw that is not a model's takes the stream's identity record, and its vertex goes through VSMain's
-  old path untouched (the branch is on the record's flag). Normals by the cofactors of A, right under a squash.
-- **Culling on the CPU, per view:** placements binned in 64 m cells (box and reach per cell), then per placement the
-  frustum and the distance; the LOD by distance from the camera (scaled by the placement's height and
-  `NGG_MODEL_LOD_SCALE`), the survivors counting-sorted into one batch per (model, LOD, crossfading) and written
-  straight into an upload buffer; each batch is one `DrawIndexedInstanced` per submesh. The camera's view is culled
-  once for the prepass and the main pass; each cascade culls its own (the camera's LODs, no crossfade, billboards
-  turned to the sun). The local lamps' shadow maps and the car's reflection probe do not draw models yet.
-- **Crossfade:** over the last `fadeWidth` before a LOD's distance a placement is in both batches, one with `fade =
-  t` (drops the pixels whose dither is under t), the next with `-t` (keeps exactly those): every pixel drawn once.
-  The dither is interleaved gradient noise on the pixel, the same in the prepass and the main pass (their depths must
-  agree); TAA's jitter moves it. After the last LOD the model dithers out the same way.
-- **The far billboard:** a quad the VS turns about the placement's up axis to face the camera; its picture is the
-  producer's (workstream 4 bakes it from the model).
-- **Foliage:** hashed alpha - the cutoff dithered by another pattern, which TAA resolves into soft leaf edges. There
-  is no MSAA for alpha-to-coverage to cover. A model's prepass keeps its own normals (`kDrawModel`): its leaves are
-  geometry, so they shadow one another in the ray tracer instead of skipping their own card as RBR's plants do.
-- **Ray tracing:** a BLAS per submesh of each model's ray-traced LOD (one shape per model at every distance keeps the
-  TLAS fixed while the camera moves), a TLAS instance per placement and submesh, cached between edits - `DescribeRt`
-  runs every frame the car moves (its ~119 parts bump the geometry revision), so the placements must cost a copy, not
-  a search. The ray-traced LOD is `lods[rtLod]` whether it is drawn or ray-only; the cache's rebuild logs its BLAS
-  meshes and triangles ("scene: models ray traced - ...", what `instancing-41` checks).
-- **What the ray-only LOD moved** (version 2): `ModelDef::drawLods` counts the drawn LODs (all, or all but a ray-only
-  last). The distance pick and the crossfade's next LOD stop there, and so does a cell's `reach` (the last DRAWN
-  LOD's distance, which was `lods.back()`). Both were real bugs with the shell in place: its distance 0 made every
-  cell's reach 0 (nothing drawn at all), and the billboard's fade-out crossfaded INTO the shell. The loader also
-  checks now that the drawn LODs' distances increase (only `ngg_scene` did). Nothing else changed: the shadow cull
-  takes the camera's pick, `ModelDrawItems` draws what the batches name, and the editor table (`modelStats`)
-  counts drawn LODs and addresses none by index - so **the editor table is unchanged** (version 2) and Wallaby's
-  generated bindings stay as they are. The load log reads "N LODs (M ray tracing only)".
-- **The replaced plants' cards:** their triangles are made degenerate in the index buffer at load (the plant table
-  says which), so object ranges, plant parts and triangle numbers stay the file's; `BuildRtMesh` leaves them out, and
-  an object left with none is removed.
-- **The editor** (`renderer_edit.h` version 2): placements by handle, added, set and removed in batches, the cells
-  rebuilt once per batch; the last frame's statistics (`modelStats`).
-
-**Measured on stage 41** (the 780M, RBR's recorded run replayed in lock-step, `--step 0.0333`, 16,000 ticks, 3,300
-frames, TAA and vsync off, the GPU frame; alternating runs):
-
-| stage 41 | GPU frame | ray tracing | main pass |
-|---|---|---|---|
-| RBR's tree cards (the file as it was) | 26.9-28.8 ms | 8.8-9.1 ms | 4.5-5.6 ms |
-| placeholder trees, LOD1 ray traced (the default) | 31.5-32.9 ms | 12.6-12.7 ms | 4.9-5.1 ms |
-| placeholder trees, LOD0 ray traced | 36.3-37.9 ms | 15.4-16.3 ms | 5.1-5.6 ms |
-| LOD0 with the needles made OPAQUE (experiment) | 28.0-28.2 ms | 11.0 ms | 4.0-4.2 ms |
-
-- **No cost to a file without models:** HEAD's `WRenderer.dll` and this one, behind the same game, the original file:
-  28.8 / 28.8 ms and 28.8 / 28.8 ms, the same pass medians. (The main checkout's build read 19-22 ms: its
-  `W-Rally.ini` sets another time of day and car - compare builds beside the same settings file.)
-- **Drawing the trees is cheap:** in a typical view (the renderer's log) 341 placements in view, 18 at LOD0, 130 at
-  LOD1, 208 billboards, 30 crossfading: 20 instanced draws, ~8k triangles against the stage's 400k+. The main pass
-  moves by a few tenths of a ms. The cull: 0.03 ms of CPU for the camera, 0.34 ms with the four cascades (2,982
-  shadow-map instances).
-- **Ray tracing them is not**, and the experiment says why: the same 142-triangle trees cost +2.2 ms of ray tracing
-  with opaque needles and +7.2 ms alpha-tested. The 7,486 TLAS instances and their triangles are the small part; the
-  any-hit tests as shadow and AO rays pass needle tier after needle tier are the large one (RBR's tree is 2 crossed
-  cards; the placeholder's LOD0 7 overlapping tiers, LOD1 4). A dense forest is where the frame drops - what the user
-  saw. So the placeholder's ray-traced shape is LOD1, and the open question is below.
-- The TLAS is rebuilt every frame the car moves (8,408 instances on stage 41 instead of 924); that runs on the
-  build list before the frame and is outside these timings.
-
-**The proof file:** `ngg-check --trees track-41.ngg --out <file>` puts a placeholder conifer generated in code (no
-RBR data: a trunk and needle tiers, textures made there; LOD0 142 triangles to 50 m, LOD1 40 to 150 m, a billboard to
-900 m, at scale 1, crossfading over 6 m, LOD1 ray traced - `--rt-lod 0` for LOD0) in place of each of the 3,743 tree-card plants, at its base,
-height and footprint, turned and tinted by its index. The renderer drops their 25,558 card triangles.
-`--rt-lod ray` adds a fourth LOD, ray-tracing only, and traces it: the trunk (5 sides) and a closed hull round the
-needle tiers (a ring at each tier's rim, 12 sectors, an apex and a cap - 178 triangles with the trunk), its material
-alpha-tested and two-sided, not foliage, with blobby holes (about 60% covered), so a ray crosses 2 alpha surfaces of
-the crown instead of up to 7 tiers. CTests:
-- `instancing-41` (`--rt-lod ray`): the file round-trips, the renderer counts the model, 4 LODs (1 ray tracing only),
-  3,743 placements and plants replaced. Then against the same trees with LOD1 traced and no shell: frames from 14
-  distances to a tree of about the model's size, inside each LOD, in each crossfade band (LOD0-1, LOD1-billboard, the
-  billboard's fade-out) and past the end, ray tracing off so that the cascades draw - every editor statistic
-  (visible, per LOD, fading, shadow-map instances, draws) must be the same, and the shell (it would count as LOD2)
-  never drawn. Then a ray-traced frame: the BLAS must be the shell's 178 triangles (40, LOD1's, without it). And the
-  trees without the shell written as a version-1 NGGD must read the same and load. Checked that it bites: with the
-  crossfade not stopped at `drawLods` it fails at 25 m (a neighbour's billboard fading out into the shell), with the
-  old `reach` at 5 m.
-- `ngg-roundtrip`: the made-up scene's model has a ray-only LOD; then each rule broken in turn - not last, two, one
-  `rtLod` does not name, also a billboard, a distance, no drawn LOD before it, the flag in a version-1 chunk - must be
-  refused by `CheckModels`, by `Read` and by the renderer, which loads the scene with no models (the cards drawn).
-- `editor-api-41` (the placement calls, each seen in the next frame's counts: all removed draws none, fifty added draw,
-  moved away none, one moved back exactly one, a bad batch changes nothing; and the cascades draw instances), now on
-  the file with the shell.
-
-**The ray-only shell, measured** (2026-11-10, the same run: 780M, RBR's run replayed, `--step 0.0333`, 16,000 ticks,
-3,300 frames, TAA and vsync off, a worktree build without `W-Rally.ini`; three interleaved rounds). The machine read
-~40% slower than on 11-09 (the cards' ray tracing 12.3-13.5 ms against 8.8-9.1) and drifted slower within each round,
-so the numbers are read against the cards of the same round:
+| RBR's tree cards | 26.9-28.8 ms | 8.8-9.1 ms |
+| placeholder trees, LOD1 ray traced (default) | 31.5-32.9 ms | 12.6-12.7 ms |
+| placeholder trees, LOD0 ray traced | 36.3-37.9 ms | 15.4-16.3 ms |
+| LOD0, needles opaque (experiment) | 28.0-28.2 ms | 11.0 ms |
+
+**Drawing the trees is cheap, ray tracing them is not:** a typical view is ~20 instanced draws, ~8k triangles, CPU
+cull 0.03 ms (0.34 ms with four cascades). The cost is any-hit tests through overlapping alpha-tested needle tiers
+(+2.2 ms opaque vs +7.2 ms alpha-tested), hence `rtLod` 1. A file without models costs nothing (28.8 / 28.8 ms
+before and after). Tests: `instancing-41`, `editor-api-41` (placements through `renderer_edit.h` version 2).
+
+**The ray-only shell, measured** (2026-11-10; the same replay, three interleaved rounds; the machine read ~40% slower
+than on 11-09, so against the cards of the same round). `ngg-check --trees --rt-lod ray` adds the placeholder's shell:
+its trunk and a closed hull round the needle tiers, 178 triangles, alpha-tested with holes (~60% covered).
 
 | stage 41, ray tracing median | round 1 | round 2 | round 3 | over the cards |
 |---|---|---|---|---|
 | RBR's tree cards | 12.33 ms | 13.03 ms | 13.47 ms | - |
 | placeholder trees, LOD1 traced (4 tiers) | 16.11 | 17.31 | 18.32 | +3.8 / +4.3 / +4.9 |
-| placeholder trees, the ray-only shell (178 tris) | 16.14 | 16.95 | 17.28 | +3.8 / +3.9 / +3.8 |
+| placeholder trees, the ray-only shell | 16.14 | 16.95 | 17.28 | +3.8 / +3.9 / +3.8 |
 | placeholder trees, LOD0 traced (7 tiers) | 20.18 | 20.59 | - | +7.9 / +7.6 |
 | the shell made opaque (experiment) | - | - | 15.73 | +2.3 |
 | the shell without its trunk submesh (experiment) | - | - | 16.77 | +3.3 |
 
-The GPU frame moved with it (cards 38.8-41.6 ms, shell 43.3-46.1, LOD1 43.1-47.1, LOD0 48.4-49.0); the main pass
-stayed at 6.1-6.8 ms in every row - the shell is never drawn.
-- **Against LOD0 the shell saves 3.3-3.6 ms**, the alpha tests of 7 tiers against 2 surfaces. Against the
-  placeholder's LOD1 it saves 0-1.0 ms: LOD1 is already only 4 coarse tiers, so there were few tests left to save.
-  Workstream 4's real LOD0 has 18-24 layers per ray, so the shell's place is against that, not against this LOD1.
-- **What is left over the cards is not the shell's alpha alone:** opaque, the same shell costs +2.3 ms (11-09's
-  opaque LOD0 cost +2.2): the TLAS traversal of 7,486 instances in a dense forest. Its alpha tests are the other
-  ~1.5 ms. Its trunk as a second submesh costs ~0.5 ms (3,743 more TLAS instances): a producer that puts the trunk
-  into the shell's one submesh (one material, the trunk as opaque texels) saves that.
-- So the shell is one mitigation, not the whole answer; the rest is in "not done" below.
+Against LOD0 the shell saves 3.3-3.6 ms; against the placeholder's coarse LOD1, 0-1.0 ms. What is left over the cards
+is mostly the TLAS traversal of 7,486 instances (+2.3 ms opaque), the shell's alpha ~1.5 ms, and a trunk as a second
+submesh ~0.5 ms (so a producer puts the trunk into the shell's one submesh). Tests: `instancing-41` runs on the shell
+(frames through every LOD band draw exactly what the trees without it draw, the BLAS is the shell's, a version-1 NGGD
+of the same trees loads); `ngg-roundtrip` breaks each rule in turn and both readers refuse it.
 
-**Not done:**
-- **The ray-traced foliage's cost** (above). Done: the ray-only LOD, so a coarse proxy can be traced (workstream 4's
-  `<id>_RT`, written by workstream 3's converter). Still open: opaque leaves for the AO rays only (AO needs no
-  leaf-sharp occlusion); placements beyond some distance as opaque or out of the TLAS; one submesh per shell; the
-  real models' run (their LOD0 against the shell) is the number that decides how far the shell alone goes.
-- GPU culling (`ExecuteIndirect`): the CPU cull costs 0.03 ms (camera) / 0.34 ms (with the cascades), not worth the
-  machinery yet; with 25k placements (bushes too) it is the first thing to measure again.
-- Models in the lamps' shadow maps and in the car's reflection probe; a model's own `kMaterialBlend` (drawn opaque).
-- Per-LOD BLASes (the ray tracer has the one LOD), a billboard's normal map, and wind.
-- Bushes and grass, the real models (workstream 4) and the converter's placements (workstream 3).
+### 2.7 Load-time fallbacks
 
-### 5.1 Renderer implications
+**Every repair the renderer does at load follows one pattern: measure first, act only where the data is
+unambiguous, log it, and stand down by itself once the producer does the job.** They exist for the legacy import
+and for older or community files.
 
-A track at night wants hundreds of small emitters (street lamps, windows, marshal posts, spectator torches, car
-headlights) plus a handful of shadow-casting ones. That means **clustered light culling** running per view (mirror
-and both eyes included), and — on the DX12 Ultimate baseline — **ray-traced shadows for the important lights**
-instead of a priority-allocated shadow atlas. Many-light sampling (ReSTIR-style reservoir resampling) is the
-natural fit and is what makes "hundreds of emitters" affordable rather than aspirational.
+| fallback | where | rule |
+|---|---|---|
+| per-object AABB | `Scene::Load`, one pass over the indices | always; there is no bounds chunk, so culling never depends on a converter version |
+| single-stage | `Scene::MeasureSingleStage` | an object whose uv1 is unusable (\|uv1\| > 1e6) on **every** vertex draws single-stage; per object, not per material (track-42's material 81 is 23 % garbage, 77 % fine); mixed objects counted, not touched. track-42: 323 flagged, 126 mixed; track-108: none |
+| solids among the cards | `Scene::MeasureSolidCards` | an alpha-tested object that samples only opaque texels (15 barycentric points per triangle, 2x2 min, x vertex alpha, vs the cutoff) is drawn as a solid, not foliage; `NGG_NO_SOLIDS` turns it off. The legacy importer does the same test itself (`Builder::Solid`) |
+| normal weld | `Scene::WeldNormals` | exact-position weld with hard edges kept; detects an already-welded file and does nothing (re-welding would undo the converter's forced splits). On by default |
+| foliage volume normals | `Scene::SphericalFoliageNormals` | a plant's cards shaded as one volume; defers to the file |
+| plants | `Scene::FindPlants` | only for a file with no plant table **and** not a legacy import (RBR's vegetation block also holds people, cars, houses, fences) |
+| mip chains | `GenerateDdsMips` (`core/mipgen.*`) | below |
 
-The VR tier (§1.8.4) can't afford that, so it falls back to a small shadow atlas for the few nearest lights plus
-unshadowed contribution beyond — same light data, same materials, different sampling budget.
+**Mip chains for textures that shipped without one:** track-108 ships 76 of 88 textures single-level. A DDS with mips
+is left as it is. Mip 0's blocks are copied verbatim; each level is built from the previous one in linear light;
+alpha-tested base colours keep mip 0's coverage at their material's `alphaCutoff` (Castano 2010, alpha rescaled by
+bisection, colour alpha-weighted); levels 1+ are re-encoded in the source format (DXT1/3/5 only). Up to 8 threads.
+Measured on track-108: 76 textures in 203 ms, memory 21.2 -> 28.3 MB (+33 %, against 113 MB uncompressed), re-encode
+error 3.55/255; horizon-band shimmer at rest with TAA on 0.79 -> 0.47, aliasing energy with TAA off 27.1 -> 15.6. A box
+filter errs either way on coverage (`FIELD01_FENCE` level 4: 36.5 % -> 26.6 %; `FENCE_WOOD03` 73.4 % -> 81.2 %);
+preservation holds it within the alpha resolution. The mode (`Scene::SetMipFallback`: 0 off, 1 box, 2 coverage) is
+2 and nothing sets it now.
 
-This is the strongest technical argument for D3D12 over D3D9 anywhere in this document, and it's the reason not to
-write a D3D9 backend at all.
+**The vertex shader's `isfinite(uv1)` guard never fires** (RBR's bad uv1 is finite garbage up to ~3.1e36); the
+magnitude test in `MeasureSingleStage` is what actually protects. Past ~1e6 the sampler collapses to the top mip, so
+stage 1 only blends in the atlas average.
 
-### 5.2 Car lights
+### 2.8 RBR asset rules the importer and the fallbacks rely on
 
-Headlights as shadow-casting spotlights with a real IES-ish profile, tail/brake lights as emissive + small point
-lights, driven from `CarObj` state. Headlights lighting our world correctly is likely the single most striking
-visual difference from vanilla, so it should land in the same phase as night, not later.
+- **Vertex colour is two quantities:** RGB = baked light at the editor's scale (§2.2 `bakedScale`), A = the ground's
+  blend weight, or coverage on objects. RBR's actual blend weight is `tex1.a * vertexAlpha`.
+- **Baked lighting is discarded for light**, together with RBR's baked shadow and specular maps, fog and in-scatter:
+  the sun, the sky, RT shadows and AO replace them. What is owed to the original is geometry, UVs, texture assignment
+  and the blend weight. A difference from vanilla that traces to a missing bake is out of scope; one that traces to
+  our pipeline is a bug.
+- **Object meshes are single-texture** (RBR's `RLSingleTexture`): their uv1 was never read by RBR and is
+  unvalidated. The importer gives alpha-tested materials no detail layer.
+- **Ground textures named `...Plate...` are atlases** (Joux Verte: 2048^2, 18 cells of 256^2, a 2.25-texel gutter
+  sized for mip 0). Anisotropic taps cross the cell edge (dominant), bilinear taps at high mips cross the sub-texel
+  gutter (residual): road seams. **The fix is de-atlasing in the converter** - per texture, not globally (some ground
+  textures genuinely tile), wrap/clamp per cell decided from its UV range. Wallaby does it; the legacy importer does
+  not, so imported stages keep the seams.
+- **Hidden ground chunks:** RBR draws ground chunks of visibility 1 and 2 only; the importer drops the rest (darker
+  patches over the road if drawn).
+- **Vegetation block (1,1) is not only plants:** walls, rocks, houses, people and cars sit there under the same
+  flags; only the texture's alpha tells a solid from a card (§2.7).
+- **RBR's own visibility data is not used:** block (2,10)'s ground boxes are `(origin, size)`, one per ground region
+  (158 on Joux Verte), ~10x coarser than our objects; block (1,4), named "clipping planes" in Wallaby, is not planes.
+  Per-object bounds are computed at load instead.
+- **Normals in RBR files were never used for shading** (no `dcl_normal` in its shaders) and are split per face; the
+  importer takes them as they are (face normals where the layout has none) and the renderer welds.
+- **Protected stages** (geometry block version 88/89, ciphertext) are never imported, not even in part
+  (`formats::LbsEncryptedVersion`; the catalog leaves them out): decrypting is a licensed install's job, and a plain
+  `.ngg` of one would leak it. Stock RBR: 31 files (maps 10 overcast, 95, 96, 105, 488-499).
+- **Textures by surface:** the importer takes `<stage>_textures.rbz`'s dry/damp/wet folder matching the physics'
+  wetness first, then the others.
 
-### 5.3 Where do the lights come from?
+### 2.9 Fairness and encryption
 
-Tracks have no authored light sources, so we derive candidates and let a human confirm:
+**Rendering is competitive:** view distance, fog, foliage density, night brightness are information. So everything
+that changes what a player sees is inside the one `.ngg` (embedded textures, weather records, models) and covered by
+the stage hash the game reports ([design.md §7](design.md)); a sanctioned render profile locked per event is not built.
+**Encryption is deferred:** the format has no envelope field today; chunk framing keeps payloads independently
+encryptable, and protected sources are refused rather than converted.
 
-1. **Emissive texture detection** — textures whose name or content reads as lamp/window/sign become emissive
-   materials automatically.
-2. ~~**The `_N` baked variant as a light map.**~~ **WITHDRAWN 2026-10-30: there is no night variant.** RBR's `N`
-   is NOON (its suns stand ~50 degrees up; RBR has no night stages at all), so `_N` holds no painted light pools.
-   Stage lights come from (1) and (3) only; see 5.4.
-3. **Manual placement in Wallaby** — a light-placement mode with live preview through `ngg-host`, producing
-   `provenance=authored` entries that survive reconversion.
 
-That ordering matters: (1) and (2) mean a track converts to *something plausible* at night with zero artist time,
-and (3) upgrades the tracks people care about most. Across ~100 tracks, that difference is the difference between
-shipping and not.
 
-**Confirmed scope (rev 3): all three.** Auto-derivation runs on every track; the Wallaby editor exists for
-hand-polishing the tracks people actually race. So P3 owes a real editing mode — light gizmos, live preview
-through `ngg-host`, and a reconversion path that never clobbers `provenance=authored` entries. That last property
-is a format and tooling requirement, not a UI nicety: if reconverting a track silently destroys a night an artist
-spent a day on, nobody will use the editor twice.
+## 3. Sky, atmosphere, exposure and post
 
-### 5.4 Night in W-Rally - decided 2026-10-30
+The sky is evaluated, not painted, and **one atmosphere model feeds everything that needs light from the sky**: the sky
+pass, the environment and irradiance maps, the aerial-perspective table and the multiple-scattering table. Everything
+writes linear HDR radiance into one RGBA16F target. Exposure, the tonemap and the sRGB encode happen once, at the end.
 
-RBR has no night stages, so night is W-Rally's own, and with dynamic lighting **any stage can be driven at any hour**.
-Four decisions, the user's:
+Frame order (`Renderer::RecordFrame` in `modules/renderer/src/core/renderer.cpp`):
 
-1. **Scope: car lights, the night sky, and stage lights** in the first version, not car lights alone.
-2. **Time of day = date + time + place.** A preset (or the menu, or an event) gives a date, a local time and the
-   stage's latitude/longitude. The sun's and the moon's positions, the moon's phase and the stars follow
-   astronomically, so dusk, night and dawn come out right on every stage. RBR's stages carry no location: a
-   default latitude stands in until a stage's own metadata (stage.yaml, design.md 7) says where it is.
-3. **Every light is ray traced:** shadows for all of them, made affordable by many-light sampling (ReSTIR-style
-   reservoir resampling, 5.1), not a shadow map or a "few shadowed, the rest fill" split. The VR tier (P4) and
-   min-spec are the risk, measured, not designed around.
-4. **Car lights are the CAR's,** in this order:
-   1. the car's own W-Rally light specification (`car.yaml`, design.md decision 9: YAML with a schema). Per
-      lamp: role, position and aim on the car, beam shape (an IES-like profile), colour and intensity, and the mesh
-      that glows when it is lit;
-   2. else **derived from RBR's car `.ini`**, which already names the lamps: `Point_light_lf/rf` headlights,
-      `_bon1..6` the bonnet pod, `_lb/rb` tail, `_brake_lb/rb` brake, `_reverse_lb/rb` reverse, `_lit_c` a centre
-      lamp, each with a position and a direction. The `.sgc` has a lit and an unlit mesh per lamp
-      (`e_light_lf` / `e_light_lf_lit`, switched by the `.ini`'s `SwitchBox = light`). 80 car `.ini`s in 44 car
-      folders of the stock install have them. Per-role defaults fill what the `.ini` lacks: photometry, and the
-      **indicators**, which no RBR car has, placed at the corners beside the head and tail lamps;
-   3. else a generic default, placed from the model's size.
+| step | where | |
+|---|---|---|
+| atmosphere for the frame | `Scene::SetAtmosphere(sky)`, `Sky::SetMultipleScattering` mirrored from the Scene | one `SkyParams` for every consumer |
+| TAA jitter | `PostFx::Jitter` → `Scene::SetJitter`, `Sky::SetJitter` | set **before** the prepass (see 3.7) |
+| prepass, visibility | `Scene::RecordPrepass`, RT or cascades | depth, normals, motion |
+| sky | `PostFx::Begin`, `Sky::Record` (or a clear to `PostFx::kHdrClear` with the sky off) | covers every pixel, no depth |
+| scene main pass | `Scene::Record`: `AtmosphereMs::Update` (only when dirty), `Environment::Record`, reflection probe resolve, `AerialLut::Record`, draws | |
+| post | `PostFx::Resolve`: TAA or upscaler, meter, tonemap + sharpen + encode | into the client's target |
 
-   The roles: low beam, high beam, pod, tail, **brake, reverse, left and right indicator, hazard**. The game
-   switches them from the car's state: the brake pedal, reverse gear, the indicator and hazard keys, high beam,
-   the pod. Damage (a broken lamp goes dark) comes with body damage (design.md phase 6).
+In W-Rally the module (`modules/renderer/src/module/module.cpp`) builds the frame's `SkyParams` from the weather
+(`weather.h`, preset or `WeatherDesc`) and, when `FrameDesc::skyTime` is set, puts the sun and moon there from the
+date, time and place (`ApplySkyTime`, `astronomy.h`, Meeus). It always draws with the sky on, ACES, and TAA from
+`RenderSettings::taa`. Weather and night are their own sections; here they only appear as inputs to the model.
 
-   **Every car's lights are different, and every LAMP has a character** (the user, 2026-10-30). A rally car carries
-   up to **8** auxiliary lamps (the bonnet pod plus roof or bumper lamps), and they are not copies of one another:
-   pencil/spot beams for reach down the road, driving beams, wide floods, cornering ("ditch") lamps aimed off to
-   the side, each with its own colour temperature (halogen warm, HID, LED cold) and intensity. So the spec is per
-   LAMP, never per car: position, aim, a beam profile (an IES-like intensity table, or a named preset: `pencil`,
-   `driving`, `flood`, `ditch`, `low`, `high`), colour temperature, intensity, which switch it is on (high beam,
-   pod, separately switched lamps) and its glowing mesh. RBR's `.ini` gives the positions and aims and nothing of
-   the character: the i20's six pod lamps (`_bon1..6`) aim 20 degrees out to each side in two groups of three (normal
-   x = ±0.342), and the derived default must give them a sensible mix of profiles (the outer ones flood or ditch,
-   the inner ones driving or pencil), not six identical beams. The look of real rally lamps at night is the
-   reference: the user collects screenshots, and the profiles are tuned against them.
+### 3.1 Atmosphere and sky
 
-**Phases, each ending in something to look at:**
-- **N1a - DONE 2026-10-30: the sun from the time and place.** `core/astronomy.*` (Meeus: the sun's low-accuracy
-  method, the moon's main terms, its lit fraction, sidereal time; x east, y up, z north turned by `northDeg`),
-  checked by CTest `astronomy-check` against Meeus's worked examples (the sun to 0.00001 degrees, the moon's
-  longitude to 0.0007, its distance to 29 km, its lit fraction to 0.002) and the solstice's noon sun at 50 N
-  (63.44 degrees, due south, 13:04 CEST). The weather record grows by appending (124 -> 160 bytes:
-  `timeFlags`, date, local hour, UTC offset, latitude, longitude, north); readers take min(recordSize, sizeof)
-  over the defaults, so a 124-byte record reads as no time set (checked on track-108's). The JSON gains
-  `"time": {"date", "local", "utcOffset"}` and `"place": {"latitude", "longitude", "north"}`. Renderer interface
-  **5**: `FrameDesc::skyTime` puts the sun there over any weather; the game's `--time HH:MM [--date]
-  [--utc-offset] [--latitude] [--longitude] [--north]`. Stage 41 on 21 June at 50 N: noon, a low evening sun at
-  20:30, civil dusk at 21:30 lit by the sky alone, and black at 22:30 - what the moon and the night exposure
-  (N1b, N1c) are for.
-- **N1b/N1c - DONE 2026-10-30: the moon, the stars, the night's exposure and colour.**
-  - **The light passes to the moon** at the end of civil twilight (the sun 6 degrees down, its direct light long
-    gone): the renderer's one directional light - the direct light, its ray-traced shadows (moon shadows), the
-    aerial table - becomes the moon's, at the full moon's 2.3e-6 of the sun's illuminance times its phase's
-    brightness (Krisciunas-Schaefer: 0.026 a + 4e-9 a^4 magnitudes over the phase angle a).
-  - **The sky is both bodies':** `SkyParams::light2` adds the other one's sky in `AtmSkyRadiance` (sky pass and
-    environment): the moon's through the dusk, the sun's twilight into the night, only while it shows (not the
-    moon's by day, not the sun's 20 degrees down). The first version handed the sky over at -11 degrees and it
-    jumped (a full moon's sky is brighter than the twilight there); either side of -6 degrees it is now the same
-    picture.
-  - **The moon's disc** (0.52 degrees), by day too: a sphere lit by the real sun, so the phase draws itself, its
-    radiance albedo 0.12 x the sun's irradiance / pi, with earthshine and the atmosphere's extinction.
-  - **The stars:** procedural on the celestial sphere (cube-face cells, ~9,000 to magnitude 6, brighter ones
-    rarer as N(<m) ~ 10^(0.5 m)), turned by the sidereal time about the pole, each a pixel-wide gaussian holding
-    its flux (as bright at any resolution), magnitude 0 = 2.3e-11 of the sun's irradiance. The moon outshines the
-    faint ones by itself.
-  - **The glow** (airglow + starlight, ~0.001 lux) in `AtmSkyRadiance`, brighter towards the horizon, dimmed by
-    cloud: what lights a moonless night.
-  - **Night exposure:** the meter reaches 2^-32 (the day's floor was 2^-12, where a night counted as black and the
-    meter froze); beyond 3 EV under the day's grey only 0.75 of the rest is made up, so a full moon sits ~4 EV and
-    a moonless night ~6 EV under the day: dark, readable.
-  - **Night vision** in the tonemap: per pixel, on the scene's own luminance before exposure, full colour down to
-    8 EV under the day's grey, the rods alone (desaturated, blue-shifted: the Purkinje shift) from 17 EV. A surface
-    in a beam keeps its colour beside a moonlit verge that has none.
-  - Checked on stage 41: dusk, a full moon (hard moon shadows, a grey-blue moonlit stage), a moonless night (the
-    stars, the glow), the handover either side of -6 degrees (the same picture), and the day unchanged (mean
-    difference 0.03/255 against the frame before N1). `PHYS_DRIVE_LOOK_UP=<deg>` tilts the view to the sky.
-  - Not done: the moon's phase is too small to see at its true size (as to the eye); twinkling; the Milky Way; a
-    stage's real latitude and north (stage metadata).
-- **N2 - DONE 2026-10-30: the light system.**
-  - **The interface (renderer 6):** `FrameDesc::lights` / `lightCount`, a list per frame of `iface::LightDesc`
-    (128 bytes): point or spot, position and axis, a linear tint and an intensity in **candela**, a range (0: from
-    the intensity, to where it gives 0.1 lux, at most 300 m), the emitter's radius (how soft its shadows and its
-    highlight are), a spot's inner and outer half-angles, and an optional 16-entry beam profile over the cone
-    (`kLightProfile`; what N3's lamp characters fill). `kLightNoShadows` for a lamp nothing should shadow.
-    `RenderStats` gains `lightsMs` and `lightCount`. A candela at a metre is a lux, 2e-4 of the sun's irradiance
-    unit (22 = a clear day's ~110,000 lux).
-  - **Clusters** (`core/lights.*`): the view cut into 16 x 9 tiles x 24 depth slices (exponential, 0.25-1000 m),
-    each with the list of lights whose range touches it, built on the CPU per frame (a conservative screen box
-    and slice span per light), uploaded and copied to GPU-local buffers that the scene pass and the ray tracer
-    both read - so both see exactly the same lights. Up to 512 lights and 65,536 list entries.
-  - **Every light ray traced, at one ray per pixel however many there are** - the ratio estimator (Heitz, Hill
-    and McGuire 2018). The scene pass sums every light's UNSHADOWED light exactly (Lambert, and GGX for the
-    highlight); the ray tracer picks one light per pixel in proportion to what it gives there (a one-pass
-    weighted reservoir) and traces one ray to a random point on its emitter's disc; that 0/1 is an unbiased
-    estimate of the shadowed fraction of the sum - smooth, like the sun's visibility - so it goes through the
-    same denoiser, and the light is the sum times it. Foliage cards take the wrapped cosine and no highlight, as
-    for the sun; glass takes the fraction as 1.
-  - **The highlight is the emitter's**, its lobe widened by the disc's angular size (Karis 2013's widened
-    roughness, the lobe blurred and its energy kept): a point's highlight on a wet road (roughness at its 0.002
-    floor) would peak near 1e5 x the irradiance.
-  - Checked on stage 41 at 23:30 with `PHYS_DRIVE_TEST_LIGHTS` (two 40,000 cd headlight spots and a 2,000 cd lamp
-    above and behind the car; `=lamp` the lamp alone, `=noshadow` none occluded): the beams on the road, and the
-    lamp's light with the car's own shadow on the road ahead (a wedge the roof casts; without the rays the road
-    there was evenly lit). Fast tests pass. Without lights a frame is bit-identical to the one before N2 (noon and
-    23:30, lockstep, TAA off in both: a fresh build's settings had it on, which looked like a difference).
-  - **What it costs** (1080p, the development GPU, a Radeon 780M; three lights covering the whole screen): the
-    light rays 3.2 ms (0.4 with none occluded), their denoising +0.8 ms, and **the scene pass about +4 ms** (7.0-7.4
-    -> 10.7-11.9). Measured apart (N2b, below), it is the lights' arithmetic per FRAGMENT.
-  - **N2b - DONE 2026-10-30: the scene's shaders on DXC, and what the lights' cost is.**
-    - **DXC (shader model 6.0)** compiles the scene's whole set (VS, the three PS variants, prepass, shadow - a
-      pipeline cannot mix DXIL and DXBC), `-HV 2018` for FXC's language; FXC (5.1) is the fallback when
-      dxcompiler.dll is missing or DXC refuses the source, which compiles under both (the wave path behind
-      `__SHADER_TARGET_MAJOR`). The picture is the same: without lights night is identical, noon differs by 1/255
-      on 0.1% of the pixels (rounding).
-    - **A wave-uniform light loop:** the wave takes its clusters in turn (`WaveReadLaneFirst`, at most 4, the rest
-      and helper lanes per pixel) and reads the cluster, the indices and the records with scalar loads (RGA: all
-      scalar, 117 VGPRs from 122).
-    - **Clusters cull a spot by its CONE** (each cluster's bounding sphere against the cone, a point light's sphere
-      against the cluster's): half the list entries in the test view (8784 -> 4734), the picture the same (1/255 on
-      0.1%, the ray tracer's light pick). The shader skips a light that gives nothing (outside its cone or range,
-      facing away), and the divisions a light alone decides are made on the CPU (`invRange2`, `spotScale`,
-      `invOuterRad`; one rsqrt for distance and direction): 140 -> 130 instructions, 10 -> 6 transcendental.
-    - **What the cost IS** - PIX per-draw timings (`NGG_PIX=<frame>` captures that frame; `pixtool open-capture
-      <file> --disable-gpu-plugins save-event-list <csv> --counters=EOP*to*EOP* --counters=PS*Invocations`): the
-      lights' time is in the main pass's draws, in proportion to each draw's pixel shader invocations - foliage's
-      overdraw included (without a prepass, 12.3 M invocations for 2 M pixels). Per light per fragment ~130 vector
-      instructions in one dependent chain, at 4 waves per SIMD stalled more than computing (RGA: 52 `s_delay_alu`
-      in the loop). Not memory: scalar loads changed nothing measurable, nor did the cone culling (in the test view
-      the three lights do reach most of the screen) or the cheaper arithmetic: three lights still add ~3 ms to the
-      main pass at 1080p on the 780M (7.3 -> 10.1-10.6 ms).
-    - The remedy is fewer fragments per light, not cheaper loads: N2c.
-    - PIX: per-draw timings work only with GPU plugins disabled - with AMD's counter plugin the replay hung the GPU
-      (TDR, three times).
-  - **N2c - DONE 2026-10-31: the deferred local lights.** The opaque world's lights are shaded after it, once per
-    PIXEL, by one full-screen pass (`PSDeferredLights`) - in the main pass they were shaded per FRAGMENT, foliage's
-    overdraw and every 2x2 quad's helper lanes included.
-    - While there are local lights the opaque and alpha-tested draws use GBUF variants of their pipelines, which
-      leave the surface in two 32-bit targets: R10G10B10A2 (the shading normal octahedral, roughness, the kind:
-      opaque, or a foliage card - wrapped cosine, no highlight) and R8G8B8A8 sRGB (albedo, metallic). A first
-      version with a third target (the aerial transmittance) and the normal in half floats cost the opaque world
-      +3.8 ms in PIX's replay; packed, +0.3. The transmittance is computed again in the pass (`AerialAt`, the
-      scene pass's own, now one function).
-    - The pass runs under the scene's root signature (its light table grows by the two targets and the depth),
-      reads the depth through a READ-ONLY depth view, rebuilds the position with the jittered view-projection's
-      inverse and calls the same `LocalLights`; added (ONE, ONE) times the transmittance. Glass stays forward,
-      drawn after the pass, over the lit world. Day (no local lights): the old pipelines, nothing written or run.
-    - The picture: against the forward lights at most 4/255 (the 10-bit normal), mean 0.12/255; without lights
-      night identical, noon 1/255 on 0.1% of the pixels (rounding). `NGG_FORWARD_LIGHTS` shades them in the main
-      pass instead - the A/B.
-    - **The cost, by the whole frame's GPU time** (`RenderStats::frameMs`, renderer interface 7, in the readout as
-      "gpu frame"; 1080p, the 780M, the three test lights over the whole screen): no lights 21.8-22.7 ms, forward
-      29.3-33.1, deferred 27.2-27.9 - the lights' shading now ~1.2 ms of the +5.3, the rest their rays (3.1) and
-      denoising (0.8). PIX's replay: the opaque world 19.44 ms without lights, 25.88 forward, 19.71 deferred, the
-      pass 0.89.
-    - **Measuring, learned the hard way:** a pass's own timestamps do not isolate it on this GPU - "gpu main" kept
-      reading +3.7 ms with the lights shaded forward or deferred alike, and a timestamp pair round the deferred
-      draw read 0.00 ms. The frame's first-to-last time is the measure; PIX's per-draw replay (`NGG_PIX`) the
-      breakdown. The vsync quantises fps (30 or 20), so fps says nothing either.
-  - **N2d - DONE 2026-10-31: the depth test before the shader, and the draw order.** Every pass's cost before it.
-    - **The scene shader was depth-tested AFTER it ran.** Its debug probe writes a UAV (`gProbe`), and a pixel
-      shader with UAV writes is tested late unless it says otherwise - so every fragment the rasteriser made ran the
-      whole shader and only then failed the test: 6.4 per pixel on stage 41 at 1080p, the prepass's final depth
-      notwithstanding (PIX's PS invocations: 13.3 M in the main pass for 2.07 M pixels, with a prepass or without).
-      The opaque, glass and deferred variants are `[earlydepthstencil]` now (exact: no clip, no SV_Depth); the
-      alpha-tested one clips, so it leaves the probe out, and after a prepass draws over the prepass's depth without
-      writing it (`m_psoAlphaKept`), which lets the driver test it before the shader too. Main pass: 13.3 M ->
-      2.88 M invocations (1.39 per pixel), PIX's replay 16.2 -> 4.0 ms; real time 7.3 -> 2.2-2.4 ms.
-    - **Front to back**: the opaque draws sorted, the solid before the alpha-tested, each by the distance to the
-      nearest point of its box (they were in the stage file's order). The main pass does not care (the prepass's
-      depth is final); the prepass: 8.1 -> 7.4 M invocations. Ray tracing "off" still runs the prepass (it is there
-      whenever there is a BVH).
-    - Culling: per object, its box against the frustum (behind the camera and beside it) in every pass - but the
-      stage's objects are large, so on stage 41 only 299 of 2987 are culled. Finer objects, distance and occlusion
-      culling are open.
-    - The picture: identical (noon with and without ray tracing, the lit night; within the ray tracer's +-1).
-    - The GPU frame at full clock (`PHYS_DRIVE_OFF=vsync`: capped by the display, the integrated GPU clocks down
-      into the slack and every pass reads slower): 15.2-16.8 ms without local lights, 19.2-20.7 with the three test
-      lights (their rays 3.0, denoising +0.7, shading ~0.5). With the overdraw gone the forward lights cost about
-      what the deferred ones do (19.5-21.0); deferred stays - its cost does not grow with the overdraw that is left
-      and it runs in a small shader, which counts once N3 brings a dozen lamps.
-  - **Lessons.** A buffer the shaders read from the UPLOAD heap is CPU-visible memory the GPU barely caches -
-    copy to a default-heap buffer (no gain measured here, but it is the rule). A struct copied from a buffer and
-    indexed by a variable (the profile) is an indexable temporary, i.e. scratch memory (~1.5 ms per light): read
-    fields from the buffer by index. Under PowerShell 7.6, `$env:X = ''` can leave X defined but empty, so the
-    game reads an empty value as unset. Probing a shader's cost with a runtime switch measures what the
-    COMPILER made of the switch: zeroing a result after computing it removes nothing, and a select by a constant
-    may become a branch that skips the work - check the ISA (`NGG_DUMP_PS` writes what Radeon GPU Analyzer needs:
-    the blobs, the root signature, the source).
-- **N2d - DONE 2026-11-05: the local lights' shadows without the ray tracer** (the cascades + XeGTAO path). Without
-  RT the local lights were unshadowed (`ClearRtLights`) and XeGTAO scales only the ambient, which at night is next to
-  nothing: the Garage's car floated on the turntable (XeGTAO on vs off changed 0.4% of the pixels; RT on vs off 30%).
-  - **Shadow maps for a few lamps** (`Lights::Build`, `Scene::RenderLocalShadows`): out of the same list the ray
-    tracer shadows, the shadowed spots and beams by peak / distance from the camera squared; lights of one MOUNTING
-    share a map (within 0.8 m, 0.12 m of height, axes within ~45 degrees: a ramp's pods, a headlamp's beams), seen
-    from the best one's position, its frustum widened to the others'. At most 4 maps, 1024^2 D32 (a second
-    `ShadowMaps`, its four slices), perspective along the lamp's axis (a beam's up; half-angles from its lobes,
-    at most 70 degrees), near 5 cm, far its range up to 150 m. Point lights: none (unshadowed, as before). The slot
-    goes in the light record's flags (bits 8-11); t21 is a second range in the lights' descriptor table (the root
-    signature has no DWORD left).
-  - **Sampling** (`LocalShadow`, in `ShadeLocalLight`, so forward and deferred alike): PCSS - 4 gathers for blockers,
-    the penumbra from the emitter's radius (the Garage's spots are 0.6 m discs), 12 comparison taps turned per pixel
-    by interleaved gradient noise (8 were grainy with TAA off, 16 no better); a texel and a half of normal offset.
-    The lamps of one mounting read their map once per pixel (the last slot cached).
-  - **The AO's share of the local diffuse:** 0.5 at night (faded in as the sun sets below 0 to -6 degrees; 0 while
-    it is up, so the day is unchanged), `NGG_LOCAL_AO=<share>`; `NGG_LOCAL_SHADOWS=0` turns the maps off.
-  - **TAA: the moved shadow** (the user, 2026-11-05: trails of the car's shadow on the turntable at every drag speed,
-    RT off only). The turntable's floor is still world, so TAA kept its history at 0.97 unclipped - the shadow the
-    turning car had just left. The ray tracer's lights' denoise tells TAA where a moved object shadows (z, its
-    distrust); now the maps do too: beside each map the casters' kind (R8, `PSShadowFlag`: 1 a `DrawItem::dynamic`
-    object's), read round the pixel's spot where it is blocked; `PSDeferredLights` writes a MOVED-SHADOW MASK as a
-    second target (RGBA16F, z: 1 now, then last frame's at the reprojected pixel less 1/8 - four frames), and TAA
-    takes it in the RT lights' slot (`Scene::LocalShadowMask`): relit, not kept. Fast, bursty, slow drags, the
-    Garage's own turning and the stop: no copies. The mask costs ~0.1 ms. `NGG_LOCAL_SHADOW_TURN=0`: the taps
-    unturned (A/B).
-  - **Numbers** (iGPU, gpu frame medians; the longer runs, 60 frames x 3, TAA on): Garage RT off 12.4-13.0 ->
-    15.5-16.1 ms (maps off 12.8-12.9; RT on ~22.5), maps 0.4 ms (an earlier single 20-frame run said +1.7); night stage
-    (user-4.phr, chase, 6 lamps: a 4-pod ramp + 2 headlamps -> 3 maps, ~0.9 ms) 18.2/18.1 -> 21.2/20.0 ms (RT on
-    ~27.5). The RT path is pixel-identical (max 1/255, as run to run), and the day has no lights to change.
-- **N3 - car lights.** The spec and its fallbacks (above), lit meshes as emissive, the game's switching (brake,
-  reverse, indicators, hazard, beams, pod). Analysed 2026-10-31 against the user's reference shots (onboard night
-  stages: a 4-pod bonnet ramp; two LED bars):
-  - **What the look is made of.** The BEAM SHAPE first: a pod throws an intense, fairly narrow hot spot down the
-    road, an LED bar a wide, flat flood that lights both verges and the trees beside them - wide horizontally,
-    narrow vertically, a sharpish upper edge. N2's round cone cannot make a flat flood. Then the REACH (halogen
-    headlamps ~15-60 k cd; rally LED pods rated ~1 lux at several hundred metres, i.e. a few hundred k cd - to be
-    calibrated on the references), the AIM (lamps 0.6-1 m up, ~0.5-1.5 degrees down: the hot spot lands 50-150 m
-    ahead), the COLOUR (LED ~5700-6500 K, the references' blue-white; HID ~4300 K; halogen ~3200 K). Around the beam:
-    the lamps' own glowing lenses and LED strips, the dark pod housings in the onboard view, retroreflectors (marker
-    poles, signs, vests) flashing back because the lamp sits almost at the eye, haze in dust and rain, glare, and an
-    exposure that keeps the blown-out near verges and the dark distance both readable.
-  - **The lamp model:** a beam is a sum of a few LOBES, each with its own horizontal and vertical spread (a pod:
-    pencil + driving; a bar: one very wide lobe), in the lamp's own frame (an axis AND an up vector); a colour
-    temperature; candela. Real IES/LDT photometry can come later as one more kind of lobe. The 300 m range cap goes
-    to ~1 km (a pencil beam's reach).
-  - **What RBR gives** (`<RBR>\Cars`, 41 car .inis with lamps): the headlamps' positions with usable forward
-    normals (`Point_light_lf/rf`), the tail, brake and reverse positions. Bonnet lamps in 5 of them only
-    (`Point_light_bon1-4`), their normals mostly sideways - positions, no aim; a ramp mesh (`e_ramp`,
-    `e_ramp_light_lit`) in 4, switched off (`Predicate=NotUsed`): RBR modelled ramps and never used them. So the
-    beams' character, the layouts and most ramps are W-Rally's (car.yaml presets), RBR's positions where they exist.
-  - **Decided (the user, 2026-10-31):**
-    1. **Layouts per car, chosen in the setup:** car.yaml lists the configurations a car can run (e.g. 2 headlamps +
-       a 2-lamp ramp, a 4-pod ramp, 2 LED bars, no ramp); the driver picks one; a car without its own spec gets a
-       sensible default ramp.
-    2. **The aim is set in the setup**, per ramp, yaw and pitch a few degrees (as crews do at service); while
-       driving only the switches: low/high beam, the ramp on/off; brake, reverse and the indicators by the car's
-       state and keys.
-    3. **Beams visible in dust, mist and rain: a later phase**, with the weather and dust work they depend on.
-  - **Phases:** N3a the lamp model (lobes, orientation, colour temperature, reach; the renderer interface; the
-    car.yaml lamp schema; presets: halogen low/high, LED pod pencil/driving, LED bar flood, ditch lamp). N3b the
-    car's layouts and controls (derived from RBR where it has data, the setup's choices, the switches, the glowing
-    lenses). N3c tuning on the references (intensities, spreads, aim, exposure). Later: haze, retroreflective
-    materials, glare. Cost: shadows stay one ray per pixel however many lamps; shading ~0.15 ms per lamp over the
-    whole screen on the 780M.
-  - **N3a - DONE 2026-10-31: the lamp model.**
-    - **Beams** (renderer interface 8): `kLightBeam`, a lamp's light as the sum of up to 4 LOBES (`iface::LightLobe`):
-      each an elliptical peak in candela in the lamp's own frame (its axis and its UP), falling to half at the
-      half-width across and the half-height up and down, centred a yaw and a pitch off the axis, with a sharpness
-      (2 a gaussian, higher a flatter top and a harder edge - a dipped beam's cut-off). In the shader the angle is
-      measured in the lamp's tangent plane, I = sum of candela x 2^-(q^(sharpness/2)). The radial profile of N2 is
-      gone (nothing used it). A light reaches up to 1 km (a pencil beam's 0.1 lux; it was 300 m), and the clusters
-      cull a beam by the cone its lobes reach (to 1% of their peaks).
-    - **The game's lamps** (`game/src/assets/car_lights.*`): a lamp is a BEAM preset at a place on the car (its
-      frame: x LEFT, -y forward, z up, from the centre of gravity) aimed yaw right and pitch up. The presets, round
-      figures until N3c tunes them on the references: `halogen-low` (3200 K, 16 kcd hot spot 2 degrees under the
-      axis, cut-off), `halogen-high` (3300 K, 50 kcd), `led-pencil` (5800 K, 350 kcd in +-3.5 x 2.5 degrees),
-      `led-driving` (5800 K, 150 kcd, a 22-degree spread), `led-bar` (5700 K, a flat flood +-30 degrees, 60 kcd, and a
-      +-60-degree spill), `ditch` (5800 K, 40 kcd, to be aimed off to the side). Colour temperature -> linear sRGB of
-      luminance 1 (Planckian locus, Kim et al.), so candela stay candela whatever the colour. The axes' swap into the
-      renderer mirrors the car's right, so a lobe's yaw takes its sign from where the car's right ends up.
-    - `PHYS_DRIVE_TEST_LIGHTS=ramp|bars|low` (`assets::TestLayout`): two main beams and a 4-pod ramp (pencils
-      inside, driving beams outside toed 2 degrees out, all 0.8 degrees down), two main beams and two LED bars, the
-      dipped beams. Checked from the bonnet camera on stage 41 at night: the pods' long, intense beam down the road;
-      the bars' wide flood over both verges and the spectators beside the road; the warm, short dipped beams.
-    - Cost (1080p, the 780M, full clock): the ramp layout's 6 lamps add 5.5-8 ms to the GPU frame - their light
-      rays 3.9 ms (the ray tracer weighs every lamp of a pixel's cluster to pick one: next to optimise), denoising
-      +1.0, shading ~1.2. The day is unchanged.
-    - **car.yaml's lamps (draft, N3b settles it):**
-      ```json
-      "lamps": {
-        "beams":   { "<name>": { "kelvin": 5800, "radius": 0.08,
-                                 "lobes": [ { "candela": 350000, "halfWidth": 3.5, "halfHeight": 2.5,
-                                              "yaw": 0, "pitch": 0, "sharpness": 2 } ] } },
-        "lamps":   [ { "name": "lf", "role": "main", "beam": "halogen-high", "at": [0.65, -2.0, 0.05],
-                       "yaw": 0, "pitch": -0.5, "mesh": "e_light_lf_lit" } ],
-        "layouts": { "4-pod ramp": { "mesh": "e_ramp", "lamps": [ { "beam": "led-pencil", "at": [0.12, -1.9, 0.3],
-                                                                    "pitch": -0.8 } ] },
-                     "no ramp":    { "lamps": [] } }
-      }
-      ```
-      `beams` adds the car's own beams beside the presets; `lamps` the ones every layout has (headlamps, tail,
-      brake, reverse, indicators: `role` says how the game switches them); `layouts` the choices for the setup (the
-      ramp's lamps, the mesh that is shown with them). The setup's aim (yaw, pitch) is added to a layout's lamps.
-  - **Tuning on a wall, and the lamp lab (2026-10-31).** `tools/lamp-wall/wall.py` draws the lamps on a wall 10 m
-    ahead without the engine (the renderer's beam formula; a copy of the presets and the test layouts). The user's
-    tuning there: each lamp its own spot - the main beams 10 degrees out (80 kcd), the outer pods 20 degrees out, the
-    inner ones 5 out and 4 up; the pods' beams narrow with a harder edge, and a wide, dim spill around each (~7% of
-    its peak, +-25-30 x 10-12 degrees). `W-Rally --lab` (`assets::BuildLampLab`): the test lamps on a car standing in
-    a synthetic scene - a floor, a wall 10 m ahead of the ramp, thin white poles at 5 and 8 m, a person-sized block -
-    with no stage or physics; `--camera`, `--time`, `--exit-at`, `PHYS_DRIVE_SHOTS` as on a stage.
-  - **"The shadows look like one lamp's."** Checked against an exact reference (`NGG_LIGHTS_REF=1`: a ray to every
-    lamp; `=2`: the one-pick estimate averaged over 16 picks): in the lab the game's shadows ARE the reference's.
-    With the pods aimed apart and their beams narrow, every patch was lit almost by one lamp, so each thing cast that
-    lamp's one dark shadow; the spill gives every patch several lamps and each thing a fan of lighter shadows, as in
-    the reference shots. New debug view 15: the lamps' shadowed fraction. Open: on stage 41 the timing clock's legs
-    still differ from the reference (one hard shadow), which the lab does not show - the clock is a physics object.
-  - **N3b - DONE 2026-10-31: the car's lamps, switched.**
-    - **Its lamps** (`assets::LoadCarLamps`): RBR's car .ini places (`Point_light_lf/rf/lb/rb/brake_*/reverse_*/
-      bon<n>`, the model's frame made the car's - y and z swapped, less the centre of gravity), defaults where it has
-      none; the AIMS are W-Rally's, as tuned on the wall (RBR's lamp normals are no aims). The ramps a car offers:
-      "ramp" (its own pods, with its ramp's meshes - the i20's six), "2 pods", "4 pods", "6 pods" (a count its own
-      leaves out), "LED bars", "no ramp"; its own ramp the default, else four pods. The pods are halogen (3300 K -
-      `halogen-pencil`, `halogen-driving`, the wall-tuned shapes of N3a's LED presets, their spots then made half as big again); the white LED look is the bars'.
-      Aims: two pods (driving beams) 5 out and 3 up; the outer pair 20 out, the inner 5 out and 4 up, a middle pair (six)
-      13 out and 2 up; with four or more every pod a pencil. The small lamps: tail, brake (with the high centre one), reverse (white), four
-      indicators (amber, 1.5 Hz; no RBR car has them) - coloured presets, no shadows.
-    - **The switches:** H headlights off / dipped / main, J the ramp (it shines with the main beam), Q / E the
-      indicators, G hazard; the brake pedal and reverse switch theirs. After dusk the lamps start lit (the renderer's
-      sun: `RenderStats::sunElevationDeg`, renderer interface 9); by day the small lamps' light is not given (only
-      their glass shows it). The readout shows the switches; `PHYS_DRIVE_LAMPS` sets them for captures.
-    - **The glass:** RBR's lamp meshes come in pairs (`e_light_lf`, its lit twin `e_light_lf_lit`); the car draws
-      each lamp group as instances of its own - the unlit glass or the lit twin by the switches, the ramp's housing
-      with the car's own ramp. A lit twin glows in its lamp's colour (a solid DXT1), as bright as such a lens is in
-      the renderer's units (~1600 nits a unit: a headlamp ~100,000 nits, a brake lamp ~10,000, a tail lamp ~200) -
-      not by its texture: RBR draws the twins with its CarLight shader on the tyre's texture sheet.
-    - **Quick rally** (the setup editor's, once there is one): "Lamps" (the car's ramps), the ramp's spread and aim,
-      remembered per car (`lamps_<folder>` in W-Rally.ini), and the time of day (`quick_time`, on 15 October, summer
-      time: dusk ~18:30). Command line: `--lamps <ramp> --lamp-aim <spread>,<pitch>`.
-    - **Lamps on loose parts:** each lamp mesh sits on its part's node (the i20's ramp on the bonnet, by the .sgc's
-      node tree) - one instance per group and side (`_lf` / `_rf` / `_lb` / `_rb` in the name), on the car's own
-      node tree. A part that comes off (or hangs loose out of the car's frame) takes its lamps' light with it: its
-      cable is torn, glass and beams dark (`CarRender::Mounts`, `assets::LampMounts`); one that hangs on (a bonnet
-      on its hinge) moves its lamps' beams with it - the part's move, rest to now in the car's frame, applied to the
-      lamp's place and axes. The ramp follows its pods' part, else its housing's.
-    - **LED bars, their own beam:** a combo bar's - a 6 x 3.5 degree spot (150 kcd), an 18 x 6 mid (30 kcd) and a
-      40 x 10 flood (10 kcd), all soft (sharpness 2): no cut-off, unlike the halogens and the pods it was tuned
-      against. With the bars the main beams shine straight on (`LampLayout::headSpread` 0; 10 degrees out with the
-      pods, whose outer lamps cover the corners).
-    - Open: bloom on the lit glass; replays switch the brake and reverse lamps by the live input only.
-- **N4 - stage lights.** A light chunk in the `.ngg` (with `provenance=auto|authored`, 5.3), emissive texture
-  detection for the automatic part, Wallaby's light-placement mode for the authored part (its own task).
+**The model lives once, in `shaders/atmosphere.hlsli`, `#include`d by every consumer.** The sky and the aerial
+perspective are the same integral over different segments of one ray; the horizon, where they meet, is exactly where
+two implementations would visibly disagree. `AtmScatter(ray, sunDir, maxDist, ...)` returns in-scatter and the
+transmittance of what lies beyond, so distant geometry is **both dimmed and tinted** (tint alone reads as paint, not
+air).
 
----
+| constant | value | |
+|---|---|---|
+| `kRg`, `kRa` | 6360 km, 6420 km | ground, top of atmosphere |
+| `kHr`, `kHm` | 8000 m, 1200 m | Rayleigh, Mie scale heights |
+| `kBetaR` | (5.8, 13.5, 33.1)e-6 /m | |
+| `kBetaM` | 21e-6 /m × `turbidity` (extinction ×1.1) | `turbidity` is OUR haze dial |
+| `kMieG` | 0.76 | Cornette-Shanks phase |
+| `kCamHeight` | 500 m | the camera's fixed altitude on the sphere |
 
-## 6. The car (prepared now, built later)
+**The camera sits at a fixed 500 m on a planet-sized sphere**, so the atmosphere depends on view direction and the sun,
+never on where on the stage the car is. That is what lets every table below be rebuilt from scratch each frame with no
+history.
 
-Deferred, but these hooks go in from v1 so the door stays open:
+- `AtmSunTransmittance(sunDir, steps)`: one march along the sun ray, then the cloud deck and the fog. Low-sun reddening
+  falls out of the model; it returns black with the sun below the horizon (no light through the earth).
+- `AtmSkyRadiance`: scatter plus the below-horizon ground blend (the sky mirrored, times `groundAlbedo`), plus the
+  second body's sky (`light2*`) and the night glow. **The sun disc is deliberately not in it**: the environment map
+  feeds a specular term that has its own sun lobe, and a disc in both counts the sun twice.
+- The sky pass (`shaders/sky.hlsl`, `Sky::Record`) marches **16×6** per pixel, adds the sun disc (0.00465 rad ×
+  `sunDiscSize`, dimmed by cloud and fog), the moon and the stars. It builds its ray from the camera basis and the
+  projection's tangents (no inverse, unaffected by reverse-Z) and **subtracts the jitter**, so the horizon does not crawl.
 
-- Tagging extends to the car load path, so car resources are identified the same way track resources are.
-- `NGGM` carries car-paint material parameters (clearcoat, metallic flake) and `NGGS` carries skeletons.
-- Wallaby's existing SGS parsing (`SGS/AnimMesh.cs`, `MaterialDefinition.cs`, `MaterialDeclaration.cs`) is the
-  starting point for a car converter; completing it is a known, bounded RE task.
-- Runtime damage deformation and dirt are harvested (§4.1) rather than re-derived.
-- Until then, §2.4's stencil harmonization keeps the vanilla car from looking pasted on.
+**Taken from RBR, and not.** `SunDir` (direction the light travels, RBR's sign convention kept in `SkyParams::sunDir`)
+and `Terrain_Reflectance_R/G/B` (ground bounce colour) are used. `Turbidity`, `Rayleigh_Multiplier`, `Mie_Multiplier`,
+`Greenstein_Value` are **not**: Joux Verte ships Turbidity 0 and Greenstein 1.0, degenerate for any real model, i.e.
+internal scales for RBR's ps_1_1 constants. RBR's skybox mesh is not converted: a painted sky cannot follow a moving sun.
 
----
+### 3.2 Multiple scattering
 
-## 7. Native and AI-generated tracks
+`AtmosphereMs` (`src/core/atmosphere_ms.*`, `shaders/atmosphere_ms.hlsl`) is Hillaire 2020 §5.5: a **32×32 table
+Ψ_ms(μ_s, altitude)** of second-order isotropic scattering (64 directions × 20 steps, ground as a Lambertian
+reflector) times `1/(1 − f_ms)` for all higher orders. `AtmScatter` adds `σ_s · Ψ_ms · T_view` per view step, not gated
+on the sun ray being lit (a point in the planet's shadow still sees the lit atmosphere: most of twilight).
 
-Requirement: be ready for tracks that were never RBR content in the first place. This is cheaper than it sounds,
-because Wallaby is **already a track authoring tool** — `Filebuilder.cs` writes LBS/DLS/FNC/COL/MAT,
-`MeshImporter.cs` imports external meshes, and `DriveLineCreator`, `colgen`, `FenceBuilder` and `CamCreator`
-already generate the gameplay-side data. What's missing is a modern content path into it, not the fundamentals.
+- **The table does not depend on the sun**: μ_s is a lookup coordinate. It changes only with turbidity and ground
+  albedo, and `Update` records nothing otherwise. So the Sky and the Scene each own an instance with no ordering
+  between them; the switch must match (`Renderer` mirrors it).
+- Bound at `t0/s0 space1` in every root signature that compiles `AtmScatter` (`MsSrvRange`, `MsSampler`), so it can
+  never collide with a consumer's own registers.
+- Off = an all-zero table = exactly the single-scattering model; the A/B costs no shader branch.
 
-### 7.1 The key structural insight
+**Verified**: GPU texel (937.5 m, μ_s 0.781) `0.02319 0.02943 0.04071` against a numpy port `0.02319 0.02944
+0.04073` (fp16). **Cost** (dev iGPU, track-108): switching it on costs nothing over off; the per-step lookup raised the
+aerial fill from 0.29 to 0.48 ms whether the table is zero or not.
 
-A generated track still needs the game to be able to *drive* on it: collision meshes, drive line, checkpoints,
-triggers, cameras, `.MAT` surfaces, pacenotes. But it does **not** need the game to be able to *draw* it, because
-we suppress the game's world rendering anyway.
+### 3.3 Aerial perspective
 
-So for a generated track the LBS becomes a **gameplay stub**: real collision, real drive line, real triggers, real
-surface maps — and visual geometry reduced to whatever minimum keeps the engine happy (the engine still culls,
-streams and CRC-checks it). All actual visual richness lives in `.ngg`, authored directly, with no format
-compromise inherited from 2004.
+`AerialLut` (`src/core/aerial.*`, `shaders/aerial.hlsl`): two RGBA16F volumes, **64×64 screen cells × 32 distance
+slices**, in-scatter and transmittance, filled by one compute dispatch per frame (one thread per froxel, each an
+independent `AtmScatter` over [0, d] at **8×3** steps). The scene pass reads them with two trilinear fetches
+(`AerialAt` in `shaders/scene.hlsl`). Owned by `Scene`, filled inside `Scene::Record` before the scene binds its heap,
+main pass only.
 
-Consequences worth stating plainly:
+Each rule below would be a bug the other way round:
 
-- The un-baking machinery (§3.2) simply doesn't apply. Generated content is authored PBR from the start, so every
-  Tier 0/1/2 field in the format must be **optional**, never required.
-- `NGGO` objects are `free`-bound (§3.5): there is no suppressed draw to match them against, so they render from
-  their own transform. This is why the binding mode is in the format from v1 rather than being assumed.
-- The same mechanism lets **added content on converted tracks** work — new props, better trees, replaced buildings —
-  which is the feature the community will ask for first, long before anyone generates a whole stage.
-- Minimum-viable-LBS is its own RE question: how little visual geometry can the stub contain before the engine
-  misbehaves? **Rev 3 promotes this to the P0 critical path**, because fully generated stages are now in scope and
-  this experiment sets the ceiling on how free they can ever be. It needs nothing but the game and Wallaby, so
-  there's no reason to defer it.
+- **Radial distance, not view depth**: the integral is along the ray. Quadratic slices, `w = sqrt(d / maxDist)`, so the
+  near field gets the resolution.
+- **Below the first slice centre** in-scatter and `1 − T` scale by `(w/w0)²` (linear in distance, exact to first
+  order); clamping to slice 0 would put metres of air between the camera and its bonnet.
+- **Reach = 1.5 × the far plane** (radial distance at the frame corners runs ~1.4× view depth), clamped 500 m..60 km;
+  12 km when the projection has no readable far plane.
+- **Unjittered `Scene::LastViewProj`** for the cell rays: a cell spans ~30 px, following the jitter would only make the
+  table shimmer.
+- **CLAMP sampler (s4)**: wrapping in w blends the farthest slice into the nearest.
+- **Same 8×3 quadrature as the per-pixel march**, which survives as an exact reference (`Scene::SetAerialMarch`), so a
+  difference between them is the table's interpolation error alone. 16×4 cost 0.60 ms of fill for nothing visible
+  after the tonemap.
 
-### 7.1b What full stage generation additionally requires
+Measured (dev iGPU, track-108 start camera, before multiple scattering):
 
-Generating whole stages (confirmed in scope) means Wallaby must emit **gameplay** data, not just visuals. The
-foundations exist — `DriveLineCreator`, `colgen`, `FenceBuilder`, `CamCreator`, `PacenotesEditor` — but they were
-built for a human working interactively, not for a generator. The gap list:
+| aerial | main pass | aerial's share |
+|---|---|---|
+| off | 1.65 ms | — |
+| per-pixel march 8×3 | 3.55 ms | 1.9 ms |
+| table, 8×3 fill | 2.14 ms | 0.50 ms (0.29 fill + ~0.2 lookup) |
 
-- **Drive line + checkpoints + start/finish** from a generated centreline, with the sanity properties RBR expects.
-- **Collision meshes** generated from render geometry, with the §3.1 rule inverted: here collision is authored
-  *first* and the visual mesh must conform to it, never the reverse.
-- **Surface maps (`.MAT`)** painted from the generator's own material assignment — which we get for free, since the
-  generator knows which polygons are tarmac and which are gravel.
-- **Pacenotes**, derivable from the centreline curvature. The plugin already has pacenote infrastructure
-  (`PacenotesMap.h`, Wallaby's `PacenotesEditor`), so this is assembly rather than invention.
-- **Triggers, cameras, sound zones** — mostly templatable from the drive line.
+Table vs march: max 1/255 on the HDR buffer, 99.4 % of pixels identical. The march costs ~10 ns per geometry pixel
+and the fill is fixed, so the table's advantage grows with geometry coverage. A 32×32 grid would cut the fill ~4×;
+not taken, and the Mie lobe towards a low sun (the case that would test it) has not been looked at.
 
-None of this touches the renderer. It's a Wallaby project that happens to share a format, and it should be
-planned and staffed as one.
+### 3.4 Sky lighting: environment, irradiance, ambient specular
 
-### 7.2 The content path
+`Environment` (`src/core/env.*`, `shaders/env.hlsl`), **owned by `Scene` and rebuilt at the start of every main pass**
+from the same `SkyParams` the sky uses (when it was the caller's, only the old viewer built one and in-game there was
+no ambient specular). It is the frame's sky LUT: sky radiance depends only on direction and the sun, both uniform for
+the frame, so 4,096 marches replace one per pixel.
 
-AI/generative tooling emits standard interchange formats, not RBR ones. So the pipeline is:
+| map | size | content |
+|---|---|---|
+| radiance | 64×64 octahedral, 7 mips, RGBA16F (< 40 KB) | mip 0 = `AtmSkyRadiance` at 16×4, each mip a 2×2 box of the last |
+| irradiance | 16×16 octahedral | cosine-weighted upper-hemisphere integral of mip 0, 16 rings × 32 directions, exact per-ring solid angle |
+
+- **Octahedral, not a cube**: ordinary mips and bilinear sampling, no seam policy. The small error along the
+  octahedron's edge is invisible on a sky; revisit for sharp probes.
+- **The mip chain is the roughness axis** (`level = roughness × (mips − 1)`); a box chain instead of a GGX prefilter is
+  what most engines ship.
+- **Rebuilt every frame**, no staleness rule: cheaper than any rule, and a rule can be wrong.
+- **Irradiance, not `π·L(N+up)`**: one sample looks at the zenith, the darkest part of a clear sky; against the true
+  integral it was 0.65× at a 50° sun and 0.43× at 10°. GPU vs numpy integral for one direction: `0.6221 / 1.0234 /
+  1.6709` vs `0.6220 / 1.0247 / 1.6755` (within 0.3 %). Light from below is not in it: the scene adds the ground
+  analytically (3.5).
+- **Ambient specular** = `EnvRadiance(R, N, roughness) × EnvBRDFApprox` (Karis' analytic split-sum fit) × AO, with a
+  clear-coat layer sampled separately. For reflection-focus objects (the car) `EnvRadiance` reads the cube probe
+  (`probe.h`) in place of the sky; that is the car-paint section's.
+- `gEnvReady` (the map exists) is separate from `gEnvOn` (ambient specular wanted), so turning specular off for an A/B
+  does not change the diffuse. Without a map the diffuse falls back to a 6×2 per-pixel march, never to nothing.
+
+### 3.5 Surface lighting balance and physical units
+
+**The physical balance is the default and the only one any client reaches** (`Scene::m_physical = true`;
+`SetPhysicalLighting` is never called). In `shaders/scene.hlsl`:
 
 ```
-generator (AI / procedural / DCC)
-      │  glTF or USD  (geometry, PBR materials, lights, instancing — all native concepts there)
-      ▼
-Wallaby importer ──► scene graph ──┬──► .ngg        (visuals: our renderer)
-                                    └──► LBS/COL/DLS/MAT stub  (gameplay: the game)
+sunE     = sunIntensity * AtmSunTransmittance(sunTowards, 8)          // per pixel, 8 steps
+diffuse  = albedo * (1 - metallic) / PI                               // Lambert as written
+E_sky    = irradiance(N)
+E_ground = groundColour * (sunE * sinElev + irradiance(up)) * groundBounce   // uniform Lambertian plane
+ambient  = E_sky + E_ground * saturate(0.5 - 0.5 * N.y)
+lit      = diffuse * (sunE * ndl * vis + ambient * ao) + GGX * sunE * ndl * vis + ambSpec
 ```
 
-**This is no longer only the generated-content path.** Converted tracks now travel the same spine —
-`LBS → glTF → edit → .ngg` (§3.0) — so what follows describes one pipeline entered at two different points, not
-two pipelines. Everything below about what glTF does and does not carry applies equally to a converted track.
+No π factors on specular, no dials: a glTF material means what it means elsewhere. `E_ground` needs no explicit 1/π
+(the one turning irradiance into bounced radiance and the π turning it back cancel). **Ambient is an irradiance, the
+same units as `sunE`; `AtmScatter` returns radiance**, a factor π apart. That one units error, made three ways, produced
+navy shadows (π too dark, sky-only), red shadows (bounce without 1/π) and black ones (both).
 
-Adopting **glTF as the interchange format** is the single highest-leverage decision here: it maps almost 1:1 onto
-`NGGV`/`NGGM`/`NGGP` (PBR metallic-roughness, punctual lights, instancing, tangents), every generative and DCC tool
-speaks it, and it means we never have to define an authoring format of our own. Wallaby's existing `.x` importer
-is the template; glTF import is a bounded addition.
+**Why physical won** (units audit, then multiple scattering). The established balance was diffuse `albedo·E`,
+`sunDiffuse` 0.18, `skyAmbient` 1.0, specular ×π. Relative to physical it was internally consistent but put ambient
+**5.5× too strong against the sun**. The model's own numbers (numpy port, cosine-weighted 24×48 quadrature, single
+scattering):
 
-> **DECIDED: glTF, not USD.** Both were on the table; the deciding factors were reach and weight, not features.
->
-> - **Tool support.** glTF is the de-facto real-time interchange — native in Blender, 3ds Max, Cinema 4D,
->   Houdini, Substance, Unity, Unreal, Sketchfab and the web engines; Maya via maintained exporters. For a
->   community modding pipeline the realistic authoring tool is Blender, where glTF is excellent. USD's tooling is
->   strong in Houdini/Maya and thin elsewhere, and it brings a heavy C++ dependency.
-> - **Where USD would have won:** its layer composition and variant sets map almost exactly onto §3.4b's layers
->   and stage variants. That is a real loss, and the scene-description layer below has to carry that instead.
->
-> **Animation, checked rather than assumed.** glTF 2.0 covers node TRS keyframes, skinning, and morph targets —
-> which is most of what animated scenery needs. It does **not** natively carry **UV scrolling**, and the shader
-> disassembly (§3.2b) showed RBR's `…Anim` variants are exactly that: `oT0 = time * direction + uv`. Reproducing
-> it through glTF needs `KHR_texture_transform` driven by `KHR_animation_pointer` — ratified, but thinly
-> supported by exporters — so a plain round-trip will lose it.
->
-> This matters less than it sounds: §4 harvests animation from the running game for *converted* tracks, so glTF's
-> animation support only governs **native** content. And RBR's own needs turned out modest — `…Sway` compiles to
-> no vertex motion at all.
->
-> **glTF is a transport format, not a working format.** Its accessor/bufferView indirection sits deliberately
-> close to GPU buffers and is awkward to edit against. Wallaby's in-memory geometry should be a plain mesh
-> structure that glTF maps onto at import/export (§8.1) — transport and working representations differing is
-> correct, not duplication.
+| sun elevation | E_sun horiz. | E_sky true | old `π·L(N+up)` | model sun:sky | established sun:sky |
+|---|---|---|---|---|---|
+| 50° | 14.79 | 0.973 | 0.635 | 15.2 : 1 | 4.2 : 1 |
+| 30° | 9.10 | 0.905 | 0.446 | 10.1 : 1 | 3.7 : 1 |
+| 10° | 2.21 | 0.699 | 0.300 | 3.2 : 1 | 1.3 : 1 |
 
-A JSON **scene description** layer sits above it for things glTF doesn't carry: stage layout, drive line, weather
-preset bindings, surface classes per material, light schedules. That layer is also the natural target for a
-generative pipeline to emit directly — it's text, it's reviewable, and it's diffable.
+The dials were hiding two deficits, the one-sample sky estimate and single scattering (sky ~2× too dim), and then
+overshot. Lab measurement (18 % grey upward ground, 45° sun, pixel probe):
 
-### 7.2b Vegetation CAN be de-merged — MEASURED, and it is the tractable half
+| | sun : sky, flat ground | lit : shadow |
+|---|---|---|
+| established, single scattering | 4.2 : 1 | 4.95 : 1 |
+| established + MS | 3.2 : 1 | 3.94 : 1 |
+| physical, single scattering | 14.0 : 1 | 15.5 : 1 |
+| **physical + MS (default)** | **10.6 : 1** | **11.8 : 1** |
 
-The obvious objection to replacing RBR's vegetation is that the LBS welds many plants into one mesh, so there is
-no "tree" to extract. **That objection does not survive measurement.** Separate plants do not touch each other,
-so connected components over quantised vertex positions separates them with no help from the file at all.
+MS adds 32 % sky light (E_sky 0.97 → 1.28). 10.6 : 1 is clean clear air; real clear skies run ~5–10 : 1, and
+`turbidity` is the dial for a hazier day. The established balance looked overcast. Auto exposure absorbs the absolute
+level change (physical measured 1.5× brighter in sun at the track-108 start).
 
-On `track-42`, over alpha-tested geometry:
+**Still in the code:** `SkyParams::sunDiffuse`/`skyAmbient`, `gSunDiffuse`/`gSkyAmbient`, the lerp ambient and
+`kSpecScale = physical ? 1 : π` remain as the established path, reached only when `gEnvReady` is false (no environment
+map). The deletion planned after "one round of comparison" has not happened.
+
+Other rules in the same shader:
+
+- **Back faces flip the normal** (`SV_IsFrontFace`): everything is drawn `CullMode NONE`, and a back face's normal points
+  away from the viewer, giving `N·L ≤ 0` on a sunlit side.
+- **Foliage (ALPHA_TEST) is wrap diffuse 0.4 plus transmission 0.5 × `saturate(dot(-N, L))`, no specular lobe**: a
+  backlit leaf is not unlit, and a card's normal is a shading fiction. A shaded plant loses 75 % of the sunlit-ground
+  bounce (`kFoliageGroundShade`), since the ground around it is shaded too. Card normals themselves (welding, volume
+  normals) are the geometry/foliage section's.
+- `Scene::SetLightMode`: **0 = RBR's bake × `bakedScale`, kept as the A/B reference** (display-referred, so it gets the
+  sRGB-only curve), 1 = dynamic (default). The old "dynamic + bake as AO" mode is gone; the legacy profile
+  (`SetLegacyProfile`, `NGG_LEGACY_PROFILE`) does the bake-as-ambient-occlusion variant for imported .lbs cards only.
+- **The camera constant buffer is grouped in whole float4s from `gSunDiffuse` on**, with a `static_assert` that it is
+  a whole number of registers. HLSL will not let a float3 straddle a register and a packed C++ struct does; that
+  mismatch once fed every later field the wrong value, and it showed up as a plausible-looking wrong picture.
+
+### 3.6 HDR, exposure and tonemap
+
+`PostFx` (`src/core/post.*`, `shaders/post.hlsl`, `shaders/meter.hlsl`). Sky and scene draw into
+`PostFx::kHdrFormat` = **RGBA16F** at the render size; the only allowed clear colour is `kHdrClear` (it is the
+resource's optimised clear value). The sky and scene shaders never apply exposure: when one did and the other did not,
+the exposure control worked on the sky and not on the ground.
+
+**Curves** (`PostFx::Curve`); the curve is a rule, set in `RecordFrame`, not a free choice:
+
+| curve | used for | why |
+|---|---|---|
+| raw | any debug view | false colour, not radiance: a curve would change the numbers, TAA would blend them (TAA is off there too) |
+| sRGB only | light mode 0 (bake) | RBR's vertex colour is display-referred; the A/B stays honest |
+| `1−exp(−x)` | reference | what dynamic lighting first shipped with |
+| **ACES** (Narkowicz) | **default; the module always sets it** | |
+| AgX | option | a clipping channel loses saturation, not hue (ACES turns a blown sun disc yellow first) |
+
+The encode is in `PSTonemap` (`LinearToSrgbEnc`), because the swap chain is `R8G8B8A8_UNORM`. Textures are created
+`BC*_UNORM_SRGB` (or `_UNORM` when the data is linear) so samples decode to linear. **Verify the colour pipeline end to
+end before tuning any light**: linear values written to a display buffer look exactly like "the ambient is too weak".
+Before the curve, `NightVision` desaturates and shifts towards blue-green below ~8 EV under the day's grey (rods alone
+from ~17 EV); that and the night's exposure are the night section's.
+
+**Auto exposure, on by default (`RenderSettings::autoExposure`), metered from the image and adapted on the GPU**, two
+compute passes, no CPU in the loop:
+
+1. `CSHistogram`: 128 bins of log2 luminance over [2^-32, 2^8] (the floor went down from 2^-12 for moonlit and moonless
+   nights), one sample per 2×2 block, **centre-weighted 4:1** aspect-corrected (the driver looks down the road; sky at
+   the top, verge at the bottom corners). It meters what is about to be tonemapped: the TAA output, the upscaler's
+   output, or the raw HDR.
+2. `CSAdapt` (one group): mean log2 luminance between the **40th and 90th percentiles**, straddling bins counted
+   fractionally. A histogram, not a log-average, because the sun disc and deep shadow dominate a mean. At night the
+   metered level is kept no lower than 3 EV under the 97th percentile, so headlamp light in view sets a floor and does
+   not clip. Adaptation is **exponential in log space** (an N EV step settles in the same time for any N),
+   **asymmetric: 3/s towards bright, 1.2/s towards dark** (forest exit into sun). It clears the histogram.
+
+`exposure = dial × 2^ev`, `ev = clamp(made-up(ref − adapted), −3, +24)`, where up to 3 EV darker than the reference is
+made up in full and 0.75 of the rest beyond it, so night stays darker than day. **The dial keeps one meaning**: it is
+the exposure at the reference brightness, `kReferenceLog2 = −2.025`, **measured** as what the track-108 start camera
+(the view the 0.8 dial was tuned on) meters at. Switching auto on leaves that view as it was: measured 0.798 auto vs
+0.800 manual. Step response with the sky turned off (frame 1.58 EV darker): 0.80 → 1.54 → 2.02 → 2.24 → 2.38 at
+~30-frame intervals, settling at exactly +1.58 EV with no overshoot. A static camera meters within ±0.001 EV
+frame to frame, so the jitter does not make the meter hunt.
+
+Details that would be bugs the other way round:
+
+- **Buffers decay to COMMON after every `ExecuteCommandLists`.** The histogram and the state buffer start each frame
+  from COMMON, and `m_exposureStateNow` tracks the state buffer through the frame (TAA reads it, the meter writes it,
+  the readback copy and the tonemap read it).
+- `dt` is measured inside `PostFx` (QPC, clamped to 0.1 s), so no client passes a frame time and a breakpoint is not
+  seconds of adaptation.
+- Only the exposing curves meter. Otherwise, and on `ResetHistory` (load, `FrameDesc::camera.cut`), the next metered
+  value is **snapped** to, not adapted from a different world.
+- `LastExposure`/`LastMeteredEv`/`LastAdaptedEv` are read back one frame late for `RenderStats`, never fed back.
+- A meter partly undoes a brightness edit (a brightened material that fills the view brings exposure down to meet
+  it), so a material editor must turn `RenderSettings::autoExposure` off while judging brightness.
+
+### 3.7 TAA, sharpening and upscalers
+
+**TAA exists because the noisy techniques depend on it**: RT shadows and AO, PCSS, stochastic alpha are only
+affordable with a temporal filter to accumulate them. `PSTaa` runs at the render size, writes the history (RGBA16F,
+alpha = depth with identity flags) and a `settled` R8 companion, ping-ponged.
+
+**Jitter**: Halton(2,3), 8 phases (an upscaler's own sequence and phase count when one runs), applied to scene and sky.
+**It is set before the prepass** (`RecordFrame`): the main pass tests `GREATER_EQUAL` against the prepass's depth, and
+with the jitter set after it, half the terrain failed the test and the sky flickered through.
+
+**The jitter rule.** `Scene::LastViewProj` is reverse-Z **included**, jitter **excluded**; the reprojection
+`inverse(VP) · prevVP` and the prepass's motion vectors are both unjittered. TAA accumulates into a fixed pixel grid;
+reprojecting through the jitter makes the history follow the Halton pattern and the whole image shakes by up to a pixel.
+Reprojecting an unjittered ray against jittered depth is wrong by at most half a pixel of parallax. (Corollary: anything
+that reconstructs a surface point from depth must use the jittered matrix, `LastViewProjJittered`; the aerial cells
+need neither.)
+
+**Reprojection stays homogeneous**: `float4(ndc, depth, 1) · reproj`, divided after. A sky pixel (reverse-Z depth 0) is
+a point at infinity; reconstructing a world position first would divide by w and give NaN. This way the sky
+reprojects as pure camera rotation with no special case.
+
+**Static world by the camera, moving objects by the prepass.** The world is rigid, so camera reprojection from depth is
+exact there. Moving objects (an instance that has moved since placed) write motion in the prepass
+(`Scene::MotionBuffer`, RGBA16F: xy NDC offset to last frame, z last frame's depth, w = 1); their glass, which depth
+does not hold, writes its own (`GlassMotionBuffer`, RG16F). The motion vectors exist since moving cars arrived; the
+"no motion vectors" assumption only holds for the static world.
+
+The per-pixel decisions in `PSTaa`, each against a trail seen in practice:
+
+| case | rule |
+|---|---|
+| neighbourhood | **variance clip**, mean ± 1.25σ of the 3×3, intersected with its min/max (a box alone lets one specular pixel widen it into ghosting) |
+| history fetch | **Catmull-Rom, 5 bilinear taps** (corners dropped, renormalised), clamped at 0. Bilinear compounds a blur under every non-integer camera move at a 0.9 weight |
+| blend | 0.9 history, **1/(1 + luma × exposure)** weights against fireflies, on last frame's exposure |
+| standing still | from 1/4 px of motion down to none, the clip fades out and the weight goes to **0.97**, scaled by `settled` (0→1 over 16 still frames): fence flicker −71 %, car edges −65 % at a stationary view |
+| disocclusion | decided **by identity, not depth** (history alpha negated on moving objects): a static pixel whose 4×4 history touches a moving object that has gone drops its history (a tyre and the road meet at the same depth) |
+| moved pixel | keeps history only if a texel of its 2×2 is a moving object at its depth (±5 %); a **still occluder in front** in the 4×4 → only its own texels, bilinear (no fence bars printed on a passing car) |
+| object standing still | within 0.1 px of the camera's reprojection it is treated as the world, so its outline keeps history |
+| moving fast | above 8 px/frame the weight falls to 0.6 at 40 px/frame |
+| moved shadow / AO / local-light shadow (RT distrust or the local-shadow mask) | never "still"; history **relit** by the ratio of this frame's 3×3 mean to its own local mean (0.25..4; for AO bounded by the AO's own change less 6 %). Dropping it instead cost 2.5× the grain |
+| history with no history of its own | at most 0.25 weight (the contact-shadow line one frame behind the car) |
+
+**Sharpen, after the tonemap, on display values**: an unsharp mask on the 4-neighbour cross, **clamped to the cross's
+min/max**, so it can steepen an edge but never create a value that was not there: no halos to tune. In HDR the sun
+edge would dominate it. Only on a TAA-resolved image. Amount by quality tier: low 0.25, medium/high 0.5.
+
+Measured (track-108 start camera, mean |Laplacian| of luma, % of the aliased TAA-off frame; `--pan` turned the camera
+a fixed amount per frame, the old viewer's instrument; dev iGPU):
+
+| | TAA off | bilinear | Catmull-Rom | CR + sharpen 0.5 |
+|---|---|---|---|---|
+| panning 0.5°/frame (~10 px) | 4.97 | 1.63 (33 %) | 2.12 (43 %) | **2.55 (51 %)** |
+| static | 7.96 | = CR | 4.20 (53 %) | **5.10 (64 %)** |
+
+The TAA-off column includes aliasing energy, so it is a ceiling, not the target. Sharpen 0.5 raises static
+frame-to-frame change 0.206 → 0.238 (out of 255) by re-amplifying jitter residue, which is why it is a dial.
+
+**Upscalers replace `PSTaa`, nothing else** (`upscaler.h`: FSR 3.1 in `fsr.cpp`, DLSS SR in `dlss.cpp`;
+`RenderSettings::upscaler`, `renderScale`). With one, everything up to the resolve runs at the render size and the
+tonemap at the output size. `PSUpscaleIn` writes the inputs from the same reprojection `PSTaa` makes: motion as
+(prev uv − uv) of the unjittered centre, and a reactive mask of 0.25 on moving glass. The upscaler gets the colour
+before exposure plus the 1×1 exposure. Debug views and TAA off bypass both and show the render-size image stretched.
+
+
+## 4. Shadows, ambient occlusion and ray tracing
+
+All numbers in this section are GPU times on the dev machine's integrated AMD Radeon (780M) at 1080p unless a line
+says otherwise.
+
+### 4.1 The visibility provider and the two paths
+
+**One renderer, a pluggable source of the sun's visibility and the AO - not two renderers.**
+`modules/renderer/src/core/visibility.h` defines `VisibilityProvider`: it runs between the prepass and the main
+pass, takes a `VisibilityFrame` (the prepass's depth, normal, motion and plant targets, the jittered and unjittered
+view-projection, the camera, the sun's direction and angular radius, AO wanted / rays, whether a temporal filter
+follows, the lights) and fills a `Visibility` (sun visibility or "sample the cascades", an AO texture for the AO slot,
+the local lights' shadowed fraction, the denoisers' outputs TAA reads, `aoSource` for the readout). What the main
+pass, TAA and the upscalers do with it does not depend on which provider filled it.
+
+| provider | sun | AO | local lights |
+|---|---|---|---|
+| `RtVisibility` | RT, denoised (`Rt::Filtered`) | RT (`AoSource::Traced`, default) or XeGTAO (`AoSource::ScreenSpace`) | RT, ratio estimator |
+| `CascadeVisibility` | cascaded maps, sampled in the main pass | XeGTAO | spot/beam shadow maps (PCSS) |
+
+`Renderer::RecordFrame` (`renderer.cpp`) picks RT when `m_preferRt && prepass && m_rt.HasScene() && m_rtValid &&
+ShadowsOn()`; otherwise the cascades. `Renderer::RtFallbackReason` says why not ("cascades selected", "no ray tracing
+on this adapter", "shadows off", "the acceleration structure failed to build"). The game's setting is `ray_tracing`
+(`RenderSettings::rayTracing`); `kRendererNoRayTracing` at creation skips `Rt::Create` altogether. A third provider
+(NRD SIGMA/REBLUR, DLSS Ray Reconstruction) is meant to fill the same struct.
+
+**The depth + normal + motion prepass runs on both paths** (`Scene::RecordPrepass`): the main pass shades every pixel
+once (`GREATER_EQUAL` against the prepass depth), both AOs read its depth and normals, TAA and the upscalers its
+motion. The prepass normal is the GEOMETRIC normal (`R8G8B8A8_SNORM`, world space, no normal map - a ray origin
+wants the surface, not the paint); `w` marks a plant's card, whose normal is then the card's plane.
+
+**Rules the code relies on:**
+- **TAA reprojects into a stable grid and must not see the jitter; anything reconstructing a surface from depth
+  must.** Ray origins come from `Scene::LastViewProjJittered`; the denoisers' reprojection from `Scene::LastViewProj`.
+  With the unjittered matrix the origin was half a pixel of world space off and the shadowed fraction cycled
+  33-69 % on a still frame.
+- **Every pass that rasterises a frame uses the same jitter, set before the first of them** (`RecordFrame` sets it
+  before `RecordPrepass`); otherwise `GREATER_EQUAL` fails and the sky shows through, flickering with the sequence.
+- The RT outputs are traced and read **in the same frame** (no lag).
+- Glass (`kMaterialBlend`) is not in the ray-traced scene: it neither shadows nor occludes, and takes the sun whole.
+  Far scenery (`kLayerFarScenery`) is neither traced nor shadowed.
+- Quality tiers (`Renderer::Tier`): low = RT sun only, no AO; medium = AO, 1 RT ray, XeGTAO medium; high = AO,
+  2 RT rays, XeGTAO high.
+
+### 4.2 Acceleration structures
+
+Inline `RayQuery` in compute shaders (`cs_6_5`), no DXR pipeline or shader tables; needs raytracing tier 1.1 and
+SM 6.5 (`Rt::Create` logs the adapter's and declines otherwise). `modules/renderer/src/core/rt.*`.
+
+**The BVH is organised like the draw list: one BLAS per mesh, one TLAS instance per placement.**
+`Scene::DescribeRt` lists mesh keys and instances:
+
+| key | BLAS | instances |
+|---|---|---|
+| `kRtWorld` | every static object at its authored position, in `InRtWorld`; key = FNV over the load and the objects it LEAVES OUT | one, identity |
+| `kRtMoved \| i` | a static object that moved, was hidden/shown, or is keyed (NGGK, the physics moves it), at its authored position | one, its transform |
+| `kRtDynamic \| mesh` | a dynamic-pool mesh (the car's parts, editor meshes, a model's ray-traced LOD submesh) | one per use; material per instance, `FORCE_OPAQUE` when drawn opaque |
+
+`Rt` caches BLASes by key (`std::map`). `Renderer::KeepRtCurrent` runs when `Scene::GeometryRevision` changes, when a
+batch of BLASes has landed, or the frame after one did. **Two speeds: a change in which meshes exist builds BLASes
+(load, first move of a non-keyed object, hide/show, added car, prop or model); a change in where things are - a
+driving car, a drag - is TLAS-only.** The TLAS (`Rt::UpdateInstances`, `PREFER_FAST_BUILD`, with the instance table)
+is built on the **secondary device context** (`m_buildDev`, blocking: the frame's list is open). `Rt::Rebuild` drops
+dead BLASes and rewrites the shared any-hit buffers and the descriptor heap, then the TLAS.
+
+**New BLASes never stall a frame.** They are built off the frame and join the TLAS when done:
+
+1. **Queue** (`Rt::SubmitBlases`, the frame a mesh appears in): `Scene::BuildRtMesh` copies each missing key's
+   indices out of the scene (1-5 ms for a car or a stage), and the batch is queued. Nothing else - that frame
+   allocates plenty of its own (the car's materials, the scene's heap), and a thread allocating beside it made it
+   35 ms longer.
+2. **Record and submit** (`Rt::StartBatches` after the frame is recorded, then `RecordBatch` on the batch's own
+   thread): one index upload, one 8 MB scratch reused past UAV barriers, 4 MB result arenas (a BLAS of 4 MB or more
+   gets its own buffer, so a replaced world never pins a car's parts), the builds (`PREFER_FAST_TRACE`) on **the
+   ray tracer's own COMPUTE queue**, then a fence. The thread does not log (the sink is the main thread's).
+3. **Land** (`Rt::Land`, step 5 of a later frame): a finished batch's BLASes go into the cache and the TLAS is
+   published with their instances. Until then they are **simply not in the TLAS**: no RT shadow, AO or reflection
+   rays from them. On a load that means no TLAS at all: the cascades draw those frames
+   (`rtFallback` "the acceleration structure is being built").
+
+Why each step is shaped so (measured, dev iGPU 780M):
+- **One committed buffer per BLAS** (BLAS, scratch, index upload) cost ~1.2 ms each to create and as much again to
+  free: a stage's 922 BLASes took 1.15 s to record and 0.38 s to release - the old first stage frame was 1.68 s.
+  Sub-allocated, the same batch records in 40-50 ms, on its thread.
+- **Small allocations on purpose**: the driver creates a buffer under a lock that the frame's own allocations (the
+  TLAS's instance upload, every frame the car moves) wait on. With 32 MB arenas the frame after a new car waited
+  143 ms for the batch's thread; at 4 MB each creation holds it about a millisecond.
+- The GPU part is small: the i20's 71 BLASes (202k triangles, 31 MB) 8 ms, a stage's 922 (439k, 69 MB) 39 ms.
+- **The renderer's RT targets** (outputs and histories, 11 textures at the render size) are made with the renderer
+  and on a resize (`Rt::PrepareTargets`), not by the first frame that traces: 95 ms at 1080p, most of the frame a
+  stage's first BVH landed in. A new descriptor heap only rewrites their views (`WriteTargetViews`) - recreating
+  them dropped every history on the screen whenever a mesh appeared.
+- The any-hit buffers are rewritten in place when big enough (made with a third to spare), and a pool upload for a
+  mesh still building only moves the dynamic-vertex view (`FollowDynamicPool`), not the heap.
+- **A superseded world is kept** while its successor builds (a hide or first move rebuilds the world's BLAS): its
+  identity instance stays, or the whole stage would leave the rays for those frames. A new scene empties the cache
+  first (`Rt::ForgetScene` in `Renderer::Load`), so an old stage is never kept.
+- **History when it lands**: a landed mesh's instances go into that frame's instance table as occluders that were
+  10 km away (`kRtAppearedFrom`), so `Allow` gives the pixels whose rays hit them no history (4.5) - the new shadow
+  and AO come in at once instead of fading in over the old "unoccluded"; the next frame's table is the ordinary
+  one (`InstancesStale`). And whenever the RT path turns on again (the first BVH of a load, `K`, shadows on), its
+  histories are reset: they are from whenever it last ran.
+
+Measured (dev iGPU, 1080p, whole-frame wall time / GPU `frameMs` of the frame before; machine noise +-10 ms):
+
+| event | before | after |
+|---|---|---|
+| Garage, i20 R5 put on (71 BLASes) | 218-230 ms (record 176: BLAS 92 CPU + 8 GPU, release and the rest 38) | 59-71 ms; with RT off the same frame is 54-57 |
+| Garage, Fabia RS Rally2 after the i20 (92 BLASes) | 328 ms | 98-124; RT off 104-105 |
+| the frame the car's BLASes land (1-2 frames later) | - | publish 7-12 ms CPU (any-hit buffers, heap, TLAS) |
+| stage 41 load, first frames (922 + 2 BLASes) | 1676, 103, 51 ms | 87, 42, 74 (the world lands: publish 13-18 ms), 53, 50; RT off 97, 112, 88 |
+
+- **Keyed objects get their own BLAS from the load** (`InRtWorld` excludes them): a car going through a row of
+  barriers used to rebuild the 92 MB world BLAS once per barrier - worst frame 292 ms -> 89 ms.
+- Models (`.ngg` NGGD/NGGE): a BLAS per submesh of the model's `rtLod`, a TLAS instance per placement and submesh,
+  cached until a placement edit (`Scene::DescribeModelsRt`). Replaced plant cards are degenerate and left out.
+- Every instance carries its last-frame transform and `moved` = travelled more than `kRtMovedMin` (2 mm) this frame
+  (`Travel` over the box corners) - a car idling is re-posed every tick by a hundredth of a millimetre, and treating
+  that as motion cut the AO history around it.
+- Instance masks: `kRtMaskAll` on all, `kRtMaskFocus` on the reflection focus (the car) - its reflection rays
+  (`ReflOpen`, scene pass) trace only the car. So the TLAS is kept current **whenever the adapter ray traces**, on
+  the cascades path too (`Scene::SetReflectionTlas`).
+- An unchanged reflection focus is not a scene revision (an idle editor refitted its TLAS every frame).
+- Scratch buffers are created in `COMMON`; asking for UAV earned a validation warning per rebuild. The world BLAS is
+  built from `Scene::m_staticIndices` (CPU copy), never read back from an upload heap.
+
+**Foliage: the any-hit test is the rasteriser's own.** A BLAS has two geometries: opaque (`GEOMETRY_FLAG_OPAQUE`)
+and alpha-tested (no flag, every hit is a candidate). `Occluded` (`shaders/rt_common.hlsli`) looks the triangle up
+through `gInst[CandidateInstanceID()]` (alpha-triangle base, vertex base, static or dynamic vertex buffer, material),
+rebuilds uv0 and vertex alpha from the barycentrics and tests texture alpha x vertex alpha against the material's
+cutoff - so a leaf blocks exactly the pixels it was drawn with. Texture alpha at a **fixed LOD 2** (a ray has no
+footprint; mip 0 gives a shadow sharper than the leaf on screen). On top:
+- **A plant's rays skip its own plant** (by id, `gTriPlant` vs the prepass plant id): crossed cards of one tree
+  shadowed each other card by card. Other plants and everything opaque still count; the plant's own volume shading
+  is the pixel shader's (`FoliageSelfShadow`).
+- **Plant kind decides what it casts** (packed in uv1.y): grass casts no sun shadow and no AO, a bush half its hits
+  (lighter, softer after the denoise), trees in full.
+- **Legacy cards** (an import's remaining alpha cards) and **any alpha card that is not a plant** take the card's
+  plane towards the camera as normal and skip cards within `kLegacyCardSkip` (1.5 m) - RBR's 75 m forest walls shadowed
+  themselves along a straight line.
+- The leaf pass/fail counters (`Rt::LeafHits/LeafMisses`) stay: "cutting leaves out" and "rejecting everything" look
+  the same from a distance.
+
+### 4.3 RT sun shadows
+
+`shaders/rt_trace.hlsl`, one ray per pixel to a point on the sun's disc, `tMax` 4000 m.
+- **Surface**: `SurfaceAt` - depth through the inverted jittered view-projection, the prepass normal. Shared by
+  every ray type, so their origins never differ.
+- **Origin**: normal offset, the normal flipped towards the sun (a two-sided card is pushed to the side the ray
+  leaves), `0.02 m x (1 + 0.002 x distance)` - depth precision falls with distance. The old 5 cm step along the ray
+  skipped exactly the occluders within 5 cm, which is where grass shades the ground (shadowed pixels 1.3 % -> 5.1 %).
+- **Soft shadows**: the sun is a disc of angular radius `0.00465 x sunDiscSize` - the same `sunDiscSize` the sky draws,
+  so the visible disc and the penumbra agree by construction. Uniform over the disc (`sqrt` on the radius).
+- **Stratified over 4x4 pixel tiles** (`StratDisc`; the lamps' pick `StratU`), the pattern shifted every frame: with
+  white noise a 5x5 window drew its samples unevenly and the denoiser kept that luck as blotches.
+- The raw result is `R16_FLOAT`; `EncodeRaw` stores a hit on a moved object as a negative value carrying the history
+  weight its rays allow (4.5).
+
+### 4.4 RT ambient occlusion
+
+`shaders/rt_ao.hlsl`: **cosine-weighted** hemisphere rays (the plain hit/miss mean IS the occluded fraction of the
+diffuse ambient), radius 3 m, the same surface, origin and any-hit test. It scales the **ambient terms only** (sky,
+ground bounce, ambient specular), never the sun. **The radius is where occlusion stops and GI starts**: a far wall
+blocks sky but also reflects light nobody simulates, so beyond 3 m the answer is "unoccluded".
+- **One ray per pixel** by default (tier medium; `NGG_AO_RAYS`), the denoiser accumulates. Measured (plugin viewer,
+  lab forest): RT 7.87 -> 4.28 ms, mean AO identical, +17 % frame-to-frame noise at rest.
+- Stratified over 4x4 tiles (`AoSample`), n rays split their cell along the azimuth; the denoise window spans exactly
+  one period (outer ring weighted 0.5), so on a flat surface its mean is a 16-sample stratified estimate.
+- A plant's card looks **up**, not along its plane: half its hemisphere was ground, which the ambient already lights
+  from below; grass came out ~7 % darker than without AO.
+- AO is traced only when applied; a frame without it drops the AO history.
+- **Under an upscaler at <= half the output's pixels the AO traces twice the tier's rays** (`Renderer::AoRaysTraced`),
+  so its grain is not blown up into blotches 1.5-2x the size.
+
+**The wide pass** (`shaders/rt_ao_wide.hlsl`, AO and local lights): where the history was cut (moved occluder,
+disocclusion, a slow occluder that did not allow it all, a moved object's young history) the denoised result is
+averaged again over 13x13 (5x5 taps 3 px apart, the same depth and identity rules). Spatial only, so it cannot trail;
+not fed back into the history.
+
+### 4.5 Denoising and history rules
+
+`shaders/rt_denoise.hlsl`, one shader for the sun, the AO and the local lights (`Rt::Denoise`); histories are RGBA16F
+pairs: x visibility, y NDC depth, z distrust, w identity / allowed weight / youth. **The visibility is filtered before
+the lighting sees it**: the colour TAA's variance clip exists to reject history that disagrees with the neighbourhood,
+which is what a converging penumbra looks like, so it never converged.
+
+1. **Spatial**: depth-aware 5x5 mean (relative linear depth within 3 % of what the pixel's **plane** predicts -
+   `Slope`; a flat test rejected most of a grazing road), and **identity-aware**: a moved object's pixels and static
+   ones never mix (the road under a bumper is within 3 % of it). Loaded once per group into a 12x12 shared window.
+2. **Temporal**: reproject by the unjittered camera, or by the prepass motion for a moved object's pixel; accept
+   only the same surface (3 % + half a pixel's slope) and the same identity.
+3. **Neighbourhood clamp**: the history may not leave this frame's mean +- (sigma + 0.5/sqrt(n)).
+
+| weight | sun / lights | AO |
+|---|---|---|
+| history (`blend`) | 0.85 | 0.85 (0.92 lagged once the car drove) |
+| pixel still on screen (< 1/4 px, `blendStill`) | 0.95 | 0.95 |
+| a ray hit a moved object (`blendMoved`, floor) | 0.25 | 0 |
+
+**History rejection - what the past may not carry:**
+- **Moved occluders**: a ray that hits a moved instance says how much history it allows (`Allow`): the hit point's own
+  travel this frame against the softness of the shadow there (hit distance x the light's angular size; for AO x
+  `kAoPenumbra` 0.15), keeping the lag within `kLagShare` 0.3 of the penumbra. A driving car allows nothing (no trail);
+  the Garage's turntable car, millimetres a frame, keeps most (no grain round it). The distrust fades over four
+  frames (1 then -1/8 a frame), and TAA reads it.
+- **No ghost behind the car (AO)**: AO's `blendMoved` 0 and `kAoPenumbra` 0.15 (was the whole distance) - the road
+  behind a driving car kept the car's occlusion where it had been; bias against no-history 18 km/h -10.29 -> -0.39
+  grey.
+- **The road a car has left takes no history**: a moving object counts as "standing" (its pixels may swap with the
+  world's at a jittered outline) only if one of its pixels is in the 5x5 and none moves against the world. Where none
+  is there any more, the object has gone, and what it uncovered starts over (golden replay, TV camera: copies of the
+  car on the shaded road, blurred error 5.04 -> 2.40).
+- Ground uncovered this frame (last frame's pixel was a moved object's) counts as touched, allow 0.
+- **A mesh whose BLAS just landed** (4.2: a car, a prop, a stage's world) is an occluder that was 10 km away last
+  frame, for one frame: its hits allow nothing, so its shadow and AO are in at once, not faded in over "unoccluded"
+  (Garage shots: the Fabia's contact shadow complete in its second frame, no trail). The RT path turning on again
+  resets all three histories.
+- **A moved object's own pixels keep their history** (reprojected by their motion; their occluder is mostly
+  themselves). Its young history (just out from behind a panel) is a running mean of its frames, youth counted in
+  32nds in w, and widened while young.
+- **Camera cuts**: `FrameDesc::camera.cut` -> `Renderer::ResetHistory` -> `Rt::ResetHistory` (all three histories),
+  XeGTAO's sequence, TAA and exposure. The stage flags a cut on another camera mode, another TV camera, or an eye 10 m
+  from the last frame's. Without it a still camera kept the old view for its long still history (car side +1 frame
+  39.1/61.8 -> 0.7/13.5, x1e-3).
+- `NGG_RT_NO_HISTORY=1`: no history and no wide pass - grainy but unbiased, the reference `tools/car-ghost`
+  (`check-car-ghost.sh`, `ghost.py`) measures ghosts against (fails a mean bias over 1 grey).
+
+**Pitfall:** the denoiser ping-pongs its histories, so `Rt::Filtered()` changes pointer every frame; a "ready" flag
+reset on a new resource turned RT shadows off silently. The flag now gates only the descriptor write.
+
+### 4.6 Cascaded shadow maps
+
+The non-RT path's sun (`modules/renderer/src/core/shadow.*`, `Scene::RenderShadows`), drawn only by
+`CascadeVisibility`. **Not drawn at all on the RT path** - four full-scene passes were the most expensive thing in
+the frame. Four cascades at 2048^2 (`R32` typeless, conventional depth), split 1-1500 m with a log/uniform blend
+(lambda 0.85), depth-only through the scene's own `VSMain`.
+
+| choice | why |
+|---|---|
+| bounding-sphere fit per cascade, radius rounded up | rotation-invariant: the projection does not breathe as the camera turns |
+| texel snapping of the light-space origin | sub-texel camera motion otherwise moves edges (shimmer that reads as a filtering bug) |
+| normal-offset bias by the texel's world size, x(1 + 2 slope), x3 for alpha-tested receivers | scale-correct per cascade; depth bias trades acne for peter-panning |
+| 3x3 hardware PCF (`SampleCmpLevelZero`) | 36 samples' worth for 9 fetches |
+
+Casters culled per cascade volume; glass and far scenery cast nothing; alpha-tested casters through the shadow pixel
+shader, two-sided; models instanced, one LOD, billboards turned to the sun. A sun below the horizon skips the pass.
+**No penumbra** (no PCSS on the sun), no cross-fade between cascades; edge softness varies with cascade texel size
+(~4 cm to ~2 m).
+
+**Pitfall: an unwritten D3D12 descriptor reads as zero, silently.** A shadow SRV never written made every
+`SampleCmp` fail - the whole world shadowed. Stored depth 1.0 = empty map, 0.0 = descriptor never written, ~receiver
+depth = bias too small. Empty material slots are bound to a white fallback for the same reason.
+
+### 4.7 XeGTAO
+
+`modules/renderer/src/core/gtao.*`, `shaders/gtao.hlsl`: Intel's XeGTAO (`third_party/xegtao`, MIT, unchanged) at the
+render size - the AO wherever the renderer runs (needs only the prepass), and the cheap AO a ray-traced frame can take
+(`NGG_AO_SOURCE=screen`). It writes the same AO slot (`Scene::SetRtAo`, R8), ambient terms only.
+- FP32 view-space depth MIPs (5): a stage's depth runs to kilometres, where FP16 has half a metre.
+- Reverse-Z and jittered depth: the constants come from the reverse-Z projection and the reconstruction is shifted
+  by the jitter.
+- **Normals from the depth by default** (`NGG_GTAO_NORMALS=prepass|depth`): the prepass's smooth shading normals put
+  dark bands along the terrain's triangle edges.
+- Radius 1.5 m (x1.457 inside XeGTAO: ~2.2 m; 2.5 blotched near leaf cards, 1.0 hardly reached the car), thin-occluder
+  compensation 0.5, three edge-aware denoise passes (fence bars before a passing door: grain 5.22 -> 2.47; RT 2.99).
+- **No temporal accumulation of its own**: the noise walks with the frame (64-frame sequence) when TAA/FSR/DLSS
+  follows, and stands still otherwise. A cut restarts the sequence.
+- Quality by tier (medium 2 slices x 2 steps, high 3 x 3; `NGG_GTAO_QUALITY=0..3` overrides); each quality's main
+  pass is compiled when first used. Other switches: `NGG_GTAO_RADIUS`, `NGG_GTAO_THIN`, `NGG_GTAO_DENOISE=1..3`.
+
+**AO selection**: `AoSource` on `RtVisibility` only (`Renderer::SetAoSource`); the cascades always take XeGTAO. The
+readout (`RenderStats::aoSource`, interface 14) says "ray traced, 1 ray" or "XeGTAO medium"; `aoMs` is the chosen
+one's time.
+
+### 4.8 Local-light shadows
+
+The lights themselves (clusters, beams, units) are described with the lighting; this is how they are shadowed.
+
+**With RT: every shadowed light, one ray per pixel however many lights** - the ratio estimator (Heitz et al. 2018,
+`shaders/rt_lights.hlsl`). The scene pass sums every light's unshadowed light; the tracer picks one light of the
+pixel's cluster in proportion to what it gives there (stratified `StratU`), traces one ray to a point on its emitter,
+and the denoised 0/1 is the shadowed fraction of the sum. Denoised as the sun's, widened as the AO's (debug view 15).
+`NGG_LIGHTS_REF=1|2`: a ray to every lamp, or 16 picks averaged - the references.
+
+**Without RT: spot/beam shadow maps with PCSS** (`Scene::RenderLocalShadows`, `CascadeVisibility` only).
+`Lights::Build` scores the shadowed spots and beams by peak / camera distance^2; lamps of one mounting share a map;
+at most `kShadowSlots` 4 perspective maps at 1024^2 (near 0.05 m, far <= 150 m, half-angle <= 70 deg); point lights
+stay unshadowed. `LocalShadow` (`scene.hlsl`): blocker search of 4 gathers, penumbra from the emitter's radius, 12
+rotated comparison taps (one tap when the penumbra is under 1.5 texels); one lookup per mounting per pixel.
+- A **moved-shadow mask** for TAA (the casters' kind beside each map; RGBA16F, four frames) stands in for the RT
+  lights' distrust: without it the car's spotlit shadow left copies on the turntable.
+- **XeGTAO takes a share of the local lights' diffuse at night** (0.5, faded in as the sun sets, none by day): at night
+  the ambient it scales is almost nothing, and the car floated on the turntable. `NGG_LOCAL_SHADOWS=0`,
+  `NGG_LOCAL_AO=<share>`, `NGG_LOCAL_SHADOW_TURN=0` for A/B.
+
+### 4.9 Costs measured
+
+**Why RT is the default path** (plugin-era viewer, `track-108`, earlier hardware state; the shape still holds):
 
 | | |
 |---|---|
-| triangles | 337,944 |
-| **connected components** | **38,033** (from 1167 objects — ~33 plants welded per object) |
-| triangles per component | median **6**, p90 10 |
-| footprint | median **1.3 m**, p90 5.1 m |
-| taller than wide, footprint < 25 m | **14,579 (38%)** — tree-like |
-| flat, height < 0.35 × footprint | 2,494 (7%) — grass/ground |
-| sprawling > 40 m | **98 (0.3%)** — genuinely merged or not vegetation |
+| one sun ray per pixel | ~2 ns per ray, linear: 0.47 ms / 194k px, 1.8-2.0 ms / 967k px |
+| frame: cascades, no prepass -> prepass + RT shadows | 53 -> 34 ms |
+| track start view: RT shadow / RT shadow + 2-ray AO / cascades | 0.86 / 2.25 / **2.93** ms - on real geometry the four cascade passes cost more than the rays |
+| lab forest: shadow without -> with foliage any-hit | 1.29 -> 1.89 ms (+46 %): any-hit is not the problem |
+| AO share of the ray tracing (2 rays) | 75-80 % - hence one ray |
+| world BLAS, `track-108` (594k tris) | 92 MB, built in 65-94 ms |
 
-Median 6 triangles is 2–3 crossed cards: one bush. The de-merging works.
+**W-Rally, 1080p:**
 
-**Shape alone is NOT enough to classify, and this is where it would go wrong.** The largest components are not
-vegetation at all:
-
-- `MB_SUPERBOWL_4.tga`, 946 tris spanning **7326 × 665 × 5347 m** — the distant terrain backdrop, alpha-tested
-- `MB_FENCE002.tga`, several components of 400–540 tris — **fences**, which are §9b item 4, generated from a
-  point list and deformed at runtime. Replacing those as vegetation would be actively wrong.
-
-So classification needs **texture name AND shape**, with fences and backdrop excluded explicitly rather than
-filtered out by a size threshold that happens to work on one track.
-
-**Effort, honestly split:**
-
-| | |
+| | ms |
 |---|---|
-| detection / de-merging | **easy** — the analysis above is essentially the implementation |
-| classification (tree / bush / grass / fence / backdrop) | moderate; heuristics plus a review pass, and it wants validating per track |
-| replacement assets | **the actual project** — a vegetation library or generator, this is where the time goes |
-| rendering 38k instances | needs GPU instancing + LOD, which is also where the performance comes back |
+| RT AO (1 ray) + denoise / XeGTAO medium (/ under FSR Quality) | 5.9 + denoise / 2.2 (1.3) |
+| stage 41 ray tracing, without -> with model trees (LOD1 traced; opaque trees 11.0) | 8.9 -> 12.6 (the alpha tests, not the triangles) |
+| three local lights over the screen: light rays + denoise | 3.2 + 0.8 |
+| local shadow maps, cascades path: Garage 12.7 -> 14.4 frame (maps 0.37); night stage, 3 maps | ~0.9 |
+| keyed objects' own BLAS: worst frame driving through barriers | 292 -> 89 |
+| `RenderStats` | `rtMs` (all traces), `aoMs`, `denoiseMs`; per-pass stamps in `Rt::ReadStats` |
 
-That last row is worth noting as a *benefit*: 38,033 instances of a few source meshes is far cheaper to draw
-than 338k unique triangles, so this pays for itself in frame time as well as looks.
 
-**Fairness constraint (§3.6):** collision comes from `.col`, not from these meshes, so replacing the visual
-geometry does not change what is drivable — provided the collision data is left untouched. That has to stay
-true, or the replacement becomes a gameplay change rather than a visual one.
+## 5. Weather, surfaces and night
 
-This is also the honest fix for the dark-card problem in §5.0: no shading model rescues crossed-card geometry,
-and this is the path that removes the cards.
+### 5.1 Weather presets and what the renderer does with them
 
-### 7.3 AI in the nearer term
+**A preset is ours and physical; RBR's `TrackSettings.ini` is only an import source.** Its numbers are art knobs for a
+2004 shader, not physics (measured over its ~760 sections: `Turbidity` −2.8…9 with a median of 0, the Mie phase
+`Greenstein_Value` 1.0 - a delta function - in most, track-108's clear sky at `Rayleigh_Multiplier` 0.025), so they
+are not copied. What does translate is the **condition in the section name** (`<map><variant>_<haze>_<cloud>`, e.g.
+`41O_M_lightrain_heavycloud`), the fog distances (visibilities), `SunDir` and the terrain reflectance.
 
-Full stage generation is the far end. The same infrastructure serves things that pay off much sooner and should be
-treated as the same feature, not a different one:
+**Format** (`modules/renderer/src/core/weather.*`, `WeatherPreset`): sun (direction the light travels, intensity),
+turbidity, ground albedo and colour, cloud cover 0..1, fog visibility (Koschmieder, metres: contrast 2 % there; 0 = no
+fog) and fog layer height, rain and snow 0..1, exposure, optional time and place (5.4), `source` provenance. Two forms:
+versioned `ngg-weather` JSON (`WeatherToJson` / `WeatherFromJson`, for projects and the editor; unknown keys ignored,
+missing ones keep defaults) and binary records in the `.ngg`'s **NGGW** chunk, which is all the runtime reads
+(`ParseWeatherChunk`, `Scene` at load). Presets live inside the file - covered by its CRC, part of an event's
+definition; a loose file beside the game would let a competitor thin the fog. The first record is the default.
 
-- **Texture upscaling and material synthesis** — already in §3.3 as an offline step; generated normal/roughness/
-  emissive maps from a 256×256 2004 diffuse texture is a large visual win per unit of effort.
-- **Light placement** — §5.3's auto-extraction from the `_N` baked variant is exactly the kind of task a model does
-  well, and the format already marks `provenance=auto|authored` so machine output stays distinguishable from a
-  human's and survives reconversion.
-- **Detail injection** — scattering generated vegetation/props over converted tracks using the `.MAT` surface
-  classification as the placement mask. Purely additive, `free`-bound, and it makes converted tracks feel new
-  without touching a single original vertex.
+**NGGW grows by appending** (`format/ngg_format.h`): `version` stays 1, `WeatherRecord` is 160 bytes (124 before the
+time and place); a reader takes `min(recordSize, sizeof)` bytes over `DefaultWeatherRecord()`, so an older record reads
+as "no time set". `static_assert`s tie the format default to `SkyParams` and `SkyTime` defaults.
 
-### 7.4 Fairness, again
+**Import** (`game/src/assets/legacy_weather.*` over `game/src/formats/track_settings.*`): the `.lbs` importer
+(`assets/legacy_stage.cpp`) writes every section of the stage's map into the imported scene, the default first (the
+stage's own time of day, `crisp_clear` if present). The translation, made once:
 
-Generated and augmented content changes what players see, so it lands in the same check chain as everything else
-(§3.6): the `.ngg` hash and the generator id/seed/input hash from `NGGH` are registered per event. "Reproducible
-from a recorded seed" is the property that makes generated content admissible in competition at all — which is why
-it's a header field rather than a comment.
+| name word | becomes |
+|---|---|
+| `hazy` | turbidity 3 |
+| `partcloud` / `lightcloud` (and misspelt `ligthcloud`) / `heavycloud` | cloud cover 0.35 / 0.6 / 0.95 |
+| `lightfog` / `heavyfog` | visibility = `FogEnd` when `UseFog` (else 1500 / 300 m), 150 m layer, turbidity 2 |
+| `lightrain` / `heavyrain` | rain 0.4 / 1, turbidity 3 / 4, visibility 6000 / 2500 m under a 600 m layer |
+| `lightsnow` / `heavysnow` | snow 0.4 / 1, turbidity 3 / 4, visibility 3000 / 800 m under a 600 m layer |
+
+Repairs RBR's file needs: decimal commas in `SunDir` (`0,64`) read as points; a sun at or within ~3° of the horizon
+(48 presets, overcast mostly - RBR's hand-set ambient made it irrelevant) is raised to ≥ ~10° on the same bearing, or
+a physical sky draws night. **Every RBR stage is daytime: M morning, N NOON (suns ~50° up), E evening** - `N` is not
+night. Map numbers are zero-padded (`04M_...`, `formats::TrackSettingsMap`).
+
+**Selection.** The preset's **name is its identity**: the game asks `findWeatherPreset(name)` and sends
+`FrameDesc::weatherPreset` (index; 0 the default) or `-1` with an explicit `FrameDesc::weather` (`WeatherDesc`, 60
+bytes). A name the file lacks falls back to the default, logged by the game. Quick rally picks a stage file by the
+preset's time of day (`assets::Stage::TimeOf`) and may override the preset's sky (`--sky clouds,fog,rain`: fog 0..1
+maps to 6 km..150 m) and the road (`--road`). So a preset the game should select must carry the section-style name of
+the condition it stands for; free names work only by explicit `--weather`.
+
+**Rendering, all in the one atmosphere** (`shaders/atmosphere.hlsli`, `AtmSetWeather`), so sky, environment,
+irradiance and the aerial table agree:
+- **Fog**: an exponential height layer on the camera's ground, composited **analytically** (closed-form optical depth
+  - the view march's kilometre steps would step over a 150 m layer), lit by the sun into it (Mie phase) and a diffuse
+  field (half sky, half ground bounce); the direct sun at a surface inside it is attenuated through the layer.
+- **Clouds**: a uniform deck. Direct sun × `1 − 0.98·smoothstep(0.3, 1, cover)` (`AtmCloudSun`); the sky turns toward a
+  CIE overcast dome at 30 % of the clear global irradiance; the air is lit by the deck's diffuse light. Clear-sky
+  diffuse uses the fit `0.064 · I · sin(elev)^¼` (within ~5 % from 10° to 50°).
+- A clear, fog-free preset leaves the weather path untouched.
+- `rain` / `snow` are carried but draw nothing themselves (no particles); wetness is separate (5.2).
+
+Pitfall: HLSL starts a `float2` on a new register rather than straddle one - the sky's constant buffer once read its
+jitter and weather one slot off. A CB struct mirrored in C++ needs explicit pads and `static_assert`ed offsets.
+
+### 5.2 Wet surfaces and puddles
+
+**The wetness shown is the road's, not the sky's**: rain that has stopped still leaves the road wet. The game sends
+its road state as `FrameDesc::wetness` (dry 0, damp 0.5, wet 1; `game/src/app/game.cpp` from the physics' wetness,
+which also picks an import's wet textures); the shader reads it as `gWetness`. The weather's `rain` does not set it.
+
+**Shading** (`shaders/scene.hlsl`, opaque non-alpha-tested, non-glass variants only; after Lagarde, "Water drop 2b"):
+
+| term | rule |
+|---|---|
+| exposure to rain | `(0.5 + 0.5·N.y)` (up full, walls half) × `lerp(0.35, 1, AO)` (sheltered stays drier) |
+| porosity | from roughness, `saturate((r − 0.3)/0.5)`; albedo × 0.85 (smooth) .. 0.45 (porous) when wet |
+| gloss | roughness capped at 0.25 when fully wet; the environment's split sum then gives the sky's sheen down the road |
+| grass | green-dominant albedo: no puddles, wet roughness only down to 0.6 (else lawns became blue-grey mirrors) |
+| puddles | ground layer only, wetness > 0.5: world-fixed two-octave value noise (~3 m and ~1 m cells), threshold 0.74 (damp) → 0.62 (wet), flat ground only (N.y > 0.93); albedo × 0.35, roughness 0.02, normal turned level |
+
+RBR's materials carry no grass tag; the albedo colour test stands in until materials are tagged (plants come from
+Wallaby's tags, not heuristics - this is a surface heuristic, kept until the format has a surface class).
+
+### 5.3 Glass and blended materials
+
+**`kMaterialBlend` is drawn blended, in its own pass after everything opaque** (`Scene`, `m_psoBlend`): sorted far to
+near by box centre, depth tested (reverse-Z), no depth write, over the sky too. Format bit: `kMaterialBlend = 1 << 3`
+in `.ngg` (bit 2 stays unused - it was v2's single-stage, and a reused bit is a misread waiting to happen); the
+interface's `iface::kMaterialBlend` is bit 2 and the module maps it. Blend wins over the alpha test.
+
+- **Premultiplied** (ONE, INV_SRC_ALPHA). The `BLEND` shader variant scales the tint's light (diffuse, baked colour,
+  local lights' diffuse, aerial in-scatter) by coverage = base alpha × vertex alpha × factor; the **reflection stays
+  whole** (sun GGX, environment / probe). A clear pane reflects as much sky as a tinted one. glTF's `BLEND` scales
+  everything and reads as a matt film.
+- **No screen buffers of its own**: RT sun visibility, AO and the local lights' shadowed fraction are the opaque
+  surface's behind the pane, so glass takes AO 1, the sun unshadowed under RT (the cascades it looks up as anything
+  does) and local-light visibility 1.
+- **Casts no shadow, not in the BVH** (cascades, local shadow maps, `DescribeRt` skip it): the sun reaches the seats.
+- **Not in the depth prepass**, so the ray tracer and TAA see what is behind it. A moving object's glass writes only
+  its own motion in the prepass (`PSGlassMotion` into `kGlassMotionFormat`), so TAA never treats moving glass as still
+  (no headlamp-lens smear).
+- **The car** (`game/src/assets/car_render.cpp`): only real glass is glass - shader class `CarGlass` / `CarIntGlass` /
+  `CarLight` or a mesh named for it (`e_lightglass_*`, `e_window_*`) goes in as `kMaterialBlend | kMaterialTwoSided`,
+  roughness 0.05; other transparent textures (grilles, vents) are alpha-tested holes. Rules in
+  [car-pbr.md](car-pbr.md).
+
+Measured on the i20 (stage 41, chase): the rear window went from 0–5/255 (black cabin through a hole) to ~85 - the
+sky's reflection, ~10 % at that angle, as Fresnel gives. Physically right; lighter than RBR's dark windows.
+
+### 5.4 Time of day: date + time + place
+
+**Night is W-Rally's own** (RBR has none) **and any stage can be driven at any hour**: a date, a local time and the
+stage's latitude/longitude give the sun, the moon, its phase and the stars. Decided 2026-10-30 with three more (5.5).
+
+- **Astronomy** (`core/astronomy.*`, Meeus): the sun's low-accuracy method, the moon's main terms, its lit fraction,
+  sidereal time; dynamical time = UT, no refraction. World axes x east, y up, z north, turned by `northDeg`. CTest
+  `astronomy-check` against Meeus's worked examples (sun 0.00001°, moon longitude 0.0007°, distance 29 km, lit
+  fraction 0.002) and the solstice noon sun at 50 N (63.44°, due south, 13:04 CEST).
+- **Interface**: `FrameDesc::skyTime` (`SkyTimeDesc`, `set` = 1) puts the sun there over any weather; a preset may carry
+  its own time (`WeatherPreset::timeSet`, JSON `"time"` / `"place"`). `RenderStats::sunElevationDeg` reports the
+  frame's sun back (the game's lamps switch by it). Game: `--time HH:MM [--date] [--utc-offset] [--latitude]
+  [--longitude] [--north]`; defaults 21 June, UTC+1, 50 N 14.4 E, north 0. Quick rally: `quick_time` on a season's
+  date (`app::QuickDate`; autumn 2026-10-15, UTC+2: dusk ~18:30). **No stage carries its own place yet**: every stage
+  uses the default latitude and north 0.
+- **The light passes to the moon at the end of civil twilight** (sun −6°, `ApplySkyTime`): the one directional light -
+  direct light, its RT shadows, the aerial table - becomes the moon's, at a full moon's 2.3e-6 of the sun's
+  illuminance × its phase brightness (Krisciunas-Schaefer, 0.026a + 4e-9a⁴ mag over phase angle a). The direct sun is
+  long gone by −6°, so the ground shows no handover.
+- **The sky is both bodies'** (`SkyParams::light2`): the moon's sky through the dusk, the sun's twilight into the night,
+  only while it shows. The first handover at −11° jumped (a full moon's sky outshines the twilight there); either side
+  of −6° the picture is now the same.
+- **Moon disc** (0.52°, by day too): a sphere lit by the real sun, so the phase draws itself; albedo 0.12, earthshine,
+  atmospheric extinction.
+- **Stars** (`shaders/sky.hlsl` `Stars`): procedural on the equatorial sphere (cube-face cells, ~9,000 to magnitude 6,
+  N(<m) ~ 10^(0.5m)), rotated by local sidereal time; each a pixel-wide gaussian holding its flux (resolution
+  independent); magnitude 0 = 2.3e-11 of the sun's irradiance.
+- **Night glow** (airglow + starlight, ~0.001 lux) in `AtmSkyRadiance`, brighter to the horizon, dimmed by cloud: what
+  lights a moonless night.
+- **Exposure** (`core/post.cpp`, `shaders/meter.hlsl`): the meter reaches 2^-32 (the day's 2^-12 floor froze it at
+  night); beyond `kNightKnee` 3 EV under the day's grey only `kNightSlope` 0.75 of the rest is made up - full moon ~4 EV,
+  moonless ~6 EV under the day: dark, readable. **At night the lit patch sets a floor**: the metered level is at least
+  3 EV under the 97th percentile, blended in over 2 EV past the knee (day unchanged) - else the black sky and verge
+  open the exposure and the headlamp patch and everything reflecting it clip white.
+- **Night vision** (`post.hlsl` `NightVision`): per pixel, on scene luminance before exposure; full colour to 8 EV
+  under the day's grey, rods only (desaturated, Purkinje blue shift) from 17 EV. A surface in a beam keeps its colour
+  beside a colourless moonlit verge.
+
+Without a time set (or by day) the frame is unchanged: the day's mean difference against pre-night builds 0.03/255.
+`PHYS_DRIVE_LOOK_UP=<deg>` tilts the view to the sky for checks.
+
+### 5.5 Local lights: car lamps, the light loop, limits
+
+**The decisions (2026-10-30, the user's):** (1) scope = car lights, the night sky and stage lights; (2) time = date +
+time + place (5.4); (3) **every light is shadowed**, by ray tracing at one ray per pixel however many lights, not a
+"few shadowed, the rest fill" split; (4) car lights are the **car's**, per lamp, each with its own character.
+
+**Interface** (`iface::LightDesc`, 176 bytes; `FrameDesc::lights` / `lightCount`): point, spot or **beam**; world
+position, axis and up; linear tint; intensity in **candela**; range (0: from intensity to 0.1 lux, at most 1 km - a
+pencil beam's reach); emitter radius (shadow and highlight softness); a spot's inner/outer half-angles;
+`kLightNoShadows`. A beam (`kLightBeam`) is the sum of up to 4 `LightLobe`s in the lamp's own frame: an elliptical peak
+in candela that halves at the half-width across and half-height up/down, centred a yaw and pitch off the axis, with a
+`sharpness` (2 gaussian, higher = flatter top, harder edge - a dipped beam's cut-off); `I = Σ cd · 2^-(q^(s/2))`.
+Units: 1 cd at 1 m = 1 lux = 2e-4 of the sun's irradiance unit (`Lights::kCandelaToUnits`; 22 = ~110,000 lux).
+`RenderStats::lightsMs`, `lightCount`.
+
+**Clusters** (`core/lights.*`, `Lights::Build`): the view in 16 × 9 tiles × 24 exponential depth slices (0.25–1000 m),
+built on the CPU per frame (conservative screen box and slice span per light; a spot or beam culled by its cone against
+each cluster's bounding sphere), uploaded and copied to default-heap buffers that the scene pass and the ray tracer
+both read - **both see exactly the same lights**. Limits: 512 lights, 65,536 index entries. Per-light constants that a
+light alone decides (`invRange2`, `spotScale`, lobe tangents) are computed on the CPU (`GpuLight`, 208 bytes, mirrored
+in `shaders/lights.hlsli`).
+
+**Shading = the ratio estimator** (Heitz, Hill, McGuire 2018). The scene sums every light's **unshadowed** light
+exactly (Lambert + GGX; foliage cards the wrapped cosine, no highlight); `shaders/rt_lights.hlsl` picks one shadowed
+light per pixel in proportion to its luminance × cosine (stratified over 4 × 4 tiles, inverse CDF, `StratU`;
+`StratDisc` for the point on the emitter's disc) and traces one ray. The 0/1 is an unbiased estimate of the shadowed
+fraction, a smooth scalar like the sun's visibility, denoised the same way; the light is sum × fraction. The highlight
+is the emitter's: the lobe widened by the disc's angular size (Karis 2013) - a point on a wet road (roughness floor
+0.002) would peak near 1e5 × irradiance.
+
+**Deferred** (`PSDeferredLights`): while there are local lights, opaque and alpha-tested draws use GBUF pipeline
+variants that leave two 32-bit targets (`kGbufFormats`: R10G10B10A2 octahedral normal + roughness + kind, R8G8B8A8 sRGB
+albedo + metallic); one full-screen pass reads them and the depth (read-only view), rebuilds the position with the
+**jittered** view-projection's inverse, calls the same `LocalLights` and adds (ONE, ONE) × the aerial transmittance
+(`AerialAt`, recomputed). Glass stays forward, after it. Day with no lights: the plain pipelines, nothing extra runs.
+A third target and half-float normals cost +3.8 ms; packed, +0.3. `NGG_FORWARD_LIGHTS` shades in the main pass (A/B).
+
+**Rules the cost depends on:** the scene shader is `[earlydepthstencil]` (its debug-probe UAV write would otherwise
+test depth after the shader: 6.4 fragments per pixel on stage 41), the alpha-tested variant draws over the prepass depth
+without writing it so the driver tests early too; opaque draws sorted front to back. The lights' cost is per-fragment
+arithmetic (~130 VALU per light in one dependent chain), not memory - hence deferred. Lessons: buffers shaders read
+belong in the default heap, not UPLOAD; a struct copied from a buffer and indexed by a variable becomes scratch memory
+(~1.5 ms per light) - read fields by index.
+
+**Without ray tracing** (cascades + XeGTAO path): up to 4 shadow maps (`Lights::Build` picks shadowed spots/beams by
+peak / camera distance²; `Scene::RenderLocalShadows`), 1024² D32, perspective along the lamp's axis, half-angle ≤ 70°,
+near 5 cm, far ≤ 150 m. Lights of one **mounting** share a map (within 0.8 m, 0.12 m of height, axes within ~45°: a
+ramp's pods). Point lights stay unshadowed. Slot in the record's flags (bits 8–11). Sampling `LocalShadow`: PCSS, 4
+blocker gathers, penumbra from emitter radius, 12 comparison taps rotated per pixel by interleaved gradient noise.
+At night (sun 0 → −6°) the AO takes a 0.5 share of the local diffuse (`NGG_LOCAL_AO=<share>`; 0 by day). TAA would keep
+the shadow a moving car just left: maps carry a casters' kind target (`PSShadowFlag`), `PSDeferredLights` writes a
+**moved-shadow mask** (four frames of decay) that TAA takes in the RT lights' slot (`Scene::LocalShadowMask`).
+Switches: `NGG_LOCAL_SHADOWS=0`, `NGG_LOCAL_SHADOW_TURN=0` (taps unrotated), `NGG_LOCAL_SHADOW_LOG`.
+
+**Cost** (1080p, dev Radeon 780M iGPU, GPU frame `RenderStats::frameMs` - per-pass timestamps do not isolate a pass on
+this GPU; vsync quantises fps):
+
+| case | GPU frame |
+|---|---|
+| 3 test lights over the screen, RT, full clock | 15.2–16.8 → 19.2–20.7 ms (rays 3.0, denoise +0.7, shading ~0.5) |
+| ramp layout, 6 lamps, RT | +5.5–8 ms (rays 3.9: the pick weighs every lamp of the cluster; denoise +1.0; shading ~1.2) |
+| night stage, 6 lamps, cascades path (3 maps ~0.9 ms) | 18.2 → 20.0–21.2 ms (RT on ~27.5) |
+| Garage, cascades path | 12.4–13.0 → 15.5–16.1 ms (maps 0.4 ms) |
+
+Debug: `NGG_LIGHTS_REF=1` (a ray to every lamp) / `=2` (the estimator averaged over 16 picks) as the exact reference;
+debug view "RT local lights" (the lamps' shadowed fraction). Fanned lighter shadows need several lamps per patch:
+narrow, apart-aimed pods give one lamp's hard shadow, which the reference confirms.
+
+**Car lamps** (`game/src/assets/car_lights.*`). A lamp is a **beam preset** (`LampKind`) at a place in the car frame
+(x LEFT, −y forward, z up, from the CoG), aimed yaw right / pitch up; `LampLight` makes the `LightDesc` for the pose.
+Colour temperature → linear sRGB of luminance 1 (`KelvinToRgb`, Planckian locus), so candela stay candela.
+
+| preset | character (round figures, tuned on the wall) |
+|---|---|
+| `halogen-low` / `halogen-high` | 3200 / 3300 K headlamps; low with a cut-off under the axis |
+| `halogen-pencil`, `halogen-driving` | 3300 K pods: narrow hard-edged spot / wider driving beam, each with a dim wide spill (~7 % of peak) |
+| `led-bar` | combo: 6 × 3.5° spot 150 kcd, 18 × 6° 30 kcd, 40 × 10° flood 10 kcd, all soft (no cut-off) |
+| `ditch` | cornering lamp, aimed to the side |
+| tail, brake, reverse, indicator | coloured, no shadows; indicators amber 1.5 Hz (no RBR car has them) |
+
+- **Places from RBR's car `.ini`** (`LoadCarLamps`: `Point_light_lf/rf/lb/rb/brake_*/reverse_*/bon<n>`, y/z swapped,
+  less the CoG), defaults where missing. **Aims are W-Rally's** - RBR's lamp normals are not aims (bonnet lamps point
+  sideways); RBR modelled ramps (`e_ramp`) in a few cars and never switched them on.
+- **Layouts** the setup chooses: the car's own "ramp", "2 pods", "4 pods", "6 pods", "LED bars", "no ramp"; default its
+  own ramp, else four pods. Aims as tuned on the wall (`tools/lamp-wall/wall.py`, the renderer's beam formula on a
+  10 m wall): with pods the main beams turn 10° out; 2 pods 5° out 3° up; outer pair 20° out, inner 5° out 4° up,
+  six-pod middle pair 13° out 2° up; four or more all pencils; with LED bars the main beams straight on. Setup aim
+  `--lamps <layout> --lamp-aim <spread>,<pitch>`, remembered per car (`lamps_<folder>` in W-Rally.ini).
+- **Switches** (rebindable actions, defaults H off/dipped/main, J ramp - it shines with the main beam -, Q/E
+  indicators, G hazard; brake pedal and reverse gear by the car). Until the driver touches them, the lamps follow the
+  renderer's sun every frame: main beam below 3°, the small lamps' light below 6° (by day only their glass shows).
+  `PHYS_DRIVE_LAMPS=<0|1|2>[,noramp][,brake]...` for captures; `PHYS_DRIVE_TEST_LIGHTS=ramp|bars|low|lamp|noshadow`
+  (`assets::TestLayout`) replaces the car's own, always lit.
+- **Glass**: RBR's lamp meshes come in pairs (`e_light_lf` / `e_light_lf_lit`); the car draws the unlit or the lit twin
+  by the switches, the lit one glowing flat in its lamp's colour at the lens's brightness (~1600 nits per unit: headlamp
+  ~100,000 nits, brake ~10,000, tail ~200) - not its texture (RBR's CarLight shader used the tyre sheet).
+- **Lamps on loose parts** (`CarRender::Mounts`, `assets::LampMounts`): a part that comes off takes its lamps dark;
+  one hanging on (a bonnet on its hinge) moves its beams with it.
+- **The lamp lab** (`W-Rally --lab`, `assets::BuildLampLab`): the car on a floor, a wall 10 m ahead of the ramp, white
+  poles at 5 and 8 m, a person-sized block; no stage or physics; `--camera`, `--time`, `--exit-at`,
+  `PHYS_DRIVE_SHOTS` as on a stage.
+
+**Stage lights: not built.** There is no light chunk in the `.ngg` and no derivation. The plan stands: a light chunk
+with `provenance=auto|authored` (reconversion never clobbers `authored`), automatic candidates from emissive-looking
+textures, and Wallaby's light-placement mode for the tracks people race. RBR's `_N` variant is noon, not a night light
+map, so it gives nothing.
+
+### 5.6 What is still open for night and weather
+
+The four decisions of 5.5: **(1)** car lights and the night sky built, stage lights not; **(2)** built, but no stage
+carries its place, so all use 50 N and north 0; **(3)** built - every light ray traced at one ray per pixel, and a
+4-map cascades fallback for the non-RT path; the VR tier and min-spec costs are unmeasured; **(4)** built from RBR's
+`.ini` with W-Rally presets and layouts, but not from the car's own `car.yaml` lamp spec, and no generic size-based
+default for a car without an `.ini`.
+
+- Weather: cloud shapes (partly cloudy is a uniform blend; RBR's cloud textures vs volumetric undecided); rain and snow
+  themselves (drops, spray, splashes, rain on glass); snow cover; fog and cloud in the multiple-scattering table.
+- Wetness: a step (dry/damp/wet), no drying over time; puddles and glass reflect only the sky/probe - under a canopy
+  that is wrong, RT reflections for mirror-like pixels are the cure, against the RT budget.
+- Glass: faces within one object are not sorted (fine for RBR's single-sheet panes, wrong for a closed shell); tint is
+  grey (coloured transmission needs dual-source blending); Wallaby's `NggWriter` does not write bit 3 yet.
+- Night sky: the moon's phase unreadable at its true size; no twinkling, no Milky Way.
+- Car lamps: N3c tuning against the reference shots (intensities, spreads, aim, exposure); `car.yaml` lamp schema
+  (draft: `beams`, `lamps` with `role`, `layouts`); a setup editor for layout and aim; beams visible in dust, mist and
+  rain (haze), retroreflective materials, glare, bloom on lit glass; replays switch brake/reverse lamps by live input
+  only; the light pick weighs every lamp in the cluster (the rays' main cost with 6+ lamps).
+- Stage lights (N4): format chunk, auto-derivation, Wallaby placement.
+- Culling: per-object frustum only; stage 41's objects are large (299 of 2987 culled).
+
+
+## 6. The car
+
+The renderer knows no cars. **A car is a model on a node tree that the game builds, places and animates each frame;
+the renderer never interprets node names.** Everything specific to RBR's car files lives in the game
+(`game/src/assets/car_model.*`, `car_render.*`); the renderer contributes the clear coat, the reflection probe and
+the rules that keep a moving object clean in TAA and the RT denoisers. Finish rules and the PBR map format are in
+[car-pbr.md](car-pbr.md); this section is the renderer's view and the invariants.
+
+### 6.1 How the game hands a car to the renderer
+
+- **Reading** (`assets::ReadCarModel`, any thread): the `.sgc` (HedgeHog3D's scene file, read as `HedgeHog3D.dll`
+  reads it), the exterior only (`e_` meshes, the lamps' lit twins, the wheels and spare wheel of the requested
+  surface - tarmac, gravel or snow), textures through `<car>_shaders.ini`, each mesh group's material and RBR shader
+  class from `<car>.ini` (`FaceBlock<g>_Material`, `FaceBlock<g>_Shader`), and the optional PBR maps beside each
+  texture (6.3). Files come through the car's content item (`CarFiles`, [content-layers.md](content-layers.md)), so a
+  downloaded patch's maps lie over RBR's textures.
+- **Building** (`assets::CarRender::Create`): one `createModel` with a fixed node layout, then `createInstance`.
+
+  | node | what | placed by |
+  |---|---|---|
+  | 0 | body | the model's frame to the car's: `-cog` |
+  | 1 + k | wheel k's hub (lf, rf, lb, rb) - calipers, what does not spin | the physics' knuckle and hub |
+  | 5 + k | wheel k's spin, child of its hub - tyre, brake disc | spin about the knuckle's x |
+  | 9 + i | loose part i (`physics::Part`: door, bonnet, bumper) | the physics' part pose |
+
+  A mesh goes on its wheel's node, else on a part's (`e_<name>`, `e_int_<name>`, or a part above it in the `.sgc`
+  tree: the grille with the bumper, mirrors with the doors), else on the body. **A part at rest gets exactly the
+  body's matrix** (`PartNode`), so an undamaged car draws as a rigid one; a torn-off part's node is its world pose
+  turned back into the car's frame. `PHYS_DRIVE_PARTS=1` prints the assignment.
+- **Material 0 is always a red lacquered paint**, used by the fallback hull (the collision mesh, flat-shaded) when
+  the model yields nothing, so material slots never shift.
+- **Lamps are separate instances on the same node tree** (`PlaceLamps`): per lamp group and side an unlit and a lit
+  model, one visible at a time; the lit twin glows in a solid lamp colour (RBR draws lit twins on the tyre sheet,
+  which as an emission is pink). Lamp light itself is the night lighting's (§5.5).
+- **Per frame** (`CarRender::Place`): `InstanceUpdate` with the pose matrix and all node matrices.
+  `FrameDesc::reflectionFocus` names the body instance (6.2). The module (`module/module.cpp` `Place`) multiplies
+  the tree out and calls `Scene::SetObjectTransform` per mesh; each mesh is its own dynamic `DrawItem` with its own
+  BLAS.
+- Creating a model rebuilds the material SRV heap once (`Scene::BeginMaterialBatch`), not twice per material:
+  a car's creation went 57-204 -> 16-32 ms.
+- `CarRegister` (`car_register.*`) is metadata only (name, class, physics, whether W-Rally can use the car); the
+  renderer never sees it.
+
+### 6.2 Paint: clear coat and the reflection probe
+
+**Clear coat** (`MaterialDesc::clearCoat`, interface 15; times the ORM alpha, interface 17): a smooth dielectric
+lacquer over the base layer - f0 0.04, roughness 0.02, its own GGX lobe for sun, moon and local lights and its own
+sharp environment sample; the base's light is scaled by `1 - coat * F`. Forward and deferred (G-buffer kind 3:
+coated pixels carry base roughness and the specular-AA widening, 5 bits each, in the roughness channel).
+RBR's textures carry no gloss mask (DXT3, alpha opaque), so without maps the shader class is the mask (6.3).
+
+**Reflection probe** (`core/probe.h` `ReflectionProbe`, interface 16). The environment map is the sky only, and
+screen-space reflection cannot serve a car's side (what it reflects is off screen), so **the stage is drawn again
+around the car**:
+
+| parameter | value |
+|---|---|
+| faces | 6 x 256², RGBA16F (the HDR target's format, so the scene's PSOs draw them) |
+| faces per frame | 2 (`NGG_PROBE_FACES` 1..6); all six at first, on a focus change and after a jump > 25 m |
+| resolve | next frame's start: faces -> 512² octahedral, 10 mips (2x2 box down), sky behind wherever a face saw nothing - env.h's mapping and roughness axis |
+| read by | the focus's objects only (paint coat and base, its glass), in place of the sky (`EnvRadiance`, t19) |
+| cost, dev iGPU 1080p, track 42 | ~1.0 ms at 2 faces (0.6 at 1, 2.9 at 6); 128² faces were 0.8 ms - the cost is the scene, not its pixels |
+
+- **The faces are lit as the main pass, less what is per main-camera pixel**: no RT sun visibility or AO, no aerial
+  table (the probe marches its air), every local light unclustered and unshadowed; the cascades where drawn.
+- **Left out of the faces: the car, any model within 3 m of the centre (its lamps, a helmet), the glass.** A probe
+  at the car's centre would see its inside.
+- **The car is kept as a box in the faces** (`CarBoxVis`, `gCarBoxC/X/Y/Z`: axes of its biggest mesh, extents over
+  all): a sun ray through it is shadowed and the ground under it keeps a quarter of the ambient - else the paint's
+  grazing edges mirror a sunlit road where the car's own shadow lies.
+- The centre is the instance origin (the CoG); faces drawn on different frames lag by a frame or two of travel -
+  accepted, it is a blurred reflection on a curved panel.
+- **The car occludes its own reflections** (`ReflOpen`): the focus's opaque draws trace one inline ray (DXR 1.1)
+  along the reflection, 5 m, against the car's own TLAS instances only (`Scene::kRtMaskFocus`); blocked = no probe
+  term. Separate pipelines (`m_psoRefl`) for those draws only - a ray query in every pipeline cost the main pass
+  ~1 ms. Active whenever the TLAS exists, cascades included. Off with `NGG_NO_REFL_RAY=1` or without tier 1.1.
+  Cost +0.7 ms main pass with the car close. Without it a lacquered roll cage mirrored a lamp-lit barrier through
+  the roof (night glints).
+- **Rough lobes read the probe in taps**: a lobe much wider than a texel of its level is read half a lobe-width
+  finer, the reflection plus six taps around it, each above the surface; narrow lobes and the sky take one sample.
+  A 2x2-box chain read at level ~7.6 for a tyre (roughness 0.85) let the far side's lit road through (tyre glow).
+- **Specular AA** (Tokuyoshi-Kaplanyan) widens base, coat, sun/moon and local-light lobes and the environment's
+  roughness from the shading normal's screen derivatives. The sun's and moon's discs widen highlights as an emitter
+  does.
+- `Scene::SetReflectionFocus` is called every frame but bumps the geometry revision only on a change (it moves TLAS
+  instance masks); counting every call refitted the TLAS every frame.
+
+### 6.3 PBR maps and the class fallback
+
+**Two layers: W-Rally's PBR maps per texel where a texture has them, else RBR's shader class per mesh group.** A map
+overrides the rules for its texture only; a car without maps looks exactly as the rules make it. Names, channels,
+formats, texconv lines and the draft tool are [car-pbr.md](car-pbr.md); the decisions:
+
+- Maps beside the texture, by name only: `<tex>_basecolor.dds` (sRGB, replaces the texture), `_normal.dds`
+  (tangent space, two channels, z rebuilt), `_orm.dds` (linear: r occlusion, g roughness, b metallic, **a clear
+  coat**). Data maps load through `createTextureData` (interface 17: no sRGB decode); the DDS loader takes BC1-3 and,
+  behind a DX10 header, BC4/5/7 (TYPELESS too).
+- **With an ORM map the map is the finish** (roughness, metallic, coat factors 1). The class still decides glass
+  or holes.
+- Class rules without maps (`car_render.cpp` `finishOf`):
+
+  | class / case | finish |
+  |---|---|
+  | `CarPaint`, `CarPaintInt` | clear coat, base roughness 0.2 (livery decals under the same lacquer) |
+  | `CarTire` | roughness 0.85 |
+  | other opaque | roughness 0.45 |
+  | transparent texture on glass (`CarGlass`, `CarIntGlass`, `CarLight`, or a mesh named `*glass*` / `*window*`) | `kMaterialBlend`, two-sided, roughness 0.05 |
+  | transparent texture elsewhere | holes: alpha test 0.25 (the game's 170/255 cut thin meshes away), two-sided, roughness 0.6; lacquered on `CarPaint` |
+
+- **A material drawn with two finishes becomes two materials.**
+- **The body is one-sided**, as the game draws it: its inner shell faces (black) sit just behind the paint and
+  would show through.
+- Over the 42 cars at hand the glass rule moves ~90 groups (vents, logos, bolts) off the glass and no lens or pane;
+  most cars draw their lamp lenses as `CarPlastic`, hence the name rule.
+- `tools/car-pbr` drafts ORM maps (`car-uv-dump` + `make_pbr.py`) into a new version of the car in the downloads
+  layer; `PHYS_DRIVE_MATERIALS=1` lists the maps found and any the renderer refused.
+
+### 6.4 Frames, wheels, pitfalls
+
+**Frames.** The physics pose's origin is the **centre of gravity**, not the model's origin: a model point draws at
+`v - cog` (body node). The car frame (`physics::Pose`): **+x is the car's LEFT, -y forward, z up**. `math::ToRender`
+swaps y and z (render: y up, the car facing -z), which mirrors handedness - anything with a "right" (a lamp lobe's
+yaw) takes its sign from where the car's right lands in render space. The `.sgc`'s root frame is already the render
+frame (y up, forward -z).
+
+**Wheels.** On a stage they stand where the physics has them: hub and knuckle rotation per wheel, the right
+knuckles turned half about z, spin about the knuckle's x (`PartMatrix`, `SpinNode`). **A wheel mesh's `.sgc` node
+matrix is a leftover: only its scale is kept.** Every wheel mesh has its rim towards +x; the reader turns the right
+wheels half about y (i20 R5's tarmac and snow wheels are all four stored as right ones: the left rims faced inward).
+Off the physics (the Garage) `CarRender::Stance` places them at the wheel meshes' own nodes when all four exist,
+else at the `Point_e_wheel_*` helpers (5-15 cm off where the maker drew the wheel), and the origin at hub height
+plus the tyre radius.
+
+Pitfalls:
+- A face group's first index is its record's fourth field, not its second (else groups draw another's triangles).
+- A mesh's object offset (pivot, rotation, scale) must be applied; mirrored meshes are rewound.
+- Glass has no depth and is not in the ray tracer's scene: it writes its own motion (`Scene::GlassMotionBuffer`,
+  RG16F) for TAA and the upscalers, and reflection rays pass through windows.
+- **A moving object is one that has moved since it was placed** (`DrawItem::dynamic`), standing or not: it keeps its
+  motion and identity in TAA and the denoisers frame after frame. A per-frame threshold (2 mm) made a dragged car
+  flip between world and object - copies behind it.
+- **The road a car has left takes none of the car's RT history**: "standing" means a moving object's pixel in the
+  5x5 and none moving against the world (none at all = gone). AO's history allowance under a moving hit uses
+  `kAoPenumbra` 0.15 and no `gBlendMoved` floor. Checked by `tools/car-ghost/check-car-ghost.sh` (replay, TAA off,
+  each stretch against `NGG_RT_NO_HISTORY=1`; fails a mean bias over 1 grey).
+
+### 6.5 The Garage showroom
+
+The Garage (Quick rally -> Garage) draws the chosen car on a turntable in a **synthetic stage built in memory as an
+`.ngg`** (`assets::BuildShowroom`: a 120 m tessellated dark floor, a turntable disc r 3.2 m, 4 cm high, and its rim).
+Lit by three spot lights (key 9000, fill 3500, rim 6000 cd) under a moonless 23:00 sky, so the spots alone light it.
+Fixed camera; the projection's centre shifted to where the menu wants the car (`proj[8]`, `proj[9]`).
+
+- **The scene is loaded once** where the menus stall anyway (as they open, after a stage) and kept; a stage
+  replaces it (one scene at a time).
+- **A car is read on its own thread** after the carousel has rested on it 0.25 s; its textures and maps are uploaded
+  at most ~4 ms a frame, the model last. The turntable stays empty meanwhile, and for a car W-Rally cannot use.
+- Textures belong to the scene, so after 8 cars (`kCarsPerScene`) the scene is reloaded to free them.
+- **A car put on or taken off cuts TAA's history** (`Camera::cut`): what stood still there (glass, slow parts)
+  otherwise stayed as a trail on the empty turntable.
+- The turning car (12.6 deg/s, dragged by the mouse in bursts) is what the moving-object rules above were built
+  against. TAA keeps an R8 `settled` count per pixel: the still weight 0.97 and the clip's fade grow over 16 frames,
+  so a car stopping does not jump; at speed it keeps less (0.9 at 8 px/frame to 0.6 at 40). The RT denoiser lets
+  each ray keep as much history as the hit point's travel is small against the shadow's penumbra - the turntable's
+  millimetres a frame keep most, a driving car none.
+- `PHYS_DRIVE_OFF` (taa, ao, shadows, rt) applies as on a stage.
+- Measuring: `--showroom <car> [--turn deg] [--spin deg/s] [--shots n] [--stop shot] [--jerk k] [--then car]`
+  captures `showroom.png` / `showroom-NN.png`; `WRALLY_SHOWROOM_TIMES=1` logs upload and slow-frame times.
+- **A new car's BLASes are built off the frame** (4.2): its first frame is as long with RT as without (55-70 ms on
+  the iGPU, from the car's materials and model), and the car casts no RT shadow or AO for the 1-2 frames until they
+  land. It was 160-280 ms, 110 of them the BLAS build inside the frame.
 
 ---
 
-### 1.9 The 64-bit launcher owns the session
+## 7. Upscaling
 
-Rev 4 spawned `ngg-host.exe` lazily from the bridge, on the game's first `Present`. That is backwards, and two
-defects made it obvious: the host **orphaned** when the game crashed (two dead instances holding file locks
-across sessions), and its startup raced the game's device creation.
+**The scene, prepass, ray tracing and denoisers run at a render size; a temporal upscaler resolves the jittered
+frames to the output in place of the TAA (`PSTaa`); tonemap, HUD and UI stay at the output.** Off (the default) is
+the TAA at the output, unchanged.
 
-**Invert it. The 64-bit process starts first and launches the game.** It is a graphical launcher that *contains*
-the renderer:
+### 7.1 The interface
 
-```
-ngg-launcher.exe (x64)          the user runs THIS
-   ├── ngg-core                 the D3D12 renderer (was ngg-host.exe)
-   ├── IPC server               already listening before the game exists
-   ├── OpenXR session           VR belongs here - runtimes are 64-bit (§1.3)
-   ├── UI                       weather/daylight presets (§3.4), track and .ngg management,
-   │                            conversion, profile selection, fairness profile (§3.6)
-   └── child: RichardBurnsRally_SSE.exe (x86)
-           └── d3d9.dll  = ngg-bridge   → connects to the parent's IPC server
-           └── RBRTM.dll              → detects the launcher
-```
+`core/upscaler.h` `Upscaler`: `Resize` (render and output size; the history goes with it), `JitterPhases` /
+`JitterOffset` (the backend's own sequence), `Dispatch(UpscaleDispatch)` (with `reset` on a cut or load).
+`UpscaleRenderSize`: even, at least 64 px. **One convention, converted once per backend** and written at the top of
+each backend file:
 
-What this fixes, beyond tidiness:
-
-- **Lifetime becomes owned, in both directions.** The launcher holds the child in a **job object** with
-  `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`, so the game cannot outlive it; and it waits on the child handle, so it
-  knows immediately when the game exits or crashes. No orphans, no stale locks, and a crash becomes a reported
-  event rather than a puzzle.
-- **Startup ordering stops being a race.** The renderer is up and listening before the game's device exists, so
-  the handshake is a connect rather than a spawn-and-hope.
-- **VR lands in the right process.** §1.3 already wanted the renderer to own the OpenXR session; a 64-bit parent
-  makes that natural instead of awkward.
-- **The 64-bit side gets a home for tooling** — conversion, preset authoring, the standalone viewer — which today
-  has nowhere to live because the host is a headless child.
-
-**DECIDED — the plugin loads, but refuses to run outside the launcher, and says so.** `RBRTM.dll` initialises
-normally under any launch method; if the launcher session is absent it replaces its menu with a single screen
-explaining that the game must be started via the NGG launcher, which the installer places in the Start menu and
-(optionally) on the desktop.
-
-This is deliberately not the same as failing to load. A DLL that declines to load produces no message, no menu
-entry and no diagnosis — the user sees a plugin that "disappeared". A DLL that loads and explains itself turns a
-broken install into a one-line instruction, and leaves the rest of the game entirely untouched. It does still
-require existing users to change how they start the game; that is the accepted cost, bought back by the message
-being explicit about what to do.
-
-It also keeps the integrity story simple: **a sanctioned session requires the launcher**, and there is exactly
-one supported configuration to reason about (§3.6), rather than a matrix of "with launcher / without".
-
-**Detection must be a deliberate handshake, not a process-name check.** A name check is trivially spoofed, which
-would make the fairness profile theatre rather than a control. The launcher generates a random per-session token,
-creates a named kernel object from it in the `Local\` namespace, and passes the name to the child through its
-inherited environment. Only a process the launcher actually started can see it, and it costs nothing to verify.
-
-## 8. Module layout
-
-```
-ngg-format/    (C++)  .ngg read/write, versioning, CRC/provenance, encryption envelope. No dependencies.
-ngg-core/      (C++)  renderer: D3D12 only. Passes, shaders, clustered lighting, shadows, culling,
-                      streaming, material system, sky/atmosphere, post (HDR + TAA + tonemap, 5.0c).
-                      Knows nothing about RBR.
-ngg-launcher/  (C++)  64-bit process the USER runs (§1.9). Owns ngg-core, the IPC server, OpenXR and
-                      texture streaming; launches RichardBurnsRally_SSE.exe as a job-object child and
-                      owns its lifetime. Also the standalone viewer (same binary, different entry)
-                      and the front end for presets, conversion and profile selection.
-ngg-bridge/    (C++)  in-game 32-bit DLL: d3d9 interception, tagging, suppression, harvesting,
-                      shared-surface management, composite, present, legacy-plugin detection.
-ngg-convert/   (C#)   inside Wallaby. Two halves of ONE spine (§3.0): LBS/COL/MAT/DDS/SGS → glTF project
-                      (photometric solver, material heuristics, de-atlas, weld, texture bundle), then
-                      glTF/USD import → .ngg + LBS/COL/DLS gameplay stub (§7). Direct LBS → .ngg is a
-                      development shortcut, expected to go.
-                      Plus the editor UI: material overrides, light placement, weather presets, A/B validation.
-plugin glue    (C++)  RBRTM integration: lifecycle, config, fairness profile, CRC registration, fallback.
-```
-
-Two deliberate choices: the converter is **C#** reusing Wallaby, because the formats are already solved there and
-offline tooling has no perf constraint — only the *reader* needs to be C++. And `ngg-core` never knows about RBR,
-which is what keeps the viewer and the editor preview viable.
-
-### 8.0 `ngg-core` exists — DONE
-
-The renderer is now its own static library (`ngg/core/`), separate from the launcher that drives it:
-
-| file | contents |
+| input | convention |
 |---|---|
-| `core/device.h/.cpp` | `Device` — D3D12 device, queue, one direct command list, fence. `Create(luid)` takes an optional LUID: **mandatory** when a resource will be shared cross-process, absent when the client is free to pick a GPU |
-| `core/scene.h/.cpp` | `Scene` — `.ngg` load, pipeline, per-object draw. Moved from `host/`, unchanged in behaviour |
-| `core/log.h/.cpp` | one sink for the whole library, replacing `SetSceneLogSink` |
+| colour | linear HDR before exposure and tonemap (RGBA16F); last frame's exposure as a 1x1 R32F beside it, so the backend's tonemapped heuristics see the screen's brightness |
+| depth | reverse-Z R32, infinite far |
+| motion | RG16F, render size, previous uv - current uv, unjittered: camera reprojection for still pixels, the prepass's motion for moved ones (`PostFx` `PSUpscaleIn`) |
+| reactive | R8, how little history to keep: moving glass |
+| jitter | render pixels, +x right, +y down - the projection's offset |
+| states | inputs PIXEL\|NON_PIXEL_SHADER_RESOURCE, output UNORDERED_ACCESS, on entry and return |
 
-`ngg/host/` keeps only what is genuinely about RBR: the session/job-object launcher, the IPC frame loop, the shared
-texture, and the track-name → `.ngg` mapping. **Nothing in `ngg/core/` includes an RBR or IPC header**, and that is
-the property worth protecting — the moment it does, the viewer and Wallaby's preview (§8.1) both stop being possible
-and the two-renderer problem comes back.
+`Renderer::SetUpscaling(kind, scale)` switches backends between frames; a backend that cannot run leaves `None`
+(logged). Interface: `RenderSettings::upscaler` / `renderScale` (11), `kUpscalerDlss` (12),
+`RenderStats::renderWidth/Height`, `upscaler` name and `upscalersAvailable` (13) - see [design.md](design.md).
 
-**The camera contract is now stated in `core/scene.h` rather than assumed.** Row-major, row-vector (`v * M`), which
-is D3D9's convention because RBR's matrices are used unchanged; and **reverse-Z is applied inside `Record`**, so a
-client hands in a conventional near→0/far→1 projection and must not pre-flip. Both were previously true only by
-accident of having exactly one caller.
+**What changes with a render size below the output:**
+- the scene's samplers take a mip bias `log2(render / output)` (`Scene::SetMipBias`; static samplers, so the
+  pipelines are rebuilt when it changes);
+- **the AO traces twice the tier's rays at half the output's pixels or fewer** (`Renderer::AoRaysTraced`): its
+  one-ray grain is otherwise denoised at render size and blown up into blotches 1.5-2x larger;
+- the jitter is the backend's sequence, not our 8-phase Halton.
+- TAA off (or a debug view) skips the upscaler too: the render-size frame goes straight to the tonemap.
+- The coverage-preserving mip fallback for single-level textures (§2.7) is what made upscaling safe to ship on
+  community stages (it was the old precondition).
 
-#### The standalone viewer — DONE
+### 7.2 Backends
 
-Same binary, different entry, as the layout above specifies:
-
-```
-rbrtm.exe --view <RBR>\Ngg\track-42.ngg
-```
-
-Free camera (WASD/QE, right-drag look, Shift ×8, Ctrl ×0.15), **F5 reloads the asset in place keeping the camera**,
-D3D12 debug layer on — none of which is wanted in the game path.
-
-The justification is iteration cost, and it is measured rather than assumed: without it every shader or material
-change costs a full RBR launch and stage load, and **a deploy silently fails while the game is running while still
-reporting success** — which has already cost this project a debugging session spent chasing a crash that was really
-a stale binary. Dynamic lighting is going to be dozens of shader iterations; that loop has to be seconds.
-
-Verified: Joux Verte loads and renders standalone (747,746 verts / 428,557 tris / 29 textures), with no game
-process involved at all — which is also the proof that `ngg-core` carries no hidden dependency on RBR.
-
-One thing deliberately *not* done: the initial camera speed was briefly scaled from the stage bounding box, which
-gave ~400 m/s on an 8 km stage — excellent for crossing the map and useless for inspecting a road surface. It is a
-fixed 25 m/s with Shift for traversal.
-
-### 8.0b The viewer has an on-screen readout, and it reuses the editor's text
-
-`ngg/host/hud.h/.cpp`, plus two flags on the existing label system. `F1` toggles it.
-
-**Why it had to exist:** the roughness, tonemap and sun keys are all *sweeps* — change a value and watch — and
-watching only works if the value is on the picture. Reading it out of a log after the fact is the thing this
-project has been doing instead, and it does not work while a number is moving.
-
-**Why the RENDERER draws it:** a native child window with a swap chain wins the airspace fight against anything
-the host paints over it, so host-drawn text on a D3D12 viewport either flickers or never appears. That finding
-already put labels in `ngg-core` for Wallaby (§8.2); the viewer has the same window and takes the same answer.
-
-Two additions to the label system, both of which the editor gets for free:
-
-- **`kOverlayScreenSpace`** — `Label::pos.xy` is pixels from the top-left instead of a world anchor, and the
-  text is left-aligned on it rather than centred. A HUD has no world position to anchor to, and a caller laying
-  out rows cannot predict a centred origin without measuring the text first. Implies no depth test: a frame-time
-  readout a hillside can hide is not a readout.
-- **`kOverlayTextShadow`** — the glyphs again, one pixel down-right and tinted black, underneath. White text
-  over a sunlit road or a bright sky is invisible, which is exactly the case a readout has to survive. Two
-  draws rather than a shader outline, because the atlas has no distance field to grow one from and 300 extra
-  quads cost nothing. **Wallaby's world labels want this as much as the HUD does** — an object name over the
-  sky has the same problem.
-
-**The font is rasterised by the HOST with GDI**, as `SetFont` intends: nothing is embedded in the renderer, no
-glyph blob in the binary, no frozen size or character set. 16×8 cells of 2:1 — the natural monospace aspect
-*and* a square atlas, which matters because `SetLabels` derives the glyph aspect from `columns/rows` alone and
-so assumes squareness.
-
-> **The instrument was broken before the feature was.** First run reported **0 glyph pixels** and the obvious
-> reading was that the text was not drawing. It was drawing the whole time: `ReadOverlayStats()` has to be
-> called after the GPU wait — like `LogProbe` — and the viewer never called it, so the counter could only ever
-> be zero.
->
-> Two rounds went into the font atlas and the screen-space quad maths before that turned up, and the atlas was
-> fine (measured: 13.4% ink, peak alpha 255). This is the third time on this project that the measuring device
-> was the defect — after the probe reporting zeros twice — and the lesson generalises: **when an instrument
-> reports "nothing happened", check that the instrument is connected before believing it about the feature.**
-> The shadow pass was then confirmed the same way and in one line: 6,264 glyph pixels became 12,558.
-
-### 8.1 Wallaby should render through `ngg-core`, not its own path
-
-Proposed direction, not yet scheduled: rebuild Wallaby to drop its own SlimDX renderer and drive `ngg-core`
-instead, keeping only the legacy formats still in use for gameplay (`.col`, `.trk`, `.fnc`, `.mat`).
-
-**The case is stronger than "less code to maintain", because the current split has already cost this project.**
-Wallaby's preview is a fixed-function approximation of RBR, not RBR. Implementing the ground blend from
-`ModulateInvAlphaAddColor` — which Wallaby uses as an *editor fallback* and the game never executes, because RBR
-renders ground with shaders — put the wrong textures on the road, and it took disassembling RBR's own
-`RLDoubleTexture.pso` to find out (§3.2b). An editor whose preview is a second, differently-wrong implementation
-of the renderer will keep generating that class of bug. One renderer means the editor cannot disagree with the
-game, because there is nothing to disagree with.
-
-Two further arguments:
-
-- **The SlimDX dependency is already blocking.** Wallaby does not build here at all — SlimDX 4.0.13.43 is
-  discontinued and unavailable — which is why `lbs2ngg` exists as standalone Python instead of living in Wallaby
-  as this section originally specified. That is technical debt with an expiry date, not a preference.
-- **§3.2's validation harness needs exactly this**: re-render a converted track under solved lighting and diff it
-  against a vanilla screenshot. That is an editor feature, and it only means anything if the editor renders with
-  the shipping renderer.
-
-**Two design points to get right, though, or this becomes a different mess:**
-
-1. **`.ngg` is a runtime format and must not become the editing format.** It is optimised for load-and-draw:
-   textures embedded, objects flattened, instance transforms baked. An editor needs references, instancing, named
-   objects and non-destructive history. Wallaby should author in an interchange format — §7 already nominates
-   **glTF/USD** for the native path — and *export* `.ngg`. Editing the runtime format directly would either
-   cripple the editor or bloat the format with authoring data the renderer must skip.
-2. **Wallaby still has to emit legacy gameplay files, including geometry.** Dropping `.lbs` entirely is not
-   possible: the car must collide with the world, and that collision is RBR's (§4.1a corollary). So a native
-   track still ships `.col`/`.trk` and probably a minimal `.lbs` for the physics engine, even though nothing
-   renders from it. "Wallaby only supports `.ngg`" is true for *rendering*, not for output.
-
-**Integration shape: SUPERSEDED by §8.2 — do not build from this paragraph.** It proposed that Wallaby be a
-second client of the launcher's IPC protocol (§1.9), "which avoids a C++/CLI or P/Invoke boundary between C# and
-the renderer entirely". Two premises there are wrong: the launcher is out-of-process because *RBR* is 32-bit,
-which is not a constraint Wallaby shares, and C++/CLI is not the same risk as P/Invoke — SlimDX is mixed-mode
-C++/CLI, and that is exactly why it is unobtainable and why the editor is pinned to x86. §8.2 decides
-**in-process, through a flat C ABI**, and records what that costs.
-
-#### Measured: SlimDX is Wallaby's data model, not its renderer
-
-"Drop SlimDX, render externally" sounds like one change. It is not — **106 of 136 source files reference it**, and
-the heaviest uses are not rendering at all:
-
-| type | uses | what it really is |
+| | FSR (`core/fsr.cpp`) | DLSS SR (`core/dlss.cpp`) |
 |---|---|---|
-| `Mesh` | 408 | the geometry container every parser returns |
-| `Vector3` | 361 | math |
-| `VertexBuffer` | 158 | geometry storage |
-| `Device` | 113 | required to *load* a mesh, not just draw it |
-| `Matrix` | 93 | math |
-| `IntersectInformation` | 32 | ray picking |
+| version | ffx-api, FSR SDK v2.4.0: FSR 3.1 on any DX12 GPU, FSR 4 on RDNA 4 (the signed loader picks) | NGX, DLSS SDK v310.9.16 |
+| where from | headers in `third_party/fidelityfx` (MIT); AMD-signed DLLs fetched at configure, SHA-256 pinned, copied beside `WRenderer.dll` | nothing in git (NVIDIA-proprietary headers): headers, `nvsdk_ngx_s.lib`, `nvngx_dlss.dll` fetched at configure, pinned (`third_party/nvidia-dlss/README.md`) |
+| linking | none: loaded by name from the module's folder; no DLL = no FSR | static lib, /MT: Release builds only; Debug has a stub |
+| gate | the loader succeeding | **vendor 0x10DE first** (a non-NVIDIA adapter never loads NGX), then NGX and `SuperSampling_Available` |
+| notes | jitter phases from ffx | Halton(2,3), 8 x ratio² phases; reactive = bias-current-colour mask; **preset K for every mode** - M (Performance) lifted the Garage's dark floor ~6% and doubled its flicker; `NGG_DLSS_PRESET=<letter>` to compare |
 
-The signature that matters: `MeshTools.LoadMesh(BinaryReader, int type, Device d3dDevice)`. **Geometry cannot be
-parsed without a GPU device.** That single coupling is why Wallaby cannot run headless, cannot be a CLI
-converter, and why `lbs2ngg` had to be reimplemented in Python rather than reusing parsers that already worked —
-the duplication this section originally warned against, forced by a dependency rather than chosen.
+The renderer probes both once at create (`renderer.cpp`, logged "upscalers available") and reports them in
+`RenderStats::upscalersAvailable`; the game's Settings -> Graphics -> UPSCALING steps past and dims modes this
+machine cannot run. The main menu credits NVIDIA DLSS and AMD FidelityFX Super Resolution, as the licences ask.
 
-So sequence it, with value at each step rather than one big-bang rewrite of a working editor:
+**Game modes** (`game/src/app/settings.h` `kUpscaleModes`; `upscaling` in `W-Rally.ini`; `PHYS_DRIVE_UPSCALE=<index
+or name>` overrides): `off` (TAA), `fsr-native` (1.0), `fsr-quality` (1/1.5), `fsr-balanced` (1/1.7),
+`fsr-performance` (0.5), `dlaa` (1.0), `dlss-quality` (1/1.5), `dlss-balanced` (0.58), `dlss-performance` (0.5). The
+readout shows "upscaled by <name> from WxH".
 
-1. **Decouple the data model.** Plain managed mesh (positions/indices/attributes) plus `System.Numerics` for
-   `Vector3`/`Matrix`; a ~30-line Möller–Trumbore replaces `Mesh.Intersect`. Rendering keeps using SlimDX for now,
-   uploading from the plain mesh. **This step alone retires the Python converter duplication** and gives headless
-   conversion — the largest single win, and it is not the rendering step.
-2. **Replace rendering with `ngg-core`**, in-process through the flat C shim of §8.2 — not the IPC protocol,
-   which is the game bridge's answer to RBR being 32-bit.
-3. **Delete SlimDX, and flip to x64**, which is the same change: nothing else pins the process to x86.
+**Measured** (GPU frame median):
 
-Step 1 is the bulk of the work (408 `Mesh` uses) but it is mechanical, and it is the one that pays off
-immediately whether or not steps 2 and 3 ever happen.
+| machine, case | native TAA | FSR Q | FSR B | DLSS Q | DLSS B | DLSS P | DLAA |
+|---|---|---|---|---|---|---|---|
+| dev iGPU, track-42 replay, 1080p, medium | 27.9-31.6 ms | 21.9 | 20.8 | - | - | - | - |
+| dev iGPU, same, high | 34.8 | 24.1 | 21.1 | - | - | - | - |
+| RTX 5070 Ti, 2160p, medium | 9.21 | 7.12 | - | 7.74 | 7.04 | 6.50 | 10.56 |
 
-### 8.2 The editor integration: a flat C API, an instanced live scene — REVISES 8.1
+FSR Quality also reduced the door-panel grain (fine 2.58 -> 1.67, blot 8.65 -> 6.66), the AO's doubled rays being
+paid out of the smaller frame.
 
-§8.1 ends by proposing that Wallaby be a second client of the launcher's IPC protocol, "which avoids a C++/CLI
-or P/Invoke boundary between C# and the renderer entirely". **That conclusion is revised here**, because two of
-its premises do not survive contact with the editor's actual requirements.
+### 7.3 What remains
 
-- **The bitness argument belongs to RBR, not to Wallaby.** The launcher is out-of-process because the *game* is
-  32-bit and D3D12 needs x64. Wallaby has no such constraint — .NET Framework 4.8 WinForms runs x64 happily —
-  and going x64 is a stated goal, not an obstacle. What pins it to x86 today is only that a mixed-mode assembly
-  is loaded in-process.
-- **C++/CLI and P/Invoke are not the same risk, and conflating them costs the wrong decision.** SlimDX *is* a
-  mixed-mode C++/CLI assembly, and that is precisely why it is discontinued, why one dev machine cannot build
-  against it, and why the editor is stuck at x86. P/Invoke over a flat C ABI has none of those properties: the
-  native side is an ordinary DLL with no CLR coupling, and the managed side stays pure IL.
+The plan was FSR 3.1 first (runs anywhere), DLSS SR behind the same interface, then NRD, then DLSS Ray
+Reconstruction. **FSR and DLSS SR are built; NRD and DLSS RR are not.** The visibility layer is shaped for them:
+a third `Visibility` source (NRD's SIGMA/REBLUR over the RT output, or DLSS RR) takes the same frame and fills the
+same outputs (`core/visibility.h`). NVIDIA-only features stay optional and are checked by eye on the RTX machine.
 
-**Decision: in-process, through a flat C ABI.** Not C++/CLI — repeating SlimDX's construction with our own code
-would reproduce every failure mode we are currently paying to escape.
 
-**The one real cost, and it is not bitness:** in-process, a device-removed or a driver hang takes the editor down
-with it, losing unsaved work. That is the trade being accepted, and it is mitigable (handle device removal,
-re-create, reload from the project). It should be the reason someone later argues for a separate process — not
-the two premises above.
+## 8. Editor integration (Wallaby)
 
-**This is also cheaper than it looks.** Measured across the editor's 106 SlimDX-touching files: **79 use it only
-as math and geometry** (`Vector3`, `Matrix`, `Mesh`, `IntersectInformation`), which `Wallaby.Formats` already
-replaces on `System.Numerics`; only **27 touch rendering** (`Device`, `VertexBuffer`, `Texture`, swap chains).
-The 79 are a mechanical pass independent of the renderer. The 27 *are* this integration. x64 falls out of
-finishing them, rather than being a prerequisite for starting.
+**Wallaby draws through `WRenderer.dll`, the renderer the game ships** ([design.md decision 11](design.md)). One
+renderer means the editor's preview cannot disagree with the game. That was the reason for the whole integration: a
+second, differently-wrong renderer (Wallaby's old fixed-function SlimDX preview, then plugin-rbr's frozen `ngg-api.dll`)
+keeps producing "looks right in the editor, wrong in the game" bugs.
 
-**And the choice stays reversible if the API is designed first.** A flat C surface can be linked into the editor
-or hosted in a separate process behind the same calls. Design the API, and in-process versus out-of-process
-becomes a deployment decision made later with a working renderer, instead of an architecture decision made now.
+### 8.1 Shape: in-process, flat C ABI
 
-#### The live scene is instanced, like glTF — not baked, like `.ngg`
+- **In-process, through the module's flat C tables**, not C++/CLI and not a second process. The old out-of-process
+  argument was RBR's (32-bit game). Wallaby is x64 and P/Invokes a plain DLL. Wallaby generates its bindings from the
+  headers, so it follows `kRendererInterfaceVer`.
+- **The cost accepted:** a device removal or driver hang takes the editor down with it. WRenderer has DRED
+  breadcrumbs (`core/device.cpp`) but **no device-lost recovery** (re-create, reload). That is open (§11).
+- **Two tables.** The editor opens the renderer and loads a scene like the game does (`renderer.h`: `loadScene`
+  from memory, `createModel`/`createInstance` for added content, `FrameDesc` per frame). It then asks
+  `RendererApi::editApi(r, kRendererEditVer, &t)` for
+  [`renderer_edit.h`](../include/wrally/iface/renderer_edit.h). The edit table has its own version (now 2), so
+  editor additions do not move the game's interface. The rules are as in `renderer.h`: one thread, POD, pack 4,
+  nothing thrown across. Edits take effect from the next `renderFrame`. Readouts describe the last frame, which is
+  complete when `renderFrame` returns (synchronous).
+- **The `.ngg` is the runtime format, not the editing format.** Wallaby authors in its own model and exports `.ngg`.
+  **The renderer never loads glTF or any other editing format:** to show the truth it would have to repeat the
+  converter's passes (normal welding, shading overrides, de-atlasing), which would make two content pipelines instead
+  of two renderers. The converter stays the only content pipeline, and the renderer draws the buffers it is handed.
+- Implementation: `modules/renderer/src/module/module.cpp` (`Edit*`, `kEditApi`) over `core::Scene`
+  (`src/core/scene.h`, the "editor:" blocks). Test: CTest `editor-api-41` (`tests/editor_api.cpp`). It fails
+  against a stub, and planted breaks of the move, the selection and the layer mapping each turn it red.
 
-`.ngg` objects are index ranges into one shared buffer (`firstIndex`, `indexCount`) with instance transforms
-baked into vertices. That is right for a runtime format and wrong for an editor: "move this object" would
-rewrite a vertex range, and "place fifty cones" would copy the geometry fifty times.
+### 8.2 The live scene: objects, placements, the dynamic pool
 
-So the live scene carries **meshes plus instances**, which is the shape the glTF exporter already preserves (694
-movable placements on Joux Verte, kept as nodes rather than baked). Baking stays where it belongs: in the `.ngg`
-export, which `NggBuilder` already does.
-
-```c
-// Lifetime and device
-ngg_scene*      ngg_create(HWND parent, int width, int height);
-void            ngg_destroy(ngg_scene*);
-void            ngg_resize(ngg_scene*, int width, int height);
-
-// Bulk open: the serialised .ngg the editor already builds, from MEMORY, never a temp file
-bool            ngg_load_memory(ngg_scene*, const void* ngg, size_t bytes);
-
-// Content registry -- add/remove, refcounted, ids assigned by the renderer
-ngg_mesh        ngg_add_mesh(ngg_scene*, const ngg_vertex*, uint32_t vcount,
-                             const uint32_t* indices, uint32_t icount);
-ngg_texture     ngg_add_texture(ngg_scene*, const void* dds, size_t bytes);
-ngg_material    ngg_add_material(ngg_scene*, ngg_texture t0, ngg_texture t1, uint32_t flags);
-ngg_instance    ngg_add_instance(ngg_scene*, ngg_mesh, ngg_material, uint32_t layer,
-                                 const float xform[16]);
-
-void            ngg_set_transform(ngg_scene*, ngg_instance, const float xform[16]);
-void            ngg_set_visible(ngg_scene*, ngg_instance, bool);
-void            ngg_remove_instance(ngg_scene*, ngg_instance);
-void            ngg_remove_mesh(ngg_scene*, ngg_mesh);
-
-// Renderer state -- these already exist on core::Scene; the shim only exposes them
-void            ngg_set_camera(ngg_scene*, const float view[16], const float proj[16]);
-void            ngg_set_sun(ngg_scene*, const float dir[3], float exposure);
-void            ngg_set_sampler(ngg_scene*, int mode);       // aniso / linear / mip clamp
-void            ngg_set_debug_view(ngg_scene*, int mode);
-void            ngg_set_light_mode(ngg_scene*, int mode);    // baked A/B vs dynamic
-void            ngg_set_shadows(ngg_scene*, bool on);
-void            ngg_set_sky(ngg_scene*, bool on, bool aerial);
-
-// Editor services the renderer is uniquely placed to answer
-bool            ngg_pick(ngg_scene*, int x, int y, ngg_instance* out, float outWorld[3]);
-void            ngg_set_selection(ngg_scene*, const ngg_instance* sel, uint32_t count);
-void            ngg_render(ngg_scene*);
-```
-
-Everything under "renderer state" is wiring, not new rendering work: `core::Scene` already has `SetAtmosphere`,
-`SetDebugMode`, `SetLightMode`, `SetShadowsOn`, `SetWeldNormals`, `SetFoliageNormals`, `SetCull`, `OnResize`,
-`Bounds` and `FocusPoint`. The viewer's key handling is a thin layer over exactly these, so the first useful
-milestone is small.
-
-#### Addition and deletion
-
-**Deletion is a draw-list edit — no GPU work.** Removing an instance stops it being drawn; its vertex bytes stay
-resident until a compaction. That is not a compromise: it makes **undo instant too**, because the geometry never
-left the buffer. Freeing storage on delete would make undo the expensive operation, which is backwards for an
-editor. Compaction happens on save, on export, or when free space crosses a threshold — never on the interactive
-path.
-
-**Addition goes to a dynamic pool beside the static scene.** Two tiers, because their lifetimes differ:
-
-| | contents | mutability |
-|---|---|---|
-| static set | the imported track, uploaded once | flags only: hidden, transform |
-| dynamic pool | everything added this session | growable suballocator, grow-and-copy like a `vector` |
-
-Adding one prop must not re-upload 35 MB, and this is also how editing actually proceeds: a large static import
-plus a few dozen authored changes. Editing an imported object's *geometry* — rare — is "remove from static, add
-to dynamic", so there is one mechanism rather than a special case.
-
-Four details that are awkward to retrofit:
-
-- **Duplicate placement must not duplicate geometry.** Fifty cones is one `add_mesh` and fifty `add_instance`,
-  which only works if the scene is instance-based from the start.
-- **Ids are assigned by the renderer** and mapped by Wallaby to its own object model, so storage can move under a
-  stable handle.
-- **Batch the uploads, not the calls.** P/Invoke is nanoseconds; separate GPU submits are not. The shim queues
-  uploads and flushes once before each render — `core::Device` is synchronous (`Begin`/`EndAndWait`), so the
-  frame boundary is the natural flush point.
-- **Materials and textures need the same add/refcount treatment**, or "add a prop with a new texture" collapses
-  back into a full reload.
-
-#### Why the renderer must NOT load glTF
-
-The obvious shortcut — teach `ngg-core` to open the editing format directly — reintroduces the exact bug class
-this project has already paid for twice.
-
-To show the truth, a glTF loader would have to reimplement the converter's passes: complete-linkage normal
-welding, per-material shading overrides, de-atlasing, and the texture round-trip decision. Anything it skipped
-would make the preview disagree with the shipped asset. **That is the two-renderers-disagree problem in a new
-costume — two content pipelines instead of two renderers** — and it is what put the wrong textures on the road
-and cost a `.pso` disassembly to find (§3.2b).
-
-The property to protect: **the C# converter stays the only content pipeline, and the renderer consumes buffers it
-is handed.** Then the preview is honest by construction rather than by discipline. A C++ glTF parser and PNG
-decoder would also be a large dependency to carry for a preview.
-
-#### "Immediately visible", by tier
-
-Match the mechanism to what actually changed. Most interactions never touch geometry:
+**The scene is edited in place, never rebuilt per edit.** The editor's costs fall into three tiers:
 
 | what changed | cost | mechanism |
 |---|---|---|
-| camera, sun, exposure, sampler, debug view, shadows | free | setters that already exist |
-| move/rotate an object, hide it, toggle a layer, select | ~free | per-instance transform and flags |
-| weld angle, spherical, flip, mesh edit, repainted texture | scoped rebuild | re-run the C# pass for affected objects, push updated meshes |
+| camera, sun/weather, debug view, light mode, culling | free | `FrameDesc` / `RenderSettings` fields, `setLightMode`, `setCull` |
+| move/hide an object, move/add/remove placements, select, material scalar | ~free | per-object delta and flags, placement batches, root constants |
+| geometry edit, weld angle, re-converted texture | scoped rebuild | Wallaby re-runs its pass and re-pushes (today: the whole `.ngg` through `loadScene`) |
 
-Tier 1 is the one that matters most for Wallaby, which is a placement editor: moving and rotating objects is its
-main verb.
+- **Objects by index.** An object is one of the scene's draw objects: the `.ngg`'s `NGGO` order, then whatever
+  `createInstance` added (`instanceObjects` maps an instance to its objects). `setObjectTransform` takes a
+  **world-space delta** from where the file put it, because the `.ngg` bakes object placements into the vertices.
+  Identity restores the object. Turning about its own centre is the caller's job, composed from `objectBounds`. An
+  object can also be moved by `FrameDesc::stageObjects` or an `InstanceUpdate`. The last call wins, so an editor uses
+  one of them per object.
+- **Deletion is hiding** (`setObjectVisible`): a draw-list edit with no GPU work. The geometry stays resident, so undo
+  costs nothing. Freeing storage on delete would make undo the expensive direction.
+- **Placements (edit table v2)** are the instanced models of `NGGD`/`NGGE` (§2.6): a handle per placement, the
+  file's in order and then the added ones, **never renumbered**. A removed placement becomes a tombstone, so the
+  handles in an editor's undo stack stay valid. Edits come in **batches** (`addPlacements`, `setPlacements`,
+  `removePlacements`), so a brush stroke or a dragged selection rebuilds the culling cells once. A batch is checked
+  whole and changes nothing if any handle, model or scale is bad. `modelStats` reports the last frame's counts.
+  This answers the old "instanced like glTF, not baked" requirement for placed content: fifty cones are one model and
+  fifty placements.
+- **Added geometry goes to the dynamic pool** beside the static scene (`Scene::AddMesh/AddInstance`, reached through
+  `createModel`/`createInstance`). Placing one prop does not re-upload the track. The pool is uploaded lazily at the
+  next frame and grows like a `vector`. Mesh/texture/material handles are 1-based; instance handles are object
+  indices. `Scene::Compact` (reclaim without renumbering) exists but nothing calls it: released meshes stay until the
+  scene goes ([design.md §3.1a](design.md)).
+- **Materials live** (`getMaterial`/`setMaterial`, handles 1-based): a scalar shows on the next frame at no cost, and
+  a texture slot rebuilds the descriptor heap. Only `kMaterialAlphaTest`, `kMaterialTwoSided` and `kMaterialBlend`
+  are exposed. What the renderer derives from the slots stays inside it. `materialName` is the base-colour texture's
+  name (RBR's naming).
+- `focusPoint` gives a point **on the ground** mid-stage. On a bent stage the box centre is in the air.
 
-`Scene::Load` already reads the whole file into a `std::vector<uint8_t>` and parses from `blob.data()`, so
-`LoadFromMemory` is a five-line split — and it removes the temp file for opening a project. **Do not reach for it
-on every edit**; that is the temp-file mistake moved from disk to PCIe. `load_memory` opens a project, deltas edit
-it, and having both from the start is what keeps the API honest.
+### 8.3 Overlays: what needs depth is drawn by the renderer
 
-Tier 2 may start as "rebuild and re-push the whole scene" — 1.4 s for Joux Verte, textures and de-atlas included
-— and get scoped down when that is the thing that hurts.
+A child window with a swap chain wins the airspace fight, so host-painted (GDI/WinForms) overlays flicker or never
+appear. **Decision: the renderer draws everything in-world that needs the depth buffer** (the selection wire, line
+layers, labels). Wallaby draws its 2D chrome outside the viewport.
 
-#### Overlays: split by what needs depth
+- **Selection** (`setSelection`): a wire round each object. Hidden objects draw none, because hiding is deletion.
+- **Overlay lines** (`setOverlayLines`): segments (vertex pairs, per-vertex colour `0xAABBGGRR`), one layer replaced
+  per call and kept until changed. *Described, not commanded*: there is no render-state API, which is what made the
+  D3D9 immediate-mode gizmos replaceable at all. An odd vertex count is refused. `kEditNoDepth` is for manipulators,
+  which must stay grabbable. **Editor layer L is core layer L + 1**: `FrameDesc::lines` owns layer 0 and clears it
+  when a frame drops its lines. On a shared layer, the editor's gizmos would vanish with the game's debug lines.
+- **Labels** (`setFont`, `setLabels`): the host supplies a monospace RGBA atlas (no glyph data or size frozen into the
+  renderer). Text sits at world anchors, `pixelHeight` tall at any distance. `kEditScreenSpace` is for HUD readouts
+  and `kEditTextShadow` keeps text readable over sunlit road.
+- **Where in the frame** (`Scene::RenderEditorOverlay`, `shaders/select.hlsl`): **after the tonemap and TAA,
+  straight onto the back buffer, depth-tested against the scene's depth.** Drawn into the HDR target, the overlay
+  would be tonemapped (not the colour asked for), and a one-pixel wire fed to TAA ghosts. Upscaling breaks this: the
+  overlay is **not drawn while upscaling** (FSR/DLSS), because the depth buffer is then not the output's size.
+- **Unjittered view-projection**, unlike the scene: a jittered wire would crawl against the TAA-stable image. The
+  up-to-half-pixel mismatch with depth is absorbed by the selection PSO's depth bias, which is **positive under
+  reverse-Z**. The wrong sign fails silently: the wire sinks into its surface and never appears. Overlay lines have
+  no bias, so they sit against geometry.
+- **The occluded part is drawn too, dimmed**, on the exact complement of the visible pass's depth function. A
+  selection that vanishes behind a hill is worse than none.
+- **Pixel counters** (`overlayStats`): visible and occluded pixels per kind, the only way to tell "drawn" from "drawn
+  and rejected" from outside. **`[earlydepthstencil]` is load-bearing:** a UAV-writing pixel shader otherwise runs
+  before the depth test, and the counters then count rasterised pixels, not surviving ones. The symptom: identical
+  visible/occluded counts from two complementary depth functions. *Rule: any instrument written from a pixel shader
+  measures invocations unless early-Z is forced.*
+- **The pixel probe** (`probePixel`): the next frame logs that pixel's lighting terms by name. The buffer is zeroed
+  before the armed frame and the shader sets a FIRED marker, so "nothing covered the pixel" reads as a miss, not as a
+  stale pass.
 
-Wallaby drawing overlays *over* a child window with a swapchain runs straight into the airspace problem: a native
-child window paints over managed controls, so GDI overlays flicker or never appear. Three ways out:
+Measured through the table on stage 41 (`editor-api-41`):
 
-1. renderer hands over a frame image, Wallaby composites — overlays trivial in C#, but a copy per frame and no
-   depth buffer, so selection wireframes cannot occlude correctly;
-2. renderer draws everything from selection data Wallaby sends — correct and free, but every overlay tweak is a
-   C++ change;
-3. **split by what needs depth** — the renderer draws in-world overlays (selection wireframe, grid, gizmos),
-   Wallaby draws 2D chrome *outside* the viewport.
+| check | result |
+|---|---|
+| translate +10 m | moved exactly (10, 0, 0) |
+| turn 90 deg about its centre / about the origin | 0.0000 m / 2706 m |
+| scene + camera moved 64 m together / scene alone | max delta 0.0002 / 60.5 |
+| selection, occluders hidden | 35,835 / 46,430 -> 36,036 / 46,229, total conserved |
+| lines, scene hidden | 4,179 / 2,489 -> 6,668 / 0 |
+| labels, twice the text | 9,580 = 2 x 4,790 |
 
-**Decision: 3.** Selection wireframes want the depth buffer, which lives in the renderer; a camera-position
-readout does not need to be over the viewport at all. `ngg_set_selection` and `ngg_pick` above are the whole
-interface that requires.
+The transform comparison runs **without sun shadows**. The cascades snap to a world-fixed texel grid, so moving the
+camera 64 m moves the snap. That is the maps' stability design, not a transform error.
 
-**Built, and two placement questions were decided by measuring rather than by taste.**
+### 8.4 Picking and the rest
 
-*Where in the frame.* The highlight draws **after the tonemap and after TAA**, straight onto the back buffer,
-while still depth-testing against the scene's own buffer. Into the HDR target it would be tonemapped — so the
-colour the editor asks for is not the colour on screen — and a one-pixel wire handed to a temporal filter ghosts
-behind itself the moment the camera moves. The part that has to stay inside the renderer is the depth test, and
-that is the part this keeps.
-
-*Which matrix.* The overlay uses the **unjittered** view-projection, unlike `Record`. The image underneath is
-temporally stable, so a wire drawn with the frame's jitter would crawl half a pixel against a still picture. The
-cost is that wire and depth buffer disagree by up to half a pixel, absorbed by a depth bias — the right way
-round, because a sub-pixel depth error is invisible and a crawling outline is the most obvious thing on screen.
-The bias is **positive**, which is the opposite of the conventional-depth instinct: under reverse-Z nearer is
-larger. That sign does not fail loudly — it pushes the wire into the surface it traces and the highlight simply
-never appears.
-
-Occluded wire is drawn too, dimmed, on the exact complement of the visible pass's depth function. A selection
-that vanishes behind a hill is worse than no highlight.
-
-**`[earlydepthstencil]` turned out to be load-bearing, and it is worth knowing why.** The overlay's pixel shader
-counts the wire pixels it writes, so the editor can tell "nothing is highlighted" from "everything is highlighted
-and rejected by the depth test" — from outside, both are an unchanged screen. But **a pixel shader that writes a
-UAV has early depth-stencil disabled by default**: the depth test then runs *after* the shader, which still
-suppresses the colour write, so the picture is correct — while the shader has already run and its atomic has
-already landed. The counter was measuring rasterised pixels and calling them visible ones. Measured: both
-counters reported exactly 25,932 on Joux Verte, every wire pixel counted once per pass with the depth test
-contributing nothing. **Two identical numbers out of two complementary depth functions is the shape of this
-bug.** With the attribute on, the same 25,932 splits 22,953 / 2,979.
-
-Generalise it: **any instrument written from a pixel shader measures shader invocations, not surviving pixels,
-unless early-Z is forced on.**
-
-**And the probe now reports when it did not fire.** `ngg_probe_pixel` writes from the scene's pixel shader, so if
-no geometry covers the pixel nothing is written and the readback still holds the *previous* armed frame — which
-reads as "identical to the baseline" and passes. That false pass had already been paid for once in the transform
-test; it was still there. The buffer is now zeroed before an armed frame and the shader sets a FIRED marker, so a
-miss is reported as a miss. It immediately showed that **track-108's transform verification had never run at
-all** — its camera aimed at the centre of the bounding box, which on a stage that bends is open air. The test now
-searches for a pixel with geometry behind it, and "the geometry left the pixel" counts as the change it is
-looking for.
-
-#### Sequencing
-
-1. ~~**Flat C shim over the state setters**~~ **DONE**, plus `ngg_load_memory` and a child HWND.
-2. ~~**The mechanical math pass**~~ **DONE** — SlimDX's `Vector*`/`Matrix`/`Quaternion` are gone from the
-   editor, which now speaks `System.Numerics` like everything else. (The "79 files" figure this step was sized
-   with was wrong; see Wallaby's `CLAUDE.md`. The real count that could go fully clean was 5 — `Render(Device)`
-   is in the map-object model itself, so 93 of 106 files name a D3D9 type.)
-3. **The rendering files** onto the shim. SlimDX leaves here and x64 flips in the same change.
-
-**Why 3 cannot be incremental, measured:** `SlimDX.dll` is x86 and `ngg-api.dll` is x64 (PE header, checked).
-They can never share a process, so there is no "add the new viewport beside the old one" step — the flip is
-atomic by construction, exactly as the editor's own notes assumed.
-
-**And what the flip would cost if attempted today:** the editor's draw path is immediate-mode fixed-function —
-35 distinct D3D9 device operations, led by `SetRenderState` (106 calls across 31 files), `SetTransform` (46) and
-fixed-function `Material` (38). No retained-mode renderer can implement that interface, so it cannot be wrapped;
-it has to be *replaced by a description*. More sharply: everything the editor draws that is not track geometry is
-a gizmo — 7 `LineStrip` draws, 4 `TriangleStrip`, 3 `TriangleList` — and until ngg-core could draw those, a
-flipped editor would render the track beautifully and none of the things a track editor exists to edit.
-
-**So the overlay-line channel came first** (`ngg_set_overlay_lines`, below). The caller replaces a whole layer by
-id and the renderer owns everything about how it is drawn: per-vertex colour, so there is no colour state to set;
-segments rather than strips, so there is one topology and nothing to get wrong; depth-tested with the occluded
-part dimmed, or `NGG_OVERLAY_NO_DEPTH` for manipulator handles, which must stay grabbable. *Described, not
-commanded* — that is the difference that lets a D3D12 backend satisfy a request `SetRenderState` never could.
-
-Verified on both tracks by the renderer's own pixel counters, with the same conservation argument the selection
-pass uses: 12 verticals through the focus point (which is on the ground, so every line is half buried) come out
-110 visible / 53 occluded on track-42; hiding every object empties the depth buffer and gives 163 / 0, the total
-unchanged — emptying depth *moved* pixels rather than making them; and `NO_DEPTH` returns exactly 163 / 0 with
-the scene restored. An odd vertex count is refused rather than silently dropping half a segment.
-
-Open, and deliberately not decided yet: whether the live scene's per-instance transform should also become an
-optional `.ngg` field (the format bakes today, and §9b item 4's culling bounds may want the same per-object
-data); and whether picking should be GPU readback or a CPU ray cast against `Wallaby.Formats` meshes, which
-already has Möller–Trumbore and would keep the renderer out of it.
-
-#### 8.2a The editor API moved into WRenderer (2026-11-07)
-
-`ngg-api` did not survive the move to W-Rally (phase 4 replaced it with the game's `FrameDesc`), so the editor was
-left drawing through plugin-rbr's last build of it: an ngg-core that no longer received fixes. Its editor surface is
-now `include/wrally/iface/renderer_edit.h`, reached from `RendererApi::editApi` with its own version, over the same
-core calls - objects by index, selection, overlay layers, labels, materials, light mode, culling, the probe. Picking
-stayed on the CPU, as the paragraph above leaned towards.
-
-Measured through it on stage 41 (`tests/editor_api.cpp`, CTest `editor-api-41`):
-
-```
-translate +10 m                       moved exactly (10, 0, 0)
-turn 90 deg about its centre          0.0000 m;  about the origin 2706 m
-scene + camera moved 64 m together    max delta 0.0002  (float rounding 64 m further out)
-scene moved alone                     max delta 60.5
-selection, occluders hidden           35,835 / 46,430  ->  36,036 / 46,229, total conserved
-lines, scene hidden                   4,179 / 2,489    ->  6,668 / 0
-labels, twice the text                9,580 = 2 x 4,790
-```
-
-Two things the old self-test never had to say. The transform comparison runs **without sun shadows**: the cascades
-snap to a texel grid fixed in the world, so moving the camera 64 m moves the snap (shadowUV 0.5338 -> 0.5333), which
-is the maps' stability design and not the transform. And the editor's line layer L is the core's L + 1, because
-`FrameDesc::lines` owns layer 0 and a frame that drops them clears it - on the same layer, the editor's gizmos would
-vanish with the game's debug lines.
+- **Picking is the editor's, on the CPU** (Möller–Trumbore against Wallaby's own meshes). The table has no pick
+  call, which keeps the renderer out of the editor's object model.
+- Other editor-only switches: `setLightMode` (0 = RBR's bake as the A/B reference, 1 = dynamic; `lightModeName`),
+  `setCull`.
+- **Open:** device-lost recovery; scoped re-push of changed objects instead of a whole `loadScene` (build it when
+  the full reload hurts); a transform for the file's own `NGGO` objects (they are baked; moving is a delta).
 
 ---
 
-## 9. Phasing
 
-**P0 — Interception + interop spike. Retires the two biggest risks.** *(weeks, not months)*
+## 9. Native and generated tracks
 
-- P0a: hook the device, dump a frame's draw calls, confirm the tagging window partitions track / car / UI
-  correctly, extract view/proj, suppress all track draws. (No INTZ — see §1.4.)
-  *Exit: game runs with an empty world, HUD and menus perfect, debug cube glued to world space.*
-  - **Increment 1 — DONE.** ✅ `ngg/bridge/` ships a `d3d9.dll` proxy that routes `Direct3DCreate9` through
-    `Direct3DCreate9On12`. Verified by `proxycheck` (7 checks) *and* in the real game: RBR creates its device
-    successfully on D3D12 (1024×728, 3 backbuffers, `hr=0`), and `IDirect3DDevice9On12` + `ID3D12Device` are
-    reachable from inside the game process. **A 2004 game running on D3D12 is no longer an assumption.**
-    Findings: RBR uses `D3DCREATE_MULTITHREADED` (see §2.1) and requests SDK version 31, which 9on12 accepts.
-  - **Increment 2 — DONE.** ✅ `IDirect3DDevice9` wrapper **generated from `d3d9.h`** by
-    `tools/gen_d3d9_wrapper.py` (99 forwarded, 20 hand-implemented; the generator emits the intercepted
-    *declarations* too, so a hand-written signature cannot drift). Resource tagging via private data, draw
-    attribution, camera capture, per-frame stats, one-frame inventory dump (F11 or `DumpFrame=N`), and
-    tag-based suppression behind `SuppressTagged`. Verified in-game — see the measured blocks in §2.1 and §2.2,
-    which resolved the camera question outright.
-  - **Increment 3 — DONE, and it invalidated the plan.** Call-site attribution replaced the `ParseLBS`
-    bracket entirely (see the correction in §2.1). No plugin change, no anti-cheat-adjacent edit, and the
-    partition is now a single config value.
-  - **Increment 4 — DONE.** The track-geometry sites were identified in a live stage by cycling suppression
-    in-game, and the result was better than expected: the world is partitioned by content type (§2.1), not
-    lumped into one site. Suppression now takes a list of sites, and each module is fingerprinted so a site
-    table can never be applied to the wrong binary.
-  - **Increment 5 — DONE. P0a exit criterion met.** With ground+scenery+sky suppressed the world is gone and
-    the UI still renders. The full site map is in §2.1, along with the two findings that change planning: the
-    car shares a creating function with the ground, and `0x0876D4` bundles water/trees/grass/scenery together.
-    Also measured: a 9on12 resource-loss defect (§1.2) that needs re-testing once suppression is permanent.
-  - **P0a is closed.** Remaining P0 work is P0d (photometric spike, in Wallaby) and P0e (minimum-viable-LBS).
+Future design. What exists today is marked **exists**; everything else is planned.
 
-**P1 — in progress.**
+### 9.1 What exists
 
-- **`ngg-host` + IPC — DONE (v1).** The two-process architecture is real and verified end to end by
-  `proxycheck`: the bridge creates a shared texture on the game's own 9on12 D3D12 device, launches the 64-bit
-  `ngg-host.exe`, the host opens the texture by name and renders into it, and the bridge unwraps RBR's D3D9
-  backbuffer in-process and copies the result in. A pixel written by the 64-bit process is then read back
-  through D3D9 and checked. The IPC contract is `ngg/ipc/ngg_ipc.h`, with static_asserts that break the build
-  if the 32- and 64-bit layouts ever diverge.
+- **exists:** the runtime treats every `.ngg` alike; nothing in the format is RBR-only. Every field that comes from
+  un-baking (`bakedScale`, the vertex colour) is optional in effect: a native file sets `bakedScale` 1 and white
+  colour, and the default lighting never reads them.
+- **exists:** instanced models and placements (`NGGD`/`NGGE`, §2.6) - the mechanism for added content on converted
+  stages (better trees, props) and for generated scatter. A placement with `kNoPlant` adds; one naming a plant replaces.
+- **exists:** glTF as the interchange (Wallaby's conversion spine, §2.1) and v3 materials that map onto glTF
+  metallic-roughness.
+- **not yet:** W-Rally stages (`stage.yaml`): the catalog reads none. Native gameplay in `.ngg` chunks
+  ([design.md decision 10](design.md)). Any generator.
 
-  Deliberately synchronous in v1: the game thread waits for the host's frame. Overlapping them would buy
-  throughput at the cost of a frame of latency between the world and the car, which has to be measured before
-  it is accepted, not assumed away. Every failure path (no host, wrong adapter, host hung or crashed) simply
-  deactivates the link and falls back to vanilla rendering.
+### 9.2 Gameplay first, as a stub, then native
 
-  Known gaps in v1, all recorded rather than hidden: no resize — a device reset deactivates the link instead
-  of rebuilding the shared texture; no depth, so nothing can composite *against* the host's output yet; and the
-  host paints a placeholder over the whole frame rather than rendering a world.
+A generated stage still needs everything to *drive* on - collision, surfaces, drive line, splits, cameras, fences,
+pacenotes - but nothing from RBR to *draw* it. **The plan in [design.md §6.3](design.md):** a W-Rally stage ships an
+`.ngg` plus gameplay files in RBR's formats (`.trk .col .mat .fnc .dls`), written by our tools, so both physics modules
+run it from day one; later those move into `.ngg` chunks and a stage is one file. Since W-Rally draws the stage
+itself, the old "minimum-viable `.lbs` render stub" question no longer exists: no render geometry has to satisfy RBR's
+engine.
 
-- **Test scene + camera contract — DONE.** `ngg/format/ngg_format.h` (chunked container, v0),
-  `ngg/tools/make_test_ngg.py` (writes a world-locked test grid with axis markers), and `ngg/host/scene.*`
-  (loader + D3D12 pipeline) put real geometry on screen through the game's own camera. Verified in-game across
-  several stages, static and under motion. See the measured block in §2.2.
+**The collision rule inverts for generated content:** collision is authored first and the visual mesh conforms to it.
+Wallaby's existing tools (`DriveLineCreator`, `colgen`, `FenceBuilder`, `CamCreator`, `PacenotesEditor`) are the
+starting point, but were built for interactive use; a generator needs them as passes: a drive line with splits and
+start/finish from a centreline, collision from the road surface, `.mat` from the generator's own material assignment,
+pacenotes from curvature, cameras and triggers templated from the drive line. That is Wallaby's project; it does not
+touch the renderer.
 
-- **LBS -> .ngg converter (prototype) — DONE.** `ngg/tools/lbs2ngg.py` reads real RBR ground geometry and
-  emits `.ngg`. Standalone by necessity: **Wallaby does not build here** — it needs SlimDX 4.0.13.43, which is
-  discontinued and not installed — so its C# is used as the format *reference* rather than as the
-  implementation. It is a CLI so Wallaby can shell out to it once it builds.
+### 9.3 Content path
 
-  The parser's self-check is the valuable part: a correct parse consumes each block's declared size **exactly**,
-  and the tool fails loudly otherwise. That turns "the picture looks odd" into "the layout is wrong at this
-  byte". **171 of 207 shipped track files convert with an exact match**; the remaining 31 desync near the end of
-  the ground block, spread across all time-of-day variants (worst on `_O`, 16/83) — a format variation still to
-  be identified, tracked as a known gap rather than papered over.
+```
+generator (AI / procedural / DCC) --glTF--> Wallaby --+--> .ngg            (renderer)
+                                                     +--> gameplay files   (physics, game)
+```
 
-  Confirms two things: mesh vertices need **no Y/Z swap** (Wallaby's `getSwapedVector` applies to bounding boxes
-  and object positions, not to vertex data), and the bounding boxes agree with a Y-up runtime — e.g. track-100
-  spans 11 km in X and 3.8 km in Z but only 197..358 in Y.
+**glTF, not USD** (decided): reach and weight - glTF is native in Blender and every real-time tool, USD's tooling is
+thin outside Houdini/Maya and heavy to embed. USD's loss is its layer composition and variant sets; the `.scene.json`
+sidecar carries that instead (stage layout, layers, material classes, weather, drive line). Converted stages enter the
+same spine further down, so this is one pipeline. glTF does not carry UV scrolling without `KHR_animation_pointer`
+(thinly supported), which matters little: RBR's `...Anim` shaders are a single UV-scroll instruction and its `...Sway`
+moves nothing. glTF is a transport format; Wallaby's working form is its own mesh structure.
 
-- **PIPELINE PROVEN END TO END.** Joux Verte (Map 42) converted from `track-42_M.lbs` and rendered by the
-  64-bit host **matches the original geometry exactly** in-game — road under the car, terrain where RBR thinks
-  it is. That closes the architecture question the whole of P0/P1 existed to answer:
-  `LBS -> .ngg -> 64-bit D3D12 -> shared texture -> D3D9 backbuffer`, with the game's own camera, is real.
-  Everything after this is content and quality rather than "does the approach work".
+### 9.4 Replacing the card vegetation
 
-- **Textures and the object model — DONE.** The converter now emits `NGGM` materials, `NGGO` objects and
-  `NGGT` embedded DDS; the host decodes BC1/BC2, builds an SRV heap and draws per object. RBR's own
-  `GMeshRenderChunk` maps *directly* onto an object: it already partitions each region into
-  (sub-mesh, index range, texture), which is exactly an object with a material — so §3.4b's object model came
-  out of the source data rather than being imposed on it.
+**De-merging works with no help from the file:** separate plants do not touch, so connected components over quantised
+positions split them. Joux Verte: 337,944 alpha-tested triangles -> 38,033 components (~33 per object), median 6
+triangles and 1.3 m footprint (a bush of 2-3 crossed cards), 38 % tree-like, 0.3 % sprawling > 40 m. **Shape alone does
+not classify:** the largest components are the distant backdrop (`MB_SUPERBOWL_4`, 7 km wide) and fences; tagging
+needs texture name and shape, with fences and backdrop excluded explicitly - Wallaby's tagger (§2.6). The legacy
+importer already does the de-merge (untagged).
 
-  Joux Verte: 158 regions -> **746 objects, 3 materials, 3 embedded textures**. Only three because the ground
-  genuinely uses three (`MB_04_GROUND_C`, `MB_03GROUND04`, `TrackTexturePlateOpaque`); the other 27 named
-  textures belong to fences, banners and signs in the *general* meshes, still unconverted. Sub-mesh 0
-  (vertex type 4, position+colour only) has zero render chunks in any region — it is never drawn.
+| part | state |
+|---|---|
+| detection / de-merge | **exists** (importer; Wallaby's plant table) |
+| classification | Wallaby's tags; per-track review |
+| rendering instances with LOD | **exists** (§2.6); ray-tracing cost of alpha-tested foliage open |
+| replacement models, bushes, grass, converter placements | open (vegetation plan workstreams 3-4, Wallaby) |
 
-  A texture that fails to decode keeps its descriptor slot and borrows a 1x1 white fallback, so a bad texture
-  cannot leave a hole in the heap or crash the draw loop.
+Collision comes from `.col`/`.trk`, not from these meshes, so replacing them is visual only - as long as collision is
+left untouched.
 
-- **Complete the world — DONE for static content.** The converter covers general meshes (1/1), scenery (1/3) and
-  movable meshes (1/6); RBR's world is suppressed wholesale and ours is drawn. Chosen over depth compositing
-  because the latter builds a bridge the design intends to burn. What remains is not static geometry but
-  *runtime-driven* geometry — fences and movable transforms (§9b items 4/5), both blocked on the harvesting-vs-
-  physics-coupling decision.
+### 9.5 Nearer-term uses of the same path
 
-- **`ngg-core` split + standalone viewer — DONE.** See §8.0. This is the prerequisite for the lighting work
-  below: it makes a shader change cost seconds instead of a game launch.
+- **Material synthesis:** normal/ORM/emissive maps for RBR's 256^2 diffuse textures, offline, into v3 slots.
+- **Light placement** from RBR's evidence of where light was intended; machine output must stay distinguishable from
+  authored (a provenance field when the lights chunk exists).
+- **Detail scatter** over converted stages, masked by the `.mat` surface classes: additive placements, no original
+  vertex touched.
 
-- **Next: dynamic lighting.** The renderer still reproduces RBR's own ground shader exactly — two textures lerped
-  by vertex alpha, modulated by the baked vertex colour, scaled by `bakedScale`. Faithful to 2004, and the thing
-  the whole overhaul exists to replace. Order matters: **sky and atmosphere first**, because ambient has to come
-  from somewhere and "directional light plus a hardcoded ambient constant" is a placeholder that never gets
-  removed — and because an analytic sky *answers* §9b item 6 rather than deferring it again. Then sun and
-  shadows, per-track direction from `TrackSettings.ini` until §3.2's photometric solve replaces it. `bakedScale`
-  and the vertex-colour path then disappear by construction, exactly as `ngg_format.h` predicts.
-- P0b: **interop — DONE.** ✅ `tools/interop-probe/` — 17 checks, passing. Established that the renderer creates the
-  shared textures and the D3D9↔D3D12 hop stays in-process (§1.2). The next step is wiring the same calls into a
-  real `d3d9.dll` proxy rather than a console harness.
-- ~~P0c: VR per-eye draw replay~~ — **moved to P4.** It exists to render the *car* twice per frame, and there is no
-  car in early phases. Nothing else needs it before the VR phase.
-- P0d: **photometric spike** in Wallaby — match vertices across `_M`/`_E`/`_O`, run the solver, visualise recovered
-  sun directions and the `_N` light hot-spots. Lower stakes than in rev 2 (RT covers occlusion), but it still
-  decides how much per-track hand-authoring §5.3 and §3.4 need.
-- P0e: **minimum-viable-LBS experiment.** How little visual geometry can a gameplay stub carry before the engine
-  misbehaves? On the critical path now that fully generated stages are in scope (§7.1).
+### 9.6 Fairness
 
-**P1 — Static world.** Converter v1 in Wallaby (Tier 0 lighting, heuristic materials, meshlet build) → `ngg-core`
-D3D12: mesh-shader geometry, RT shadows, physical sky, fog matched to vanilla, foliage sway → flat-screen
-composite. One track, fully ours. The quality-tier interface (§1.8.4) goes in here, even though only one tier exists.
+Generated and augmented content changes what players see, so it is in the same hash chain (§2.9). **A generated stage
+must be reproducible from a recorded generator id, seed and input hash**; the format has no field for it yet.
 
-**P2 — Quality and scale.** RT GI/AO/reflections, sampler-feedback texture streaming above 4 GB, material override
-workflow, LOD chains, long view distance, wetness from `.MAT`, weather preset system, Tier 2 solve for sun
-estimation, batch conversion of all tracks.
 
-**P3 — Night and motion.** Clustered many-light path, emissive materials, auto light extraction **and the Wallaby
-light editor**, headlights; transform harvesting for animated objects; car stencil harmonization and car env map.
+## 10. Measuring and debugging
 
-**P4 — VR.** Stereo path, OpenXR submission, per-eye car replay, VR UI panel, and the RT-light quality tier —
-which is where §1.8.4 gets paid for.
+### 10.1 Judging a change: whole-frame GPU time and A/B captures
 
-**P5 — The car.** SGS converter, car materials, damage/dirt harvesting, full takeover.
+**A change of what the GPU does is judged by the whole frame's GPU time** (`Renderer::LastFrameMs`,
+`RenderStats::frameMs`: timestamps around `RecordFrame`, first command to last), not by a pass's own timestamps,
+which shift work between passes. Per-pass numbers (`passMs`, `rtMs`, `aoMs`, `lightsMs`...) say where a difference
+is, once the total says there is one.
 
-**P6 — Native content.** glTF import, scene description layer, gameplay-stub emission, additive content on
-converted tracks, generative material/light/detail tooling (§7.3).
+**A/B runs are deterministic replays** (game side, `game/src/app`):
 
-**P7 — Stage generation.** Wallaby-side gameplay generation: drive line, collision, surfaces, pacenotes, triggers
-(§7.1b). Renderer-independent; can run in parallel with P4–P6 given people.
+| switch | effect |
+|---|---|
+| `--replay run.phr`, `--step <s>` / `PHYS_DRIVE_STEP` | fixed time per frame, simulation in lockstep: the same frames at the same ticks run to run |
+| `--pause-at`, `--exit-at` / `PHYS_DRIVE_PAUSE_AT`, `_EXIT_AT` | stop or quit at a tick |
+| `PHYS_DRIVE_SHOTS=<n>` | `CaptureFrame` (the swap chain's image, PNG) every n ticks, `shot-NNN.png` beside `--out` |
+| `PHYS_DRIVE_OFF=taa,ao,shadows,rt,vsync` | those off from the start (`ao` = quality low). **`taa` for image A/B** (history makes frames differ); **`vsync` for timing** (a capped iGPU clocks down into the slack) |
+| `PHYS_DRIVE_FRAMEMS` | mean + median of `frameMs` (and `passMs`, `rtMs` medians) printed at the end |
+| `PHYS_DRIVE_UPSCALE=<mode>` | upscaling mode by index or name (`fsr-quality`...) over the settings |
+| `PHYS_DRIVE_READOUT` | the readout on from the start |
+| `PHYS_DRIVE_NGGLOG` | the renderer's log on stdout |
+| `PHYS_DRIVE_CAMERA_AT=<tick>:<cam>` | a camera cut at a tick |
+| `PHYS_DRIVE_JITTER=<tick>` | RMS of the car's frame-to-frame screen motion up to that tick, then quit |
+| `PHYS_DRIVE_LOOK_UP=<deg>`, `PHYS_DRIVE_TEST_LIGHTS`, `PHYS_DRIVE_LAMPS` | views tilted up (sky); test lamps on the car; lamp switches forced |
+| `--showroom <car> [--shots n]` | the Garage turntable, captured and quit (`WRALLY_SHOWROOM_TIMES` logs load times) |
 
-Every phase ships behind a config flag with vanilla fallback one setting away.
+Keep runs short. Renders are compared within one compiler / build only. `tools/car-ghost` is a scripted A/B of this
+kind (RT history vs `NGG_RT_NO_HISTORY=1`, view 11/13).
 
-Three items are deliberately pulled *earlier* than their phase because they're cheap and they de-risk what
-follows: the `free` binding mode ships in the P1 format, the quality-tier interface ships in P1 for a VR phase
-three steps later, and the minimum-viable-LBS experiment runs in P0.
+### 10.2 The readout and `RenderStats`
 
----
+The renderer fills `RenderStats` (`renderer.h` iface, `stats`) after each frame: GPU ms (frame, main pass, env,
+aerial, RT, AO, denoise, local lights), RT available / active and **why not** (`rtFallback`: "cascades selected",
+"no ray tracing on this adapter", "shadows off", "the acceleration structure failed to build"), traced and shadowed
+pixels, quality, AO source name, exposure (applied, metered and adapted EV), render size and upscaler, light count,
+sun elevation. **The game draws it** (`F1`, `ui::DrawReadout` in `game.cpp`) through the UI pass - fps, gpu frame,
+switches (`K` RT, `L` shadows, `O` AO, `T` TAA), RT breakdown or the fallback reason, upscaling, exposure, debug view.
 
-## 9b. Deferred work — the running TODO
+Rule from the readout's history: **when an instrument reports "nothing happened", check that it is connected**
+before believing it - readbacks are valid only after the GPU wait (`Scene::LogProbe`, `ReadOverlayStats` run after
+`EndAndWait`).
 
-Items parked deliberately, with the reason, so "later" does not become "lost".
+### 10.3 Debug views, light modes, the pixel probe
 
-| # | item | why deferred | blocked on |
+`setDebugView` / `V` / `NGG_DEBUG_VIEW=<n>` (`Scene::DebugModeName`): 0 normal, 1-2 tex0/tex1, 3 blend weight,
+4 baked vertex colour, 5 uv0, 6 flat grey, 7 sun visibility, 8 shadow acne, 9 ambient specular x8,
+10 roughness/metallic, 11 RT sun visibility, 12 RT vs shadow map (red RT-shadow/map-lit, blue reverse), 13 RT AO,
+14 plants, 15 RT local lights. Debug views get the raw curve and no TAA. Light mode (`NGG_LIGHT_MODE`): 0 baked RBR
+vertex colour (sRGB curve, the A/B reference), 1 dynamic. The editor's `probePixel` (`Scene::SetProbe`) logs every
+lighting term of one pixel in linear HDR the next frame.
+
+### 10.4 The lab
+
+`W-Rally --lab` (`RunLab`, `game/src/assets/lamp_lab.cpp`) builds a synthetic `.ngg` in memory and loads it through
+the ordinary `loadScene`, so the real path is measured: the car at the origin, a flat floor (albedo 0.18), a wall
+11.9 m ahead (0.5, an aiming screen), thin poles (0.9) and a person-sized block; untextured, exact linear albedos;
+night by default (`--time`), test lamps from `PHYS_DRIVE_TEST_LIGHTS`. **Measuring on known albedos and fixed
+geometry, judging on real tracks.** The old general lab (spheres, albedo ladder, 12 km plane, TAA poles, `--probe`)
+is not ported. `tools/lamp-wall/wall.py` draws the same beam model offline.
+
+### 10.5 Device removal: DRED
+
+`Device::Create` enables DRED before the device exists (auto-breadcrumbs and page-fault data, forced on: the cost is
+small and a GPU reset without a record is a dead end). Command lists are named (`ngg frame`,
+`ngg secondary (BVH builds)`). **`CheckRemoved` runs after every submit, on a failed `Begin` and at the end of
+`renderFrame`**, and logs once per device: the removal reason, for each unfinished list the breadcrumb window around
+the last completed command, and the page fault (GPU VA and up to 6 recently freed allocations near it, by name and
+type). Recently-freed allocations near a fault mean use-after-free - the one such hang found was a descriptor keyed on a reused pointer
+(1.3). The D3D12 debug layer exists behind `kRendererDebugLayer`; `DrainMessages` logs its messages.
+
+### 10.6 PIX and RGA
+
+- **`NGG_PIX=<frame>`** loads the newest PIX GPU capturer from `Program Files\Microsoft PIX` before the device is
+  made, and captures renderer frame `<frame>` (>= 2) to `ngg-frame-<frame>.wpix` in the working directory - for PIX,
+  or `pixtool open-capture <file> save-event-list <csv> --counters=*` for per-draw times. The pipeline library is off
+  under PIX.
+- **`NGG_DUMP_PS=<path>`** writes the scene's opaque pixel and vertex shader blobs, the root signature and
+  `scene.hlsl` with its includes flattened (`.ps.obj`, `.vs.obj`, `.rs.bin`, `.hlsl`) - what Radeon GPU Analyzer needs
+  for registers, occupancy and ISA. How the local lights' cost was taken apart.
+- `NGG_SHADER_DUMP=<dir>` writes every shader as handed out (proved the move to files byte-identical).
+
+### 10.7 Environment variables (renderer)
+
+All read once, at start-up or first use; development only unless noted.
+
+| variable | effect | read in |
+|---|---|---|
+| `NGG_SHADER_DIR=<dir>` | compile shaders from the files at run time; disables the pipeline library | `shaders.cpp`, `pipeline_cache.cpp` |
+| `NGG_SHADER_DUMP=<dir>` | write each shader blob as handed out | `shaders.cpp` |
+| `NGG_SHADERC_THREADS=<n>` | build-time compiler's threads (default cores, max 16) | `shaderc/main.cpp` |
+| `NGG_PIPELINE_CACHE=library` | turn the pipeline library on | `pipeline_cache.cpp` |
+| `NGG_PIPELINE_THREADS=<n>` | create a batch's pipelines on n threads (crashes AMD) | `pipeline_cache.cpp` |
+| `NGG_PIPELINE_TIMES` | log every pipeline's creation time | `pipeline_cache.cpp` |
+| `NGG_DRIVER_SHADER_CACHE=off\|clear` | driver's shader caches disabled / emptied (developer mode) - `clear` is the honest cold start; `off` makes everything slow | `device.cpp` |
+| `NGG_PIX=<frame>` | PIX capture of that frame | `device.cpp` |
+| `NGG_DUMP_PS=<path>` | scene shader + root signature + flattened source for RGA | `scene.cpp` |
+| `NGG_DEBUG_VIEW=<n>` | start in that debug view (module and game) | `module.cpp`, `game.cpp` |
+| `NGG_LIGHT_MODE=<n>` | 0 baked, 1 dynamic | `module.cpp` |
+| `NGG_LEGACY_PROFILE=<n>` | legacy cards' lighting: 0 off, 1 A (bake), 2 B (bake as occlusion, the game's default for an imported `.lbs`) | `module.cpp`, `game.cpp` |
+| `NGG_AO_RAYS=<n>` | RT AO rays per pixel over the tier | `module.cpp` |
+| `NGG_AO_SOURCE=screen` | a ray-traced frame takes XeGTAO's AO | `module.cpp` |
+| `NGG_GTAO_QUALITY=0..3`, `_RADIUS=<m>`, `_NORMALS=prepass\|depth`, `_THIN=0..0.7`, `_DENOISE=1..3` | XeGTAO knobs over the tier | `module.cpp` |
+| `NGG_RT_NO_HISTORY=1` | RT sun denoiser without history: the unbiased reference for ghosting | `rt.cpp` |
+| `NGG_LIGHTS_REF=1\|2` | local lights' shadows by a reference shader (checking only) | `rt.cpp` |
+| `NGG_NO_REFL_RAY` | no ray-traced reflections on the car (no `ps_6_5` variant) | `scene.cpp` |
+| `NGG_FORWARD_LIGHTS` | local lights shaded in the main pass instead of deferred (A/B) | `scene.cpp` |
+| `NGG_LOCAL_SHADOWS=0` | no local-light shadow maps without RT (A/B) | `visibility.cpp` |
+| `NGG_LOCAL_AO=<share>` | night share of XeGTAO on local lights' diffuse (default 0.5) | `visibility.cpp` |
+| `NGG_LOCAL_SHADOW_TURN=<k>` | scale of the per-pixel rotation of the local shadow-map filter (default 1) | `scene.cpp` |
+| `NGG_LOCAL_SHADOW_LOG` | log the shadow-slot candidates every 300 frames | `lights.cpp` |
+| `NGG_PROBE_FACES=1..6` | cube-probe faces drawn per frame (default 2) | `scene.cpp` |
+| `NGG_MODEL_LOD_SCALE=<k>` | instanced models' LOD distances scaled (min 0.05) | `models.cpp` |
+| `NGG_NO_SOLIDS` | don't measure solid cards: every alpha-tested object treated as foliage (A/B) | `scene.cpp` |
+| `NGG_DLSS_PRESET=<A..O>` | force a DLSS render preset for every mode (default K) | `dlss.cpp` |
+
+
+## 11. Open work
+
+This is the renderer's running TODO, written in W-Rally terms. It keeps what is still open from the plugin era's
+list and phase plan, plus the open points of §§1-10. Game-side render features already listed in
+[design.md §3.2](design.md) are not repeated here: particles, skid marks, decals, damage deformation, rain on
+glass, and VR behind `kRendererCapVr`.
+
+**Frame and start-up**
+
+| # | item | state / why | blocked on |
 |---|---|---|---|
-| 1 | **Installer: Start-menu entry + optional desktop icon for `rbrtm.exe`** | packaging, not mechanism; the launcher already works when run directly, and the in-game warning screen already names it | nothing — do it when shipping |
-| 2 | ~~Per-track `.ngg` selection + fallback~~ **DONE** | the bridge pushes the track name over IPC (`ngg_SetTrack` -> `host_link`), the host reloads on change, and **clearing `kHostFlagSceneReady` stops suppression** so an unconverted stage renders as plain RBR instead of an empty world | done |
-| 2b | **Converter must merge the `_M/_N/_E/_O` variants into ONE `.ngg`** | assets are named per TRACK (`track-42.ngg`), because variants belong inside the file as layers and presets (§3.4b), not in the filename. But `lbs2ngg` still converts a single `.lbs`, so converting a second variant currently overwrites the first rather than adding to it | the photometric solve (§3.2) needs all variants anyway |
-| 3 | **`.trk` reading for pacenote marks / signs** | needs to know which draws are pacenotes before regenerating them; guessing risks misplacing safety-critical content (§1.4) | identifying the draws |
-| 4 | **`.fnc` fences** | generated from a point list and *deformed* at runtime, so they need draw harvesting, not conversion (§4.1b). The long roadside fences are currently missing from our render | harvesting |
-| 5 | **Movable-mesh transforms** | correctness gap: they render at their authored position and no longer move when hit. Offset-reads are ruled out (§4.1a), so this needs draw harvesting + identity mapping | harvesting |
-| 6 | ~~Skybox~~ **DECIDED — not converted** | an analytic sky replaced it (§5.0). A painted skybox cannot respond to a moving sun, which is the point of the overhaul | done |
-| 7 | **Per-object transforms in `.ngg` (format v2)** - RENDERER SIDE DONE (5.0o): the BVH is per mesh with instance transforms, dragging is TLAS-only; INSTANCED MODELS DONE (5.0w: `NGGD` + `NGGE`, GPU instancing, LODs); a transform for the file's own movable objects and the converter remain | movable meshes are baked, which is why they cannot move. Also wanted for GPU instancing of generated content (§7) | follows from 5 |
-| 8 | ~~Road-chunk seams at distance~~ **EXPLAINED — §3.3b** | RBR's ground textures are 2048² atlases; the road's cell is bordered by luma-100 content and the gutter is ~2.25 texels. **Anisotropic tap spread** crossing the cell edge is the dominant term (confirmed: disabling aniso nearly removes it), sub-texel gutters at high mips the residual | closed — fix is item 9 |
-| 9 | ~~De-atlas the ground textures~~ **DONE — in `wallaby-cli`** | shipped by the converter session; `track-42.ngg` went from 29 to 74 textures and **the road seams are gone**, confirmed in the viewer. Closes item 8 for real | done |
-| 10 | ~~Object meshes carry a non-UV second UV set~~ **CURED renderer-side — `kMaterialSingleStage`, §3.3f** | the flag exists, the shader skips stage 1 entirely on it, and `MeasureSingleStage` sets it per object at load where the file does not. **And the isfinite() guard that was supposedly protecting this had never once fired** — see §3.3f | converter should set the flag; the fallback stands down when it does |
-| 11 | **Carry the car's start position into `.ngg`** | the viewer has no idea where a stage actually starts, so it uses a geometry centroid as a stand-in. RBR keeps the real start in the track data | converter |
-| — | ~~31 tracks fail to convert~~ **NOT A DEFECT** | measured over the corpus: **171 of 171 unprotected tracks convert; all 31 failures are protected (v88/89) tracks, a clean 1:1.** No layout bug ever existed. The converter now says so instead of failing deep in a mesh reader | closed |
-| — | ~~Release-only pacenote crash~~ **FIXED** | detours replacing `__thiscall` game functions saved/restored `ECX` with inline asm around a compiler-managed prologue/epilogue; held in Debug, broke under `/O2`. Now `__declspec(naked)` free functions. Confirmed in-game | done |
-| 12 | **9on12 loses trees after ~1 min** | pre-existing D3D9On12 defect, masked while the world is suppressed | re-test with suppression permanently on |
-| 13 | ~~No culling at all~~ **DONE — frustum + per-cascade** | became urgent the moment shadows landed: four extra full-scene passes took track-108 from 40 fps to **12**. Per-object AABBs computed at load (the §3.3e renderer fallback), culled against the camera frustum and against **each cascade's own volume**. Measured: **763 drawn / 5068 culled**, and 12 fps → **25**. Converter-side bounds are still worth doing — only the converter can choose the grouping | done |
-| 14 | ~~Environment LUT for the atmosphere~~ **DONE - 5.0d** | 64x64 octahedral, 7 roughness mips, rebuilt per frame. Answers BOTH the ambient specular and the ambient diffuse; measured 17.7 -> 19.0 fps on track-108 | done |
-| 15 | **Cheaper distant cascades** | cascade 3 covers kilometres and changes slowly — updating it every second or third frame is invisible; 2048² for texels already 0.7 m across is wasted bandwidth | nothing |
-| 16 | ~~TAA history filtering and sharpening~~ **DONE - 5.0h** | Catmull-Rom history (5 taps) + clamped post-tonemap sharpen 0.5. Detail under a 10 px/frame pan 33 % -> 51 % of the no-TAA frame, static 53 % -> 64 %; cost +15 % frame-to-frame change at rest. `--pan` added to measure motion. Remainder under motion is the clip/blend: motion-adaptive blend is the next step if driving shows it | done |
-| 17 | ~~Exposure is still a hand-set constant~~ **DONE - 5.0g** | histogram metering (centre-weighted, 40-90th percentile), asymmetric log-space adaptation, ±3 EV around the dial; calibrated so the view the dial was tuned on is unchanged (0.798 vs 0.800). `X` A/Bs it; `ngg_set_auto_exposure` lets the editor lock it. The claim that it would remove `sunDiffuse`/`skyAmbient` was wrong - see item 24 | done |
-| 18 | ~~No ambient specular~~ **DONE — 5.0d** | split-sum against the prefiltered sky, Karis' analytic BRDF fit, `J` to A/B it. What remains is that the environment is the SKY only - no local reflections, so a wall does not see the wall opposite. That is a reflection-probe or RT job, not this one | done |
-| 19 | **PBR maps exist in the format and in no asset** | roughness, metallic, normal and emissive all read their factors and multiply by a white fallback, so every surface is currently a uniform rough dielectric. Generating maps from albedo is the converter half; the caveat that decides quality is that generated normals read painted-on shading as geometry, and RBR textures often have baked lighting | converter |
-| 20 | **Mips are MISSING on community content** - RENDERER FALLBACK DONE (5.0l): coverage-preserving chains generated at load, mip 0 untouched, 203 ms / +7 MB on track-108, shimmer -41 %; the converter should still do it, and the fallback stands down when it does | measured through the loader: `track-42` (original RBR) 0 of 74 textures without a mip chain, `track-108` (community) **76 of 88**, including a 2048 atlas and both 3200x800 backdrops. A single-level texture cannot be minified, so it aliases at distance and anisotropy has nothing to filter - and TAA burns its budget on it. The renderer logs the count; the cure is decode/downsample/re-encode in the converter, which needs the BC encoder | converter, and it gates any upscaling |
-| 22 | ~~RT probe~~ **RT SHADOWS ARE THE SHADOW TERM - 5.0e** | depth+normal prepass, normal-offset bias, any-hit foliage; 19 -> 29 fps because the cascades are no longer rendered and the main pass shades each pixel once | done |
-| 23 | **Decide the cascaded shadow maps: delete, or keep ONE as the low tier** | RT is the shadow path and stays so: DX12 Ultimate is the floor, so every supported GPU has hardware RT, and it MEASURED faster (19 -> 29 fps, 5.0e) and better. That puts us with the RT-required titles (Metro EE, Indiana Jones, Doom TDA), not the console-bound hybrids that keep raster sun shadows. But three costs are unmeasured, and each is where RT shadows are known to hurt: (1) **alpha-tested foliage** - every leaf-card hit runs an any-hit test, RT's most expensive path, worst on AMD, and RBR stages are forests; (2) **moving geometry** - the car, movable meshes (item 5), foliage sway all need per-frame BVH updates that shadow maps get for free; (3) **weak-RT hardware and VR** (P4: two eyes at 90 Hz), where RT cost scales with pixels. Decide by measuring a foliage-heavy stage in-game on min-spec, with the car in the scene: within budget -> delete the cascades and their bias/PCF/fitting; over -> keep a single cheap cascade as the low quality tier (§1.8.4) | that measurement |
-| 24 | ~~`sunDiffuse` / `skyAmbient` are relative fudges~~ **AUDITED - 5.0i** | they compensated two deficits: a one-sample sky irradiance at 0.43-0.65x the true integral (FIXED: irradiance map, verified within 0.3 %) and single scattering (item 25). Physical balance built behind `Z`; default unchanged until 25 | 25 |
-| 25 | ~~Multiple scattering in the atmosphere~~ **DONE - 5.0j** | Hillaire 2020 Psi_ms table, verified to fp16 against numpy; sky light +32 %; physical + multiple scattering measured 10.6:1 sun:sky in the lab (clean clear air) and made the DEFAULT | done |
-| 27 | ~~One frame, in `ngg-core`, for every client~~ **DONE - 5.0n** (game host verification is in-game) | the RT path (depth prepass, trace, denoise, AO, the jitter-before-prepass ordering) exists only in the viewer; the game host still renders cascades with no prepass, no AO, and Wallaby's API the same (5.0m). Move frame orchestration into ngg-core - one `RecordFrame` the viewer, the game host and the API all call - so "what the viewer shows" and "what the game shows" stop being two code paths. Prerequisite for item 23's in-game measurement | nothing |
-| 28 | ~~The bridge passes the event's weather preset~~ **DONE - 5.0s** (in-game check pending) | RBRTM reads the weather it set back from the game, names it as RBR's TrackSettings section (`108M_crisp_clear`), and passes it through `nggSetWeather` -> `FrameState.weatherName` (IPC v4); the host selects that preset, logging any fallback to the default. Fixed on the way: single-digit maps (`04M_...`) imported nothing | in-game run |
-| 29 | **Weather v2: cloud shapes, rain, snow, night** - WET SURFACES DONE (5.0v): the road's wetness darkens, glosses and puddles the ground | v1 (5.0q) does fog, haze and cloud COVER. Partly cloudy is a uniform blend; RBR's cloud textures vs volumetric clouds is undecided. Left of rain: drops, spray, rain on glass, reflections of more than the sky, drying. Snow is carried in the presets but not drawn. Night: RBR has none (its N is NOON, 2026-10-30) - night stages are W-Rally's own design question | user's choice on clouds; night design |
-| 26 | **Delete the established lighting balance** | `sunDiffuse`, `skyAmbient`, `kSpecScale`, the albedo*E convention and the lerp ambient. Kept behind `Z` for one round so the physical default can be compared in-game | the user's in-game look at the physical default |
-| 30 | **Build a new mesh's BLAS in the background** | `KeepRtCurrent` builds the missing BLASes inside the frame and waits (`Rt::Rebuild` -> `EndAndWait`): a car added to a loaded scene stalls its first frame - the game's Garage showroom, measured 2026-11-01, 160-280 ms with the build 110 ms of it (Hyundai i20 R5: 71 meshes, 201,628 triangles, 31 MB). Wanted: the build submitted on its own and fenced, the new instances left out of the TLAS (no RT shadow, or the cascades' for them) until their BLASes are done, then added - the frame never waits. The same on a stage's car load and any added prop. (Model creation's twice-a-material SRV heap rebuild, the other half of that stall, is already batched: `Scene::BeginMaterialBatch`.) | nothing |
-| 21 | ~~Aerial perspective is the last per-pixel atmosphere march~~ **DONE - 5.0f** | 64x64x32 froxel table of in-scatter + transmittance, filled per frame with the same `AtmScatter` and the same 8x3 quadrature; the march stays as the exact reference (`L`). Aerial's share of the main pass 1.9 -> 0.5 ms at the start camera, max 1/255 difference to the march | done |
+| 1 | **Build a new mesh's BLAS off the frame** | done (4.2): queued, recorded on a thread, built on the ray tracer's own compute queue, fenced, landed 1-2 frames later. Left: the landing frame's publish, 7-18 ms CPU (the any-hit buffers rebuilt whole - appending the new BLASes' share would make it ~1 ms - and the blocking TLAS); dropping a car frees its BLASes on the frame (3-8 ms); a frame's other allocations can still wait a millisecond or so behind the thread's | nothing |
+| 2 | **TLAS refit instead of a full rebuild** | the TLAS is rebuilt whole (`FAST_BUILD`), blocking on the secondary context, every frame anything moves (the car). No update path. Measured once, stage 41 (922 instances): 3.5-5 ms of the frame's CPU, the upload, the build and the wait together - so worth it, and the async queue of 4.2 would take the wait out | nothing |
+| 3 | **Pipelines in parallel** | built and reverted (§1.6). A cold start was ~5 s shorter, but AMD driver 32.0.31021.5001 crashed in `amdxc64.dll` or hung in about 1 run of 12-28 whenever two threads compiled. `NGG_PIPELINE_THREADS=<n>` retries it. Run it 60+ times with the crash/hang harness before trusting it | a driver that survives it (newer AMD, or NVIDIA) |
+| 4 | **Measure the pipeline library on NVIDIA** | it saves nothing on the AMD iGPU, so it is opt-in (`NGG_PIPELINE_CACHE=library`). On the RTX machine, run with `NGG_DRIVER_SHADER_CACHE=clear`, with and without it, and compare the log's `pipelines:` lines. If there is no win there either, delete `pipeline_cache`'s library and keep the wrappers | the RTX machine |
+| 5 | **Shader hot reload** | `NGG_SHADER_DIR` compiles from the files at start only. Recreating the pipelines without a restart is not built | nothing (optional) |
+| 6 | **D3D12 debug layer reachable** | `kRendererDebugLayer` exists, but nothing in `game/` or `tools/` sets it, so there is no way to run the game under validation | nothing |
+| 7 | **Device-lost recovery** | the game and the in-process editor (§8.1) die on a device removal. Re-create the device and reload the scene | nothing |
 
-## 10. Status of open questions
+**Visibility, shadows and AO**
 
-**Resolved.** Address space and process model; presentation model; graphics API; hooking method; GPU/feature
-baseline; weather model; encryption timing; VR; legacy plugin policy; converter home; car preparation;
-generated-content scope; night light authoring scope; **conversion spine — `LBS → glTF → .ngg` for converted
-tracks too, with direct `LBS → .ngg` a shortcut expected to go (§3.0)**.
+| # | item | state / why | blocked on |
+|---|---|---|---|
+| 8 | **A third visibility provider: NRD (SIGMA/REBLUR) or DLSS Ray Reconstruction** | named in `visibility.h`, not built. Most of the remaining RT grain is what it would remove (§4.5) | the RTX machine (DLSS RR), NRD integration |
+| 9 | **Ray-traced foliage cost** | instanced trees add +2.2 ms with opaque RT and +7.2 ms alpha-tested (§2.6), since any-hit runs through the needle tiers. Done: a ray-tracing-only LOD (`kModelLodRayOnly`, §2.6). Open: distant placements opaque or out of the TLAS, one submesh per shell; the real models decide how far the shell goes | the real tree models (Wallaby) |
+| 10 | **Cascades: penumbra and cross-fade** | the non-RT sun shadow is hard-edged (no PCSS) and switches between cascades with no blend | nothing |
+| 11 | **Cheaper distant cascades** | cascade 3 covers kilometres and changes slowly: update it every 2nd-3rd frame. 2048² for 0.7 m texels is wasted bandwidth | nothing |
+| 12 | **Re-measure RT vs the raster path in W-Rally** | the "cascades cost more than RT" number is from the plugin (§4.9). Env, aerial and multiple scattering were last timed before the probe and weather were added | nothing |
+| 13 | **Debug view 12 on the RT path** | it compares RT with the cascade map, but `RenderShadows` is not called on the RT path, so it may read a stale map. Unverified | nothing |
 
-**Not blocking design, but needs an owner before the phase it belongs to.**
+**Content and the format**
 
-1. ~~Whether a D3D9On12-unwrapped resource is shareable~~ — **answered by experiment: it is not, and it doesn't
-   matter.** See §1.2. Retired as a risk.
-2. **RT-vs-VR budget (§1.8.4).** The architecture handles it via quality tiers, but *which* techniques land in the
-   VR tier is a measurement question that can only be answered on real hardware in P4. Nothing to decide now;
-   something to keep honest about, because "VR at 90 Hz with ray tracing" is the kind of promise that quietly
-   becomes 45 Hz.
-3. **Distribution.** Vanilla-only means our own launcher/distribution rather than riding an existing one. That's a
-   product question, not a rendering one, but P1 shouldn't ship before someone owns it — a renderer nobody can
-   install is not a renderer.
-4. **Minimum-viable-LBS (P0e).** Not a question we can answer from the desk; the experiment answers it, and its
-   result sets the ceiling on P7.
-5. ~~How the tagging bracket gets installed~~ - **moot.** There is no bracket. Tagging is by creating call site
-   (§2.1), so nothing in RBRTM needs to change and the tournament hook installation is untouched.
+| # | item | state / why | blocked on |
+|---|---|---|---|
+| 14 | **The legacy `.lbs` import, finished** | no de-atlas (road seams stay on imported stages), no weld in the importer (the renderer's fallback welds), no variants, no `NGGS`, no cache. The planned order is a hand-finished server `.ngg` before the import (§2.1) | the stage server |
+| 15 | **Instanced models, the rest** | not in the lamps' shadow maps or the car's reflection probe. A model's own `kMaterialBlend` is drawn opaque. One RT LOD only (no per-LOD BLAS), no billboard normal map, no wind | nothing |
+| 16 | **GPU culling of placements** (`ExecuteIndirect`) | the CPU cull takes 0.03 ms (camera) and 0.34 ms (with cascades) at 3.7k placements, so it is not worth it yet. Measure again at ~25k (bushes, grass) | bush and grass placements |
+| 17 | **Finer culling of stage objects** | every pass frustum-culls per object, but stage objects are large: stage 41 culls 299 of 2,987. Converter-chosen bounds and grouping, distance culling and occlusion culling are open | the converters |
+| 18 | **PBR maps for stages** | roughness, metallic, normal and emissive are read but fall back to white, so stage surfaces are uniform rough dielectrics. Generating maps from albedo is converter work. The catch: RBR textures carry baked shading, which generated normals would read as geometry | converter (Wallaby), importer |
+| 19 | **Mip chains and the single-stage flag from the converters** | the renderer generates missing mip chains at load (§2.7; 203 ms / +7 MB on track-108) and measures single-stage materials. Both fallbacks stand down once the converters write the data | BC encoder in the converter |
+| 20 | **`NGGS` and the variant spawn points** | written by the converters, read by nobody: the car starts from the physics' data | a use for them |
+| 21 | **RBR animated objects** (`.dls`) | drawn static. `NativeSim::Open` refuses animation objects | physics side |
+| 22 | **Native gameplay chunks in `.ngg`** | collision, surfaces, fences, drive line, splits and pacenotes into the `.ngg` ([design.md decision 10](design.md)); generated stages after that (§9) | the game running end to end |
+| 23 | **Texture streaming above the VRAM budget** | not built: every texture is resident | a stage that needs it |
+| 24 | **`.ngg` content protection** | deliberately deferred; no envelope field yet (§2.9) | competition use |
 
-**Deliberately deferred.** Encryption (§3.7), native DLS/SGS animation player (§4.2), particle replacement.
+**Lighting, weather, night**
+
+| # | item | state / why | blocked on |
+|---|---|---|---|
+| 25 | **Delete the established lighting balance** | physical lighting is the default and `Scene::SetPhysicalLighting` has no caller. `sunDiffuse`, `skyAmbient`, `kSpecScale`, the albedo*E convention and the lerp ambient run only when there is no environment map | nothing |
+| 26 | **Weather v2** | v1 does fog, haze and cloud cover, and the wet road is done (§5.2). Open: cloud shapes (RBR's textures or volumetric, undecided), falling rain and snow, spray, drying, snow cover, fog and cloud in the multiple-scattering table, RT reflections for puddles and glass | user's choice on clouds |
+| 27 | **Stage lights (N4)** | a light chunk in the `.ngg` (`provenance=auto|authored`). Emissive-texture detection for the automatic part, Wallaby's light placement for the authored part | Wallaby light editor |
+| 28 | **Car lamps, the rest (N3)** | `car.yaml` lamp spec and a size-based default; tuning on the user's reference shots (N3c); bloom on lit glass; beams visible in dust, mist and rain; glare; retroreflectors. Replays switch brake and reverse lamps from live input only | references; weather/dust work for beams |
+| 29 | **A stage's own place** | every stage is lit as 50 N 14.4 E, north 0, because no stage metadata gives a latitude, longitude or north | `stage.yaml` / stage metadata |
+| 30 | **Light pick cost** | `rt_lights.hlsl` weighs every lamp of the cluster per pixel. The 6-lamp layout's rays take 3.9 ms | nothing |
+| 31 | **TAA under camera motion** | only moving objects get the speed-based history weight. Under a pan the static world keeps ~51 % of its detail. Judge at driving speed before changing it | an in-game look |
+
+**The car**
+
+| # | item | state / why | blocked on |
+|---|---|---|---|
+| 32 | **Car normal and base-colour maps** | the format and loader support them, but no tool drafts them: from colour alone they emboss decals. `make_pbr.py` drafts ORM only, and loses a black-painted car's lacquer | a drafting tool |
+| 33 | **Lacquer seen through glass** | glass is not in the RT scene, so lacquered parts seen through a window still reflect the stage. Some roll-cage lines remain at night | nothing |
+
+**Housekeeping**
+
+| # | item | state / why | blocked on |
+|---|---|---|---|
+| 34 | **RT vs VR budget** | which techniques fit a two-eye 90 Hz tier can only be measured on real hardware, once VR exists | VR ([design.md §3.2](design.md)) |
+
+## Appendix A: old section numbers
+
+Commit messages before 2026-11-11 and plugin-rbr cite the plugin-era numbering. Where the topic still exists:
+
+| old | new | old | new |
+|---|---|---|---|
+| 1.8, 1.8.1-1.8.4 | 1.1, 1.5 | 5.0k (lab) | 10.4 |
+| 1.8.5 (RT probe) | 1.1, 4.2, 4.3 | 5.0l (mip fallback) | 2.7 |
+| 3.0, 3.1 (conversion spine, sidecar) | 2.1 | 5.0m (RT cost) | 4.9 |
+| 3.2, 3.2b (un-baking, RBR's lighting) | 2.8 | 5.0n (one frame) | 1.4 |
+| 3.3-3.3d, 3.3g (materials, atlases) | 2.3, 2.8 | 5.0o (BVH instancing) | 4.2 |
+| 3.3e, 3.3f (bounds, single stage) | 2.7 | 5.0p (quality tiers) | 1.5 |
+| 3.4a, 3.4 (weather presets) | 5.1 | 5.0q, 5.0s (weather) | 5.1 |
+| 3.4b (layers, variants) | 2.4 | 5.0r (TDR, DRED) | 10.5 |
+| 3.5 (format) | 2.2 | 5.0t (weather records) | 2.5 |
+| 3.6, 3.7 (fairness, encryption) | 2.9 | 5.0u (glass) | 5.3 |
+| 4.x (animation harvesting) | gone; 11 #21 | 5.0v (wet surfaces) | 5.2 |
+| 5.0 (sky) | 3.1 | 5.0w (instanced models) | 2.6 |
+| 5.0b (cascades) | 4.6 | 5.0x (shaders, pipelines) | 1.6 |
+| 5.0c (HDR, TAA, tonemap) | 3.6, 3.7 | 5.1-5.3 (lights) | 5.5 |
+| 5.0d (ambient specular) | 3.4 | 5.4 N1 (time of day) | 5.4 |
+| 5.0e (RT shadows, RT AO) | 4.3, 4.4 | 5.4 N2, N3 (light loop, car lamps) | 5.5 |
+| 5.0f (aerial perspective) | 3.3 | 5.4 N4 (stage lights) | 11 #27 |
+| 5.0g (auto exposure) | 3.6 | 6 (car) | 6 |
+| 5.0h (TAA filter, sharpen) | 3.7 | 7, 7.x (native tracks) | 9 |
+| 5.0i, 5.0j (units, multiple scattering) | 3.2, 3.5 | 8, 8.0 (module layout) | 1.2, 1.3 |
+| 8.0b (readout) | 10.2 | 8.1, 8.2, 8.2a (editor) | 8 |
+| 9 (phasing) | gone; design.md §9 | 9b, 10 (TODO, open questions) | 11 |
+
+The rest of the old numbering described the plugin and is gone: §0, §1.1-1.7, §1.9, §2 (bridge, IPC, tagging,
+camera interception).

@@ -28,7 +28,6 @@
 #include <stdint.h>
 #include <string>
 
-#include "dxc.h"
 
 namespace ngg {
 namespace core {
@@ -83,12 +82,10 @@ public:
 private:
     bool CreateTargets(ID3D12Device* dev, UINT width, UINT height);
 
-    Dxc m_dxc;
     Microsoft::WRL::ComPtr<ID3D12RootSignature>  m_rootSig;
     Microsoft::WRL::ComPtr<ID3D12PipelineState>  m_psoPrefilter, m_psoDenoiseMid, m_psoDenoise;
     Microsoft::WRL::ComPtr<ID3D12PipelineState>  m_psoMain[2][4];   // [depth normals][quality], compiled when first used
     bool   m_mainFailed[2][4] = {};
-    std::string m_source;                                       // the passes' HLSL, for those compiles
     Microsoft::WRL::ComPtr<ID3D12Resource>       m_depthMips;   // R32F view-space depth, 5 MIPs
     Microsoft::WRL::ComPtr<ID3D12Resource>       m_aoTerm;      // R8_UINT the horizon search's term
     Microsoft::WRL::ComPtr<ID3D12Resource>       m_aoTermB;     // and the denoise's other one

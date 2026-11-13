@@ -5,8 +5,8 @@ install(TARGETS W-Rally RUNTIME DESTINATION .)
 install(TARGETS WPhysicsRBR RUNTIME DESTINATION modules/physics)
 install(TARGETS WAudio RUNTIME DESTINATION modules/audio)
 install(TARGETS WRenderer RUNTIME DESTINATION modules/renderer)
-install(FILES ${PROJECT_SOURCE_DIR}/third_party/dxc/dxcompiler.dll ${PROJECT_SOURCE_DIR}/third_party/dxc/dxil.dll
-        DESTINATION modules/renderer)
+# No dxcompiler.dll / dxil.dll: WRenderer's shaders are compiled at build time and inside it (docs/ngg-design.md,
+# "Shaders and the pipeline cache"); the DXC DLLs are only the build's and NGG_SHADER_DIR's, in the build tree.
 # FSR: AMD's signed ffx-api DLLs (fetched at configure, third_party/CMakeLists.txt) and their licence.
 if(WRALLY_FFX_DLLS)
     install(FILES ${WRALLY_FFX_DLLS} DESTINATION modules/renderer)

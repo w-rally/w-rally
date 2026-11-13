@@ -1,6 +1,6 @@
 // ---------------------------------------------------------------------------
 // Mip-chain generation for block-compressed DDS textures that shipped without
-// one (design 9b item 20, 5.0l).
+// one (design §2.7).
 //
 // Community content routinely ships single-level textures: track-108 has 76 of
 // 88, including its 2048 atlas and both 3200x800 backdrops. A single-level

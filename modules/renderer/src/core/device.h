@@ -1,9 +1,8 @@
 // ---------------------------------------------------------------------------
 // ngg-core device: D3D12 device, queue and a single direct command list.
 //
-// Extracted from the launcher so the renderer can be driven by something that
-// is not RBR - today the standalone viewer, tomorrow Wallaby (design 8.1).
-// Nothing in ngg-core knows about the game.
+// Used by every client of ngg-core - the game and the editor (design §8)
+// through WRenderer. Nothing in ngg-core knows about the game.
 //
 // Deliberately one allocator and one list: the renderer is synchronous (it
 // waits for the GPU at the end of every frame), which is a real limitation but

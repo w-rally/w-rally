@@ -1,5 +1,5 @@
 #pragma once
-// wrally::assets - the car's lamps (NGG design 5.4 N3): what a lamp's beam is like, where it sits on the car and where
+// wrally::assets - the car's lamps (NGG design §5.5): what a lamp's beam is like, where it sits on the car and where
 // it points, made the renderer's light (iface::LightDesc, kLightBeam) for the car's pose each frame.
 //
 // A BEAM is a lamp's character, a preset (LampKind): its colour temperature, its emitter's size, and the lobes of its

@@ -92,7 +92,7 @@ int Parse(int argc, char** argv, Options& o) { return Parse(Args(argv, argv + ar
 
 int ParseSkyTime(const std::vector<std::string>& args, Options& o, const char* defaultTime)
 {
-    // The time and place: the sun from them (NGG design 5.4).
+    // The time and place: the sun from them (NGG design §5.4).
     const std::string t = Arg(args, "--time", defaultTime ? defaultTime : "");
     if (t.empty()) return 0;
     int h = 0, m = 0;
@@ -191,7 +191,7 @@ int Parse(const std::vector<std::string>& args, Options& o)
         o.skyRain = std::clamp(v[2], 0.0f, 1.0f);
     }
     if (const int code = ParseSkyTime(args, o)) return code;
-    // --lamps <the ramp> --lamp-aim <spread>,<pitch>: the car's lamps (NGG design 5.4 N3b).
+    // --lamps <the ramp> --lamp-aim <spread>,<pitch>: the car's lamps (NGG design §5.5).
     o.lampLayout = Arg(args, "--lamps", "");
     if (const std::string a = Arg(args, "--lamp-aim", ""); !a.empty() &&
         std::sscanf(a.c_str(), "%f,%f", &o.lampSpread, &o.lampPitch) != 2)
