@@ -646,6 +646,11 @@ Status WRALLY_CALL RenderFrame(Renderer* r, const FrameDesc* f)
             } else {
                 r->scene.SetWind(0.0f, 0.0f, 0.0f);
             }
+            // NGG_WIND=<speed>[,<gustiness>[,<degrees>]]: that wind over the weather's (measuring; NGG design §10).
+            static const bool windSet = std::getenv("NGG_WIND") != nullptr;
+            static float windEnv[3] = {0.0f, 0.5f, 90.0f};
+            static const int windRead = windSet ? sscanf_s(std::getenv("NGG_WIND"), "%f,%f,%f", &windEnv[0], &windEnv[1], &windEnv[2]) : 0;
+            if (windRead > 0) r->scene.SetWind(windEnv[2], windEnv[0], windEnv[1]);
             r->scene.SetWindTime(f->time);
         }
         // The frame's local lights, as the core takes them (NGG design §5.5).

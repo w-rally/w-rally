@@ -231,7 +231,7 @@ Measured (Radeon 780M, 1080p, track 42, RT on; cold = `NGG_DRIVER_SHADER_CACHE=c
 ### 2.1 Two producers, one renderer path
 
 **The renderer draws only `.ngg`.** The game hands it file bytes (`iface::RendererApi::loadScene`, or
-`loadSceneVariant` with the stage's name, interface 19); where those bytes came from is the game's business
+`loadSceneVariant` with the stage's name, interface 19; 20 added the weather's wind); where those bytes came from is the game's business
 ([design.md §6.3](design.md)). Two producers write them today:
 
 | producer | path | what it guarantees |
@@ -280,8 +280,8 @@ and loader in step; `ngg-producer-wallaby` does the same for a Wallaby file.
 | `NGGA` | `VariantAlias` 36 B: variant index, name | no | `version` 1, `recordSize` |
 | `NGGG` | tag names (UTF-8) | no | - |
 | `NGGP` | plant table: `PlantTableHeader`, `PlantRecord` 32 B, `PlantPart` 16 B, tag refs | no | - |
-| `NGGW` | `WeatherChunkHeader` + `WeatherRecord` 160 B (§2.5) | no | `version` 1, `recordSize` >= 124 |
-| `NGGD` | model library (§2.6) | no | `kModelVersion` 1 |
+| `NGGW` | `WeatherChunkHeader` + `WeatherRecord` 172 B (§2.5) | no | `version` 1, `recordSize` >= 124 |
+| `NGGD` | model library (§2.6) | no | `kModelVersion` 3 (reads 1-3) |
 | `NGGE` | placements, `Placement` 40 B | no | `kPlacementVersion` 1, `recordSize` >= 40 |
 
 **Textures are embedded, not referenced, so a stage is one file and one hash** (§2.8). **Records grow by
@@ -371,10 +371,12 @@ wrong length), `ngg-roundtrip` (all three chunks through `ngg_scene`).
 
 **`NGGW` is binary records; the JSON form is for projects and the editor.** The preset is inside the file, not
 beside it, because it is part of an event and must be covered by the same hash as the geometry (a thinner fog is
-a competitive change). `WeatherRecord` (160 B): a 64-byte name, sun direction, intensity, turbidity, ground albedo
+a competitive change). `WeatherRecord` (172 B): a 64-byte name, sun direction, intensity, turbidity, ground albedo
 and colour, cloud cover, fog visibility (Koschmieder, 0 = none) and height, rain, snow, exposure; appended
 2026-10-30: `timeFlags` (`kWeatherTimeSet`), date, local hour, UTC offset, latitude, longitude, north - with the
 time set, sun and moon follow astronomically and `sunDirection` is unused. A 124-byte record reads as no time set.
+Appended 2026-11-13: the wind - `windDirectionDeg` (where it blows towards, degrees from +z towards +x), `windSpeed`
+(m/s at 10 m), `gustiness` (0..1); a 160-byte record reads as calm (§2.6). JSON: `"wind": {direction, speed, gustiness}`.
 The first record is the default. `DefaultWeatherRecord()` lives in the format so a producer outside the renderer can
 start from it; `core/weather.cpp` checks at compile time that it matches `core::SkyParams`.
 
@@ -466,6 +468,69 @@ is mostly the TLAS traversal of 7,486 instances (+2.3 ms opaque), the shell's al
 submesh ~0.5 ms (so a producer puts the trunk into the shell's one submesh). Tests: `instancing-41` runs on the shell
 (frames through every LOD band draw exactly what the trees without it draw, the BLAS is the shell's, a version-1 NGGD
 of the same trees loads); `ngg-roundtrip` breaks each rule in turn and both readers refuse it.
+
+**Wind** (2026-11-13; Wallaby's vegetation plan, "Planned: wind", step 2). Trees and bushes sway: the vertex shader
+bends each vertex of a model that carries wind by weights its producer baked. Visual only (collision is the `.col`).
+- **Format, NGGD version 3:** `ModelRecord::flags` `kModelWind` (bit 0), and `ModelRecord::reserved` became `float
+  windBend` - how far the top leans at 10 m/s, metres at scale 1 (spruce ~0.3, poplar ~0.5, a shrub ~0.1). A wind
+  model's vertices carry the weights in `uv1` (model materials are single-layer, so a model's `uv1` is never sampled):
+  `x` the branch weight 0..1 (0 where a branch leaves the trunk), `y` the branch's phase in the fraction and the leaf
+  flutter weight in hundredths in the integer part. Vertex alpha is not free (every pixel shader cuts by it). Rules,
+  in both readers: no other flag; `windBend` in (0, 10] with the flag and 0 without; every drawn (not billboard) LOD's
+  `uv1` in range; a version 1-2 chunk carrying either refused (version 2 loads, without wind). The writer writes 3.
+- **The weather:** `WeatherRecord` appends `windDirectionDeg`, `windSpeed`, `gustiness` (§2.5; a shorter record is
+  calm), `WeatherDesc` the same (interface 20). The renderer takes the wind of the weather in force (the preset, or
+  `FrameDesc::weather`) and its clock from `FrameDesc::time`, which it reads from here on (`Scene::SetWind`,
+  `SetWindTime`: wrapped at 3600 s; a jump over a second or backwards has no last frame). The game's stage frame sets
+  it from the stage's own clock, which stops in a pause (`game.cpp` `stageClock`; only the garage set it before).
+- **The shader, `shaders/wind.hlsli`:** `WindBend`, a float32 port of Wallaby's `tools/vegetation/plantgen/wind.py`
+  (its docstring states the formula): the main bend (the whole plant leans by `(h / height)^2`, each vertex keeping its
+  distance from the base, with the speed squared, 0.2 Hz at 11 m), the branch sway (0.3-0.42 Hz, along the wind and
+  up and down) and the leaf flutter (2.5-3.75 Hz, along the normal); gusts roll across the stage, and a placement's
+  phase is a PCG hash of its base to the centimetre. Precision far out and late: cycle counts are reduced to their
+  fraction before they are summed (the time split into whole seconds, the frequencies into 12-bit halves, `2.2 /
+  height` carried as hi + lo), and the hash's centimetres come from the float's bits, exactly Python's `round`.
+- **`VSMain`:** an instance with `kInstWind` (ix.z bit 2) in a wind above 0 is bent; its constants ride in
+  `InstanceRec::pad` (`f16 windBend | f16 height << 16`, both times the vertical scale). `prevWpos` is the vertex bent
+  at the last frame's time, and `VSOut::swayed` makes the prepass write its motion (`NggMotion`, which also gives the
+  new debug view 16, "MOTION") - otherwise TAA would smear every leaf. The billboard's quad leans by the main bend
+  alone. The prepass, the main pass and the cascades share `VSMain`, so the shadow maps sway too (`gWindPrevOn` 0
+  there: no last-frame bend). In calm air nothing is computed: the frame is the one without wind, bit for bit.
+- **C++:** the loader keeps `wind`, `windBend` and the box's height per model; `emit` sets the flag and `pad`;
+  `PlacementTransform` widens a wind model's culling box by what it can lean at the capped wind (20 m/s, gustiness 1:
+  wind.py's `max_lean` and the flutter), fixed at load so the cells never rebuild with the weather - winds above
+  20 m/s sway as 20. Its LOD distances still come from the box at rest. **Ray tracing is static:** the BLAS is the
+  model's `rtLod` unbent, so with RT on (which draws no cascades) the shadows of moving leaves stand still.
+- **Tests:** `wind-reference` (a compute shader with `wind.hlsli` against a C++ double port of wind.py, which must
+  reproduce Wallaby's golden table, `tests/data/wind_golden.json`, to 1e-13 m): on the same float32 inputs 0.06 mm on
+  the 64 golden rows and 0.63 mm on 512 worst-case rows (the hour's end, 20 m/s, gustiness 1, short trees, full
+  weights), the hash bit for bit; a straight `frac(f t)` or `2.2 / height` in float give 1.2-1.3 mm there, and
+  `round(x * 100)` in float hashed ~2% of far placements to another centimetre. The golden outputs themselves are 2.4
+  mm off, and nothing can do better: rounding wind.py's double inputs to float32 moves its answer that much (the
+  packed phase holds ~1e-5, and the phase also sets a branch's frequency). `instancing-41` (`--wind`, the placeholder
+  with weights baked the generator's way): calm air draws exactly the frames of the trees without wind; at 15 m/s two
+  frames 0.1 s apart differ on 22k pixels and the same frames without trees on none; 21k of 23k tree pixels carry
+  motion of their own; the cascades' visibility changes on 8k ground pixels no tree covers; a lone billboard's top
+  moves 5.2 px in a second and its bottom 5% 0.46 px (the hashed alpha edge of a 2-3 px trunk; its geometry moves
+  ~0.01 px). `ngg-roundtrip`: the wind round-trips into the renderer, version 2 loads, a 160-byte NGGW is calm, nine
+  broken rules are refused.
+
+**The wind, measured** (2026-11-13; dev iGPU, RBR's run replayed, `--step 0.0333`, 8,000 ticks, 1,618 frames,
+`PHYS_DRIVE_OFF=taa,vsync`, a worktree build without `W-Rally.ini`; the `instancing-41` file - the placeholder with
+its ray-only shell and the wind - and `NGG_WIND=10,0.5,90` for the wind; three interleaved rounds, medians):
+
+| stage 41 | round 1 | round 2 | round 3 | main pass | ray tracing |
+|---|---|---|---|---|---|
+| RBR's tree cards | 46.01 ms | 44.52 ms | 44.96 ms | 5.77-6.30 ms | 15.0-16.2 ms |
+| placeholder trees, calm | 52.11 | 51.94 | 51.89 | 6.20-6.97 | 20.7-20.9 |
+| placeholder trees, 10 m/s, gustiness 0.5 | 51.76 | 52.70 | 52.08 | 6.78-6.97 | 20.7-21.2 |
+
+**The wind costs nothing measurable here:** -0.35 / +0.76 / +0.19 ms against calm, within the round-to-round noise (the
+cards moved 1.5 ms between rounds); the target was under 0.2 ms. The placeholder is light (LOD0 142 triangles, ~8k
+triangles in view), so the real models (LOD0 ~25-30k) are the run that bounds it; the vertex work per placement is
+two `WindBend`s in the camera's passes and one in each cascade. These runs had the clock standing still (the stage
+frame set no `FrameDesc::time` yet, fixed since) - the bend is computed the same either way. By eye, and whether the
+static RT shadows under moving leaves show while driving (phase 2: K bent RT shells), waits on the real models.
 
 ### 2.7 Load-time fallbacks
 
@@ -1196,8 +1261,8 @@ missing ones keep defaults) and binary records in the `.ngg`'s **NGGW** chunk, w
 (`ParseWeatherChunk`, `Scene` at load). Presets live inside the file - covered by its CRC, part of an event's
 definition; a loose file beside the game would let a competitor thin the fog. The first record is the default.
 
-**NGGW grows by appending** (`format/ngg_format.h`): `version` stays 1, `WeatherRecord` is 160 bytes (124 before the
-time and place); a reader takes `min(recordSize, sizeof)` bytes over `DefaultWeatherRecord()`, so an older record reads
+**NGGW grows by appending** (`format/ngg_format.h`): `version` stays 1, `WeatherRecord` is 172 bytes (124 before the
+time and place, 160 before the wind); a reader takes `min(recordSize, sizeof)` bytes over `DefaultWeatherRecord()`, so an older record reads
 as "no time set". `static_assert`s tie the format default to `SkyParams` and `SkyTime` defaults.
 
 **Import** (`game/src/assets/legacy_weather.*` over `game/src/formats/track_settings.*`): the `.lbs` importer
@@ -2018,6 +2083,7 @@ All read once, at start-up or first use; development only unless noted.
 | `NGG_LOCAL_SHADOW_LOG` | log the shadow-slot candidates every 300 frames | `lights.cpp` |
 | `NGG_PROBE_FACES=1..6` | cube-probe faces drawn per frame (default 2) | `scene.cpp` |
 | `NGG_MODEL_LOD_SCALE=<k>` | instanced models' LOD distances scaled (min 0.05) | `models.cpp` |
+| `NGG_WIND=<speed>[,<gust>[,<deg>]]` | that wind over the weather's (m/s, 0..1, towards; default gust 0.5, 90 deg): the wind's A/B | `module.cpp` |
 | `NGG_NO_SOLIDS` | don't measure solid cards: every alpha-tested object treated as foliage (A/B) | `scene.cpp` |
 | `NGG_DLSS_PRESET=<A..O>` | force a DLSS render preset for every mode (default K) | `dlss.cpp` |
 
@@ -2057,7 +2123,7 @@ glass, and VR behind `kRendererCapVr`.
 | # | item | state / why | blocked on |
 |---|---|---|---|
 | 14 | **The legacy `.lbs` import, finished** | no de-atlas (road seams stay on imported stages), no weld in the importer (the renderer's fallback welds), no variants, no `NGGS`, no cache. The planned order is a hand-finished server `.ngg` before the import (§2.1) | the stage server |
-| 15 | **Instanced models, the rest** | not in the lamps' shadow maps or the car's reflection probe. A model's own `kMaterialBlend` is drawn opaque. One RT LOD only (no per-LOD BLAS), no billboard normal map, no wind | nothing |
+| 15 | **Instanced models, the rest** | not in the lamps' shadow maps or the car's reflection probe. A model's own `kMaterialBlend` is drawn opaque. One RT LOD only (no per-LOD BLAS), no billboard normal map. The wind: ray tracing static (its shadows stand still under moving leaves with RT on) | nothing; phase 2 of the wind if it shows |
 | 16 | **GPU culling of placements** (`ExecuteIndirect`) | the CPU cull takes 0.03 ms (camera) and 0.34 ms (with cascades) at 3.7k placements, so it is not worth it yet. Measure again at ~25k (bushes, grass) | bush and grass placements |
 | 17 | **Finer culling of stage objects** | every pass frustum-culls per object, but stage objects are large: stage 41 culls 299 of 2,987. Converter-chosen bounds and grouping, distance culling and occlusion culling are open | the converters |
 | 18 | **PBR maps for stages** | roughness, metallic, normal and emissive are read but fall back to white, so stage surfaces are uniform rough dielectrics. Generating maps from albedo is converter work. The catch: RBR textures carry baked shading, which generated normals would read as geometry | converter (Wallaby), importer |
