@@ -350,13 +350,14 @@ void Scene::PlacementTransform(PlacementRt& p) const
     p.bmin[2] = d.position[2] - r; p.bmax[2] = d.position[2] + r;
     p.bmin[1] = d.position[1] + (std::min)(0.0f, m.bmin[1] * sv);
     p.bmax[1] = d.position[1] + (std::max)(0.0f, m.bmax[1] * sv);
-    // A wind model leans out of its box: wider all round and taller by the most it can move (WindReach).
+    // The LODs' distances are taken from the box's centre at rest, so the wind changes no LOD.
+    for (int k = 0; k < 3; ++k) p.centre[k] = 0.5f * (p.bmin[k] + p.bmax[k]);
+    // A wind model leans out of its box: wider all round and taller by the most it can move (WindReach) - the cull's.
     if (m.wind)
     {
         const float w = WindReach(m.windBend * sv);
         p.bmin[0] -= w, p.bmax[0] += w, p.bmin[2] -= w, p.bmax[2] += w, p.bmax[1] += w;
     }
-    for (int k = 0; k < 3; ++k) p.centre[k] = 0.5f * (p.bmin[k] + p.bmax[k]);
 }
 
 void Scene::RebuildModelCells()

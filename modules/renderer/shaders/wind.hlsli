@@ -15,13 +15,16 @@
 // every cycle count is reduced to its fraction BEFORE it is summed:
 //   - a frequency times the time: WindCycles splits the time into whole seconds and a fraction (exact), and the
 //     frequency into its top 12 bits and the rest, so the big product is exact and its fraction too;
-//   - the frequencies are kept as sums of exact constants times the phase (2.5 t + 1.25 ph t, not ff t);
+//   - the frequencies are kept as sums of exact constants times the phase (2.5 t + 1.25 ph t, not ff t), and the main
+//     bend's 2.2 / height as a hi + lo pair (WindMainCycles);
 //   - a position's dot product takes each coordinate's own fraction (frac(0.7 x) + ...).
 // What remains is the float rounding of the INPUTS: the packed uv1.y holds the phase to ~1e-5 beside a flutter of
 // 100, and since the phase also sets the branch's frequency, a vertex's motion after an hour is that of a phase a
 // hair off - constant, so nothing jitters, but up to ~2.4 mm from the reference evaluated on the unrounded value.
-// wind-reference therefore measures this port against the reference on the SAME float32 inputs (0.1 mm on this
-// machine), and reports the distance to the golden table's own outputs beside it.
+// wind-reference therefore measures this port against the reference on the SAME float32 inputs, on the golden rows
+// and on 512 worst-case rows of its own (the hour's end, 20 m/s, gustiness 1, short trees, full weights): 0.06 and
+// 0.63 mm on this machine (AMD iGPU), where the straight frac(f t) or 2.2 / height in float give 1.2-1.3 mm.
+// The placement hash takes the base's centimetres from the float's bits (WindCentimetres): bit for bit Python's.
 //
 // `precise` keeps the compiler from refolding the splits (ah t + al t back into a t).
 #ifndef NGG_WIND_HLSLI
@@ -39,12 +42,36 @@ uint WindHash(uint v)
     return (word >> 22u) ^ word;
 }
 
+// round(x * 100) exactly, half to even, as Python's round(float(x) * 100.0) on a float32 x (the product is exact in
+// double: 24 bits times 7). In float32 the product itself rounds - to 3 cm steps 3 km out - and ~2% of the placements
+// there hashed another centimetre than Python's (found by wind-reference), so it is done on the float's bits: x is
+// m 2^e with m < 2^24, m 100 < 2^31 fits a uint, and the shift right rounds half to even. |x| under 2^23 m.
+int WindCentimetres(float x)
+{
+    const uint b = asuint(x), ex = (b >> 23u) & 255u;
+    if (ex == 0u) return 0;
+    const uint p = ((b & 0x7FFFFFu) | 0x800000u) * 100u;
+    const int e = (int)ex - 150;               // x = mantissa 2^e
+    uint q;
+    if (e >= 0) q = p << (uint)min(e, 7);      // (beyond 8,000 km: no stage)
+    else if (e < -31) q = 0u;
+    else
+    {
+        const uint sh = (uint)(-e);
+        q = sh == 32u ? 0u : p >> sh;
+        const uint rem = p - (sh == 32u ? 0u : q << sh);
+        const uint half = 1u << (sh - 1u);
+        if (rem > half || (rem == half && (q & 1u) != 0u)) ++q;
+    }
+    return (b >> 31u) != 0u ? -(int)q : (int)q;
+}
+
 // A placement's own phase, 0..1: its base's two ground coordinates to the centimetre (two's complement) through PCG.
-// wind.py placement_phase (round() is round-half-even on both sides).
+// wind.py placement_phase.
 float WindPhase(float3 base)
 {
-    const uint qa = asuint((int)round(base.x * 100.0));
-    const uint qb = asuint((int)round(base.z * 100.0));
+    const uint qa = asuint(WindCentimetres(base.x));
+    const uint qb = asuint(WindCentimetres(base.z));
     return (float)(WindHash(qa ^ WindHash(qb)) & 0xFFFFFFu) / 16777216.0;
 }
 
@@ -60,6 +87,21 @@ float WindCycles(float a, float ti, float tf)
 }
 
 float WindSin(float cycles) { return sin(kWindTau * frac(cycles)); }
+
+// The main bend's cycles, f0 t with f0 = 2.2 / height, which runs to ~8,000 by the hour's end - so one float rounding of
+// f0 (and 2.2 is not a float) moves the phase of the layer that sways metres. f0 is carried as hi + lo: hi = 2.2 / h in
+// float, lo = the residual (2.2 - hi h) / h, with hi h taken exactly as four products of 12-bit halves (the first of
+// them cancels 2.2's float exactly, by Sterbenz) and 2.2's own residual added.
+float WindMainCycles(float height, float ti, float tf)
+{
+    const float c = 2.2, cLo = -4.7683715642676816e-08;   // 2.2 = c + cLo
+    precise const float hi = c / height;
+    precise const float hh = asfloat(asuint(height) & 0xFFFFF000u), hl = height - hh;
+    precise const float fh = asfloat(asuint(hi) & 0xFFFFF000u), fl = hi - fh;
+    precise const float r = (c - fh * hh) - fh * hl - fl * hh - fl * hl + cLo;
+    precise const float lo = r / height;
+    return frac(WindCycles(hi, ti, tf) + frac(lo * ti + lo * tf));
+}
 
 // The wind for a frame: wind.x/.y the direction it blows towards along the ground (x, z; unit length), .z the speed
 // (m/s at 10 m), .w the gustiness. t: seconds, 0..3600.
@@ -89,8 +131,7 @@ float3 WindBend(float3 base, float3 v, float3 nrm, float2 attr, float h, float h
     const float gust = 1.0 + f.wind.w * (0.5 + 0.5 * WindSin(gc));
 
     // main bend: lean the whole plant, keeping each vertex's distance from the base
-    const float f0 = 2.2 / max(height, 0.5);
-    const float lean = bend * s * s * gust * (0.75 + 0.25 * WindSin(WindCycles(f0, ti, tf) + php));
+    const float lean = bend * s * s * gust * (0.75 + 0.25 * WindSin(WindMainCycles(max(height, 0.5), ti, tf) + php));
     const float hf = saturate(h / max(height, 1e-6));
     const float len = length(v);
     float3 bent = v + d * (lean * hf * hf);

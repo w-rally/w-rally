@@ -14,6 +14,11 @@
 //   LOD3  trunk 5 sides + a closed hull round the needle tiers, 12 sectors x 7 rings and an apex, its material
 //         alpha-tested with holes (two-sided, not foliage), so a ray crosses 2 alpha surfaces, not one per tier
 // - what workstream 4's <id>_RT shell is for its real trees (vegetation plan, "a ray-tracing-only LOD").
+// --wind gives it the wind (kModelWind, windBend 0.3 m), its weights in uv1 baked as Wallaby's generator bakes them:
+// the trunk 0 (the main bend moves it); each needle tier one limb with a phase of its own (one per limb, so it moves
+// as one); the branch weight 0 at the trunk rising to (rim radius / crown reach)^1.5 at the rim, the crown's reach being
+// the widest (lowest) tier's; the flutter 0 at the trunk end of a needle cone and 1 at its rim (a card's base and tip).
+// The billboard and the shell carry none. LOD0 and LOD1 share the scheme, so their crossfade moves together.
 #include "placeholder_tree.h"
 
 #include <algorithm>
@@ -240,7 +245,10 @@ void Trunk(int sides, std::vector<ngg::Vertex>& v, std::vector<uint32_t>& idx)
 }
 
 // Tiers of needle cones, apex up, each ring `segs` around; normals lean out and up as a cone's do.
-void Tiers(int tiers, int segs, std::vector<ngg::Vertex>& v, std::vector<uint32_t>& idx)
+// A tier's limb phase, 0..1 (any fixed spread will do: the generator draws them from the plant's random stream).
+float TierPhase(int t) { return std::fmod(0.618034f * float(t + 1) + 0.137f, 1.0f); }
+
+void Tiers(int tiers, int segs, std::vector<ngg::Vertex>& v, std::vector<uint32_t>& idx, bool wind = false)
 {
     for (int t = 0; t < tiers; ++t) {
         const float f = tiers > 1 ? float(t) / (tiers - 1) : 0.0f;
@@ -248,10 +256,17 @@ void Tiers(int tiers, int segs, std::vector<ngg::Vertex>& v, std::vector<uint32_
         const float r = kRadius * (1.0f - f * 0.82f);
         const float droop = 0.35f;   // the rim hangs below the cone's line
         const uint32_t apex = uint32_t(v.size());
+        const float phase = TierPhase(t), rimWeight = std::pow(r / kRadius, 1.5f);
         for (int k = 0; k <= segs; ++k) {
             const float a = 2.0f * kPi * (k + 0.5f * t) / segs, c = std::cos(a), s = std::sin(a);
             v.push_back(V(0.0f, top, 0.0f, c, 0.8f, s, 3.0f * k / segs, 1.0f));
             v.push_back(V(r * c, base - droop, r * s, c, 0.8f, s, 3.0f * k / segs, 0.0f));
+            if (wind) {   // uv1: the branch weight; the phase + the flutter in hundredths (ngg_format.h kModelWind)
+                ngg::Vertex& in = v[v.size() - 2];
+                ngg::Vertex& rim = v.back();
+                in.uv1[0] = 0.0f, in.uv1[1] = phase;
+                rim.uv1[0] = rimWeight, rim.uv1[1] = phase + 100.0f;
+            }
         }
         for (int k = 0; k < segs; ++k) {
             const uint32_t a = apex + 2 * k;
@@ -307,7 +322,7 @@ struct PlantBox { float bmin[3], bmax[3]; uint32_t firstTag, tagCount; };
 
 } // namespace
 
-std::string AddPlaceholderTrees(ngg::SceneData& s, PlaceholderReport& report, uint32_t rtLod)
+std::string AddPlaceholderTrees(ngg::SceneData& s, PlaceholderReport& report, uint32_t rtLod, bool wind)
 {
     report = PlaceholderReport{};
     if (!s.models.empty()) return "the file already has a model library";
@@ -376,10 +391,12 @@ std::string AddPlaceholderTrees(ngg::SceneData& s, PlaceholderReport& report, ui
         l.firstSubmesh = uint32_t(lib.submeshes.size());
         v.clear(), i.clear();
         Trunk(trunkSides, v, i);
+        if (wind)
+            for (ngg::Vertex& x : v) x.uv1[0] = x.uv1[1] = 0.0f;
         lib.submeshes.push_back(Submesh(lib, 1, v, i));
         report.trianglesPerLod.push_back(uint32_t(i.size() / 3));
         v.clear(), i.clear();
-        Tiers(tiers, segs, v, i);
+        Tiers(tiers, segs, v, i, wind);
         lib.submeshes.push_back(Submesh(lib, 0, v, i));
         report.trianglesPerLod.back() += uint32_t(i.size() / 3);
         l.submeshCount = 2;
@@ -425,6 +442,7 @@ std::string AddPlaceholderTrees(ngg::SceneData& s, PlaceholderReport& report, ui
     m.bboxMax[0] = kRadius, m.bboxMax[1] = kHeight, m.bboxMax[2] = kRadius;
     m.fadeWidth = 6.0f;
     m.rtLod = shell ? 3 : rtLod < 2 ? rtLod : 1;
+    if (wind) m.flags = ngg::kModelWind, m.windBend = 0.3f;
     lib.models.push_back(m);
 
     // A placement per tree card: the base mid-plant on its lowest point, the height and footprint the plant's, a turn

@@ -5,7 +5,7 @@ add_executable(ngg-check main.cpp placeholder_tree.cpp ${GAME_SRC}/assets/legacy
                ${GAME_SRC}/formats/lbs_geometry.cpp ${GAME_SRC}/formats/track_settings.cpp ${GAME_SRC}/formats/dds_image.cpp ${GAME_SRC}/rules/stage.cpp
                ${GAME_SRC}/render/renderer.cpp)
 target_include_directories(ngg-check PRIVATE ${GAME_SRC})
-target_link_libraries(ngg-check PRIVATE ngg-format phys-data wrally-modules)
+target_link_libraries(ngg-check PRIVATE ngg-format phys-data wrally-modules windowscodecs ole32)
 target_compile_definitions(ngg-check PRIVATE _CRT_SECURE_NO_WARNINGS NOMINMAX)
 target_compile_options(ngg-check PRIVATE /W4)
 set_target_properties(ngg-check PROPERTIES CXX_STANDARD 17)
