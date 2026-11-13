@@ -164,6 +164,9 @@ bool WeatherFromJson(const char* text, WeatherPreset& out)
     Num(root.Get("precipitation"), "rain", out.rain);
     Num(root.Get("precipitation"), "snow", out.snow);
     Num(root.Get("exposure"), "value", out.sky.exposure);
+    Num(root.Get("wind"), "direction", out.windDirectionDeg);
+    Num(root.Get("wind"), "speed", out.windSpeed);
+    Num(root.Get("wind"), "gustiness", out.gustiness);
 
     // "time": { "date": "2026-06-21", "local": 22.5, "utcOffset": 2 }, "place": { "latitude": 50, "longitude":
     // 14.4, "north": 0 } - both or neither (NGG design §5.4).
@@ -204,13 +207,15 @@ std::string WeatherToJson(const WeatherPreset& w)
         "  \"clouds\":        { \"cover\": %.6g },\n"
         "  \"fog\":           { \"visibility\": %.6g, \"height\": %.6g },\n"
         "  \"precipitation\": { \"rain\": %.6g, \"snow\": %.6g },\n"
-        "  \"exposure\":      { \"value\": %.6g }%s\n"
+        "  \"exposure\":      { \"value\": %.6g },\n"
+        "  \"wind\":          { \"direction\": %.6g, \"speed\": %.6g, \"gustiness\": %.6g }%s\n"
         "}\n",
         Escaped(w.name).c_str(), Escaped(w.source).c_str(),
         w.sky.sunDir[0], w.sky.sunDir[1], w.sky.sunDir[2], w.sky.sunIntensity,
         w.sky.turbidity, w.sky.groundAlbedo,
         w.sky.groundColour[0], w.sky.groundColour[1], w.sky.groundColour[2],
-        w.cloudCover, w.fogVisibility, w.fogHeight, w.rain, w.snow, w.sky.exposure, TimeJson(w).c_str());
+        w.cloudCover, w.fogVisibility, w.fogHeight, w.rain, w.snow, w.sky.exposure,
+        w.windDirectionDeg, w.windSpeed, w.gustiness, TimeJson(w).c_str());
     return buf;
 }
 
@@ -261,6 +266,8 @@ static_assert(kRec.year == kTime.year && kRec.month == kTime.month && kRec.day =
               kRec.latitude == (float)kTime.latitude && kRec.longitude == (float)kTime.longitude &&
               kRec.northDeg == (float)kTime.northDeg && kRec.timeFlags == 0,
               "ngg_format.h's DefaultWeatherRecord() and astronomy.h's SkyTime defaults disagree");
+static_assert(kRec.windSpeed == 0.0f && kRec.gustiness == 0.0f && kRec.windDirectionDeg == 0.0f,
+              "ngg_format.h's DefaultWeatherRecord() is not calm: a record without the wind would sway");
 } // namespace
 
 bool ParseWeatherChunk(const void* payload, size_t bytes, std::vector<WeatherPreset>& out)
@@ -307,6 +314,9 @@ bool ParseWeatherChunk(const void* payload, size_t bytes, std::vector<WeatherPre
         w.time.year = r.year, w.time.month = r.month, w.time.day = r.day;
         w.time.localHour = r.localHour, w.time.utcOffset = r.utcOffset;
         w.time.latitude = r.latitude, w.time.longitude = r.longitude, w.time.northDeg = r.northDeg;
+        w.windDirectionDeg = r.windDirectionDeg;
+        w.windSpeed        = r.windSpeed;
+        w.gustiness        = r.gustiness;
         out.push_back(w);
     }
     return true;
@@ -342,6 +352,9 @@ std::vector<uint8_t> PackWeatherChunk(const std::vector<WeatherPreset>& presets)
         r.year = w.time.year, r.month = w.time.month, r.day = w.time.day;
         r.localHour = (float)w.time.localHour, r.utcOffset = (float)w.time.utcOffset;
         r.latitude = (float)w.time.latitude, r.longitude = (float)w.time.longitude, r.northDeg = (float)w.time.northDeg;
+        r.windDirectionDeg = w.windDirectionDeg;
+        r.windSpeed        = w.windSpeed;
+        r.gustiness        = w.gustiness;
         memcpy(out.data() + sizeof(h) + i * sizeof(r), &r, sizeof(r));
     }
     return out;

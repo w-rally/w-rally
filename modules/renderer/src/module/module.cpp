@@ -212,6 +212,9 @@ void ToDesc(const ngg::core::WeatherPreset& w, WeatherDesc& d)
     d.rain = w.rain;
     d.snow = w.snow;
     d.exposure = w.sky.exposure;
+    d.windDirectionDeg = w.windDirectionDeg;
+    d.windSpeed = w.windSpeed;
+    d.gustiness = w.gustiness;
 }
 
 // The frame's weather into weatherSky, when it changed: a preset exactly as ngg-api's load applied the file's default
@@ -632,6 +635,24 @@ Status WRALLY_CALL RenderFrame(Renderer* r, const FrameDesc* f)
         }
         ApplyFrameWeather(*r, *f);
         r->scene.SetWetness(f->wetness);
+        // The wind from the weather in force (a preset's, or the frame's WeatherDesc), timed by FrameDesc::time.
+        {
+            const auto& presets = r->scene.WeatherPresets();
+            if (f->weatherPreset >= 0 && size_t(f->weatherPreset) < presets.size()) {
+                const auto& w = presets[size_t(f->weatherPreset)];
+                r->scene.SetWind(w.windDirectionDeg, w.windSpeed, w.gustiness);
+            } else if (f->weatherPreset < 0) {
+                r->scene.SetWind(f->weather.windDirectionDeg, f->weather.windSpeed, f->weather.gustiness);
+            } else {
+                r->scene.SetWind(0.0f, 0.0f, 0.0f);
+            }
+            // NGG_WIND=<speed>[,<gustiness>[,<degrees>]]: that wind over the weather's (measuring; NGG design §10).
+            static const bool windSet = std::getenv("NGG_WIND") != nullptr;
+            static float windEnv[3] = {0.0f, 0.5f, 90.0f};
+            static const int windRead = windSet ? sscanf_s(std::getenv("NGG_WIND"), "%f,%f,%f", &windEnv[0], &windEnv[1], &windEnv[2]) : 0;
+            if (windRead > 0) r->scene.SetWind(windEnv[2], windEnv[0], windEnv[1]);
+            r->scene.SetWindTime(f->time);
+        }
         // The frame's local lights, as the core takes them (NGG design §5.5).
         {
             std::vector<ngg::core::LightDesc> lights;

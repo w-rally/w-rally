@@ -130,6 +130,8 @@ struct CameraCB
     float localShadowVP[4][16];
     float localShadowInfo[4][4];
     float localShadowParams[4];
+    float wind[4];         // gWind (Scene::SetWind): direction x, z; speed; gustiness
+    float windTime, windPrevTime, windPrevOn, windPad;   // gWindTime, gWindPrevTime, gWindPrevOn
 };
 static_assert(sizeof(CameraCB) % 16 == 0,
               "CameraCB must be a whole number of float4 registers - see the note above");
@@ -647,9 +649,18 @@ void Scene::DescribeModelsRt(std::vector<uint64_t>& meshes, std::vector<RtInstan
         m_rtModelMeshes.clear();
         auto key = [&](uint32_t mesh) { return kRtDynamic | ((uint64_t)m_rtGeneration << 32) | mesh; };
         auto live = [&](uint32_t mesh) { return mesh && mesh <= m_dynMeshes.size() && m_dynMeshes[mesh - 1].alive; };
+        // (lods[rtLod] is a drawn LOD or the model's ray-only one, ngg_format.h kModelLodRayOnly - the same here.)
+        size_t blasTris = 0, rayOnly = 0;
         for (const ModelDef& m : m_models)
+        {
+            rayOnly += m.rtLod >= m.drawLods ? 1 : 0;
             for (const ModelSub& s : m.lods[m.rtLod].subs)
-                if (live(s.mesh)) m_rtModelMeshes.push_back(key(s.mesh));
+                if (live(s.mesh))
+                {
+                    m_rtModelMeshes.push_back(key(s.mesh));
+                    blasTris += m_dynMeshes[s.mesh - 1].indexCount / 3;
+                }
+        }
         for (const PlacementRt& p : m_placements)
         {
             if (p.removed) continue;
@@ -668,6 +679,9 @@ void Scene::DescribeModelsRt(std::vector<uint64_t>& meshes, std::vector<RtInstan
                 m_rtModelInstances.push_back(d);
             }
         }
+        if (m_rtModelInstancesDirty && !m_models.empty())
+            Log("scene: models ray traced - %zu BLAS mesh(es), %zu triangle(s) (%zu model(s) from a ray-only LOD); "
+                "%zu TLAS instance(s)", m_rtModelMeshes.size(), blasTris, rayOnly, m_rtModelInstances.size());
         m_rtModelInstancesDirty = false;
         m_rtModelGen = m_rtGeneration;
     }
@@ -1632,6 +1646,9 @@ void Scene::RenderShadows(ID3D12GraphicsCommandList* list,
         CameraCB cb = {};
         for (int k = 0; k < 3; ++k) cb.camPos[k] = eye[k] + toward[k] * 1.0e4f;
         memcpy(cb.view, m_shadows->LightViewProj(c), sizeof(cb.view));
+        // The wind sways the trees in the cascades as on screen (no motion target here: no last frame's bend).
+        memcpy(cb.wind, m_wind, sizeof(cb.wind));
+        cb.windTime = cb.windPrevTime = m_windTime;
         // Identity projection - the light view-proj is already combined above.
         memset(cb.proj, 0, sizeof(cb.proj));
         cb.proj[0] = cb.proj[5] = cb.proj[10] = cb.proj[15] = 1.0f;
@@ -1962,6 +1979,7 @@ static const char* const kDebugModeNames[] = {
     "RT ambient occlusion - white = sees the whole sky",
     "PLANTS - green = a card of a plant (volume normal), red = other alpha-tested",
     "RT local lights - the lamps' shadowed fraction, white = every lamp reaches it",
+    "MOTION - the motion target: red/green across/up (1 = half a pixel), blue = has its own motion (moved, swaying)",
 };
 
 static_assert(sizeof(kLightModeNames) / sizeof(kLightModeNames[0])
@@ -4944,6 +4962,10 @@ void Scene::RecordPass(ID3D12GraphicsCommandList* list, D3D12_CPU_DESCRIPTOR_HAN
     cb.fogBeta    = FogBeta(m_atmosphere);
     cb.fogHeight  = m_atmosphere.fogHeight;
     cb.wetness    = m_wetness;
+    memcpy(cb.wind, m_wind, sizeof(cb.wind));
+    cb.windTime     = m_windTime;
+    cb.windPrevTime = m_windPrevTime;
+    cb.windPrevOn   = 1.0f;
     cb.clusterParams[0] = m_lights.TileW();
     cb.clusterParams[1] = m_lights.TileH();
     cb.clusterParams[2] = Lights::kNear;

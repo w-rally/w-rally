@@ -14,6 +14,7 @@
 #define NGG_LIGHTS_T1 t13
 #define NGG_LIGHTS_T2 t14
 #include "lights.hlsli"
+#include "wind.hlsli"
 Texture2D<float>        gRtLights : register(t15);
 Texture2DArray<float>   gLocalShadow : register(t21);
 Texture2DArray<float>   gLocalShadowFlag : register(t22);
@@ -99,6 +100,15 @@ cbuffer Camera : register(b0)
     row_major float4x4 gLocalShadowVP[4];
     float4             gLocalShadowInfo[4];
     float4             gLocalShadowParams;
+    // The wind (Scene::SetWind, NGG design §2.6): x, y its direction along the ground (x, z), z its speed in m/s (0:
+    // calm, nothing sways), w its gustiness. The times: this frame's and the last frame's (FrameDesc::time wrapped at
+    // 3600 s); gWindPrevOn 1 where the last frame's bend is wanted too (the camera's passes, for the motion target),
+    // 0 in the shadow maps.
+    float4             gWind;
+    float              gWindTime;
+    float              gWindPrevTime;
+    float              gWindPrevOn;
+    float              gWindPad;
 };
 
 // Cascaded shadow maps. A comparison sampler so the hardware does the depth
@@ -497,8 +507,9 @@ RWStructuredBuffer<float4> gProbe : register(u0);
 
 
 // INST0..3: the INSTANCE STREAM (input slot 1, one record per instance - Scene::InstanceRec): rows of p' = A p + t,
-// then tint (RGBA8), the crossfade (float bits) and flags (1 billboard, 2 a model). An object that is not a model's
-// draws the stream's identity record: its vertex goes through as it always did.
+// then tint (RGBA8), the crossfade (float bits), flags (1 billboard, 2 a model, 4 the wind sways it) and the wind's
+// per-placement constants (f16 windBend | f16 height << 16, both times the vertical scale). An object that is not a
+// model's draws the stream's identity record: its vertex goes through as it always did.
 struct VSIn  { float3 pos : POSITION; float3 nrm : NORMAL; float2 uv0 : TEXCOORD0; float2 uv1 : TEXCOORD1; float4 col : COLOR0;
                float4 ic0 : INST0; float4 ic1 : INST1; float4 ic2 : INST2; uint4 ix : INST3; };
 struct VSOut { float4 pos : SV_Position; float3 nrm : NORMAL; float2 uv0 : TEXCOORD0; float2 uv1 : TEXCOORD1; float4 col : COLOR0; float3 wpos : TEXCOORD2; float3 prevWpos : TEXCOORD3;
@@ -510,7 +521,26 @@ struct VSOut { float4 pos : SV_Position; float3 nrm : NORMAL; float2 uv0 : TEXCO
               nointerpolation float plantShadow : TEXCOORD6;
               // An instance's crossfade (FadeClip; 0 drawn whole) and its tint (1 none).
               nointerpolation float fade : TEXCOORD7;
-              nointerpolation float3 tint : TEXCOORD8; };
+              nointerpolation float3 tint : TEXCOORD8;
+              // 1: an instanced model's vertex the wind bent (kInstWind) - it moves although its object does not, so
+              // the prepass writes its motion (NggMotion).
+              nointerpolation uint swayed : TEXCOORD9; };
+
+// The motion target's value (PSPrepass; the debug view "MOTION" shows the same): for a moving object (gObjectMoved) or
+// a vertex the wind bent (swayed), where the point was last frame on screen minus where it is now, last frame's depth,
+// w 1; for the rest 0 - TAA reprojects them by the depth and the camera.
+float4 NggMotion(float3 wpos, float3 prevWpos, uint swayed)
+{
+    if (gObjectMoved == 0 && swayed == 0u) return float4(0.0, 0.0, 0.0, 0.0);
+    const float4 c = mul(float4(wpos, 1.0), gViewProjNoJitter);
+    const float4 p = mul(float4(prevWpos, 1.0), gPrevViewProj);
+    // Behind last frame's camera: no previous position on screen. An
+    // offset that lands outside the image makes every consumer drop the
+    // history, which is the right answer.
+    return (p.w > 1e-6 && c.w > 1e-6)
+         ? float4(p.xy / p.w - c.xy / c.w, p.z / p.w, 1.0)
+         : float4(4.0, 4.0, 0.0, 1.0);
+}
 
 // THE CROSSFADE between a model's LODs (Scene::CullModels): a placement in the band is drawn by both, one with
 // fade = t (> 0: drops the pixels whose dither is under t), the next with -t (keeps exactly those) - so every pixel
@@ -585,10 +615,16 @@ VSOut VSMain(VSIn i)
     // An INSTANCED MODEL's vertex is in its model space: the instance places it (Scene::PlacementTransform). Every
     // other draw has the identity record and skips this, so its vertices are exactly as they were.
     float3 pos = i.pos, nrm = i.nrm;
+    float3 prevPos = pos;              // where it was last frame: a swaying model's moves (the motion target)
     const bool model = (i.ix.z & 2u) != 0u;
+    // THE WIND (wind.hlsli): a model that carries it (kInstWind), in a wind at all - in calm air nothing is computed,
+    // so the frame is the one without wind exactly.
+    const bool windy = model && (i.ix.z & 4u) != 0u && gWind.z > 0.0;
     if (model)
     {
         const float3 t = float3(i.ic0.w, i.ic1.w, i.ic2.w);
+        const float sv = length(float3(i.ic0.y, i.ic1.y, i.ic2.y));
+        float3 v;   // the placed vertex relative to the base
         if ((i.ix.z & 1u) != 0u)
         {
             // THE FAR BILLBOARD: its quad (x across, y up) turned about the up axis to face the camera - or, in a
@@ -597,20 +633,37 @@ VSOut VSMain(VSIn i)
             f.y = 0.0;
             f = dot(f, f) > 1e-8 ? normalize(f) : float3(0.0, 0.0, 1.0);
             const float sh = length(float3(i.ic0.x, i.ic1.x, i.ic2.x));
-            const float sv = length(float3(i.ic0.y, i.ic1.y, i.ic2.y));
-            pos = t + float3(f.z, 0.0, -f.x) * (i.pos.x * sh) + float3(0.0, i.pos.y * sv, 0.0) + f * (i.pos.z * sh);
+            v = float3(f.z, 0.0, -f.x) * (i.pos.x * sh) + float3(0.0, i.pos.y * sv, 0.0) + f * (i.pos.z * sh);
+            pos = t + v;
             // Facing the viewer, leaning up: a canopy seen from afar is lit from above more than from the side.
             nrm = normalize(f + float3(0.0, 0.6, 0.0));
         }
         else
         {
             pos = float3(dot(i.ic0, float4(i.pos, 1.0)), dot(i.ic1, float4(i.pos, 1.0)), dot(i.ic2, float4(i.pos, 1.0)));
+            v = float3(dot(i.ic0.xyz, i.pos), dot(i.ic1.xyz, i.pos), dot(i.ic2.xyz, i.pos));
             // The normal by the cofactors of A (its inverse transpose up to scale): right under a squash as well.
             const float3 a = i.ic0.xyz, b = i.ic1.xyz, c = i.ic2.xyz;
             const float3 n = float3(dot(cross(b, c), i.nrm), dot(cross(c, a), i.nrm), dot(cross(a, b), i.nrm));
             nrm = dot(n, n) > 1e-20 ? normalize(n) : float3(0.0, 1.0, 0.0);
         }
+        prevPos = pos;
+        if (windy)
+        {
+            // The per-placement constants (Scene::CullModels' emit): windBend and the model's height, both placed.
+            const float bend = f16tof32(i.ix.w & 0xFFFFu), height = f16tof32(i.ix.w >> 16);
+            // A billboard's quad leans by the main bend alone (no weights: its top corners at the full height).
+            const float2 attr = (i.ix.z & 1u) != 0u ? float2(0.0, 0.0) : i.uv1;
+            WindFrame now, before;
+            now.wind = gWind;
+            now.t = gWindTime;
+            before.wind = gWind;
+            before.t = gWindPrevTime;
+            pos = t + WindBend(t, v, nrm, attr, i.pos.y * sv, height, bend, now);
+            prevPos = gWindPrevOn > 0.5 ? t + WindBend(t, v, nrm, attr, i.pos.y * sv, height, bend, before) : pos;
+        }
     }
+    o.swayed = windy ? 1u : 0u;
     o.fade = asfloat(i.ix.y);
     o.tint = float3(i.ix.x & 255u, (i.ix.x >> 8) & 255u, (i.ix.x >> 16) & 255u) / 255.0;
     // The object transform first: the vertex is in baked world space, this moves
@@ -621,8 +674,8 @@ VSOut VSMain(VSIn i)
     o.wpos = world.xyz;
     // The same vertex under last frame's transform. Only the motion target
     // reads it; for an object that did not move it is this frame's position.
-    o.prevWpos = (gObjectMoved != 0)
-               ? mul(float4(pos, 1.0), gPrevObjectXform).xyz + gWorldOffset
+    o.prevWpos = (gObjectMoved != 0) ? mul(float4(prevPos, 1.0), gPrevObjectXform).xyz + gWorldOffset
+               : windy ? mul(float4(prevPos, 1.0), gObjectXform).xyz + gWorldOffset
                : world.xyz;
     // Rotation only. Editor placements are rigid; a non-uniform scale would want
     // the inverse transpose, and that is the point at which to add one.
@@ -798,18 +851,7 @@ PrepassOut PSPrepass(VSOut i, bool frontFace : SV_IsFrontFace)
         o.plant = 0xFFFFFFFFu;
     }
 #endif
-    o.motion = float4(0.0, 0.0, 0.0, 0.0);
-    if (gObjectMoved != 0)
-    {
-        const float4 c = mul(float4(i.wpos, 1.0), gViewProjNoJitter);
-        const float4 p = mul(float4(i.prevWpos, 1.0), gPrevViewProj);
-        // Behind last frame's camera: no previous position on screen. An
-        // offset that lands outside the image makes every consumer drop the
-        // history, which is the right answer.
-        o.motion = (p.w > 1e-6 && c.w > 1e-6)
-                 ? float4(p.xy / p.w - c.xy / c.w, p.z / p.w, 1.0)
-                 : float4(4.0, 4.0, 0.0, 1.0);
-    }
+    o.motion = NggMotion(i.wpos, i.prevWpos, i.swayed);
     return o;
 }
 
@@ -1641,6 +1683,15 @@ float4 Shade(VSOut i, bool frontFace, out GBufOut g)
         // The local lights' shadowed fraction (the ray tracer's, denoised; lights.h): white = every lamp reaches it.
         if (gDebugMode > 14.5 && gDebugMode < 15.5)
             return float4((gLightsVisOn > 0.5 ? gRtLights.Load(int3(i.pos.xy, 0)) : 1.0).xxx, 1.0);
+
+        // MOTION - what the prepass writes into the motion target here (NggMotion): red / green how far across / up
+        // the point moved since the last frame (1 at half a pixel and more), blue 1 where it has motion at all (a
+        // moving object, a swaying leaf), black where TAA takes the camera's.
+        if (gDebugMode > 15.5 && gDebugMode < 16.5)
+        {
+            const float4 m = NggMotion(i.wpos, i.prevWpos, i.swayed);
+            return float4(saturate(abs(m.xy) * 0.5 / gInvScreen * 2.0), m.w, 1.0);
+        }
 
         // FLAT GREY - no texture, no vertex colour, no blend. Every shading
         // input is gone, so anything still visible here is geometry, depth or

@@ -694,6 +694,7 @@ StageEnd RunStage(Shell& sh, const Options& given, bool fromMenu, std::string& e
     bool carLampsLoaded = false;
     size_t lampLayout = 0;
     assets::LampSwitches lampSwitch;
+    double stageClock = 0.0;   // the stage's seconds, stopping in a pause: FrameDesc::time (the trees' sway)
     bool lampSwitchSet = false;   // the driver's (or PHYS_DRIVE_LAMPS'): no longer the sun's
     int lampFrames = 0;           // the frames drawn: from the third the stats are the stage's sun
     Press headlightsKey, rampKey, indicatorLeftKey, indicatorRightKey, hazardKey;
@@ -866,6 +867,7 @@ StageEnd RunStage(Shell& sh, const Options& given, bool fromMenu, std::string& e
         // The keys for the session: R back on the road, the pedals, the steering's target.
         if (resetKey(focused && keys.Down(Action::BackOnRoad))) in.presses |= session::kBackOnRoad;
         in.seconds = paused || menu != StageMenu::None ? 0.0 : frame;   // a pause keeps the frame where it is, between the same steps
+        stageClock += in.seconds;
         in.throttle = focused && keys.Down(Action::Throttle);
         in.brake = focused && keys.Down(Action::Brake);
         in.handbrake = focused && keys.Down(Action::Handbrake);
@@ -1165,6 +1167,7 @@ StageEnd RunStage(Shell& sh, const Options& given, bool fromMenu, std::string& e
             fd.weatherPreset = customSkySet ? -1 : weatherPreset;   // the .ngg's preset (0 its own weather), or --sky's
             if (customSkySet) fd.weather = customSky;
             fd.wetness = 0.5f * static_cast<float>(std::clamp(wet, 0, 2));   // the road's: dry 0, damp 0.5, wet 1
+            fd.time = static_cast<float>(stageClock);   // the wind's clock (NGG design §2.6): it stops in a pause
             if (o.skyTimeSet) {   // the time and place: the sun from them (NGG design §5.4)
                 fd.skyTime = {1, o.skyYear, o.skyMonth, o.skyDay, static_cast<float>(o.skyHour), static_cast<float>(o.skyUtcOffset),
                               static_cast<float>(o.skyLatitude), static_cast<float>(o.skyLongitude), static_cast<float>(o.skyNorth)};

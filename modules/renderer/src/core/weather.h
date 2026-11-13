@@ -29,10 +29,12 @@
 //     "clouds":        { "cover": 0.95 },
 //     "fog":           { "visibility": 300, "height": 150 },
 //     "precipitation": { "rain": 0, "snow": 0 },
-//     "exposure":      { "value": 0.8 }
+//     "exposure":      { "value": 0.8 },
+//     "wind":          { "direction": 90, "speed": 6, "gustiness": 0.4 }
 //   }
 //
 // sun.direction is the direction light TRAVELS (from the sun), like SkyParams.
+// wind.direction is where it blows TOWARDS, degrees from +z towards +x; speed m/s at 10 m; gustiness 0..1. Missing: calm.
 // fog.visibility is meteorological: the distance at which contrast falls to
 // 2 % (Koschmieder: extinction = 3.912 / visibility); 0 means no fog layer.
 // Unknown keys are ignored and missing ones keep their defaults, so the
@@ -60,6 +62,10 @@ struct WeatherPreset
     float       fogHeight = 150.0f;     // scale height of the fog layer, metres
     float       rain = 0.0f;            // 0 dry .. 1 heavy - carried, not yet rendered
     float       snow = 0.0f;            // 0 none .. 1 heavy - carried, not yet rendered
+    // The wind (NGG design §2.6): it sways the instanced models that carry it (ngg_format.h kModelWind).
+    float       windDirectionDeg = 0.0f;   // where it blows TOWARDS: degrees from +z towards +x
+    float       windSpeed = 0.0f;          // m/s at 10 m; 0 calm
+    float       gustiness = 0.0f;          // 0..1
     // The time and place (NGG design §5.4). When set, the sun follows from them (ApplyWeather) and sky.sunDir is
     // not used.
     bool        timeSet = false;

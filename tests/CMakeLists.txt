@@ -74,12 +74,18 @@ target_compile_options(editor-api-check PRIVATE /W4 /permissive-)
 if(EXISTS "${WRALLY_TEST_NGG}")
     # INSTANCED MODELS (NGG design §2.6): a placeholder tree model (tools/ngg-check placeholder_tree.cpp) in place of
     # every tree-card plant of stage 41 - written as NGGD + NGGE, read back the same, and loaded by the renderer, whose
-    # log must count the model, its LODs, the 3743 placements and the 3743 plants whose cards it dropped. The file is
-    # the next test's.
+    # log must count the model, its LODs, the 3743 placements and the 3743 plants whose cards it dropped. Its ray
+    # tracer takes a RAY-TRACING-ONLY shell (--rt-lod ray, kModelLodRayOnly): frames through every LOD band must draw
+    # exactly what the same trees without the shell draw (main pass and cascades), never the shell; the BLAS must be
+    # the shell's triangles; and the trees without it, written as a version-1 NGGD, must still load. The trees have the
+    # WIND (--wind: kModelWind, the weights baked as Wallaby bakes them): in calm air they draw exactly the frames of the
+    # same trees without it; in a wind two frames 0.1 s apart differ, and nothing else moves; the motion target has the
+    # leaves' own motion; the cascades' shadows move on the ground (ray tracing off); a lone billboard's top leans and
+    # its base stays. The file is the next test's.
     set(WRALLY_TEST_TREES ${CMAKE_BINARY_DIR}/tests-bin/track-41-trees.ngg)
-    add_test(NAME instancing-41 COMMAND ngg-check --trees ${WRALLY_TEST_NGG} --out ${WRALLY_TEST_TREES})
+    add_test(NAME instancing-41 COMMAND ngg-check --trees ${WRALLY_TEST_NGG} --rt-lod ray --wind --out ${WRALLY_TEST_TREES})
     set_tests_properties(instancing-41 PROPERTIES FIXTURES_SETUP trees-41 TIMEOUT 300 PASS_REGULAR_EXPRESSION
-        "placeholder trees: 3743 placement.*read back the same.*scene: models - 1 model\\(s\\): 3 LODs, 5 submeshes, 184 triangles.*3743 placement\\(s\\) \\(0 in other variants\\), 3743 replace a plant.*scene: models replace 3743 plant\\(s\\): [1-9][0-9]* card triangle.*ngg-check: all good")
+        "placeholder trees: 3743 placement.*read back the same.*scene: models - 1 model\\(s\\): 4 LODs \\(1 ray tracing only\\), 7 submeshes, [0-9]+ triangles.*3743 placement\\(s\\) \\(0 in other variants\\), 3743 replace a plant.*scene: models replace 3743 plant\\(s\\): [1-9][0-9]* card triangle.*a version-1 NGGD.*loaded by the renderer.*drawn the same as without the shell.*never the shell.*the ray tracer's BLAS: the shell's [0-9]+ triangles.*calm: the trees with wind drawn as without it - 0 pixel.*wind 15 m/s: two frames 0.1 s apart differ in [1-9][0-9]* pixel.s. .calm: 0.; without the trees in 0.*the motion target: [1-9][0-9]* of [0-9]+ tree pixel.s. with motion of their own .calm: 0 not black.*the cascades: the sun's visibility changed on [1-9][0-9]* of .*calm: 0 pixel.*the billboard from 400 m.*ngg-check: all good")
     # The editor table on stage 41, and its placements (version 2) on the file with trees.
     add_test(NAME editor-api-41 COMMAND editor-api-check ${WRALLY_BIN}/modules/renderer/WRenderer.dll ${WRALLY_TEST_NGG}
              ${WRALLY_TEST_TREES})
@@ -124,11 +130,29 @@ if(EXISTS "${WRALLY_TEST_RBR_DIR}/Maps/track-4_E.lbs")
     set_tests_properties(catalog-every-stage PROPERTIES PASS_REGULAR_EXPRESSION "catalog-check: all good")
 endif()
 
+# The wind's vertex shader (modules/renderer/shaders/wind.hlsli, NGG design §2.6) against its reference, Wallaby's
+# tools/vegetation/plantgen/wind.py, on the golden table its wind.golden() wrote (data/wind_golden.json): a C++ double
+# port of the formula must reproduce the table, and the shader - compiled with the vendored DXC, run on the GPU - must
+# agree with that port on the same float32 inputs within 1 mm, with the placement hash bit for bit.
+add_executable(wind-reference wind_reference.cpp ${PROJECT_SOURCE_DIR}/modules/renderer/src/core/shader_compiler.cpp)
+target_include_directories(wind-reference PRIVATE ${PROJECT_SOURCE_DIR}/modules/renderer/src/core)
+target_link_libraries(wind-reference PRIVATE wrally-json d3d12 dxgi d3dcompiler)
+target_compile_definitions(wind-reference PRIVATE _CRT_SECURE_NO_WARNINGS NOMINMAX)
+set_target_properties(wind-reference PROPERTIES CXX_STANDARD 17)
+add_test(NAME wind-reference COMMAND wind-reference ${CMAKE_CURRENT_SOURCE_DIR}/data/wind_golden.json
+         ${CMAKE_CURRENT_SOURCE_DIR} ${PROJECT_SOURCE_DIR}/third_party/dxc)
+set_tests_properties(wind-reference PROPERTIES PASS_REGULAR_EXPRESSION "wind-reference: all good")
+
 # The .ngg writer and its readers in step (tools/ngg-check, docs/design.md decision 2): a made-up scene written, read
-# back the same and loaded by the renderer; Wallaby's stage 41 .ngg (another producer) read, rewritten the same and
-# both loaded; W-Rally's legacy importer on RBR's stage 41 .lbs, loaded by the renderer. They open a hidden window.
+# back the same and loaded by the renderer - its model with a ray-tracing-only LOD, then each of that LOD's rules
+# broken in turn and refused by both (7: "refused: ..." lines); its model's and its weather's WIND (NGGD version 3, NGGW's
+# appended fields) round-tripped and reaching the renderer, a version-2 NGGD loading without wind, a 160-byte NGGW
+# record reading as calm, and each wind rule broken and refused by both (9 more); Wallaby's stage 41 .ngg (another producer) read,
+# rewritten the same and both loaded; W-Rally's legacy importer on RBR's stage 41 .lbs, loaded by the renderer. They
+# open a hidden window.
 add_test(NAME ngg-roundtrip COMMAND ngg-check)
-set_tests_properties(ngg-roundtrip PROPERTIES PASS_REGULAR_EXPRESSION "ngg-check: all good")
+set_tests_properties(ngg-roundtrip PROPERTIES PASS_REGULAR_EXPRESSION
+    "the made-up scene's wind: its model's .NGGD version 3. and its weather's .90 deg, 6 m/s, gustiness 0.4. round-trip and reach the renderer.*a version-2 NGGD .no wind.: read the same, loaded by the renderer with no wind model.*a 160-byte NGGW record .before the wind.: reads as calm, by both readers.*refused: a ray-only LOD that is not the last.*refused: two ray-only LODs.*refused: a ray-only LOD that rtLod does not name.*refused: a ray-only LOD that is also a billboard.*refused: a ray-only LOD with a distance.*refused: a ray-only LOD with no drawn LOD before it.*refused: a ray-only LOD in a version-1 chunk.*refused: a wind model with a windBend of 0.*refused: a wind model with a negative windBend.*refused: a wind model with a windBend over 10 m.*refused: a wind model with a NaN windBend.*refused: a windBend without the wind flag.*refused: a model with an unknown flag.*refused: a wind model with a branch weight over 1.*refused: a wind model with a flutter over 100.*refused: wind in a version-2 chunk.*ngg-check: all good")
 if(EXISTS "${WRALLY_TEST_NGG}")
     add_test(NAME ngg-producer-wallaby COMMAND ngg-check ${WRALLY_TEST_NGG})
     set_tests_properties(ngg-producer-wallaby PROPERTIES PASS_REGULAR_EXPRESSION "ngg-check: all good")
