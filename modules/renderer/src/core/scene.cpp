@@ -130,6 +130,8 @@ struct CameraCB
     float localShadowVP[4][16];
     float localShadowInfo[4][4];
     float localShadowParams[4];
+    float wind[4];         // gWind (Scene::SetWind): direction x, z; speed; gustiness
+    float windTime, windPrevTime, windPrevOn, windPad;   // gWindTime, gWindPrevTime, gWindPrevOn
 };
 static_assert(sizeof(CameraCB) % 16 == 0,
               "CameraCB must be a whole number of float4 registers - see the note above");
@@ -1644,6 +1646,9 @@ void Scene::RenderShadows(ID3D12GraphicsCommandList* list,
         CameraCB cb = {};
         for (int k = 0; k < 3; ++k) cb.camPos[k] = eye[k] + toward[k] * 1.0e4f;
         memcpy(cb.view, m_shadows->LightViewProj(c), sizeof(cb.view));
+        // The wind sways the trees in the cascades as on screen (no motion target here: no last frame's bend).
+        memcpy(cb.wind, m_wind, sizeof(cb.wind));
+        cb.windTime = cb.windPrevTime = m_windTime;
         // Identity projection - the light view-proj is already combined above.
         memset(cb.proj, 0, sizeof(cb.proj));
         cb.proj[0] = cb.proj[5] = cb.proj[10] = cb.proj[15] = 1.0f;
@@ -1974,6 +1979,7 @@ static const char* const kDebugModeNames[] = {
     "RT ambient occlusion - white = sees the whole sky",
     "PLANTS - green = a card of a plant (volume normal), red = other alpha-tested",
     "RT local lights - the lamps' shadowed fraction, white = every lamp reaches it",
+    "MOTION - the motion target: red/green across/up (1 = half a pixel), blue = has its own motion (moved, swaying)",
 };
 
 static_assert(sizeof(kLightModeNames) / sizeof(kLightModeNames[0])
@@ -4956,6 +4962,10 @@ void Scene::RecordPass(ID3D12GraphicsCommandList* list, D3D12_CPU_DESCRIPTOR_HAN
     cb.fogBeta    = FogBeta(m_atmosphere);
     cb.fogHeight  = m_atmosphere.fogHeight;
     cb.wetness    = m_wetness;
+    memcpy(cb.wind, m_wind, sizeof(cb.wind));
+    cb.windTime     = m_windTime;
+    cb.windPrevTime = m_windPrevTime;
+    cb.windPrevOn   = 1.0f;
     cb.clusterParams[0] = m_lights.TileW();
     cb.clusterParams[1] = m_lights.TileH();
     cb.clusterParams[2] = Lights::kNear;

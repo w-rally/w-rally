@@ -8,6 +8,8 @@
 #include "scene.h"
 #include "log.h"
 
+#include <DirectXPackedVector.h>
+
 #include <algorithm>
 #include <chrono>
 #include <cmath>
@@ -30,8 +32,22 @@ const uint32_t kMaxLods = 8;
 // InstanceRec::flags (the VS's INST3.z).
 const uint32_t kInstBillboard = 1u << 0;
 const uint32_t kInstModel = 1u << 1;
+const uint32_t kInstWind = 1u << 2;        // the wind bends it (kModelWind); InstanceRec::pad its constants
+// wind.py's amplitudes (shaders/wind.hlsli): a branch tip's sway and a leaf's flutter at weight 1 and 10 m/s.
+const float kWindBranchM = 0.25f, kWindFlutterM = 0.025f;
 // Records the stream starts with: the identity plus a stage's worth of trees in every view.
 const size_t kInstInitial = 64 * 1024;
+
+// The most a wind model's point leaves its rest position, for its culling box: wind.py's max_lean (the main bend at its
+// peak and a branch tip's sway) plus a leaf's flutter, at the capped wind (Scene::kWindMaxSpeed, gustiness 1) - fixed
+// at load, so the cells never have to be rebuilt when the weather changes. `bend`: windBend times the vertical scale.
+float WindReach(float bend)
+{
+    const float s = Scene::kWindMaxSpeed / 10.0f, gust = 2.0f;
+    return bend * s * s * gust + (kWindBranchM + kWindFlutterM) * s * gust;
+}
+
+uint32_t Half(float v) { return DirectX::PackedVector::XMConvertFloatToHalf(v); }
 
 bool Outside(const float p[6][4], const float* bmin, const float* bmax)
 {
@@ -158,6 +174,27 @@ bool Scene::LoadModels(ID3D12Device* dev, const uint8_t* models, size_t modelByt
         for (uint32_t l = 0; l < drawn; ++l)
             if (!(L[l].maxDistance > (l ? L[l - 1].maxDistance : 0.0f)))
                 return bad("a model's LOD distances are not above 0 and increasing", i);
+        // The wind (version 3, ngg_format.h kModelWind; ngg_scene.cpp CheckModels says the same): before it the
+        // fields were 0; with it a stiffness in (0, 10] and every drawn mesh's weights in range; nothing else.
+        if (h.version < 3 && (r.flags || r.windBend != 0.0f)) return bad("a version-1/2 model with wind", i);
+        if (r.flags & ~kModelWind) return bad("a model with unknown flags", i);
+        if (r.flags & kModelWind)
+        {
+            if (!(r.windBend > 0.0f && r.windBend <= 10.0f)) return bad("a wind model's windBend is not in (0, 10]", i);
+            for (uint32_t l = 0; l < drawn; ++l)
+            {
+                if (L[l].flags & kModelLodBillboard) continue;
+                for (uint32_t k = L[l].firstSubmesh; k < L[l].firstSubmesh + L[l].submeshCount; ++k)
+                    for (uint32_t v = subs[k].firstVertex; v < subs[k].firstVertex + subs[k].vertexCount; ++v)
+                    {
+                        const float* w = vtx[v].uv1;
+                        if (!(w[0] >= 0.0f && w[0] <= 1.0f && w[1] >= 0.0f && w[1] < 101.0f))
+                            return bad("a wind model's vertex weights (uv1) are out of range", i);
+                    }
+            }
+        }
+        else if (r.windBend != 0.0f)
+            return bad("a model has a windBend without wind", i);
         if (r.rtLod >= r.lodCount || (L[r.rtLod].flags & kModelLodBillboard))
             return bad("a model's ray-traced LOD is past its LODs or a billboard", i);
     }
@@ -199,7 +236,7 @@ bool Scene::LoadModels(ID3D12Device* dev, const uint8_t* models, size_t modelByt
     (void)fileMaterials;
 
     // Meshes: a submesh each, held (refs) so Compact keeps them.
-    size_t tris = 0, lodTotal = 0, subTotal = 0, rayOnlyLods = 0;
+    size_t tris = 0, lodTotal = 0, subTotal = 0, rayOnlyLods = 0, windModels = 0;
     m_models.resize(h.modelCount);
     for (uint32_t i = 0; i < h.modelCount; ++i)
     {
@@ -210,6 +247,10 @@ bool Scene::LoadModels(ID3D12Device* dev, const uint8_t* models, size_t modelByt
         memcpy(m.bmax, r.bboxMax, sizeof(m.bmax));
         m.fade = (std::max)(0.0f, r.fadeWidth);
         m.rtLod = r.rtLod;
+        m.wind = (r.flags & kModelWind) != 0;
+        m.windBend = m.wind ? r.windBend : 0.0f;
+        m.height = (std::max)(r.bboxMax[1], 0.0f);
+        windModels += m.wind ? 1 : 0;
         m.lods.resize(r.lodCount);
         m.drawLods = r.lodCount;
         if (lods[r.firstLod + r.lodCount - 1].flags & kModelLodRayOnly) m.drawLods = r.lodCount - 1;
@@ -279,9 +320,9 @@ bool Scene::LoadModels(ID3D12Device* dev, const uint8_t* models, size_t modelByt
     m_modelCellsDirty = true;
     RebuildModelCells();
     Log("scene: models - %u model(s): %zu LODs (%zu ray tracing only), %zu submeshes, %zu triangles, %u material(s) "
-        "(+%zu twins); %zu placement(s) (%zu in other variants), %zu replace a plant; LOD scale %.2f",
+        "(+%zu twins); %zu placement(s) (%zu in other variants), %zu replace a plant; LOD scale %.2f; %zu with wind",
         h.modelCount, lodTotal, rayOnlyLods, subTotal, tris, h.materialCount, m_materials.size() - matBase - h.materialCount,
-        m_placements.size(), otherVariant, replacedPlants.size(), m_modelLodScale);
+        m_placements.size(), otherVariant, replacedPlants.size(), m_modelLodScale, windModels);
     return true;
 }
 
@@ -309,6 +350,12 @@ void Scene::PlacementTransform(PlacementRt& p) const
     p.bmin[2] = d.position[2] - r; p.bmax[2] = d.position[2] + r;
     p.bmin[1] = d.position[1] + (std::min)(0.0f, m.bmin[1] * sv);
     p.bmax[1] = d.position[1] + (std::max)(0.0f, m.bmax[1] * sv);
+    // A wind model leans out of its box: wider all round and taller by the most it can move (WindReach).
+    if (m.wind)
+    {
+        const float w = WindReach(m.windBend * sv);
+        p.bmin[0] -= w, p.bmax[0] += w, p.bmin[2] -= w, p.bmax[2] += w, p.bmax[1] += w;
+    }
     for (int k = 0; k < 3; ++k) p.centre[k] = 0.5f * (p.bmin[k] + p.bmax[k]);
 }
 
@@ -342,6 +389,26 @@ void Scene::RebuildModelCells()
         const ModelDef& m = m_models[p.d.model];
         c.reach = (std::max)(c.reach, m.lods[m.drawLods - 1].maxDist * p.d.scaleY * m_modelLodScale);
     }
+}
+
+void Scene::SetWind(float directionDeg, float speed, float gustiness)
+{
+    const float a = std::isfinite(directionDeg) ? directionDeg * 0.017453292519943295f : 0.0f;
+    m_wind[0] = sinf(a);   // degrees from +z towards +x: 0 is +z, 90 is +x
+    m_wind[1] = cosf(a);
+    m_wind[2] = std::isfinite(speed) ? (std::min)((std::max)(speed, 0.0f), kWindMaxSpeed) : 0.0f;
+    m_wind[3] = std::isfinite(gustiness) ? (std::min)((std::max)(gustiness, 0.0f), 1.0f) : 0.0f;
+}
+
+void Scene::SetWindTime(double seconds)
+{
+    double w = std::isfinite(seconds) ? std::fmod(seconds, 3600.0) : 0.0;
+    if (w < 0.0) w += 3600.0;
+    const float now = (float)w;
+    const bool jump = !m_haveWindTime || now < m_windTime || now - m_windTime > 1.0f;
+    m_windPrevTime = jump ? now : m_windTime;
+    m_windTime = now;
+    m_haveWindTime = true;
 }
 
 uint32_t Scene::LivePlacementCount() const
@@ -510,8 +577,8 @@ void Scene::CullModels(ID3D12Device* dev, const float planes[6][4], const float 
         memcpy(r.c, p.cols, sizeof(r.c));
         r.tint = p.d.tint;
         r.fade = fade;
-        r.flags = kInstModel | (m.lods[lod].billboard ? kInstBillboard : 0u);
-        r.pad = 0;
+        r.flags = kInstModel | (m.lods[lod].billboard ? kInstBillboard : 0u) | (m.wind ? kInstWind : 0u);
+        r.pad = m.wind ? Half(m.windBend * p.d.scaleY) | Half(m.height * p.d.scaleY) << 16 : 0u;
         m_cullScratch.emplace_back(key, r);
         ++counts[key];
         if (!shadow)

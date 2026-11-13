@@ -64,6 +64,11 @@ uint32_t PlantCount(const std::vector<uint8_t>& plants)
     return h.plantCount;
 }
 
+bool WindWeightsOk(const float uv1[2])
+{
+    return uv1[0] >= 0.0f && uv1[0] <= 1.0f && uv1[1] >= 0.0f && uv1[1] < 101.0f;   // (false for a NaN)
+}
+
 std::string CheckModels(const ModelLibrary& m, size_t textureCount)
 {
     for (size_t i = 0; i < m.materials.size(); ++i) {
@@ -114,6 +119,22 @@ std::string CheckModels(const ModelLibrary& m, size_t textureCount)
         if (r.rtLod >= r.lodCount || (m.lods[r.firstLod + r.rtLod].flags & kModelLodBillboard))
             return at + ": its ray-traced LOD is past its LODs or a billboard";
         if (r.fadeWidth < 0.0f) return at + ": a negative fade";
+        // The wind (version 3, kModelWind): a stiffness above 0, and every drawn mesh's uv1 the packed weights - the
+        // branch weight 0..1, the phase + flutter hundredths 0..<101. Unknown flags are refused.
+        if (r.flags & ~kModelWind) return at + ": unknown flags";
+        if (r.flags & kModelWind) {
+            if (!(r.windBend > 0.0f && r.windBend <= 10.0f)) return at + ": wind with a windBend not in (0, 10]";
+            for (uint32_t k = 0; k < drawn; ++k) {
+                if (L[k].flags & kModelLodBillboard) continue;
+                for (uint32_t sm = L[k].firstSubmesh; sm < L[k].firstSubmesh + L[k].submeshCount; ++sm) {
+                    const ModelSubmesh& sub = m.submeshes[sm];
+                    for (uint32_t v = sub.firstVertex; v < sub.firstVertex + sub.vertexCount; ++v)
+                        if (!WindWeightsOk(m.vertices[v].uv1)) return at + ": a vertex's wind weights (uv1) out of range";
+                }
+            }
+        } else if (r.windBend != 0.0f) {
+            return at + ": a windBend without wind";
+        }
     }
     return "";
 }
@@ -428,6 +449,11 @@ std::string Read(const void* bytes, size_t n, SceneData& out)
             if (mh.version < 2)
                 for (const ModelLod& l : m.lods)
                     if (l.flags & kModelLodRayOnly) return "NGGD version 1 with a ray-only LOD";
+            // Before version 3 there was no wind: `flags` was 0 and `windBend` the `reserved` 0. A chunk saying
+            // otherwise was written by nobody this reader knows.
+            if (mh.version < 3)
+                for (const ModelRecord& r : m.models)
+                    if (r.flags || r.windBend != 0.0f) return "NGGD version " + std::to_string(mh.version) + " with wind";
         } else if (f == ChunkPlacements()) {
             PlacementChunkHeader ph{};
             if (size < sizeof ph) return "NGGE is truncated";

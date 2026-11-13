@@ -52,7 +52,9 @@ namespace wrally::iface {
 //     clear coat's mask.
 // 18: editApi (the editor's table, renderer_edit.h - versioned on its own from here on).
 // 19: loadSceneVariant (a .ngg holding several of a stage's variants, NGGR/NGGQ, draws the one asked for).
-constexpr uint32_t kRendererInterfaceVer = 19;
+// 20: WeatherDesc's wind (windDirectionDeg, windSpeed, gustiness): instanced models with wind sway (NGG design §2.6),
+//     timed by FrameDesc::time, which the renderer reads from here on.
+constexpr uint32_t kRendererInterfaceVer = 20;
 
 struct Renderer;                     // the module's instance, opaque
 struct RendererEditApi;              // renderer_edit.h
@@ -127,8 +129,13 @@ struct WeatherDesc {
     float fogHeight;
     float rain, snow;        // 0..1
     float exposure;
+    // The wind (20): where it blows TOWARDS, degrees from +z towards +x (the stage's frame, as SkyTimeDesc::northDeg);
+    // its speed in m/s at 10 m above the ground; gustiness 0..1. Speed 0 is calm: nothing sways.
+    float windDirectionDeg;
+    float windSpeed;
+    float gustiness;
 };
-static_assert(sizeof(WeatherDesc) == 60, "WeatherDesc layout");
+static_assert(sizeof(WeatherDesc) == 72, "WeatherDesc layout");
 
 // The time and place (NGG design §5.4). With `set`, the sun follows from them astronomically, over whatever the
 // weather (a preset or a WeatherDesc) says - any stage at any hour.
@@ -288,7 +295,7 @@ struct FrameDesc {
     SkyTimeDesc              skyTime;         // the time and place: the sun from them (set), else the weather's
     const LightDesc*         lights;          // this frame's local lights (design §5.5)
     uint32_t                 lightCount;
-    float                    time;            // seconds, the game's: animated materials, wind
+    float                    time;            // seconds, the game's: animated materials, the wind's sway
     const InstanceUpdate*    instances;
     uint32_t                 instanceCount;
     const StageObjectUpdate* stageObjects;

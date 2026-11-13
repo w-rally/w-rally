@@ -438,6 +438,11 @@ struct WeatherRecord
     float    latitude;        // degrees, north positive
     float    longitude;       // degrees, east positive
     float    northDeg;        // where north lies in the world: degrees from +z towards +x
+    // --- appended 2026-11-13 (NGG design §2.6): the WIND, which sways instanced models that carry it (kModelWind). A
+    // 160-byte record (before this) reads as calm: speed 0.
+    float    windDirectionDeg;  // where it blows TOWARDS: degrees from +z towards +x, in the stage's frame
+    float    windSpeed;         // m/s, 10 m above the ground; 0 calm
+    float    gustiness;         // 0 steady .. 1 gusty
 };
 #pragma pack(pop)
 
@@ -448,7 +453,7 @@ const uint32_t kWeatherTimeSet = 1u << 0;
 const uint32_t kWeatherRecordMinSize = 124;
 
 static_assert(sizeof(WeatherChunkHeader) == 16, "WeatherChunkHeader layout");
-static_assert(sizeof(WeatherRecord) == 160,     "WeatherRecord v1 layout - keep NggWriter.cs in step");
+static_assert(sizeof(WeatherRecord) == 172,     "WeatherRecord v1 layout - keep NggWriter.cs in step");
 
 // A clear morning with no name: what a producer starts a record from. The same values as core::SkyParams' defaults
 // (core/sky.h) - a producer outside the renderer (W-Rally's importer) cannot include that, so the format says them;
@@ -467,6 +472,7 @@ constexpr WeatherRecord DefaultWeatherRecord()
     r.year = 2026; r.month = 6; r.day = 21;
     r.localHour = 12.0f; r.utcOffset = 1.0f;
     r.latitude = 50.0f; r.longitude = 14.4f;
+    // Calm (windDirectionDeg, windSpeed, gustiness 0).
     return r;
 }
 
@@ -500,7 +506,9 @@ static_assert(sizeof(Object) == 16,   "Object layout");
 // Version 2 added kModelLodRayOnly (below). A version-1 reader cannot know it: it would refuse the shell's zero
 // distance, or draw a shell given one as a LOD, so the bump makes "refuse a version you do not know" the rule. A
 // version-2 reader still reads version 1, which has no ray-only LOD; the layout is the same.
-constexpr uint32_t kModelVersion = 2;
+// Version 3 added the WIND (kModelWind, ModelRecord::windBend, the vertices' uv1). A version-2 chunk still loads, without
+// wind: its record's `windBend` is the old `reserved` (0) and its flags carry nothing.
+constexpr uint32_t kModelVersion = 3;
 constexpr uint32_t kModelVersionMin = 1;   // the oldest a reader still reads
 
 // ModelLod::flags
@@ -529,6 +537,22 @@ constexpr uint32_t kModelLodRayOnly = 1u << 1;
 // edge DITHERED about alphaCutoff per pixel (hashed alpha) so the renderer's temporal filter resolves soft leaf edges
 // that a hard cutoff would alias. There is no MSAA to give alpha-to-coverage anything to cover.
 constexpr uint32_t kMaterialFoliage = 1u << 4;
+
+// ModelRecord::flags
+// WIND (version 3): the model sways (NGG design §2.6; Wallaby's vegetation plan, "Planned: wind"). Three layers, all
+// in the vertex shader (shaders/wind.hlsli, a port of Wallaby's tools/vegetation/plantgen/wind.py):
+//   - the MAIN BEND: the whole model leans with the wind, (height fraction)^2, keeping each vertex's distance from the
+//     base. It needs no vertex data: `windBend` (below) is how far the top leans at 10 m/s;
+//   - the BRANCH SWAY and the LEAF FLUTTER, from the vertex's uv1 (meaningless without the flag - model materials are
+//     single-layer, so uv1 is never sampled on a model):
+//       uv1.x  the BRANCH WEIGHT, 0..1: 0 where a branch leaves the trunk, rising towards its tip;
+//       uv1.y  the branch's PHASE in the fraction (0..1: one per limb, so a branch moves as one) and the leaf FLUTTER
+//              weight in hundredths in the integer part (0 at a card's base .. 100 at its tip): phase + round(100 f).
+//     The trunk and every LOD's rigid parts carry (0, 0): the main bend moves them. Every LOD of the model bakes its
+//     weights from the same skeleton, so a crossfade blends two meshes that move together. A billboard's and a
+//     ray-only LOD's uv1 are not read (the billboard leans by the main bend; ray tracing stays static).
+// The vertex colour's alpha is NOT free for this: every pixel shader multiplies it into the alpha cut.
+constexpr uint32_t kModelWind = 1u << 0;
 
 #pragma pack(push, 4)
 struct ModelChunkHeader
@@ -559,8 +583,11 @@ struct ModelRecord
     // distance: one shape per model keeps the TLAS fixed while the camera moves. Not a billboard. A drawn LOD, or the
     // model's ray-only LOD - which it must name when there is one (kModelLodRayOnly).
     uint32_t rtLod;
-    uint32_t flags;           // 0 (none yet)
-    uint32_t reserved;        // 0
+    uint32_t flags;           // kModelWind (version 3); 0 before
+    // With kModelWind: how far the model's top leans at a 10 m/s wind, metres at scale 1 (spruce ~0.3, poplar ~0.5, a
+    // shrub ~0.1) - its stiffness. Above 0 (and at most 10) when the flag is set, 0 when it is not. Version 1-2: the
+    // `reserved` 0 this replaced.
+    float    windBend;
 };
 
 struct ModelLod

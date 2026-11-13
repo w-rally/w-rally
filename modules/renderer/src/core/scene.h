@@ -150,7 +150,7 @@ public:
 
     // Debug views - isolate one shader input so an artefact can be ATTRIBUTED
     // rather than guessed at. See kDebugModeNames for the list.
-    enum { kDebugCount = 16 };
+    enum { kDebugCount = 17 };
     static const char* DebugModeName(int mode);
     void SetDebugMode(int mode) { m_debugMode = WrapMode(mode, kDebugCount); }
     int  DebugMode() const { return m_debugMode; }
@@ -217,6 +217,15 @@ public:
     // probe is drawn from `centre` around it. count 0: none (the sky alone). Per frame, by the client's focus.
     void  SetReflectionFocus(const uint32_t* objects, uint32_t count, const float centre[3]);
     float Wetness() const { return m_wetness; }
+    // THE WIND (NGG design §2.6): it sways the instanced models that carry it (ngg_format.h kModelWind). Where it blows
+    // towards (degrees from +z towards +x), its speed (m/s at 10 m; capped at kWindMaxSpeed, the speed the culling boxes
+    // allow for) and gustiness (0..1). From the weather in force, per frame.
+    static constexpr float kWindMaxSpeed = 20.0f;
+    void  SetWind(float directionDeg, float speed, float gustiness);
+    // The frame's time (FrameDesc::time, seconds), once per frame: the wind's clock, wrapped at an hour so a float
+    // holds a millisecond (it jolts once an hour). The last frame's is kept for the motion target; a jump over a
+    // second (a new stage, a seek, a pause's end) has none.
+    void  SetWindTime(double seconds);
     bool LegacyImport() const { return m_legacyImport; }
 
     // Smooth split normals at load. FALLBACK for assets whose normals were
@@ -931,6 +940,10 @@ private:
         float bmin[3] = {}, bmax[3] = {};         // over the drawn LODs (not the billboard, not a ray-only LOD)
         float fade = 0.0f;
         uint32_t rtLod = 0;
+        // The wind (kModelWind): its vertices' uv1 carry the weights; windBend the top's sway at 10 m/s, height the
+        // model's (bmax[1]) - the shader's per-placement constants, times the vertical scale (CullModels' emit).
+        bool  wind = false;
+        float windBend = 0.0f, height = 0.0f;
     };
     struct PlacementRt
     {
@@ -940,7 +953,8 @@ private:
         float bmin[3] = {}, bmax[3] = {};      // world box
         float centre[3] = {};
     };
-    // The per-instance record of the instance stream (slot 1, PER_INSTANCE_DATA): VSIn's INST0..3.
+    // The per-instance record of the instance stream (slot 1, PER_INSTANCE_DATA): VSIn's INST0..3. `pad`: a wind
+    // model's windBend and height, both times the vertical scale, as halves (f16 bend | f16 height << 16); else 0.
     struct InstanceRec { float c[3][4]; uint32_t tint; float fade; uint32_t flags; uint32_t pad; };
     // One view's culled batches: per (model, LOD, solid or crossfading) a run of the stream.
     struct ModelBatch
@@ -1205,6 +1219,9 @@ private:
     int                      m_lightMode = 1;
     int                      m_legacyProfile = 2;    // B until compared (SetLegacyProfile)
     float                    m_wetness = 0.0f;       // SetWetness: 0 dry .. 1 wet
+    float                    m_wind[4] = { 0.0f, 1.0f, 0.0f, 0.0f };   // SetWind: direction x, z; speed; gustiness
+    float                    m_windTime = 0.0f, m_windPrevTime = 0.0f;  // SetWindTime, wrapped at 3600 s
+    bool                     m_haveWindTime = false;
     bool                     m_legacyImport = false; // the loaded scene's kSceneFlagLegacyImport
     bool                     m_weldNormals = true;
     bool                     m_singleStageFix = true;
