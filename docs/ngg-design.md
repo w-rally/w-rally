@@ -1279,13 +1279,15 @@ accumulation, stabilization, blur or anti-firefly settings, brought the bias und
 still keeps about half its history (`accumSpeed *= 1 / (1 + accumSpeed)`), where ours keeps none. Its switches stay
 for that work (10.7), with two debug outputs (`NGG_NRD_SHOW=conf`, `NGG_NRD_VALIDATION`).
 
-**Measured** (RTX 5070 Ti, 1080p, user-new.phr camera 4 ticks 3000-4200 on fr_joux_verte.ngg, GPU frame median, two
+**Measured** (RTX 5070 Ti, 1080p unless said, user-new.phr camera 4 ticks 3000-4200 on fr_joux_verte.ngg, GPU frame median, two
 runs each within 0.03 ms):
 
 | quality | ours, TAA | NRD, TAA | ours, DLSS Q | NRD, DLSS Q |
 |---|---|---|---|---|
 | medium | 5.60-5.63 | 5.87-5.89 (+0.27) | 5.38-5.39 | 5.52 (+0.14) |
 | high | 5.80 | 6.06-6.07 (+0.27) | 5.55-5.56 | 5.70-5.72 (+0.15) |
+| 1440p medium | 6.83-6.85 | 7.28-7.29 (+0.44) | 6.22-6.23 | 6.45-6.46 (+0.23) |
+| 1440p high | 7.16-7.17 | 7.62-7.63 (+0.46) | 6.54 | 6.76-6.77 (+0.22) |
 
 Ghost behind the car (`tools/car-ghost`'s ghost.py on user-42.phr, i20 chase camera, native 1080p, TAA off; signed
 bias behind the car against our denoiser without history, limit 1 grey): sun (view 11) ours -0.60, NRD -0.62; AO
