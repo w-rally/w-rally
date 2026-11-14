@@ -733,6 +733,7 @@ void PostFx::Upscale(ID3D12GraphicsCommandList* list, ID3D12Resource* depth, ID3
     d.frameMs = frameMs;
     d.cameraNear = m_near, d.cameraFar = m_far, d.fovY = m_fovY;
     d.reset = !m_historyValid;
+    d.guides = m_guides;
     m_upscaler->Dispatch(d);
 
     D3D12_RESOURCE_BARRIER post[3];

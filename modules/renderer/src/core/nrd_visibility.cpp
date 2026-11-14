@@ -667,6 +667,7 @@ void NrdVisibility::Record(Device& dev, ID3D12GraphicsCommandList* list, const V
     // AO's, unless REBLUR takes it (NGG_NRD_AO).
     const bool traced = f.ao && m_aoSource == AoSource::Traced && m_rt.AoAvailable();
     m_rt.SetNrdInputs(true, p.reblurAo);
+    m_rt.SetRawOnly(false);
     m_rt.Trace(dev, list, f.depth, f.normal, f.motion, f.plant, f.viewProjJittered, f.viewProj, f.camPos, sunTowards,
                4000.0f, f.sunAngle, traced, kAoRadius, f.aoRays, f.width, f.height, f.lights);
     if (!m_rt.NrdIn(Rt::kNrdSunPenumbra)) return;

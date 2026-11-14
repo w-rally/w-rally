@@ -1348,7 +1348,7 @@ void Rt::Trace(Device& dev, ID3D12GraphicsCommandList* list, ID3D12Resource* dep
     list->SetComputeRootDescriptorTable(1, gpuSlot(kSlotOut));
     list->SetComputeRoot32BitConstants(2, sizeof(TraceCB) / 4, &cb, 0);
     // THE NRD PATH (SetNrdInputs): the variants that also write NRD's inputs, and none of our denoisers below.
-    const bool nrd = m_nrdMode && m_psoNrd && m_nrdIn[0];
+    const bool nrd = m_nrdMode && !m_rawMode && m_psoNrd && m_nrdIn[0];
     if (nrd)
     {
         list->SetPipelineState(m_psoNrd.Get());
@@ -1412,7 +1412,13 @@ void Rt::Trace(Device& dev, ID3D12GraphicsCommandList* list, ID3D12Resource* dep
     }
     m_tracedAo = doAo;
     m_tracedLights = doLights;
-    if (nrd)
+    if (m_rawMode)
+    {
+        // RR denoises the lit colour (SetRawOnly): ours keep no history meanwhile.
+        m_filtered = m_filteredAo = m_filteredLights = nullptr;
+        m_histValid = m_aoHistValid = m_lightHistValid = false;
+    }
+    else if (nrd)
     {
         // NrdVisibility denoises the raw traces and NRD's inputs (NrdInput): ours keep no history meanwhile, and start
         // over when they are back - but for the AO when NRD takes the shadows only (SetNrdInputs's `ao`).

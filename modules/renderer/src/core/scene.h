@@ -94,6 +94,13 @@ public:
     // its own NDC offset to last frame where a moving object's glass is in front, kNoGlass (8, 8) elsewhere. In
     // RENDER_TARGET between frames, as the motion target.
     ID3D12Resource* GlassMotionBuffer() const { return m_glassMotion.Get(); }
+    // The surface's targets (the GBUF variants: R10G10B10A2 octahedral normal, roughness, kind / 3; RGBA8 sRGB albedo,
+    // metallic) written by every main pass while wanted, not only with local lights (DLSS Ray Reconstruction's guides).
+    // GbufferWritten: this frame's main pass wrote them; they are then in RENDER_TARGET.
+    void SetGbufferWanted(bool on)          { m_gbufWanted = on; }
+    bool GbufferWritten() const             { return m_gbufWritten; }
+    ID3D12Resource* GbufferNormal() const   { return m_gbuf[0].Get(); }
+    ID3D12Resource* GbufferAlbedo() const   { return m_gbuf[1].Get(); }
     ID3D12Resource* PlantBuffer() const { return m_plantTarget.Get(); }
 
     // Where the sun visibility comes from: 0 = the cascaded shadow map,
@@ -910,6 +917,7 @@ private:
     // metallic) and their RTVs; the opaque world's pipelines that write them ([alpha test][mirroring transform] the
     // culled ones); the full-screen pass. Used while there are local lights.
     Microsoft::WRL::ComPtr<ID3D12Resource>       m_gbuf[2];
+    bool m_gbufWanted = false, m_gbufWritten = false;
     Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> m_gbufRtvHeap;
     Microsoft::WRL::ComPtr<ID3D12PipelineState>  m_psoG, m_psoAlphaTestG, m_psoCulledG[2][2], m_psoDeferred;
     // The reflection focus's opaque draws with their own reflection rays (ReflOpen, shader model 6.5): [forward,

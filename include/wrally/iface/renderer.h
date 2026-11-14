@@ -56,7 +56,8 @@ namespace wrally::iface {
 //     timed by FrameDesc::time, which the renderer reads from here on.
 // 21: RenderSettings::denoiser (kDenoiserNrd: the ray tracer's traces through NVIDIA NRD instead of the renderer's own
 //     denoisers), RenderStats::denoiser and denoisersAvailable.
-constexpr uint32_t kRendererInterfaceVer = 21;
+// 22: kUpscalerDlssRr (NVIDIA DLSS Ray Reconstruction: denoises the ray tracing within the upscale; elsewhere the TAA).
+constexpr uint32_t kRendererInterfaceVer = 22;
 
 struct Renderer;                     // the module's instance, opaque
 struct RendererEditApi;              // renderer_edit.h
@@ -333,6 +334,7 @@ struct RenderSettings {
 constexpr uint32_t kUpscalerNone = 0;
 constexpr uint32_t kUpscalerFsr  = 1;    // AMD FSR 3.1 (FSR 4 on RDNA 4), any DX12 GPU
 constexpr uint32_t kUpscalerDlss = 2;    // NVIDIA DLSS Super Resolution, RTX GPUs; elsewhere the TAA (logged)
+constexpr uint32_t kUpscalerDlssRr = 3;  // NVIDIA DLSS Ray Reconstruction: RTX GPUs that ray trace; replaces the denoiser
 
 // RenderSettings::denoiser
 constexpr uint32_t kDenoiserOurs = 0;    // the renderer's own (NGG design 4.5)

@@ -25,6 +25,25 @@
 //   reset     a cut                            -> InReset
 //   states    inputs PIXEL|NON_PIXEL_SHADER_RESOURCE, output UNORDERED_ACCESS:
 //             what NGX's compute passes read and write
+//
+// RAY RECONSTRUCTION (CreateDlssUpscaler's `rayReconstruction`: NGX's
+// RayReconstruction feature, nvngx_dlssd.dll from beside this module): the
+// same inputs, denoised as well as upscaled, so the colour is lit with the
+// ray tracer's RAW visibility (rr_visibility.h), plus its guides
+// (UpscaleGuides):
+//   diffuse / specular albedo  -> pInDiffuseAlbedo / pInSpecularAlbedo, linear
+//   normal + roughness         -> pInNormals, world space, linear roughness in
+//                                 w (Roughness_Mode_Packed)
+//   depth                      -> hardware depth (Use_HW_Depth), inverted
+//   bias mask                  -> pInBiasCurrentColorMask: moving glass, as
+//                                 SR's reactive mask (and our moved-object
+//                                 mask with NGG_RR_BIAS=1 - RR keeps the road
+//                                 behind a driving car clean without it)
+//   camera                     -> pInWorldToViewMatrix / pInViewToClipMatrix:
+//                                 the client's view and conventional
+//                                 projection as they are (row-vector,
+//                                 row-major, as Direct3D's own convention)
+//   preset                     -> RR's default model; NGG_DLSS_RR_PRESET=<D..F>
 #include "upscaler.h"
 #include "log.h"
 
@@ -37,6 +56,7 @@
 #include <wrl/client.h>
 #include <nvsdk_ngx.h>
 #include <nvsdk_ngx_helpers.h>
+#include <nvsdk_ngx_helpers_dlssd_d3d.h>
 #endif
 
 namespace ngg {
@@ -106,9 +126,10 @@ public:
         if (m_init) NVSDK_NGX_D3D12_Shutdown1(m_device);
     }
 
-    bool Load(ID3D12Device* device)
+    bool Load(ID3D12Device* device, bool rr)
     {
         m_device = device;
+        m_rr = rr;
         // NVIDIA's GPUs only: elsewhere NGX is not even loaded (the settings menu probes every adapter).
         {
             Microsoft::WRL::ComPtr<IDXGIFactory4> factory;
@@ -146,7 +167,22 @@ public:
             return false;
         }
         int available = 0, needsDriver = 0, initResult = 0;
-        NVSDK_NGX_Parameter_GetI(m_caps, NVSDK_NGX_Parameter_SuperSampling_Available, &available);
+        if (m_rr)
+        {
+            NVSDK_NGX_Parameter_GetI(m_caps, NVSDK_NGX_Parameter_SuperSamplingDenoising_Available, &available);
+            if (!available)
+            {
+                NVSDK_NGX_Parameter_GetI(m_caps, NVSDK_NGX_Parameter_SuperSamplingDenoising_NeedsUpdatedDriver,
+                                         &needsDriver);
+                NVSDK_NGX_Parameter_GetI(m_caps, NVSDK_NGX_Parameter_SuperSamplingDenoising_FeatureInitResult,
+                                         &initResult);
+                Log("dlss: DLSS Ray Reconstruction not available here (%s%s) - no RR",
+                    needsDriver ? "the driver is too old; " : "", ResultText((NVSDK_NGX_Result)initResult));
+                return false;
+            }
+        }
+        else
+            NVSDK_NGX_Parameter_GetI(m_caps, NVSDK_NGX_Parameter_SuperSampling_Available, &available);
         if (!available)
         {
             NVSDK_NGX_Parameter_GetI(m_caps, NVSDK_NGX_Parameter_SuperSampling_NeedsUpdatedDriver, &needsDriver);
@@ -208,7 +244,9 @@ public:
     bool Dispatch(const UpscaleDispatch& d) override
     {
         if (!m_params) return false;
+        if (m_rr && !d.guides) return false;   // (the renderer runs RR only with its guides)
         if (!m_feature && !Create(d.list)) return false;
+        if (m_rr) return DispatchRr(d);
 
         NVSDK_NGX_D3D12_DLSS_Eval_Params e = {};
         e.Feature.pInColor = d.colour;
@@ -237,9 +275,88 @@ public:
     }
 
 private:
+    bool DispatchRr(const UpscaleDispatch& d)
+    {
+        NVSDK_NGX_D3D12_DLSSD_Eval_Params e = {};
+        e.pInColor = d.colour;
+        e.pInOutput = d.output;
+        e.pInDepth = d.depth;
+        e.pInMotionVectors = d.motion;
+        e.pInExposureTexture = d.exposure;
+        e.pInDiffuseAlbedo = d.guides->diffuseAlbedo;
+        e.pInSpecularAlbedo = d.guides->specularAlbedo;
+        e.pInNormals = d.guides->normalRoughness;
+        e.pInBiasCurrentColorMask = d.guides->bias;
+        e.InJitterOffsetX = d.jitterX;
+        e.InJitterOffsetY = d.jitterY;
+        e.InRenderSubrectDimensions = { d.renderWidth, d.renderHeight };
+        e.InReset = d.reset ? 1 : 0;
+        e.InMVScaleX = (float)d.renderWidth;     // uv -> render pixels, as SR's
+        e.InMVScaleY = (float)d.renderHeight;
+        e.InPreExposure = 1.0f;
+        e.InExposureScale = 1.0f;
+        e.InFrameTimeDeltaInMsec = d.frameMs;
+        memcpy(m_view, d.guides->view, sizeof m_view);
+        memcpy(m_proj, d.guides->proj, sizeof m_proj);
+        e.pInWorldToViewMatrix = m_view;
+        e.pInViewToClipMatrix = m_proj;
+        const NVSDK_NGX_Result r = NGX_D3D12_EVALUATE_DLSSD_EXT(d.list, m_feature, m_params, &e);
+        if (NVSDK_NGX_FAILED(r) && !m_failLogged)
+        {
+            Log("dlss: Ray Reconstruction evaluate failed (%s)", ResultText(r));
+            m_failLogged = true;
+        }
+        return NVSDK_NGX_SUCCEED(r);
+    }
+
+    bool CreateRr(ID3D12GraphicsCommandList* list)
+    {
+        NVSDK_NGX_DLSSD_Create_Params c = {};
+        c.InDenoiseMode = NVSDK_NGX_DLSS_Denoise_Mode_DLUnified;
+        c.InRoughnessMode = NVSDK_NGX_DLSS_Roughness_Mode_Packed;
+        c.InUseHWDepth = NVSDK_NGX_DLSS_Depth_Type_HW;
+        c.InWidth = m_renderWidth;
+        c.InHeight = m_renderHeight;
+        c.InTargetWidth = m_outputWidth;
+        c.InTargetHeight = m_outputHeight;
+        c.InPerfQualityValue = m_mode;
+        c.InFeatureCreateFlags = NVSDK_NGX_DLSS_Feature_Flags_IsHDR | NVSDK_NGX_DLSS_Feature_Flags_MVLowRes |
+                                 NVSDK_NGX_DLSS_Feature_Flags_DepthInverted;
+        // The model: RR's default (0) unless NGG_DLSS_RR_PRESET=<D|E|F> (D, E transformers; F "RR2"; A-C removed and
+        // G-O "do not use" in SDK 310.9.16) - for comparing them.
+        unsigned int preset = NVSDK_NGX_RayReconstruction_Hint_Render_Preset_Default;
+        if (const char* p = getenv("NGG_DLSS_RR_PRESET"))
+            if (p[0] >= 'D' && p[0] <= 'F') preset = (unsigned int)(p[0] - 'A' + 1);
+        const char* const modes[] = { NVSDK_NGX_Parameter_RayReconstruction_Hint_Render_Preset_DLAA,
+                                      NVSDK_NGX_Parameter_RayReconstruction_Hint_Render_Preset_Quality,
+                                      NVSDK_NGX_Parameter_RayReconstruction_Hint_Render_Preset_Balanced,
+                                      NVSDK_NGX_Parameter_RayReconstruction_Hint_Render_Preset_Performance,
+                                      NVSDK_NGX_Parameter_RayReconstruction_Hint_Render_Preset_UltraPerformance,
+                                      NVSDK_NGX_Parameter_RayReconstruction_Hint_Render_Preset_UltraQuality };
+        for (const char* p : modes) NVSDK_NGX_Parameter_SetUI(m_params, p, preset);
+        const NVSDK_NGX_Result r = NGX_D3D12_CREATE_DLSSD_EXT(list, 1, 1, &m_feature, m_params, &c);
+        if (NVSDK_NGX_FAILED(r) || !m_feature)
+        {
+            Log("dlss: Ray Reconstruction feature creation failed (%s) for %ux%u -> %ux%u", ResultText(r),
+                m_renderWidth, m_renderHeight, m_outputWidth, m_outputHeight);
+            m_feature = nullptr;
+            m_createFailed = true;
+            return false;
+        }
+        return true;
+    }
+
     bool Create(ID3D12GraphicsCommandList* list)
     {
         if (m_createFailed) return false;
+        if (m_rr)
+        {
+            if (!CreateRr(list)) return false;
+            NameFrom(L"nvngx_dlssd.dll", "DLSS RR");
+            Log("dlss: %s %s, %ux%u -> %ux%u", m_name, m_modeName, m_renderWidth, m_renderHeight, m_outputWidth,
+                m_outputHeight);
+            return true;
+        }
         NVSDK_NGX_DLSS_Create_Params c = {};
         c.Feature.InWidth = m_renderWidth;
         c.Feature.InHeight = m_renderHeight;
@@ -270,10 +387,18 @@ private:
             return false;
         }
 
-        // The runtime NGX loaded, by its file version, for the readout: "DLSS 310.9.16".
-        snprintf(m_name, sizeof m_name, "DLSS");
+        NameFrom(L"nvngx_dlss.dll", "DLSS");
+        Log("dlss: %s %s, %ux%u -> %ux%u", m_name, m_modeName, m_renderWidth, m_renderHeight, m_outputWidth,
+            m_outputHeight);
+        return true;
+    }
+
+    // The runtime NGX loaded, by its file version, for the readout: "DLSS 310.9.16", "DLSS RR 310.9.16".
+    void NameFrom(const wchar_t* dll, const char* label)
+    {
+        snprintf(m_name, sizeof m_name, "%s", label);
         wchar_t path[MAX_PATH];
-        if (HMODULE m = GetModuleHandleW(L"nvngx_dlss.dll"))
+        if (HMODULE m = GetModuleHandleW(dll))
             if (GetModuleFileNameW(m, path, MAX_PATH))
             {
                 DWORD handle = 0;
@@ -283,12 +408,9 @@ private:
                 UINT len = 0;
                 if (size && size <= sizeof info && GetFileVersionInfoW(path, 0, size, info) &&
                     VerQueryValueW(info, L"\\", reinterpret_cast<void**>(&v), &len) && v)
-                    snprintf(m_name, sizeof m_name, "DLSS %u.%u.%u", HIWORD(v->dwFileVersionMS),
+                    snprintf(m_name, sizeof m_name, "%s %u.%u.%u", label, HIWORD(v->dwFileVersionMS),
                              LOWORD(v->dwFileVersionMS), HIWORD(v->dwFileVersionLS));
             }
-        Log("dlss: %s %s, %ux%u -> %ux%u", m_name, m_modeName, m_renderWidth, m_renderHeight, m_outputWidth,
-            m_outputHeight);
-        return true;
     }
 
     void Release()
@@ -309,14 +431,16 @@ private:
     char                 m_name[48] = "DLSS";
     bool                 m_createFailed = false;
     bool                 m_failLogged = false;
+    bool                 m_rr = false;            // Ray Reconstruction (Load's `rr`)
+    float                m_view[16] = {}, m_proj[16] = {};   // (NGX takes the matrices by pointer)
 };
 
 } // namespace
 
-Upscaler* CreateDlssUpscaler(ID3D12Device* device)
+Upscaler* CreateDlssUpscaler(ID3D12Device* device, bool rayReconstruction)
 {
     Dlss* u = new Dlss();
-    if (!u->Load(device))
+    if (!u->Load(device, rayReconstruction))
     {
         delete u;
         return nullptr;
@@ -326,7 +450,7 @@ Upscaler* CreateDlssUpscaler(ID3D12Device* device)
 
 #else
 
-Upscaler* CreateDlssUpscaler(ID3D12Device*)
+Upscaler* CreateDlssUpscaler(ID3D12Device*, bool)
 {
     Log("dlss: not in this build (no DLSS SDK fetched at configure, or a Debug build) - no DLSS");
     return nullptr;

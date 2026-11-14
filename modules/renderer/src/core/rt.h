@@ -188,6 +188,9 @@ public:
     // AoTraced/LightsTraced: whether this frame traced them.
     bool EnableNrdInputs(Device& dev);
     void SetNrdInputs(bool on, bool ao = true) { m_nrdMode = on; m_nrdAo = ao; }
+    // DLSS RAY RECONSTRUCTION (rr_visibility.h): the default traces and NONE of our denoisers - the raw outputs above
+    // (Result, RawAo, RawLights) left as UNORDERED_ACCESS, Filtered* null. RR denoises the lit colour instead.
+    void SetRawOnly(bool on) { m_rawMode = on; }
     enum NrdInput { kNrdSunPenumbra = 0, kNrdAoHitDist = 1, kNrdLightsPenumbra = 2 };
     ID3D12Resource* NrdIn(NrdInput i) const { return m_nrdIn[i].Get(); }
     ID3D12Resource* RawAo() const     { return m_aoResult.Get(); }
@@ -213,6 +216,7 @@ private:
     Microsoft::WRL::ComPtr<ID3D12PipelineState>  m_psoNrd, m_psoAoNrd, m_psoLightsNrd;
     Microsoft::WRL::ComPtr<ID3D12Resource>       m_nrdIn[3];
     bool m_nrdMode = false, m_nrdAo = true;
+    bool m_rawMode = false;
     bool m_tracedAo = false, m_tracedLights = false;
 
     Microsoft::WRL::ComPtr<ID3D12RootSignature>  m_rootSig;

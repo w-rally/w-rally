@@ -52,8 +52,9 @@ set(WRALLY_FFX_DLLS ${WRALLY_FFX_DLLS} CACHE INTERNAL "the FidelityFX DLLs fetch
 # NVIDIA DLSS SDK v310.9.16 (github.com/NVIDIA/DLSS, tag v310.9.16; NVIDIA RTX SDKs licence, nvidia-dlss/README.md):
 # DLSS Super Resolution for the renderer's second upscaler (core/dlss.cpp). Unlike FidelityFX's, NVIDIA's headers are
 # proprietary and may not be in this repository, so all of it is fetched here once, pinned by SHA-256, into the build
-# tree: the NGX headers, the NGX loader library (linked; it finds the driver's NGX at run time) and the DLSS runtime
-# nvngx_dlss.dll (59 MB, loaded by NGX at run time from beside WRenderer.dll), with the licence. Without any of them,
+# tree: the NGX headers, the NGX loader library (linked; it finds the driver's NGX at run time) and the DLSS runtimes
+# nvngx_dlss.dll (Super Resolution, 59 MB) and nvngx_dlssd.dll (Ray Reconstruction, 48 MB; with its dlssd headers),
+# loaded by NGX at run time from beside WRenderer.dll, with the licence. Without any of them,
 # or on a machine without an NVIDIA GPU, the game runs with no DLSS.
 set(WRALLY_DLSS_URL https://raw.githubusercontent.com/NVIDIA/DLSS/v310.9.16)
 set(WRALLY_DLSS_DIR ${CMAKE_BINARY_DIR}/third_party/dlss)
@@ -66,6 +67,11 @@ foreach(file_hash include/nvsdk_ngx.h=dc38e7467cf415379c9d12ae1b6e4a494c453ed927
                   include/nvsdk_ngx_helpers_cuda.h=f2851a76107bdf4fbcb7b261f3c35573c312d8ecb4bc18fb02d9e2cec7705042
                   lib/Windows_x86_64/x64/nvsdk_ngx_s.lib=7b9a5239c1145af5f645ab472aa066f9ea79db36ac819562312aae69d65f3765
                   lib/Windows_x86_64/rel/nvngx_dlss.dll=d00b5b0ab29c3ca101b70c3a5ecb3a01b7ef33766a3383a28a18623083e6123e
+                  include/nvsdk_ngx_defs_dlssd.h=2e97fe1595b1334f71b51724f2cb67496e8c296a7a2eec5606da53055882e716
+                  include/nvsdk_ngx_helpers_dlssd.h=a25fdda925b479dfe869593aeba311ef08793da54e0391f2fe2fe756cbef5532
+                  include/nvsdk_ngx_helpers_dlssd_d3d.h=6df9d02c6f47feee3afc8d12340a9f554a7ddce4ddacb1b6a13a42b26c2c6293
+                  include/nvsdk_ngx_params_dlssd.h=d41e3ba8f1d72583b55273092c99bf426dc4a0d46de827229e25d5b1325a370e
+                  lib/Windows_x86_64/rel/nvngx_dlssd.dll=b49435ae346f227feafe7bbe937d88277ea0ee7323975ec06488f377fdb46cee
                   LICENSE.txt=d4216e39ebef5f9b50a6712ebb37beeb5379862a67733a9999c651f21592aaf0)
     string(REPLACE "=" ";" file_hash ${file_hash})
     list(GET file_hash 0 file)
@@ -91,7 +97,8 @@ if(WRALLY_DLSS_OK)
     add_library(nvidia-dlss INTERFACE)
     target_include_directories(nvidia-dlss INTERFACE ${WRALLY_DLSS_DIR}/include)
     target_link_libraries(nvidia-dlss INTERFACE ${WRALLY_DLSS_DIR}/lib/Windows_x86_64/x64/nvsdk_ngx_s.lib version)
-    set(WRALLY_DLSS_DLLS ${WRALLY_DLSS_DIR}/lib/Windows_x86_64/rel/nvngx_dlss.dll CACHE INTERNAL "the DLSS runtime fetched")
+    set(WRALLY_DLSS_DLLS ${WRALLY_DLSS_DIR}/lib/Windows_x86_64/rel/nvngx_dlss.dll
+                         ${WRALLY_DLSS_DIR}/lib/Windows_x86_64/rel/nvngx_dlssd.dll CACHE INTERNAL "the DLSS runtimes fetched")
     set(WRALLY_DLSS_LICENSE ${WRALLY_DLSS_DIR}/LICENSE.txt CACHE INTERNAL "the DLSS SDK's licence")
 else()
     set(WRALLY_DLSS_DLLS "" CACHE INTERNAL "the DLSS runtime fetched")

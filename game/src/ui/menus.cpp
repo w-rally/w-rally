@@ -353,8 +353,8 @@ SettingsChoice SettingsUi(const ImGuiLayer& ui, app::Settings& s, bool inStage, 
         const bool dlss = upscalers & (1u << iface::kUpscalerDlss);
         SetRow& up = add(SetRow::Choice, "UPSCALING",
                          dlss ? "Render below the screen's resolution and upscale with AMD FSR or NVIDIA DLSS in place "
-                                "of TAA: faster, softer. DLAA: DLSS at full resolution. Off: TAA at full resolution. "
-                                "Applies at once."
+                                "of TAA: faster, softer. DLAA: DLSS at full resolution. DLSS RR: Ray Reconstruction, "
+                                "which also denoises the ray tracing. Off: TAA at full resolution. Applies at once."
                               : "Render below the screen's resolution and upscale with AMD FSR in place of TAA: faster, "
                                 "softer. NVIDIA DLSS needs an NVIDIA RTX graphics card: not available on this one. "
                                 "Off: TAA at full resolution. Applies at once.");

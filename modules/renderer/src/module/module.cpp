@@ -194,9 +194,10 @@ void Apply(Renderer& r)
     r.core.SetPreferRayTracedShadows(s.rayTracing != 0);
     r.scene.SetShadowsOn(s.shadows != 0);
     r.post.SetAutoExposure(s.autoExposure != 0);
-    r.core.SetUpscaling(r.dev, s.upscaler == kUpscalerFsr    ? ngg::core::UpscalerKind::Fsr
-                               : s.upscaler == kUpscalerDlss ? ngg::core::UpscalerKind::Dlss
-                                                             : ngg::core::UpscalerKind::None,
+    r.core.SetUpscaling(r.dev, s.upscaler == kUpscalerFsr      ? ngg::core::UpscalerKind::Fsr
+                               : s.upscaler == kUpscalerDlss   ? ngg::core::UpscalerKind::Dlss
+                               : s.upscaler == kUpscalerDlssRr ? ngg::core::UpscalerKind::DlssRr
+                                                               : ngg::core::UpscalerKind::None,
                         s.renderScale);
     // NGG_DENOISER=nrd|ours over the settings, for A/B (NGG design 10.7).
     static const char* const envDenoiser = std::getenv("NGG_DENOISER");
@@ -811,6 +812,7 @@ Status WRALLY_CALL Stats(Renderer* r, RenderStats* out)
     out->upscalersAvailable = 1u << kUpscalerNone;
     if (r->core.UpscalerAvailable(ngg::core::UpscalerKind::Fsr))  out->upscalersAvailable |= 1u << kUpscalerFsr;
     if (r->core.UpscalerAvailable(ngg::core::UpscalerKind::Dlss)) out->upscalersAvailable |= 1u << kUpscalerDlss;
+    if (r->core.UpscalerAvailable(ngg::core::UpscalerKind::DlssRr)) out->upscalersAvailable |= 1u << kUpscalerDlssRr;
     strncpy_s(out->denoiser, sizeof out->denoiser, r->core.DenoiserName(), _TRUNCATE);
     out->denoisersAvailable = 1u << kDenoiserOurs;
     if (r->core.DenoiserAvailable(ngg::core::Denoiser::Nrd)) out->denoisersAvailable |= 1u << kDenoiserNrd;
@@ -1180,7 +1182,12 @@ WRALLY_EXPORT Status WRALLY_CALL InitWInterface(uint32_t gameVersion, const Stru
         };
         LUID luid{input.adapterLuidLow, input.adapterLuidHigh};
         const bool pick = input.adapterLuidLow || input.adapterLuidHigh;
-        if (!r->dev.Create(pick ? &luid : nullptr, (input.flags & kRendererDebugLayer) != 0)) return fail("D3D12 device creation failed");
+        // The D3D12 debug layer: the client's flag, or NGG_DEBUG_LAYER=1 (development; DrainMessages logs it).
+        const bool debugLayer = (input.flags & kRendererDebugLayer) != 0 || [] {
+            const char* e = std::getenv("NGG_DEBUG_LAYER");
+            return e && e[0] == '1';
+        }();
+        if (!r->dev.Create(pick ? &luid : nullptr, debugLayer)) return fail("D3D12 device creation failed");
         // The pipeline cache (pipeline_cache.h) in the game's cache folder for this module (cache/wrenderer).
         const char* cacheDir = input.host.files.cacheDir ? input.host.files.cacheDir(input.host.ctx) : nullptr;
         ngg::core::OpenPipelineCache(r->dev.device.Get(), cacheDir ? cacheDir : "");

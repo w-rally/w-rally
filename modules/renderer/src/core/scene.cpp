@@ -5121,23 +5121,29 @@ void Scene::RecordPass(ID3D12GraphicsCommandList* list, D3D12_CPU_DESCRIPTOR_HAN
     // NGG_FORWARD_LIGHTS: the lights shaded in the main pass instead - the A/B for this pass's picture and cost.
     static const bool forwardLights = std::getenv("NGG_FORWARD_LIGHTS") != nullptr;
     const bool deferred = !prepass && m_deferredReady && cb.lightsOn > 0.5f && m_debugMode == 0 && !forwardLights;
+    // THE SURFACE'S TARGETS (the GBUF variants) also without local lights when they are wanted (SetGbufferWanted: DLSS
+    // Ray Reconstruction's guides). Not with lights shaded forward: the GBUF variants leave the lights to the deferred
+    // pass.
+    const bool gbuf = deferred || (m_gbufWanted && !prepass && m_deferredReady && m_debugMode == 0 &&
+                                   cb.lightsOn <= 0.5f);
+    if (!prepass) m_gbufWritten = gbuf;
     // The prepass writes three targets, normal, motion and plant, adjacent in
     // their heap - so `rtv` is the start of a three-descriptor range there.
     D3D12_CPU_DESCRIPTOR_HANDLE targets[3] = { rtv };
-    if (deferred)
+    if (gbuf)
         for (int k = 0; k < 2; ++k)
         {
             targets[1 + k] = m_gbufRtvHeap->GetCPUDescriptorHandleForHeapStart();
             targets[1 + k].ptr += (SIZE_T)k * m_prepassRtvStride;
         }
     auto bindTargets = [&]() {   // (again after the probe's faces)
-        if (deferred)
+        if (gbuf)
             list->OMSetRenderTargets(3, targets, FALSE, &dsv);
         else
             list->OMSetRenderTargets(prepass ? 3 : 1, &rtv, prepass ? TRUE : FALSE, &dsv);
     };
     bindTargets();
-    if (deferred)
+    if (gbuf)
     {
         const float none[4] = { 0.0f, 0.0f, 0.0f, 0.0f };   // kind 0: no surface (the sky)
         list->ClearRenderTargetView(targets[1], none, 0, nullptr);
@@ -5748,7 +5754,7 @@ void Scene::RecordPass(ID3D12GraphicsCommandList* list, D3D12_CPU_DESCRIPTOR_HAN
         if (!(matFlags & kMaterialTwoSided))
             if (ID3D12PipelineState* c = m_psoCulled[prepass ? 1 : 0][wantAlphaTest ? 1 : 0][Mirrors(o.xform) ? 1 : 0].Get())
                 want = c;
-        if (deferred)
+        if (gbuf)
         {
             want = wantAlphaTest ? m_psoAlphaTestG.Get() : m_psoG.Get();
             if (!(matFlags & kMaterialTwoSided))
@@ -5758,7 +5764,7 @@ void Scene::RecordPass(ID3D12GraphicsCommandList* list, D3D12_CPU_DESCRIPTOR_HAN
         if (!prepass && wantAlphaTest && m_prepassThisFrame)
         {
             const int cull = (matFlags & kMaterialTwoSided) ? 0 : Mirrors(o.xform) ? 2 : 1;
-            if (ID3D12PipelineState* k = m_psoAlphaKept[deferred ? 1 : 0][cull].Get())
+            if (ID3D12PipelineState* k = m_psoAlphaKept[gbuf ? 1 : 0][cull].Get())
                 want = k;
         }
         // The reflection focus's opaque parts: with their reflection rays (ReflOpen), where there is a TLAS.
@@ -5766,7 +5772,7 @@ void Scene::RecordPass(ID3D12GraphicsCommandList* list, D3D12_CPU_DESCRIPTOR_HAN
         if (!prepass && !wantAlphaTest && o.probeFocus && m_rayQuery && m_reflTlas && cb.reflProbeOn > 0.5f)
         {
             const int cull = (matFlags & kMaterialTwoSided) ? 0 : Mirrors(o.xform) ? 2 : 1;
-            if (ID3D12PipelineState* r = m_psoRefl[deferred ? 1 : 0][cull].Get())
+            if (ID3D12PipelineState* r = m_psoRefl[gbuf ? 1 : 0][cull].Get())
                 want = r, refl = true;
         }
         draw(o, want, refl, d.inst, d.instCount);

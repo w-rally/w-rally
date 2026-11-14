@@ -40,6 +40,7 @@ void RtVisibility::Record(Device& dev, ID3D12GraphicsCommandList* list, const Vi
     // only when it is the traced one.
     const bool traced = f.ao && m_aoSource == AoSource::Traced && m_rt.AoAvailable();
     m_rt.SetNrdInputs(false);     // (NrdVisibility's)
+    m_rt.SetRawOnly(false);       // (RrVisibility's)
     m_rt.Trace(dev, list, f.depth, f.normal, f.motion, f.plant, f.viewProjJittered, f.viewProj, f.camPos, sunTowards,
                4000.0f, f.sunAngle, traced, 3.0f, f.aoRays, f.width, f.height, f.lights);
     m_rt.PrepareForRead(list);
