@@ -942,12 +942,15 @@ pass, TAA and the upscalers do with it does not depend on which provider filled 
 |---|---|---|---|
 | `RtVisibility` | RT, denoised (`Rt::Filtered`) | RT (`AoSource::Traced`, default) or XeGTAO (`AoSource::ScreenSpace`) | RT, ratio estimator |
 | `CascadeVisibility` | cascaded maps, sampled in the main pass | XeGTAO | spot/beam shadow maps (PCSS) |
+| `NrdVisibility` (4.10) | RT, NVIDIA NRD SIGMA | as `RtVisibility` (REBLUR with `NGG_NRD_AO=reblur`) | RT, NRD SIGMA |
 
 `Renderer::RecordFrame` (`renderer.cpp`) picks RT when `m_preferRt && prepass && m_rt.HasScene() && m_rtValid &&
 ShadowsOn()`; otherwise the cascades. `Renderer::RtFallbackReason` says why not ("cascades selected", "no ray tracing
 on this adapter", "shadows off", "the acceleration structure failed to build"). The game's setting is `ray_tracing`
-(`RenderSettings::rayTracing`); `kRendererNoRayTracing` at creation skips `Rt::Create` altogether. A third provider
-(NRD SIGMA/REBLUR, DLSS Ray Reconstruction) is meant to fill the same struct.
+(`RenderSettings::rayTracing`); `kRendererNoRayTracing` at creation skips `Rt::Create` altogether. On the RT path
+`RenderSettings::denoiser` (interface 21; the game's `denoiser`, `PHYS_DRIVE_DENOISER`, `NGG_DENOISER`) picks
+`NrdVisibility` over `RtVisibility` (`Renderer::SetDenoiser`); another source than last frame's starts without history.
+DLSS Ray Reconstruction denoises lit colour, not visibility, so it would not be a drop-in fourth.
 
 **The depth + normal + motion prepass runs on both paths** (`Scene::RecordPrepass`): the main pass shades every pixel
 once (`GREATER_EQUAL` against the prepass depth), both AOs read its depth and normals, TAA and the upscalers its
@@ -1241,6 +1244,55 @@ rotated comparison taps (one tap when the penumbra is under 1.5 texels); one loo
 | local shadow maps, cascades path: Garage 12.7 -> 14.4 frame (maps 0.37); night stage, 3 maps | ~0.9 |
 | keyed objects' own BLAS: worst frame driving through barriers | 292 -> 89 |
 | `RenderStats` | `rtMs` (all traces), `aoMs`, `denoiseMs`; per-pass stamps in `Rt::ReadStats` |
+
+### 4.10 NVIDIA NRD: the third source
+
+`NrdVisibility` (`core/nrd_visibility.*`, `shaders/nrd_pack.hlsl`): **the same traces, NVIDIA NRD's denoisers in
+place of ours** - SIGMA for the sun and for the local lights' shadowed fraction; the AO keeps our denoiser (REBLUR
+with `NGG_NRD_AO=reblur`, below). NRD v4.18.0 is built from source at configure, its DXIL embedded, and driven
+through its raw API: NRD hands out pipelines, texture pools and each frame's dispatches; root signatures, PSOs, the
+descriptor heap, the constants and every barrier are ours (no NRI). Plain compute, so any GPU that ray traces.
+`third_party/nrd/README.md` has the fetch and the licence.
+
+**The frame**: `Rt::Trace` with `SetNrdInputs(true)` runs the traces' `NRD_INPUTS` variants (made the first time NRD
+is chosen), which also write NRD's input beside the raw 0/1 - SIGMA's penumbra radius in metres from the first
+occluder's distance (the sun: `t tan(angle) / 2`; a lamp: `r t / (len - t)`, the lamp the pixel picked), REBLUR's
+normalized hit distance - and skips our denoisers. `CSPack` turns the prepass into NRD's guide inputs (conventions
+at the top of `nrd_visibility.cpp`): view Z through the client's view matrix, the signed-octahedron normal with
+roughness 1 and material id 1 on a moved object, the motion as the upscalers have it **plus the view Z's change**
+(without it a car moving towards the camera failed NRD's depth test every frame and kept no history). NRD's
+dispatches; then `CSUnpack` writes each output into `Rt::Filtered`'s RGBA16F layout, with the moved-object distrust
+TAA reads (from the raw traces' sign, fading over four frames) - so the main pass and TAA do not change.
+
+**History rules**:
+- the camera's cut -> `RESTART`; a resize -> `CLEAR_AND_RESTART`; another source than last frame's -> restart;
+- the road a car has left, a moved object's own pixels: NRD's disocclusion test on view Z and the motion, the
+  material id keeping a car's pixels out of the road's blur;
+- SIGMA has no input for "this pixel's ray hit a moving occluder": it is spatial, with a stabilization of at most
+  5 frames. The car's sun shadow passes the ghost check (below).
+
+**REBLUR for the AO did not pass.** Its own history rules are not ours: behind a driving car it kept the car's
+occlusion (`tools/car-ghost`'s measure, below). Fed to it: the open fraction (our AO's meaning; NRD's own normalized
+hit distance makes contact AO 33-41 grey lighter), the rays' history allowance as `IN_DIFF_CONFIDENCE` - over the
+5x5 and scattered to last frame's pixels, where REBLUR reads it - and a disocclusion mix; none of it, nor its
+accumulation, stabilization, blur or anti-firefly settings, brought the bias under 4 grey. At confidence 0 REBLUR
+still keeps about half its history (`accumSpeed *= 1 / (1 + accumSpeed)`), where ours keeps none. Its switches stay
+for that work (10.7), with two debug outputs (`NGG_NRD_SHOW=conf`, `NGG_NRD_VALIDATION`).
+
+**Measured** (RTX 5070 Ti, 1080p, user-new.phr camera 4 ticks 3000-4200 on fr_joux_verte.ngg, GPU frame median, two
+runs each within 0.03 ms):
+
+| quality | ours, TAA | NRD, TAA | ours, DLSS Q | NRD, DLSS Q |
+|---|---|---|---|---|
+| medium | 5.60-5.63 | 5.87-5.89 (+0.27) | 5.38-5.39 | 5.52 (+0.14) |
+| high | 5.80 | 6.06-6.07 (+0.27) | 5.55-5.56 | 5.70-5.72 (+0.15) |
+
+Ghost behind the car (`tools/car-ghost`'s ghost.py on user-42.phr, i20 chase camera, native 1080p, TAA off; signed
+bias behind the car against our denoiser without history, limit 1 grey): sun (view 11) ours -0.60, NRD -0.62; AO
+(view 13, two stretches) ours +0.10 / -0.52 - NRD's default the same, REBLUR +20.20 / -4.54. The Garage floor under
+three lamps (native, TAA): grain 1.05 -> 1.25, frame-to-frame 0.33 -> 0.28 (x1e-3), the contact shadow under the car
+as dark. Door grain, fence lines and the camera cut unchanged (the AO is ours in both); side by side the forest and
+the car's shadow look the same.
 
 
 ## 5. Weather, surfaces and night
@@ -1762,9 +1814,10 @@ paid out of the smaller frame.
 ### 7.3 What remains
 
 The plan was FSR 3.1 first (runs anywhere), DLSS SR behind the same interface, then NRD, then DLSS Ray
-Reconstruction. **FSR and DLSS SR are built; NRD and DLSS RR are not.** The visibility layer is shaped for them:
-a third `Visibility` source (NRD's SIGMA/REBLUR over the RT output, or DLSS RR) takes the same frame and fills the
-same outputs (`core/visibility.h`). NVIDIA-only features stay optional and are checked by eye on the RTX machine.
+Reconstruction. **FSR, DLSS SR and NRD (the third `Visibility` source, 4.10) are built; DLSS RR is not**: it
+denoises lit colour together with the upscale, so it replaces our denoisers and the TAA/upscaler at once and needs
+the main pass to output lighting with raw visibility - a design of its own. NVIDIA-only features stay optional and
+are checked by eye on the RTX machine.
 
 
 ## 8. Editor integration (Wallaby)
@@ -2086,6 +2139,11 @@ All read once, at start-up or first use; development only unless noted.
 | `NGG_WIND=<speed>[,<gust>[,<deg>]]` | that wind over the weather's (m/s, 0..1, towards; default gust 0.5, 90 deg): the wind's A/B | `module.cpp` |
 | `NGG_NO_SOLIDS` | don't measure solid cards: every alpha-tested object treated as foliage (A/B) | `scene.cpp` |
 | `NGG_DLSS_PRESET=<A..O>` | force a DLSS render preset for every mode (default K) | `dlss.cpp` |
+| `NGG_DENOISER=nrd\|ours` | the RT path's denoiser over the settings (4.10) | `module.cpp` |
+| `NGG_NRD_AO=reblur\|distance` | NRD takes the AO too: REBLUR over our open fraction, or over its own hit distance (4.10) | `nrd_visibility.cpp` |
+| `NGG_NRD_CONF=0`, `NGG_NRD_CUT=1`, `NGG_NRD_FRAMES`, `_STAB`, `_BLUR`, `_PREBLUR`, `_FIXSTRIDE`, `_HITW`, `_AF` | REBLUR's history confidence and settings, for its A/B | `nrd_visibility.cpp` |
+| `NGG_NRD_SHOW=conf`, `NGG_NRD_HISTORY=1` | REBLUR's confidence input / history length in place of the AO (view 13) | `nrd_visibility.cpp` |
+| `NGG_NRD_VALIDATION=<folder>` | REBLUR's validation layer (its view of our guide inputs) every 30th frame, `.ppm` | `nrd_visibility.cpp` |
 
 
 ## 11. Open work
@@ -2111,7 +2169,7 @@ glass, and VR behind `kRendererCapVr`.
 
 | # | item | state / why | blocked on |
 |---|---|---|---|
-| 8 | **A third visibility provider: NRD (SIGMA/REBLUR) or DLSS Ray Reconstruction** | named in `visibility.h`, not built. Most of the remaining RT grain is what it would remove (§4.5) | the RTX machine (DLSS RR), NRD integration |
+| 8 | **A third visibility provider: NRD (SIGMA/REBLUR) or DLSS Ray Reconstruction** | NRD built (§4.10): SIGMA for the sun and the lamps; REBLUR's AO failed the ghost behind the car and is off by default. Open: REBLUR's history rules against ours, DLSS RR (a design note first: it denoises lit colour, not visibility) | the user's look at NRD; DLSS RR's design |
 | 9 | **Ray-traced foliage cost** | instanced trees add +2.2 ms with opaque RT and +7.2 ms alpha-tested (§2.6), since any-hit runs through the needle tiers. Done: a ray-tracing-only LOD (`kModelLodRayOnly`, §2.6). Open: distant placements opaque or out of the TLAS, one submesh per shell; the real models decide how far the shell goes | the real tree models (Wallaby) |
 | 10 | **Cascades: penumbra and cross-fade** | the non-RT sun shadow is hard-edged (no PCSS) and switches between cascades with no blend | nothing |
 | 11 | **Cheaper distant cascades** | cascade 3 covers kilometres and changes slowly: update it every 2nd-3rd frame. 2048² for 0.7 m texels is wasted bandwidth | nothing |

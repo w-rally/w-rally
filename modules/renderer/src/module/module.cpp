@@ -198,6 +198,10 @@ void Apply(Renderer& r)
                                : s.upscaler == kUpscalerDlss ? ngg::core::UpscalerKind::Dlss
                                                              : ngg::core::UpscalerKind::None,
                         s.renderScale);
+    // NGG_DENOISER=nrd|ours over the settings, for A/B (NGG design 10.7).
+    static const char* const envDenoiser = std::getenv("NGG_DENOISER");
+    const bool nrd = envDenoiser ? std::strcmp(envDenoiser, "nrd") == 0 : s.denoiser == kDenoiserNrd;
+    r.core.SetDenoiser(r.dev, nrd ? ngg::core::Denoiser::Nrd : ngg::core::Denoiser::Ours);
 }
 
 void ToDesc(const ngg::core::WeatherPreset& w, WeatherDesc& d)
@@ -771,6 +775,7 @@ Status WRALLY_CALL Stats(Renderer* r, RenderStats* out)
     *out = {};
     ngg::core::Rt& rt = r->core.Raytracer();
     rt.ReadStats();
+    r->core.ReadDenoiserStats();
     out->passMs = (float)r->scene.LastPassMs();
     out->frameMs = (float)r->core.LastFrameMs();
     out->sunElevationDeg = r->sunElevationDeg;
@@ -781,7 +786,7 @@ Status WRALLY_CALL Stats(Renderer* r, RenderStats* out)
     if (out->rtActive) {
         out->rtMs = (float)rt.LastMs();
         out->aoMs = (float)rt.AoMs();
-        out->denoiseMs = (float)rt.DenoiseMs();
+        out->denoiseMs = (float)r->core.DenoiseMs();
         out->lightsMs = (float)rt.LightsMs();
         out->lightCount = (uint32_t)r->scene.GetLights().Count();
         out->rtPixels = rt.TracedPixels();
@@ -806,6 +811,9 @@ Status WRALLY_CALL Stats(Renderer* r, RenderStats* out)
     out->upscalersAvailable = 1u << kUpscalerNone;
     if (r->core.UpscalerAvailable(ngg::core::UpscalerKind::Fsr))  out->upscalersAvailable |= 1u << kUpscalerFsr;
     if (r->core.UpscalerAvailable(ngg::core::UpscalerKind::Dlss)) out->upscalersAvailable |= 1u << kUpscalerDlss;
+    strncpy_s(out->denoiser, sizeof out->denoiser, r->core.DenoiserName(), _TRUNCATE);
+    out->denoisersAvailable = 1u << kDenoiserOurs;
+    if (r->core.DenoiserAvailable(ngg::core::Denoiser::Nrd)) out->denoisersAvailable |= 1u << kDenoiserNrd;
     return Status::Ok;
 }
 

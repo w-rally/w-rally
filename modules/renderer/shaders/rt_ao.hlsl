@@ -43,7 +43,14 @@ void CSMain(uint3 tid : SV_DispatchThreadID)
     if (tid.x >= gSize.x || tid.y >= gSize.y) return;
     float3 p, N;
     uint plant;
-    if (!SurfaceAt(tid.xy, p, N, plant)) { gOut[tid.xy] = 1.0; return; }
+    if (!SurfaceAt(tid.xy, p, N, plant))
+    {
+        gOut[tid.xy] = 1.0;
+#ifdef NRD_INPUTS
+        gNrdOut[tid.xy] = 1.0;
+#endif
+        return;
+    }
 
     // The prepass normal already faces the camera, which is the side the
     // ambient light arrives from as far as this pixel is concerned.
@@ -67,6 +74,7 @@ void CSMain(uint3 tid : SV_DispatchThreadID)
     // far away also reflects light we are not simulating, so beyond the radius
     // the honest answer is "unknown", which is what unoccluded means here.
     float open = 0.0;
+    float hitDist = 0.0;      // NRD: the rays' normalized hit distances, summed
     float allow = -1.0;       // the least any ray allows (Allow), -1 none touched
     for (uint i = 0; i < gAoRays; ++i)
     {
@@ -82,11 +90,21 @@ void CSMain(uint3 tid : SV_DispatchThreadID)
         ray.TMin      = 0.0;
         ray.TMax      = gAoRadius;
         float2 mover;
-        if (!Occluded(ray, false, plant, mover)) open += 1.0;
+        float t;
+        const bool hit = OccludedT(ray, false, plant, mover, t);
+        if (!hit) open += 1.0;
+        // REBLUR's normalized hit distance (NRD.hlsli REBLUR_FrontEnd_GetNormHitDist with the hit distance parameters
+        // nrd_visibility.cpp sets: A = the radius, B ~ 0, so the normalization is the radius itself): 1 for a miss. What
+        // REBLUR takes only with NGG_NRD_AO=distance; by default it takes the open fraction (nrd_pack.hlsl).
+        hitDist += hit ? saturate(t / gAoRadius) : 1.0;
         // An occluder this far off changes the occlusion over a fraction of
         // that across the ground: its "penumbra" (kAoPenumbra).
         const float a = Allow(mover, kAoPenumbra);
         if (a >= 0.0) allow = allow < 0.0 ? a : min(allow, a);
     }
     gOut[tid.xy] = EncodeRaw(open / max(1.0, float(gAoRays)), allow);
+#ifdef NRD_INPUTS
+    // REBLUR_DIFFUSE_OCCLUSION's IN_DIFF_HITDIST: the mean over this pixel's rays.
+    gNrdOut[tid.xy] = hitDist / max(1.0, float(gAoRays));
+#endif
 }

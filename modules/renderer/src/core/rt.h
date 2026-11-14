@@ -175,6 +175,26 @@ public:
     };
     ID3D12Resource* Result() const { return m_result.Get(); }
 
+    // THE NRD PATH (nrd_visibility.h): the traces undenoised, for NRD to denoise. EnableNrdInputs makes the trace variants that
+    // also write NRD's inputs (rt_common.hlsli NRD_INPUTS) and their targets - once, the first time NRD is chosen;
+    // false (logged) if they cannot be made. With SetNrdInputs(true) Trace runs those variants and none of our
+    // denoisers but - with `ao` false - the AO's (NRD then takes the shadows only, and the AO is FilteredAo as on our
+    // path): Filtered/FilteredLights (and FilteredAo with `ao`) are null, and the outputs below are left as
+    // UNORDERED_ACCESS:
+    //   - the raw 0/1 per pixel (Result, RawAo, RawLights; R16F, EncodeRaw: negative where a ray hit a moved object,
+    //     carrying the history weight it allows);
+    //   - NrdIn: SIGMA's penumbra for the sun and the lamps (metres; 65504 unoccluded), REBLUR's normalized hit
+    //     distance for the AO (R16F).
+    // AoTraced/LightsTraced: whether this frame traced them.
+    bool EnableNrdInputs(Device& dev);
+    void SetNrdInputs(bool on, bool ao = true) { m_nrdMode = on; m_nrdAo = ao; }
+    enum NrdInput { kNrdSunPenumbra = 0, kNrdAoHitDist = 1, kNrdLightsPenumbra = 2 };
+    ID3D12Resource* NrdIn(NrdInput i) const { return m_nrdIn[i].Get(); }
+    ID3D12Resource* RawAo() const     { return m_aoResult.Get(); }
+    ID3D12Resource* RawLights() const { return m_lightResult.Get(); }
+    bool AoTraced() const     { return m_tracedAo; }
+    bool LightsTraced() const { return m_tracedLights; }
+
     // The result is written as a UAV after the scene pass and read by the NEXT
     // frame's scene pass as a texture - one frame of lag, which is nothing at a
     // static camera and is what makes an on-screen comparison possible without
@@ -187,6 +207,13 @@ private:
     // The outputs and the denoisers' histories at this size, and their views in the heap. A new heap (Rebuild) only
     // rewrites the views (WriteTargetViews): recreating the targets dropped every history whenever a mesh appeared.
     bool CreateTargets(ID3D12Device* device, UINT width, UINT height);
+    bool CreateNrdTargets(ID3D12Device* device);     // NRD's inputs at m_width x m_height (EnableNrdInputs)
+    void DenoiseAll(ID3D12GraphicsCommandList* list, const DenoiseCB& dc, bool doSun, bool doAo, bool doLights);
+    // The NRD path (EnableNrdInputs, SetNrdInputs).
+    Microsoft::WRL::ComPtr<ID3D12PipelineState>  m_psoNrd, m_psoAoNrd, m_psoLightsNrd;
+    Microsoft::WRL::ComPtr<ID3D12Resource>       m_nrdIn[3];
+    bool m_nrdMode = false, m_nrdAo = true;
+    bool m_tracedAo = false, m_tracedLights = false;
 
     Microsoft::WRL::ComPtr<ID3D12RootSignature>  m_rootSig;
     Microsoft::WRL::ComPtr<ID3D12PipelineState>  m_pso;

@@ -15,7 +15,8 @@ const char* GtaoName(int quality)
     return kNames[quality < 0 ? 0 : quality > 3 ? 3 : quality];
 }
 
-// Gtao's AO into `out`, when it is wanted and can run.
+} // namespace
+
 void ScreenSpaceAo(Gtao& gtao, ID3D12GraphicsCommandList* list, const VisibilityFrame& f, Visibility& out)
 {
     if (!f.ao || !gtao.Ready()) return;
@@ -26,8 +27,6 @@ void ScreenSpaceAo(Gtao& gtao, ID3D12GraphicsCommandList* list, const Visibility
     out.aoSource = GtaoName(gtao.Quality());
     out.aoMs = gtao.LastMs();
 }
-
-} // namespace
 
 void RtVisibility::Record(Device& dev, ID3D12GraphicsCommandList* list, const VisibilityFrame& f, Visibility& out)
 {
@@ -40,6 +39,7 @@ void RtVisibility::Record(Device& dev, ID3D12GraphicsCommandList* list, const Vi
     // the shadow's softness and the visible sun agree by construction. AO only when it is applied (5.0m), and traced
     // only when it is the traced one.
     const bool traced = f.ao && m_aoSource == AoSource::Traced && m_rt.AoAvailable();
+    m_rt.SetNrdInputs(false);     // (NrdVisibility's)
     m_rt.Trace(dev, list, f.depth, f.normal, f.motion, f.plant, f.viewProjJittered, f.viewProj, f.camPos, sunTowards,
                4000.0f, f.sunAngle, traced, 3.0f, f.aoRays, f.width, f.height, f.lights);
     m_rt.PrepareForRead(list);

@@ -23,6 +23,7 @@ struct Settings {
     uint32_t quality = 1;               // 0 low, 1 medium, 2 high
     bool rayTracing = true, taa = true, shadows = true, vsync = true;
     uint32_t upscaling = 0;             // kUpscaleModes: 0 off (the renderer's TAA at the full size), 1.. FSR, 5.. DLSS
+    uint32_t denoiser = 0;              // iface::kDenoiser*: 0 the renderer's own, 1 NVIDIA NRD (PHYS_DRIVE_DENOISER over it)
 
     // Sound
     bool sound = true;

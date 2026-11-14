@@ -54,7 +54,9 @@ namespace wrally::iface {
 // 19: loadSceneVariant (a .ngg holding several of a stage's variants, NGGR/NGGQ, draws the one asked for).
 // 20: WeatherDesc's wind (windDirectionDeg, windSpeed, gustiness): instanced models with wind sway (NGG design §2.6),
 //     timed by FrameDesc::time, which the renderer reads from here on.
-constexpr uint32_t kRendererInterfaceVer = 20;
+// 21: RenderSettings::denoiser (kDenoiserNrd: the ray tracer's traces through NVIDIA NRD instead of the renderer's own
+//     denoisers), RenderStats::denoiser and denoisersAvailable.
+constexpr uint32_t kRendererInterfaceVer = 21;
 
 struct Renderer;                     // the module's instance, opaque
 struct RendererEditApi;              // renderer_edit.h
@@ -324,12 +326,17 @@ struct RenderSettings {
     uint32_t   shadows;           // sun shadows at all
     float      renderScale;       // 1 native; < 1 upscaled. Per axis; used only with an upscaler
     uint32_t   upscaler;          // kUpscaler*: what resolves the frame (none: the renderer's own TAA, native)
+    uint32_t   denoiser;          // kDenoiser*: what denoises the ray-traced shadows and AO
 };
 
 // RenderSettings::upscaler
 constexpr uint32_t kUpscalerNone = 0;
 constexpr uint32_t kUpscalerFsr  = 1;    // AMD FSR 3.1 (FSR 4 on RDNA 4), any DX12 GPU
 constexpr uint32_t kUpscalerDlss = 2;    // NVIDIA DLSS Super Resolution, RTX GPUs; elsewhere the TAA (logged)
+
+// RenderSettings::denoiser
+constexpr uint32_t kDenoiserOurs = 0;    // the renderer's own (NGG design 4.5)
+constexpr uint32_t kDenoiserNrd  = 1;    // NVIDIA NRD (SIGMA, REBLUR), any DX12 GPU; where it cannot run, ours (logged)
 
 // What the last finished frame did - ngg_stats, the renderer's own readout.
 struct RenderStats {
@@ -351,6 +358,8 @@ struct RenderStats {
     char     upscaler[48];                 // what upscales it, "FSR 3.1.x"; "" none (the renderer's TAA)
     uint32_t upscalersAvailable;           // bit 1 << kUpscaler*: the backends this adapter can run (None always)
     char     aoSource[32];                 // "ray traced, 1 ray", "XeGTAO medium"; "off"
+    char     denoiser[16];                 // what denoised this frame's ray tracing, "ours" or "NRD"; "" without it
+    uint32_t denoisersAvailable;           // bit 1 << kDenoiser*: what this build and adapter can run (ours always)
 };
 
 #pragma pack(pop)

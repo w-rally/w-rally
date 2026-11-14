@@ -121,6 +121,12 @@ iface::RenderSettings ToRender(const Settings& s)
     const UpscaleMode& m = kUpscaleModes[mode < kUpscaleModeCount ? mode : 0];
     r.upscaler = m.upscaler;
     r.renderScale = m.scale;
+    // What denoises the ray tracing: the settings', or PHYS_DRIVE_DENOISER's (ours, nrd, or the index) over them.
+    r.denoiser = s.denoiser;
+    if (const char* e = std::getenv("PHYS_DRIVE_DENOISER"))
+        r.denoiser = std::strcmp(e, "nrd") == 0 ? iface::kDenoiserNrd
+                   : std::strcmp(e, "ours") == 0 ? iface::kDenoiserOurs
+                                                 : static_cast<uint32_t>(std::strtoul(e, nullptr, 10));
     return r;
 }
 
@@ -982,9 +988,9 @@ StageEnd RunStage(Shell& sh, const Options& given, bool fromMenu, std::string& e
                  kQuality[st.quality > 2 ? 1 : st.quality]);
             const bool aoTraced = st.ambientOcclusion && std::strncmp(st.aoSource, "ray", 3) == 0;
             if (st.rtActive)
-                line("   rt %.2f ms (ao %.2f, lights %.2f, denoise %.2f)   %u px, %.1f%% shadowed   %u lights", st.rtMs,
-                     aoTraced ? st.aoMs : 0.0f, st.lightsMs, st.denoiseMs, st.rtPixels, st.rtPixels ? 100.0 * st.rtShadowed / st.rtPixels : 0.0,
-                     st.lightCount);
+                line("   rt %.2f ms (ao %.2f, lights %.2f, denoise %.2f %s)   %u px, %.1f%% shadowed   %u lights", st.rtMs,
+                     aoTraced ? st.aoMs : 0.0f, st.lightsMs, st.denoiseMs, st.denoiser, st.rtPixels,
+                     st.rtPixels ? 100.0 * st.rtShadowed / st.rtPixels : 0.0, st.lightCount);
             else if (st.rtFallback[0])
                 line("   shadows from cascades: %s", st.rtFallback);
             if (st.ambientOcclusion && !aoTraced)
@@ -1055,7 +1061,8 @@ StageEnd RunStage(Shell& sh, const Options& given, bool fromMenu, std::string& e
             }
         } else if (menu == StageMenu::Settings) {
             const ui::SettingsChoice c = ui::SettingsUi(ui, sh.settings, true, settingsLog, keyDown, shownWidth, shownHeight, {},
-                                                              renderer.Stats().upscalersAvailable);
+                                                              renderer.Stats().upscalersAvailable,
+                                                              renderer.Stats().denoisersAvailable);
             if (c == ui::SettingsChoice::Graphics) {
                 sh.window.SetFullscreen(sh.settings.fullscreen);
                 settings = ToRender(sh.settings);
@@ -1415,7 +1422,7 @@ int Menus(Shell& sh, std::string note, bool intro)
                 break;
             case Screen::Settings:
                 switch (ui::SettingsUi(sh.ui, sh.settings, false, settingsLog, keyDown, sh.width, sh.height, video.Frame(),
-                                   sh.renderer.Stats().upscalersAvailable)) {
+                                   sh.renderer.Stats().upscalersAvailable, sh.renderer.Stats().denoisersAvailable)) {
                 case ui::SettingsChoice::Graphics:
                     sh.window.SetFullscreen(sh.settings.fullscreen);
                     sh.renderer.ApplySettings(ToRender(sh.settings));

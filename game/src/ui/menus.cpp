@@ -293,7 +293,7 @@ struct SetRow {
 } // namespace
 
 SettingsChoice SettingsUi(const ImGuiLayer& ui, app::Settings& s, bool inStage, const std::string& log, UINT keyDown,
-                          int width, int height, const VideoFrame& video, uint32_t upscalers)
+                          int width, int height, const VideoFrame& video, uint32_t upscalers, uint32_t denoisers)
 {
     using input::Action;
     const float k = std::min(height / 1080.0f, width / 1280.0f), W = float(width), H = float(height);
@@ -322,6 +322,7 @@ SettingsChoice SettingsUi(const ImGuiLayer& ui, app::Settings& s, bool inStage, 
     // The tab's rows, over copies of what the settings hold as other types.
     int quality = static_cast<int>(std::min(s.quality, 2u));
     int upscaling = static_cast<int>(std::min(s.upscaling, app::kUpscaleModeCount - 1));
+    int denoiser = s.denoiser == iface::kDenoiserNrd ? 1 : 0;
     const int tab = g_setTab;
     const bool keys = tab == 3;
     std::vector<SetRow> rows;
@@ -362,6 +363,14 @@ SettingsChoice SettingsUi(const ImGuiLayer& ui, app::Settings& s, bool inStage, 
             up.options.push_back(m.label);
             up.optionOff.push_back(!(upscalers & (1u << m.upscaler)));
         }
+        const bool nrd = denoisers & (1u << iface::kDenoiserNrd);
+        SetRow& dn = add(SetRow::Choice, "DENOISER",
+                         nrd ? "What smooths the ray-traced shadows of the sun and the lamps: W-Rally's own, or "
+                               "NVIDIA NRD. Ambient occlusion stays W-Rally's. Applies at once."
+                             : "What smooths the ray-traced shadows of the sun and the lamps. NVIDIA NRD needs ray "
+                               "tracing and a build with it: not available here. Applies at once.");
+        dn.at = &denoiser, dn.options = {"W-RALLY", "NVIDIA NRD"}, dn.optionOff = {false, !nrd};
+        dn.off = !s.rayTracing;
         add(SetRow::Toggle, "SHADOWS", "Shadows. Applies at once.").on = &s.shadows;
         add(SetRow::Toggle, "VERTICAL SYNC", "Frames in step with the display. Applies at once.").on = &s.vsync;
     } else if (tab == 2) {
@@ -744,6 +753,9 @@ SettingsChoice SettingsUi(const ImGuiLayer& ui, app::Settings& s, bool inStage, 
     // The copies back into the settings; a graphics change to apply now.
     if (static_cast<uint32_t>(quality) != s.quality) s.quality = static_cast<uint32_t>(quality), graphics = true;
     if (static_cast<uint32_t>(upscaling) != s.upscaling) s.upscaling = static_cast<uint32_t>(upscaling), graphics = true;
+    const uint32_t denoiserWas = s.denoiser == iface::kDenoiserNrd ? iface::kDenoiserNrd : iface::kDenoiserOurs;
+    const uint32_t denoiserNow = denoiser == 1 ? iface::kDenoiserNrd : iface::kDenoiserOurs;
+    if (denoiserNow != denoiserWas) s.denoiser = denoiserNow, graphics = true;
     if (graphics && c == SettingsChoice::None) c = SettingsChoice::Graphics;
     return c;
 }

@@ -9,12 +9,20 @@ void CSMain(uint3 tid : SV_DispatchThreadID)
     if (tid.x >= gSize.x || tid.y >= gSize.y) return;
     float3 p, N;
     uint plant;
-    if (!SurfaceAt(tid.xy, p, N, plant)) { gOut[tid.xy] = 1.0; return; }
+    if (!SurfaceAt(tid.xy, p, N, plant))
+    {
+        gOut[tid.xy] = 1.0;
+#ifdef NRD_INPUTS
+        gNrdOut[tid.xy] = kNrdFp16Max;
+#endif
+        return;
+    }
 
     // Normal-offset origin, the normal flipped towards the sun so a two-sided
     // leaf card is pushed to whichever side the ray leaves from. The offset
     // grows with distance because depth precision does.
-    if (dot(N, gSunTowards) < 0.0) N = -N;
+    const bool away = dot(N, gSunTowards) < 0.0;
+    if (away) N = -N;
     float offset = gBias * (1.0 + length(p - gCamPos) * 0.002);
 
     // SOFT SHADOWS: the sun is a DISC. A random point on it per pixel per
@@ -37,9 +45,17 @@ void CSMain(uint3 tid : SV_DispatchThreadID)
     ray.TMax      = gTMax;
 
     float2 mover;
-    bool hit = Occluded(ray, true, plant, mover);
+    float t;
+    bool hit = OccludedT(ray, true, plant, mover, t);
     // The sun's disc: the penumbra per metre of the hit's distance.
     gOut[tid.xy] = EncodeRaw(hit ? 0.0 : 1.0, Allow(mover, 2.0 * tan(gSunAngle)));
+#ifdef NRD_INPUTS
+    // SIGMA's IN_PENUMBRA, the directional light's (NRD.hlsli SIGMA_FrontEnd_PackPenumbra): the penumbra's RADIUS in
+    // metres at the hit - half its distance times the tangent of the sun's angular radius - "unoccluded" where nothing
+    // was hit, and 0 where the surface faces away from the sun (NRD: "NoL <= 0 - 0, it's very important"; a card is
+    // lit from either side, so never away).
+    gNrdOut[tid.xy] = (away && plant == 0u) ? 0.0 : !hit ? kNrdFp16Max : min(t * tan(gSunAngle) * 0.5, kNrdPenumbraMax);
+#endif
     InterlockedAdd(gCounters[0], 1);
     if (hit) InterlockedAdd(gCounters[1], 1);
 }

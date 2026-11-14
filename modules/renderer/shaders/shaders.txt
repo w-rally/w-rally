@@ -59,6 +59,15 @@ rt_lights.hlsl   CSMain  cs_6_5  -DLIGHTS_REF=1
 rt_lights.hlsl   CSMain  cs_6_5  -DLIGHTS_REF=2
 rt_denoise.hlsl  CSMain  cs_6_5
 rt_ao_wide.hlsl  CSMain  cs_6_5
+# the same traces writing NRD's inputs too (core/nrd_visibility.cpp, made only when NRD is chosen)
+rt_trace.hlsl    CSMain  cs_6_5  -DNRD_INPUTS=1
+rt_ao.hlsl       CSMain  cs_6_5  -DNRD_INPUTS=1
+rt_lights.hlsl   CSMain  cs_6_5  -DNRD_INPUTS=1
+# and NRD's guide inputs before it, its outputs in our layout after it
+nrd_pack.hlsl    CSPack    cs_6_0
+nrd_pack.hlsl    CSConf    cs_6_0
+nrd_pack.hlsl    CSConfReset  cs_6_0
+nrd_pack.hlsl    CSUnpack  cs_6_0
 
 # --- XeGTAO (gtao.cpp): the passes, then the horizon search per quality (gtao.cpp kSlices/kSteps) and normals
 gtao.hlsl  CSPrefilterDepths16x16  cs_6_0  -DGTAO_SLICES=1 -DGTAO_STEPS=2

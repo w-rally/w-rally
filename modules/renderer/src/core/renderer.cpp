@@ -89,6 +89,31 @@ void Renderer::OnResize(Device& dev, UINT width, UINT height)
     if (m_rt.Ready() && m_preferRt) m_rt.PrepareTargets(dev.device.Get(), m_renderWidth, m_renderHeight);
 }
 
+void Renderer::SetDenoiser(Device& dev, Denoiser d)
+{
+    if (d == m_denoiser) return;
+    // NRD is made the first time it is chosen (its pipelines, the ray tracer's variants): a game that never chooses it
+    // pays nothing for it.
+    if (d == Denoiser::Nrd && !m_nrdVis.Ready() && !m_nrdVis.Create(dev))
+    {
+        Log("renderer: NRD unavailable - the renderer's own denoisers");
+        d = Denoiser::Ours;
+    }
+    m_denoiser = d;
+    Log("renderer: denoiser %s", d == Denoiser::Nrd ? "NRD" : "ours");
+}
+
+const char* Renderer::DenoiserName() const
+{
+    if (!m_rtActive) return "";
+    return m_lastSource == &m_nrdVis ? "NRD" : "ours";
+}
+
+double Renderer::DenoiseMs() const
+{
+    return m_lastSource == &m_nrdVis ? m_nrdVis.DenoiseMs() : m_rt.DenoiseMs();
+}
+
 void Renderer::SetUpscaling(Device& dev, UpscalerKind kind, float scale)
 {
     if (!(scale > 0.0f) || scale > 1.0f) scale = 1.0f;
@@ -117,6 +142,7 @@ void Renderer::ResetHistory()
     m_post.ResetHistory();
     m_rtVis.ResetHistory();
     m_cascadeVis.ResetHistory();
+    m_nrdVis.ResetHistory();
 }
 
 bool Renderer::Load(Device& dev, const wchar_t* path)
@@ -366,7 +392,12 @@ void Renderer::RecordFrame(Device& dev, D3D12_CPU_DESCRIPTOR_HANDLE outRtv,
         f.width = width;
         f.height = height;
         f.lights = &m_scene.GetLights();
-        VisibilityProvider& source = m_rtActive ? static_cast<VisibilityProvider&>(m_rtVis) : m_cascadeVis;
+        VisibilityProvider& source = !m_rtActive ? static_cast<VisibilityProvider&>(m_cascadeVis)
+                                   : m_denoiser == Denoiser::Nrd && m_nrdVis.Ready() ? static_cast<VisibilityProvider&>(m_nrdVis)
+                                   : m_rtVis;
+        // Another source than last frame's (the denoiser switched): it starts from no history of its own.
+        if (&source != m_lastSource && m_lastSource) source.ResetHistory();
+        m_lastSource = &source;
         source.Record(dev, list, f, m_vis);
 
         m_scene.SetShadowSource(m_vis.shadowSource);

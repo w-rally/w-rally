@@ -193,7 +193,9 @@ enum { kSlotTlas = 0, kSlotDepth = 1, kSlotOut = 2, kSlotCounters = 3,
        kSlotLightPair0 = 31, kSlotLightPair1 = 33, kSlotLightHistUav0 = 35, kSlotLightHistUav1 = 36,
        // Their wide pass output (rt_ao_wide.hlsl, as the AO's).
        kSlotLightWideUav = 37,
-       kSlotTextures = 38 };
+       // The NRD path's inputs (NRD_INPUTS, u2): the sun's and the lamps' penumbrae, the AO's hit distance.
+       kSlotSunNrdUav = 38, kSlotAoNrdUav = 39, kSlotLightNrdUav = 40,
+       kSlotTextures = 41 };
 
 } // namespace
 
@@ -253,7 +255,16 @@ bool Rt::Create(Device& dev)
     D3D12_DESCRIPTOR_RANGE uavRange = ranges[1];
     uavRange.OffsetInDescriptorsFromTableStart = 0;
 
-    D3D12_ROOT_PARAMETER params[6] = {};
+    // u2, the NRD variants' second output (rt_common.hlsli NRD_INPUTS): a table of its own, unused by the others.
+    D3D12_DESCRIPTOR_RANGE nrdRange = {};
+    nrdRange.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_UAV;
+    nrdRange.NumDescriptors = 1;
+    nrdRange.BaseShaderRegister = 2;
+
+    D3D12_ROOT_PARAMETER params[7] = {};
+    params[6].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+    params[6].DescriptorTable.NumDescriptorRanges = 1;
+    params[6].DescriptorTable.pDescriptorRanges = &nrdRange;
     params[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
     params[0].DescriptorTable.NumDescriptorRanges = 5;
     params[0].DescriptorTable.pDescriptorRanges = srvRanges;
@@ -280,7 +291,7 @@ bool Rt::Create(Device& dev)
     samp.ShaderRegister = 0;
 
     D3D12_ROOT_SIGNATURE_DESC rs = {};
-    rs.NumParameters = 6;
+    rs.NumParameters = 7;
     rs.pParameters = params;
     rs.NumStaticSamplers = 1;
     rs.pStaticSamplers = &samp;
@@ -446,6 +457,60 @@ bool Rt::Create(Device& dev)
     Log("rt: ready - inline RayQuery, tier %d.%d, SM %d.%d",
         dev.rtTier / 10, dev.rtTier % 10, dev.shaderModel >> 4, dev.shaderModel & 0xF);
     return true;
+}
+
+bool Rt::EnableNrdInputs(Device& dev)
+{
+    if (m_psoNrd) return true;
+    if (!Ready()) return false;
+    // The three traces again, writing NRD's inputs too (NRD_INPUTS). Made the first time NRD is chosen, so a game that
+    // never chooses it never compiles or creates them.
+    ComPtr<ID3D12PipelineState> pso[3];
+    const char* files[3] = { "rt_trace.hlsl", "rt_ao.hlsl", "rt_lights.hlsl" };
+    for (int i = 0; i < 3; ++i)
+    {
+        ComPtr<ID3DBlob> cs = LoadShader(files[i], "CSMain", "cs_6_5", { "-DNRD_INPUTS=1" });
+        D3D12_COMPUTE_PIPELINE_STATE_DESC pd = {};
+        pd.pRootSignature = m_rootSig.Get();
+        if (cs) pd.CS = { cs->GetBufferPointer(), cs->GetBufferSize() };
+        if (!cs || FAILED(CreatePipeline(dev.device, &pd, IID_PPV_ARGS(&pso[i]))))
+        {
+            Log("rt: the NRD inputs' %s pipeline failed - no NRD", files[i]);
+            return false;
+        }
+    }
+    m_psoNrd = pso[0];
+    m_psoAoNrd = pso[1];
+    m_psoLightsNrd = pso[2];
+    if (m_width && m_height && !CreateNrdTargets(dev.device.Get()))
+    {
+        m_psoNrd.Reset();
+        return false;
+    }
+    return true;
+}
+
+bool Rt::CreateNrdTargets(ID3D12Device* dev)
+{
+    D3D12_HEAP_PROPERTIES hp = {};
+    hp.Type = D3D12_HEAP_TYPE_DEFAULT;
+    D3D12_RESOURCE_DESC d = {};
+    d.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+    d.Width = m_width;
+    d.Height = m_height;
+    d.DepthOrArraySize = 1;
+    d.MipLevels = 1;
+    d.Format = DXGI_FORMAT_R16_FLOAT;
+    d.SampleDesc.Count = 1;
+    d.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+    for (auto& r : m_nrdIn)
+    {
+        r.Reset();
+        if (FAILED(dev->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &d, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                                                nullptr, IID_PPV_ARGS(&r))))
+            return false;
+    }
+    return !m_heap || WriteTargetViews(dev);
 }
 
 // Instance transform: our matrices are row-vector (p' = p * M, translation in
@@ -1071,11 +1136,13 @@ bool Rt::CreateTargets(ID3D12Device* dev, UINT width, UINT height)
     }
     m_aoWideState = m_lightWideState = uav;
     m_histValid = m_aoHistValid = m_lightHistValid = false;
+    m_width = width;
+    m_height = height;
+    // NRD's inputs, once NRD has been chosen (EnableNrdInputs).
+    if (m_psoNrd && !CreateNrdTargets(dev)) return false;
     // Without a heap yet (PrepareTargets before the first Rebuild), Rebuild writes the views.
     if (m_heap && !WriteTargetViews(dev)) return false;
 
-    m_width = width;
-    m_height = height;
     m_resultReadable = false;
     return true;
 }
@@ -1139,6 +1206,13 @@ bool Rt::WriteTargetViews(ID3D12Device* dev)
     // The wide passes' outputs (rt_ao_wide.hlsl): visibility only, read by the scene like the histories.
     uav2d(m_aoWide.Get(), r16, kSlotAoWideUav);
     uav2d(m_lightWide.Get(), r16, kSlotLightWideUav);
+    // NRD's inputs (u2 of the NRD variants), once made.
+    if (m_nrdIn[0])
+    {
+        uav2d(m_nrdIn[0].Get(), r16, kSlotSunNrdUav);
+        uav2d(m_nrdIn[1].Get(), r16, kSlotAoNrdUav);
+        uav2d(m_nrdIn[2].Get(), r16, kSlotLightNrdUav);
+    }
     return true;
 }
 
@@ -1273,6 +1347,13 @@ void Rt::Trace(Device& dev, ID3D12GraphicsCommandList* list, ID3D12Resource* dep
     list->SetComputeRootDescriptorTable(0, m_heap->GetGPUDescriptorHandleForHeapStart());
     list->SetComputeRootDescriptorTable(1, gpuSlot(kSlotOut));
     list->SetComputeRoot32BitConstants(2, sizeof(TraceCB) / 4, &cb, 0);
+    // THE NRD PATH (SetNrdInputs): the variants that also write NRD's inputs, and none of our denoisers below.
+    const bool nrd = m_nrdMode && m_psoNrd && m_nrdIn[0];
+    if (nrd)
+    {
+        list->SetPipelineState(m_psoNrd.Get());
+        list->SetComputeRootDescriptorTable(6, gpuSlot(kSlotSunNrdUav));
+    }
 
     if (m_timestamps) list->EndQuery(m_timestamps.Get(), D3D12_QUERY_TYPE_TIMESTAMP, 0);
     list->Dispatch((width + 7) / 8, (height + 7) / 8, 1);
@@ -1288,8 +1369,9 @@ void Rt::Trace(Device& dev, ID3D12GraphicsCommandList* list, ID3D12Resource* dep
     if (!doAo) m_aoHistValid = false;
     if (doAo)
     {
-        list->SetPipelineState(m_psoAo.Get());
+        list->SetPipelineState(nrd && m_nrdAo ? m_psoAoNrd.Get() : m_psoAo.Get());
         list->SetComputeRootDescriptorTable(1, gpuSlot(kSlotAoOut));
+        if (nrd && m_nrdAo) list->SetComputeRootDescriptorTable(6, gpuSlot(kSlotAoNrdUav));
         list->Dispatch((width + 7) / 8, (height + 7) / 8, 1);
     }
     if (m_timestamps) list->EndQuery(m_timestamps.Get(), D3D12_QUERY_TYPE_TIMESTAMP, 2);
@@ -1298,8 +1380,9 @@ void Rt::Trace(Device& dev, ID3D12GraphicsCommandList* list, ID3D12Resource* dep
     if (!doLights) m_lightHistValid = false;
     if (doLights)
     {
-        list->SetPipelineState(m_psoLights.Get());
+        list->SetPipelineState(nrd ? m_psoLightsNrd.Get() : m_psoLights.Get());
         list->SetComputeRootDescriptorTable(1, gpuSlot(kSlotLightOut));
+        if (nrd) list->SetComputeRootDescriptorTable(6, gpuSlot(kSlotLightNrdUav));
         list->SetComputeRootShaderResourceView(3, lights->LightsVa());
         list->SetComputeRootShaderResourceView(4, lights->ClustersVa());
         list->SetComputeRootShaderResourceView(5, lights->IndicesVa());
@@ -1327,14 +1410,61 @@ void Rt::Trace(Device& dev, ID3D12GraphicsCommandList* list, ID3D12Resource* dep
         dc.period4 = 1.0f;
         if (unjitteredViewProj) memcpy(m_prevViewProj, unjitteredViewProj, sizeof(m_prevViewProj));
     }
+    m_tracedAo = doAo;
+    m_tracedLights = doLights;
+    if (nrd)
+    {
+        // NrdVisibility denoises the raw traces and NRD's inputs (NrdInput): ours keep no history meanwhile, and start
+        // over when they are back - but for the AO when NRD takes the shadows only (SetNrdInputs's `ao`).
+        m_filtered = m_filteredLights = nullptr;
+        m_histValid = m_lightHistValid = false;
+        if (m_nrdAo) m_aoHistValid = false;
+        DenoiseAll(list, dc, false, doAo && !m_nrdAo, false);
+    }
+    else
+        DenoiseAll(list, dc, true, doAo, doLights);
+    if (m_timestamps)
+    {
+        list->EndQuery(m_timestamps.Get(), D3D12_QUERY_TYPE_TIMESTAMP, 4);
+        list->ResolveQueryData(m_timestamps.Get(), D3D12_QUERY_TYPE_TIMESTAMP, 0, 5,
+                               m_timestampReadback.Get(), 0);
+    }
+
+    D3D12_RESOURCE_BARRIER toCopy = Transition(m_counters.Get(),
+        D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_SOURCE);
+    list->ResourceBarrier(1, &toCopy);
+    list->CopyResource(m_countersReadback.Get(), m_counters.Get());
+    D3D12_RESOURCE_BARRIER back = Transition(m_counters.Get(),
+        D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_COPY_DEST);
+    list->ResourceBarrier(1, &back);
+
+    D3D12_RESOURCE_BARRIER post[4] = {
+        Transition(depth, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+                   D3D12_RESOURCE_STATE_DEPTH_WRITE),
+        Transition(normal, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+                   D3D12_RESOURCE_STATE_RENDER_TARGET),
+    };
+    UINT nPost = 2;
+    if (motion) post[nPost++] = Transition(motion, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+                                           D3D12_RESOURCE_STATE_RENDER_TARGET);
+    if (plant)  post[nPost++] = Transition(plant, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+                                           D3D12_RESOURCE_STATE_RENDER_TARGET);
+    list->ResourceBarrier(nPost, post);
+}
+
+// Our denoisers over this frame's traces (Trace, unless NRD takes them): the sun's, the AO's and its wide pass, the
+// local lights' and theirs.
+void Rt::DenoiseAll(ID3D12GraphicsCommandList* list, const DenoiseCB& dc, bool doSun, bool doAo, bool doLights)
+{
     // NGG_RT_NO_HISTORY=1: the sun's and the AO's denoise without their history nor the AO's wide pass - this frame's
     // 5x5 alone: grainy, but unbiased, the reference a ghost (anything a history carries that this frame's rays do not
     // say) is measured against (tools/car-ghost).
     static const bool noHistory = [] { const char* e = std::getenv("NGG_RT_NO_HISTORY"); return e && *e && *e != '0'; }();
     DenoiseCB dcSun = dc;
     if (noHistory) dcSun.valid = 0.0f;
-    Denoise(list, dcSun, m_result.Get(), kSlotPair0, kSlotPair1, kSlotHistUav0, kSlotHistUav1,
-            m_hist, m_histState, m_histValid, m_filtered);
+    if (doSun)
+        Denoise(list, dcSun, m_result.Get(), kSlotPair0, kSlotPair1, kSlotHistUav0, kSlotHistUav1,
+                m_hist, m_histState, m_histValid, m_filtered);
     DenoiseCB dcAo = dc;
     // AoSample's stratification. And the history stays 0.85: 0.92 was smoother
     // standing still but lagged - noisier and further from a 32-ray reference -
@@ -1369,33 +1499,6 @@ void Rt::Trace(Device& dev, ID3D12GraphicsCommandList* list, ID3D12Resource* dep
               m_lightWideState, kSlotLightWideUav, m_filteredLights);
     else
         m_filteredLights = nullptr;
-    if (m_timestamps)
-    {
-        list->EndQuery(m_timestamps.Get(), D3D12_QUERY_TYPE_TIMESTAMP, 4);
-        list->ResolveQueryData(m_timestamps.Get(), D3D12_QUERY_TYPE_TIMESTAMP, 0, 5,
-                               m_timestampReadback.Get(), 0);
-    }
-
-    D3D12_RESOURCE_BARRIER toCopy = Transition(m_counters.Get(),
-        D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_SOURCE);
-    list->ResourceBarrier(1, &toCopy);
-    list->CopyResource(m_countersReadback.Get(), m_counters.Get());
-    D3D12_RESOURCE_BARRIER back = Transition(m_counters.Get(),
-        D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_COPY_DEST);
-    list->ResourceBarrier(1, &back);
-
-    D3D12_RESOURCE_BARRIER post[4] = {
-        Transition(depth, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
-                   D3D12_RESOURCE_STATE_DEPTH_WRITE),
-        Transition(normal, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
-                   D3D12_RESOURCE_STATE_RENDER_TARGET),
-    };
-    UINT nPost = 2;
-    if (motion) post[nPost++] = Transition(motion, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
-                                           D3D12_RESOURCE_STATE_RENDER_TARGET);
-    if (plant)  post[nPost++] = Transition(plant, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
-                                           D3D12_RESOURCE_STATE_RENDER_TARGET);
-    list->ResourceBarrier(nPost, post);
 }
 
 // Spatial + temporal filter of one binary-per-frame ray result; see

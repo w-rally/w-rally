@@ -29,6 +29,15 @@ Texture2D                       gTextures[]   : register(t0, space1);
 SamplerState                    gSamp         : register(s0);
 RWTexture2D<float>              gOut          : register(u0);
 RWStructuredBuffer<uint>        gCounters     : register(u1);
+#ifdef NRD_INPUTS
+// THE NRD PATH (core/nrd_visibility.cpp; the -DNRD_INPUTS=1 variants): besides the raw 0/1 in gOut - kept, for the moved-object
+// flags it carries - each trace writes what NRD denoises: SIGMA's penumbra for the sun and the lamps, REBLUR's
+// normalized hit distance for the AO. Its own table (root parameter 6), so the default variants are unchanged.
+RWTexture2D<float>              gNrdOut       : register(u2);
+// NRD's "unoccluded" (NRD.hlsli NRD_FP16_MAX) and the largest penumbra radius it takes.
+static const float kNrdFp16Max = 65504.0;
+static const float kNrdPenumbraMax = 32768.0;
+#endif
 
 cbuffer K : register(b0)
 {
@@ -138,9 +147,12 @@ void Basis(float3 d, out float3 T, out float3 B)
 // How far from a legacy card its rays ignore other cards, metres: past a grass tuft (~0.5 m) and the near cards of a
 // tree, short of the canopy over the grass.
 static const float kLegacyCardSkip = 1.5;
-bool Occluded(RayDesc ray, bool count, uint fromPlant, out float2 mover)
+// `hitT`: how far along the ray the hit is (metres), for NRD's penumbra and hit distance. ACCEPT_FIRST_HIT: the first
+// occluder found, not always the nearest - the same ray as the default path's, at the same cost.
+bool OccludedT(RayDesc ray, bool count, uint fromPlant, out float2 mover, out float hitT)
 {
     mover = float2(-1.0, 0.0);
+    hitT = 0.0;
     RayQuery<RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH |
              RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES> q;
     // From a legacy card (~0, scene.cpp PSPrepass): the cards within kLegacyCardSkip of the start do not count -
@@ -216,6 +228,7 @@ bool Occluded(RayDesc ray, bool count, uint fromPlant, out float2 mover)
         else if (count) InterlockedAdd(gCounters[3], 1);
     }
     if (q.CommittedStatus() != COMMITTED_TRIANGLE_HIT) return false;
+    hitT = q.CommittedRayT();
     const Inst hit = gInst[q.CommittedInstanceID()];
     if (hit.moved != 0)
     {
@@ -225,6 +238,11 @@ bool Occluded(RayDesc ray, bool count, uint fromPlant, out float2 mover)
         mover = float2(length(ray.Origin + ray.Direction * t - was), t);
     }
     return true;
+}
+bool Occluded(RayDesc ray, bool count, uint fromPlant, out float2 mover)
+{
+    float t;
+    return OccludedT(ray, count, fromPlant, mover, t);
 }
 
 // HOW MUCH HISTORY a pixel may keep when its ray hit a moved object (`mover`,
