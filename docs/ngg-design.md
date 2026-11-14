@@ -1288,6 +1288,8 @@ runs each within 0.03 ms):
 | high | 5.80 | 6.06-6.07 (+0.27) | 5.55-5.56 | 5.70-5.72 (+0.15) |
 | 1440p medium | 6.83-6.85 | 7.28-7.29 (+0.44) | 6.22-6.23 | 6.45-6.46 (+0.23) |
 | 1440p high | 7.16-7.17 | 7.62-7.63 (+0.46) | 6.54 | 6.76-6.77 (+0.22) |
+| 2160p medium | 10.37 | 11.29-11.33 (+0.94) | 8.69-8.71 | 9.15-9.16 (+0.46) |
+| 2160p high | 11.12 | 12.07-12.08 (+0.96) | 9.39-9.40 | 9.84-9.85 (+0.45) |
 
 Ghost behind the car (`tools/car-ghost`'s ghost.py on user-42.phr, i20 chase camera, native 1080p, TAA off; signed
 bias behind the car against our denoiser without history, limit 1 grey): sun (view 11) ours -0.60, NRD -0.62; AO
