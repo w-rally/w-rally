@@ -218,6 +218,11 @@ environment → prepass → sun visibility (RT or cascades) → AO → sky → s
   renderer's own; the AO keeps the renderer's. NRD is plain compute (any GPU that ray traces), built from source at
   configure, not in git; without it, or without ray tracing, the renderer's own (logged). `RenderStats::denoiser`
   names this frame's, `denoisersAvailable` what a settings menu may offer.
+- DLSS Ray Reconstruction (interface 22): `upscaler` = `kUpscalerDlssRr` is DLSS at `renderScale` with NVIDIA's Ray
+  Reconstruction, which denoises the ray tracing within the upscale: the ray tracing reaches the lighting undenoised
+  and the `denoiser` setting does not apply (`RenderStats::denoiser` says "DLSS RR"). RTX GPUs that ray trace only,
+  with NGX's RR DLL beside the module; elsewhere the TAA (logged). TAA off or a debug view: the denoiser's
+  frame, as without RR.
 - `kMaterialBlend` (glass) is drawn blended since 2026-10-30: after the opaque, far to near, premultiplied, no
   shadow and not ray traced (NGG design §5.3). The car's glass uses it.
 - UI textures carry a high bit in their handle (`UiPass::kTextureBit`). A UI command naming any other texture draws
