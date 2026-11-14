@@ -786,6 +786,24 @@ StageEnd RunStage(Shell& sh, const Options& given, bool fromMenu, std::string& e
             cameraAtDone = true;
             std::printf("camera %d at tick %u (PHYS_DRIVE_CAMERA_AT)\n", cameraMode, snap.tick);
         }
+        // PHYS_DRIVE_UPSCALE_AT=<tick>:<mode>: that upscaling mode (an index or a name of kUpscaleModes) from that tick,
+        // as if picked in Settings mid-stage.
+        static const char* const upscaleAt = std::getenv("PHYS_DRIVE_UPSCALE_AT");
+        static bool upscaleAtDone = false;
+        if (upscaleAt && *upscaleAt && !upscaleAtDone && snap.tick >= std::strtoul(upscaleAt, nullptr, 0)) {
+            const char* const colon = std::strchr(upscaleAt, ':');
+            if (colon) {
+                uint32_t k = static_cast<uint32_t>(std::strtoul(colon + 1, nullptr, 10));
+                for (uint32_t i = 0; i < kUpscaleModeCount; ++i)
+                    if (std::strcmp(colon + 1, kUpscaleModes[i].name) == 0) k = i;
+                if (k < kUpscaleModeCount) {
+                    settings.upscaler = kUpscaleModes[k].upscaler, settings.renderScale = kUpscaleModes[k].scale;
+                    renderer.ApplySettings(settings);
+                    std::printf("upscaling %s at tick %u (PHYS_DRIVE_UPSCALE_AT)\n", kUpscaleModes[k].name, snap.tick);
+                }
+            }
+            upscaleAtDone = true;
+        }
         bool redraw = false;   // a renderer switch changed: draw one frame even while paused
         auto toggle = [&](bool& on, uint32_t& field, uint32_t onValue, const char* name, const char* offText) {
             on = !on;

@@ -124,8 +124,12 @@ void Renderer::SetUpscaling(Device& dev, UpscalerKind kind, float scale)
     if (kind == m_upKind && (kind == UpscalerKind::None || scale == m_renderScale)) return;
     if (kind != UpscalerKind::None && (kind != m_upKind || !m_upscaler))
     {
-        // Another backend: the old one goes first (PostFx lets go of it), then the new one is made.
+        // Another backend: the old one goes first (PostFx lets go of it, the GPU finishes its last dispatch), then the
+        // new one is made. Not the other way round: NGX's init is per device, not counted - the old DLSS's
+        // Shutdown1 after the new one's Init unloaded the NGX DLL under it (SR -> RR mid-stage crashed).
         m_post.SetUpscaler(nullptr);
+        dev.WaitForGpu();
+        m_upscaler.reset();
         // RR also needs its passes (rr_guides.hlsl) and the ray tracer.
         if (kind == UpscalerKind::DlssRr && (!m_rt.Ready() || !m_rrVis.Create(dev)))
             m_upscaler.reset();
