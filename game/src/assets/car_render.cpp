@@ -116,6 +116,35 @@ void PartMatrix(const float cog[3], const physics::Wheel* w, bool right, bool sp
     out[15] = 1;
 }
 
+// A lamp's lit twin lifted off the surface it is modelled on, along its normals. RBR's cars draw a lit twin ON a
+// mesh that stays drawn: the brake and reversing lamps' lit meshes have no unlit twin and lie on the tail lamp's glass
+// (the i20's e_light_brake_rb_lit on e_light_rb to the bit, its left one within 0.1 mm), and on the tail lamp's own lit
+// twin at night. Two surfaces at one depth: which wins changes from frame to frame and pixel to pixel - a brake lamp that
+// blinks while braking, one side whole and the other speckled. 1 mm off the glass, the brake and reversing lamps 2 mm
+// (over the tail lamp's lit twin too): the depth (D32, reversed) and the rays tell them apart at any distance, and a
+// millimetre does not show.
+void LiftLit(std::vector<iface::Vertex>& v, const std::vector<uint32_t>& idx, int group)
+{
+    const float lift = group == kLampBrake || group == kLampReverse ? 0.002f : 0.001f;
+    // Where a vertex has no normal (a few have none), its faces' (by their winding, as its neighbours' normals are).
+    std::vector<V3> faces(v.size(), V3{0.0f, 0.0f, 0.0f});
+    for (size_t k = 0; k + 2 < idx.size(); k += 3) {
+        if (idx[k] >= v.size() || idx[k + 1] >= v.size() || idx[k + 2] >= v.size()) continue;
+        const float* a = v[idx[k]].pos;
+        const float* b = v[idx[k + 1]].pos;
+        const float* c = v[idx[k + 2]].pos;
+        const V3 n = math::Cross(V3{b[0] - a[0], b[1] - a[1], b[2] - a[2]}, V3{c[0] - a[0], c[1] - a[1], c[2] - a[2]});
+        for (int j = 0; j < 3; ++j) faces[idx[k + j]] = faces[idx[k + j]] + n;
+    }
+    for (size_t k = 0; k < v.size(); ++k) {
+        V3 n{v[k].normal[0], v[k].normal[1], v[k].normal[2]};
+        if (n.x * n.x + n.y * n.y + n.z * n.z < 0.25f) n = faces[k];
+        const float len = std::sqrt(n.x * n.x + n.y * n.y + n.z * n.z);
+        if (len < 1e-12f) continue;
+        v[k].pos[0] += n.x / len * lift, v[k].pos[1] += n.y / len * lift, v[k].pos[2] += n.z / len * lift;
+    }
+}
+
 } // namespace
 
 void PoseMatrix(const float rotation[4], const float position[3], float out[16]) { PoseRows(rotation, position, out); }
@@ -345,6 +374,7 @@ void CarRender::Create(render::Renderer& renderer, const CarModel* read, const s
                             part.lampGroup >= 0 ? std::to_string(part.lampGroup).c_str() : nodes[node].name, above.c_str());
             }
             if (part.lampGroup >= 0) {   // a lamp's: its own instance, on its part's node (assets::CarRender::PlaceLamps)
+                if (part.lit) LiftLit(v, part.indices, part.lampGroup);
                 const int sd = sideOf(part.name);
                 lampMeshes[part.lampGroup][sd][part.lit ? 1 : 0].push_back({std::move(v), part.indices,
                                                                             materialOf(mi, part), node});
