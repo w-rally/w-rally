@@ -9,7 +9,7 @@ archives once, pinned by SHA-256, into `build/third_party/nrd/`, and builds NRD 
 |---|---|---|
 | `NVIDIA-RTX/NRD` tag `v4.18.0` | the denoisers: C++ library and HLSL compute shaders | NVIDIA RTX SDKs |
 | `NVIDIA-RTX/ShaderMake` commit `3f01623` | NRD's build-time shader compiler driver | MIT |
-| `NVIDIA-RTX/MathLib` tag `v11` | NRD's maths headers | MIT |
+| `NVIDIA-RTX/MathLib` commit `294c8f2` (tag `v11` until 2026-11-16, when the tag moved) | NRD's maths headers | MIT |
 | `microsoft/DirectXShaderCompiler` `v1.9.2609` (`dxc_2026_09_29.zip`) | the `dxc.exe` ShaderMake runs (ours, `third_party/dxc`, has only the DLLs) | University of Illinois / MIT |
 
 How it is built:

@@ -122,7 +122,7 @@ if(WRALLY_NRD)
     foreach(arc_url_hash
             nrd=https://github.com/NVIDIA-RTX/NRD/archive/refs/tags/v4.18.0.zip=d9cb9476c11a8773bfe32d99d26e7038bac0ef3e09957f63e35c3b0fe9f29790
             shadermake=https://github.com/NVIDIA-RTX/ShaderMake/archive/3f01623a76b092ac127d2debd79a672f55d77665.zip=becdd4593f09f42b191c3a9579569d6497869ad624fdb0275f7708508bfcadd7
-            mathlib=https://github.com/NVIDIA-RTX/MathLib/archive/refs/tags/v11.zip=4a0772103fd7ef832f8c2fb3ec7fb6bf5b3bebbd41ecafc476671d11eca28a06
+            mathlib=https://github.com/NVIDIA-RTX/MathLib/archive/294c8f2eb9f2c094ac69b690e16c1ad5f0676ff1.zip=025b511a79f27b950ca6bf7fb5fe286f9e22f55eeaf995e64d136b3392855c41
             dxc=https://github.com/microsoft/DirectXShaderCompiler/releases/download/v1.9.2609/dxc_2026_09_29.zip=ad31b1fc8443175d204f77a611fdb3ef2ec42759bdc2f1167368de24a4a7e7f1)
         string(REGEX MATCH "^([a-z]+)=(.+)=([0-9a-f]+)$" _ ${arc_url_hash})
         set(name ${CMAKE_MATCH_1})
@@ -134,8 +134,16 @@ if(WRALLY_NRD)
         endif()
         if(NOT EXISTS ${path} OR NOT have STREQUAL hash)
             message(STATUS "NRD: fetching ${url}")
-            file(DOWNLOAD ${url} ${path} EXPECTED_HASH SHA256=${hash} STATUS st)
+            # The hash is checked here, not by EXPECTED_HASH: a mismatch there is a configure ERROR whatever STATUS says.
+            file(DOWNLOAD ${url} ${path} STATUS st)
             list(GET st 0 code)
+            if(code EQUAL 0)
+                file(SHA256 ${path} have)
+                if(NOT have STREQUAL hash)
+                    set(st "SHA-256 ${have}, pinned ${hash}")
+                    set(code 1)
+                endif()
+            endif()
             if(NOT code EQUAL 0)
                 message(WARNING "NRD: ${name} not fetched (${st}) - no NRD in this build")
                 file(REMOVE ${path})
