@@ -648,6 +648,9 @@ public:
         uint64_t mesh = 0;
         float    xform[16] = { 1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1 };   // row-vector, like the draws
         uint32_t material = 0xFFFFFFFFu;     // for meshes whose alphaMat is ~0
+        // A model placement's (kRtOwnerModel | its index), 0 for anything else: the rays FROM that placement's own
+        // leaves pass through its alpha-tested geometry (rt_common.hlsli OccludedT), as a card plant's skip its cards.
+        uint32_t owner = 0;
         bool     forceOpaque = false;        // a dynamic mesh drawn with an opaque material
         // It went further than kRtMovedMin (scene.cpp) since last frame: a ray
         // that hits it sees an occluder that was elsewhere, so the denoiser
@@ -692,6 +695,9 @@ public:
     void SetReflectionTlas(D3D12_GPU_VIRTUAL_ADDRESS tlas) { m_reflTlas = tlas; }
     // TLAS instance masks: every instance has kRtMaskAll's bits; the reflection focus's also kRtMaskFocus.
     static constexpr uint32_t kRtMaskAll = 0x01, kRtMaskFocus = 0x02;
+    // RtInstanceDesc::owner of a model placement, and the prepass's id of its leaves (scene.hlsl, rt_common.hlsli):
+    // this bit, then the placement's index - apart from a card plant's (+ 1, under 2^24).
+    static constexpr uint32_t kRtOwnerModel = 0x80000000u;
 
     // ---- instanced models (NGGD / NGGE, ngg_format.h; NGG design §2.6) ----------
     //
@@ -821,6 +827,9 @@ private:
         // m_dynMeshes. The draw loop binds whichever pair this names, and static
         // content stays exactly as fast as it was.
         uint32_t meshId = 0;
+        // A model's draw: its ModelDef::crown, for the shader (root constants 32..39, gPrevObjectXform's rows 0-1 -
+        // free in a model's draw, which never moves). All 0 for every other draw.
+        float    crown[8] = {};
         int32_t  baseVertex = 0;      // dynamic meshes index from their own base
         bool     removed = false;     // tombstone; see RemoveInstance
         bool     probeFocus = false;  // the reflection focus's: reflects the cube probe (SetReflectionFocus)
@@ -952,6 +961,10 @@ private:
         // model's (bmax[1]) - the shader's per-placement constants, times the vertical scale (CullModels' emit).
         bool  wind = false;
         float windBend = 0.0f, height = 0.0f;
+        // THE CROWN: the box of LOD0's alpha-tested (foliage) vertices, model space, as an ellipsoid - centre xyz and
+        // a flag 1, then the half extents (DrawItem::crown, the shader's ModelCrown). The volume a model's own leaves
+        // shade themselves by in place of its ray-traced LOD, which their rays skip (kRtOwnerModel). 0: no foliage.
+        float crown[8] = {};
     };
     struct PlacementRt
     {
@@ -963,6 +976,8 @@ private:
     };
     // The per-instance record of the instance stream (slot 1, PER_INSTANCE_DATA): VSIn's INST0..3. `pad`: a wind
     // model's windBend and height, both times the vertical scale, as halves (f16 bend | f16 height << 16); else 0.
+    // `flags`: kInstBillboard, kInstModel, kInstWind in its low byte, the placement's index above (<< 8) - the id its
+    // leaves write in the prepass for the ray tracer (kRtOwnerModel).
     struct InstanceRec { float c[3][4]; uint32_t tint; float fade; uint32_t flags; uint32_t pad; };
     // One view's culled batches: per (model, LOD, solid or crossfading) a run of the stream.
     struct ModelBatch

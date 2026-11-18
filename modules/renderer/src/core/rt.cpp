@@ -1009,7 +1009,7 @@ bool Rt::UpdateInstances(Device& dev, const std::vector<Scene::RtInstanceDesc>& 
     if (FAILED(dev.device.As(&dev5))) return false;
 
     std::vector<D3D12_RAYTRACING_INSTANCE_DESC> descs;
-    struct InstInfo { uint32_t triBase, vertexBase, vb, material, moved; float was[12]; };
+    struct InstInfo { uint32_t triBase, vertexBase, vb, material, moved; float was[12]; uint32_t owner; };
     std::vector<InstInfo> info;
     for (const Scene::RtInstanceDesc& d : instances)
     {
@@ -1034,6 +1034,7 @@ bool Rt::UpdateInstances(Device& dev, const std::vector<Scene::RtInstanceDesc>& 
             for (int c = 0; c < 3; ++c) in.was[r * 3 + c] = d.prevXform[r * 4 + c];
         if (appeared)
             for (int c = 0; c < 3; ++c) in.was[9 + c] += kRtAppearedFrom;
+        in.owner = d.owner;
         info.push_back(in);
     }
     m_appearedFlagged = !m_appeared.empty();

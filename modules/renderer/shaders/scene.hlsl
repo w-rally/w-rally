@@ -524,7 +524,11 @@ struct VSOut { float4 pos : SV_Position; float3 nrm : NORMAL; float2 uv0 : TEXCO
               nointerpolation float3 tint : TEXCOORD8;
               // 1: an instanced model's vertex the wind bent (kInstWind) - it moves although its object does not, so
               // the prepass writes its motion (NggMotion).
-              nointerpolation uint swayed : TEXCOORD9; };
+              nointerpolation uint swayed : TEXCOORD9;
+              // A model's leaf (ModelCrown): where it is in the placed crown, |q| = 1 its surface, at rest (the wind
+              // does not move the shading); and the crown's world half extents and mean radius, metres (w 0: none).
+              float3 crownQ : TEXCOORD10;
+              nointerpolation float4 crownR : TEXCOORD11; };
 
 // The motion target's value (PSPrepass; the debug view "MOTION" shows the same): for a moving object (gObjectMoved) or
 // a vertex the wind bent (swayed), where the point was last frame on screen minus where it is now, last frame's depth,
@@ -598,6 +602,23 @@ static const float kFoliageDensity = 0.33;     // per metre
 static const float kFoliageDensityCap = 1.0;   // per plant radius
 static const float kFoliageInnerAo = 0.7;    // the ambient a plant's centre keeps
 static const float kFoliageGroundShade = 0.75;   // of the sunlit-ground bounce a shaded plant loses
+// A MODEL's crown (scene.h ModelDef::crown): its draw's root constants 32..39, where a moving object's last transform
+// goes - a model never moves (scene.cpp's draw). Row 0: the centre (model space) and 1 where there is one; row 1: the
+// half extents. As an ellipsoid round LOD0's foliage it is the volume a model's leaves shade themselves by: their rays
+// pass through the model's own ray-traced LOD (rt_common.hlsli kRtOwnerModel), which is a shell round them all.
+float4 ModelCrownCentre() { return gPrevObjectXform[0]; }
+float3 ModelCrownRadii()  { return gPrevObjectXform[1].xyz; }
+// FoliageSelfShadow for that ellipsoid: q in its unit space, R3 its world half extents, R their mean (metres). The
+// sunlight's path to the point through the crown in METRES - a step s along L moves q by s L / R3 - at the cards'
+// density per metre (the same cap: per mean radius).
+float ModelSelfShadow(float3 q, float3 L, float3 R3, float R)
+{
+    const float3 u = L / R3;
+    const float a = dot(u, u), b = dot(q, u), c = dot(q, q) - 1.0;
+    const float d = b * b - a * c;
+    const float s = d > 0.0 ? max(0.0, (-b + sqrt(d)) / a) : 0.0;
+    return exp(-min(kFoliageDensity, kFoliageDensityCap / R) * s);
+}
 float FoliageSelfShadow(float3 q, float3 L, float radius)
 {
     const float b = dot(q, L);
@@ -617,6 +638,8 @@ VSOut VSMain(VSIn i)
     float3 pos = i.pos, nrm = i.nrm;
     float3 prevPos = pos;              // where it was last frame: a swaying model's moves (the motion target)
     const bool model = (i.ix.z & 2u) != 0u;
+    o.crownQ = float3(0.0, 0.0, 0.0);
+    o.crownR = float4(0.0, 0.0, 0.0, 0.0);
     // THE WIND (wind.hlsli): a model that carries it (kInstWind), in a wind at all - in calm air nothing is computed,
     // so the frame is the one without wind exactly.
     const bool windy = model && (i.ix.z & 4u) != 0u && gWind.z > 0.0;
@@ -637,6 +660,19 @@ VSOut VSMain(VSIn i)
             pos = t + v;
             // Facing the viewer, leaning up: a canopy seen from afar is lit from above more than from the side.
             nrm = normalize(f + float3(0.0, 0.6, 0.0));
+            // The crown (ModelCrown): the quad stands through its middle, but it shows the leaves on the side it
+            // faces - so its point moves out to the crown's surface towards the viewer.
+            const float4 cc = ModelCrownCentre();
+            if (cc.w > 0.5)
+            {
+                const float3 rr = ModelCrownRadii();
+                const float rxz = 0.5 * (rr.x + rr.z);
+                const float3 R3 = float3(rxz * sh, rr.y * sv, rxz * sh);
+                float3 q = (v - float3(0.0, cc.y * sv, 0.0)) / R3;
+                q += f * sqrt(saturate(1.0 - dot(q, q)));
+                o.crownQ = q;
+                o.crownR = float4(R3, (2.0 * R3.x + R3.y) / 3.0);
+            }
         }
         else
         {
@@ -646,6 +682,19 @@ VSOut VSMain(VSIn i)
             const float3 a = i.ic0.xyz, b = i.ic1.xyz, c = i.ic2.xyz;
             const float3 n = float3(dot(cross(b, c), i.nrm), dot(cross(c, a), i.nrm), dot(cross(a, b), i.nrm));
             nrm = dot(n, n) > 1e-20 ? normalize(n) : float3(0.0, 1.0, 0.0);
+            // The crown (ModelCrown), placed: its centre through A, its extents scaled (the yaw turns x into z, so the
+            // two are taken as one - a crown is round enough about its axis), the vertex at rest.
+            const float4 cc = ModelCrownCentre();
+            if (cc.w > 0.5)
+            {
+                const float3 rr = ModelCrownRadii();
+                const float sxz = length(float3(i.ic0.x, i.ic1.x, i.ic2.x));
+                const float rxz = 0.5 * (rr.x + rr.z);
+                const float3 R3 = float3(rxz * sxz, rr.y * sv, rxz * sxz);
+                const float3 cw = float3(dot(a, cc.xyz), dot(b, cc.xyz), dot(c, cc.xyz));
+                o.crownQ = (v - cw) / R3;
+                o.crownR = float4(R3, (2.0 * R3.x + R3.y) / 3.0);
+            }
         }
         prevPos = pos;
         if (windy)
@@ -700,6 +749,9 @@ VSOut VSMain(VSIn i)
     const float packed = max(i.uv1.y, 0.0);
     o.plantShadow = o.plant != 0u ? floor(packed / kPlantShadowPack) : 0.0;
     o.plantSize = o.plant != 0u ? packed - o.plantShadow * kPlantShadowPack : 0.0;
+    // A model's leaf with a crown: its placement, for the rays (rt_common.hlsli kRtOwnerModel; the stream's flags carry
+    // the index above their low byte, Scene::InstanceRec). Its size and shadow stay 0 - those are a card plant's.
+    if (model && o.crownR.w > 0.0) o.plant = 0x80000000u | (i.ix.z >> 8);
     o.col = i.col;
     return o;
 }
@@ -825,8 +877,18 @@ PrepassOut PSPrepass(VSOut i, bool frontFace : SV_IsFrontFace)
     // nearly in the card's own plane, where a ray-origin offset along it would
     // leave the ray on the card. The rays want the card's plane, towards the
     // camera, and w = 0.5 tells them the pixel is a plant's (rt.cpp SurfaceAt).
-    // A model's leaves are real geometry: their own normal for the rays, and they shadow each other (no card skip).
-    if ((gMatFlags & NGG_DRAW_MODEL) != 0u) {}
+    // A model's leaves are real geometry: their own normal for the rays. But they do not shadow each other: the
+    // model's ray-traced LOD is a shell round them all (or its leaves), and a leaf inside it is behind it from every
+    // side - the sunlit face of a dense bush came out black. So its rays skip their own placement (w = 0.5 and the
+    // id: rt_common.hlsli kRtOwnerModel), and the crown's volume shades it instead (ModelSelfShadow).
+    if ((gMatFlags & NGG_DRAW_MODEL) != 0u)
+    {
+        if (i.plant != 0u)
+        {
+            o.normal.w = 0.5;
+            o.plant = i.plant;
+        }
+    }
     else if (VolumeNormal(i.nrm))
     {
         float3 G = cross(ddy(i.wpos), ddx(i.wpos));
@@ -1105,6 +1167,13 @@ float4 Shade(VSOut i, bool frontFace, out GBufOut g)
         const float inner = lerp(1.0, kFoliageInnerAo,
                                  min(kFoliageDensity * i.plantSize, kFoliageDensityCap) / kFoliageDensityCap);
         matAo *= lerp(inner, 1.0, saturate(length(i.nrm) / kVolumeScale));
+    }
+    // A model's leaf, the same from its crown (its AO rays skip its own placement, rt_common.hlsli kRtOwnerModel).
+    else if (gAoReady > 0.5 && gAoOn > 0.5 && i.crownR.w > 0.0)
+    {
+        const float inner = lerp(1.0, kFoliageInnerAo,
+                                 min(kFoliageDensity * i.crownR.w, kFoliageDensityCap) / kFoliageDensityCap);
+        matAo *= lerp(inner, 1.0, saturate(length(i.crownQ)));
     }
 #endif
     float3 emissive  = gEmissive.Sample(gSamp, i.uv0).rgb * gPbrB.x;
@@ -1443,6 +1512,9 @@ float4 Shade(VSOut i, bool frontFace, out GBufOut g)
         ambient -= groundSun * (1.0 - vis) * kFoliageGroundShade;
         if (VolumeNormal(i.nrm) && gShadowParams.x > 0.5 && gShadowSource > 0.5 && gRtReady > 0.5)
             vis *= FoliageSelfShadow(i.nrm / kVolumeScale, gSunTowards, i.plantSize);
+        // A model's leaf: its rays skipped its own placement as well (kRtOwnerModel), and its crown stands in.
+        else if (i.crownR.w > 0.0 && gShadowParams.x > 0.5 && gShadowSource > 0.5 && gRtReady > 0.5)
+            vis *= ModelSelfShadow(i.crownQ, gSunTowards, i.crownR.xyz, i.crownR.w);
         gProbeNdl = ndl; gProbeAmbient = ambient; gProbeVis = vis;
         // No specular lobe on foliage. A leaf card is not a surface with a
         // meaningful microfacet normal - the card normal is a shading fiction

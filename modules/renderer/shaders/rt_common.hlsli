@@ -17,7 +17,8 @@ ByteAddressBuffer               gDynVerts     : register(t7);
 // was0..was3 then its LAST frame's object-to-world rows (row vectors), so a
 // ray's hit point can be put where it was.
 struct Inst { uint triBase; uint vertexBase; uint vb; uint material; uint moved;
-              float3 was0; float3 was1; float3 was2; float3 was3; };
+              float3 was0; float3 was1; float3 was2; float3 was3;
+              uint owner; };   // a model placement's (kRtOwnerModel | index, scene.h), else 0
 StructuredBuffer<Inst>          gInst         : register(t8);
 // Foliage: the plant each alpha triangle belongs to (~0 = none), and the
 // prepass's per-pixel plant (+ 1, 0 = none) - scene.cpp FindPlants.
@@ -147,6 +148,12 @@ void Basis(float3 d, out float3 T, out float3 B)
 // How far from a legacy card its rays ignore other cards, metres: past a grass tuft (~0.5 m) and the near cards of a
 // tree, short of the canopy over the grass.
 static const float kLegacyCardSkip = 1.5;
+// FROM A MODEL's leaves (`fromPlant` = kRtOwnerModel | the placement, scene.h): its own alpha-tested geometry does not
+// count either. Its ray-traced LOD is a shell round the whole crown (the generator's _RT) or its leaves, and every
+// leaf drawn is inside it, so its rays all left through it - the sunlit side of a dense bush came out black. The
+// crown's volume stands in for it in the pixel shader (ModelSelfShadow), as a card plant's does; other plants, the
+// model's own opaque trunk and everything else still shadow it.
+static const uint kRtOwnerModel = 0x80000000u;
 // `hitT`: how far along the ray the hit is (metres), for NRD's penumbra and hit distance. ACCEPT_FIRST_HIT: the first
 // occluder found, not always the nearest - the same ray as the default path's, at the same cost.
 bool OccludedT(RayDesc ray, bool count, uint fromPlant, out float2 mover, out float hitT)
@@ -169,6 +176,11 @@ bool OccludedT(RayDesc ray, bool count, uint fromPlant, out float2 mover, out fl
         // separate BLASes sharing one index buffer and one material table.
         const Inst  inst = gInst[q.CandidateInstanceID()];
         const uint  tri  = inst.triBase + q.CandidatePrimitiveIndex();
+        if (fromPlant != 0xFFFFFFFFu && (fromPlant & kRtOwnerModel) != 0u && inst.owner == fromPlant)
+        {
+            if (count) InterlockedAdd(gCounters[3], 1);
+            continue;
+        }
         if (fromPlant != 0u && gTriPlant[tri] + 1u == fromPlant)
         {
             if (count) InterlockedAdd(gCounters[3], 1);

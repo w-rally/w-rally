@@ -433,6 +433,26 @@ touch), pieces wider than 50 m (`kPlantMaxWidth`) left out.
   counts the drawn LODs: the distance pick, the crossfade's next LOD and a cell's `reach` stop there (with the shell
   in place, `lods.back()` had made every reach 0 and faded the billboard into the shell). The editor table is
   unchanged (version 2).
+- **A model's own ray-traced LOD does not shadow its own leaves** (2026-11-18). The shell is a closed hull round the
+  whole crown, so every leaf drawn - and the billboard, a quad through the middle - is inside it: traced from a leaf,
+  the sun's ray left through the shell's sunward wall and the sky's rays through all of it. On Cote d'Arbroz the
+  sunlit side of the bushes came out black (Wallaby's bramble shell lets 2% of the light through; the grey alder's
+  13%), and every tree's inside was darkened by the same rule, less. So a model's rays skip their own placement, as a
+  card plant's skip its own cards: the prepass writes `kRtOwnerModel | placement` (`scene.h`; bit 31, apart from a card
+  plant's id + 1) as the leaf pixel's plant id with normal w = 0.5, the instance stream's `flags` carry the placement
+  above their low byte, and each TLAS instance of the placement its `owner` (`InstInfo`) - `OccludedT` passes over
+  an alpha-tested candidate whose owner is the ray's. Its opaque trunk, other plants and everything else still shadow
+  it, and the shell still shadows the ground and its neighbours. In its place the CROWN shades it: the box of LOD0's
+  alpha-tested vertices as an ellipsoid (`ModelDef::crown`, at load), sent with the model's draws where a moving
+  object's last transform goes (root constants 32..39 - a model never moves), and `ModelSelfShadow` - the cards'
+  `FoliageSelfShadow` for an ellipsoid, in metres, at their density - for the sun, and their inner-AO darkening for
+  the sky. A billboard takes the crown's surface towards the viewer, the leaves it shows. Only a model with foliage
+  has a crown; one without (an editor-added prop) keeps its own shadows as before. Ray tracing off, nothing changed
+  (the cascades' foliage bias already removed most of it). `instancing-41` checks it: one placeholder tree from its
+  sun's side, the ray-traced sun visibility over it 0.96 (with the old rule, compiled the same way: 0.46).
+  Measured with Wallaby's plants on stage 41 (sun side, LOD0, the visible luma): bramble 0.24 -> 0.63, grey alder
+  0.08 -> 0.34, privet 0.39 -> 0.56; the plants without a shell (dock, fern, rose: LOD0 traced) barely move. Their
+  baked cluster cards had been brightened to make up for the shell's darkness; Wallaby re-tuned them against this.
 
 **Measured on stage 41** (dev iGPU, RBR's run replayed in lock-step, TAA and vsync off, GPU frame), with
 `ngg-check --trees` placing a code-generated conifer (LOD0 142 tris to 50 m, LOD1 40 to 150 m, billboard to 900 m)

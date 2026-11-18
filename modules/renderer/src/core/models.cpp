@@ -236,7 +236,7 @@ bool Scene::LoadModels(ID3D12Device* dev, const uint8_t* models, size_t modelByt
     (void)fileMaterials;
 
     // Meshes: a submesh each, held (refs) so Compact keeps them.
-    size_t tris = 0, lodTotal = 0, subTotal = 0, rayOnlyLods = 0, windModels = 0;
+    size_t tris = 0, lodTotal = 0, subTotal = 0, rayOnlyLods = 0, windModels = 0, crowns = 0;
     m_models.resize(h.modelCount);
     for (uint32_t i = 0; i < h.modelCount; ++i)
     {
@@ -255,6 +255,7 @@ bool Scene::LoadModels(ID3D12Device* dev, const uint8_t* models, size_t modelByt
         m.drawLods = r.lodCount;
         if (lods[r.firstLod + r.lodCount - 1].flags & kModelLodRayOnly) m.drawLods = r.lodCount - 1;
         rayOnlyLods += r.lodCount - m.drawLods;
+        float cmin[3] = { 1e30f, 1e30f, 1e30f }, cmax[3] = { -1e30f, -1e30f, -1e30f };
         for (uint32_t l = 0; l < r.lodCount; ++l)
         {
             const ModelLod& L = lods[r.firstLod + l];
@@ -271,11 +272,29 @@ bool Scene::LoadModels(ID3D12Device* dev, const uint8_t* models, size_t modelByt
                 ms.material = matBase + s.material;
                 ms.fadeMaterial = twin[s.material];
                 ms.alpha = (m_materials[ms.material].flags & kMaterialAlphaTest) != 0;
+                // The crown: LOD0's foliage, the leaves as drawn closest (the billboard and the ray-only LOD are not it).
+                if (l == 0 && ms.alpha && !lr.billboard && !(L.flags & kModelLodRayOnly))
+                    for (uint32_t v = 0; v < s.vertexCount; ++v)
+                        for (int c = 0; c < 3; ++c)
+                        {
+                            cmin[c] = (std::min)(cmin[c], vtx[s.firstVertex + v].pos[c]);
+                            cmax[c] = (std::max)(cmax[c], vtx[s.firstVertex + v].pos[c]);
+                        }
                 lr.subs.push_back(ms);
                 tris += s.indexCount / 3;
                 ++subTotal;
             }
             ++lodTotal;
+        }
+        if (cmax[0] > cmin[0] && cmax[1] > cmin[1] && cmax[2] > cmin[2])
+        {
+            for (int c = 0; c < 3; ++c)
+            {
+                m.crown[c] = 0.5f * (cmin[c] + cmax[c]);
+                m.crown[4 + c] = (std::max)(0.5f * (cmax[c] - cmin[c]), 0.02f);
+            }
+            m.crown[3] = 1.0f;
+            ++crowns;
         }
     }
 
@@ -320,9 +339,10 @@ bool Scene::LoadModels(ID3D12Device* dev, const uint8_t* models, size_t modelByt
     m_modelCellsDirty = true;
     RebuildModelCells();
     Log("scene: models - %u model(s): %zu LODs (%zu ray tracing only), %zu submeshes, %zu triangles, %u material(s) "
-        "(+%zu twins); %zu placement(s) (%zu in other variants), %zu replace a plant; LOD scale %.2f; %zu with wind",
+        "(+%zu twins); %zu placement(s) (%zu in other variants), %zu replace a plant; LOD scale %.2f; %zu with wind, "
+        "%zu with a crown",
         h.modelCount, lodTotal, rayOnlyLods, subTotal, tris, h.materialCount, m_materials.size() - matBase - h.materialCount,
-        m_placements.size(), otherVariant, replacedPlants.size(), m_modelLodScale, windModels);
+        m_placements.size(), otherVariant, replacedPlants.size(), m_modelLodScale, windModels, crowns);
     return true;
 }
 
@@ -578,7 +598,8 @@ void Scene::CullModels(ID3D12Device* dev, const float planes[6][4], const float 
         memcpy(r.c, p.cols, sizeof(r.c));
         r.tint = p.d.tint;
         r.fade = fade;
-        r.flags = kInstModel | (m.lods[lod].billboard ? kInstBillboard : 0u) | (m.wind ? kInstWind : 0u);
+        r.flags = kInstModel | (m.lods[lod].billboard ? kInstBillboard : 0u) | (m.wind ? kInstWind : 0u)
+                | ((uint32_t)(&p - m_placements.data()) << 8);
         r.pad = m.wind ? Half(m.windBend * p.d.scaleY) | Half(m.height * p.d.scaleY) << 16 : 0u;
         m_cullScratch.emplace_back(key, r);
         ++counts[key];
@@ -676,6 +697,7 @@ void Scene::ModelDrawItems(const std::vector<ModelBatch>& batches, std::vector<D
             o.indexCount = dm.indexCount;
             o.meshId = s.mesh;
             o.baseVertex = (int32_t)dm.firstVertex;
+            if (s.alpha) memcpy(o.crown, m.crown, sizeof(o.crown));
             for (int k = 0; k < 3; ++k) o.bmin[k] = o.bmin0[k] = -1e30f, o.bmax[k] = o.bmax0[k] = 1e30f;
             m_modelDrawItems.push_back(o);
             DrawOrder d;

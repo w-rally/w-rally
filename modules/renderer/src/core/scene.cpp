@@ -666,6 +666,8 @@ void Scene::DescribeModelsRt(std::vector<uint64_t>& meshes, std::vector<RtInstan
             if (p.removed) continue;
             const ModelDef& m = m_models[p.d.model];
             RtInstanceDesc d;
+            // Its leaves' rays pass through it (OccludedT) where the crown stands in for it (the shader's ModelCrown).
+            if (m.crown[3] > 0.5f) d.owner = kRtOwnerModel | (uint32_t)(&p - m_placements.data());
             for (int r = 0; r < 3; ++r)          // row vectors: the transpose of the stream's rows, t in row 3
                 for (int c = 0; c < 3; ++c) d.xform[r * 4 + c] = p.cols[c][r];
             for (int c = 0; c < 3; ++c) d.xform[12 + c] = p.cols[c][3];
@@ -5531,6 +5533,8 @@ void Scene::RecordPass(ID3D12GraphicsCommandList* list, D3D12_CPU_DESCRIPTOR_HAN
                                         o.probeFocus && cb.reflProbeOn > 0.5f ? (refl ? 2u : 1u) : 0u };
         list->SetGraphicsRoot32BitConstants(4, 4, objConsts, 0);
         if (moved) list->SetGraphicsRoot32BitConstants(4, 16, o.prevXform, 32);
+        // A model's crown (DrawItem::crown) where a moving object's last transform goes: a model never moves.
+        else if (o.matFlags & kDrawModel) list->SetGraphicsRoot32BitConstants(4, 8, o.crown, 32);
         {
             const MaterialSlot& m = m_materials[o.materialId];
             const float pbr[12] = {

@@ -633,6 +633,60 @@ struct WindSession {
     }
 };
 
+// --trees --rt-lod ray: a tree's OWN shell does not shadow its own leaves. The shell is a closed hull round the whole
+// crown, so every leaf drawn is inside it: traced from a leaf, the sun's ray left through the shell's sunward wall, and
+// the sunlit side of a dense plant came out black (a bush that lets 2% of the light through: all of it). A model's rays
+// skip their own placement now (rt_common.hlsli kRtOwnerModel) and its crown's volume shades it (scene.hlsl
+// ModelSelfShadow). One tree, alone, looked at from the sun's side with the sun ray traced: the ray tracer's sun
+// visibility (debug view 11) over the tree's pixels - those where the frame differs from the frame without it.
+std::string SelfShadowTrees(Gpu& gpu, const std::vector<uint8_t>& out, const ngg::SceneData& s, const std::string& dir)
+{
+    using namespace wrally::iface;
+    if (!gpu.error.empty()) return "";
+    size_t pick = 0;
+    for (size_t k = 1; k < s.placements.size(); ++k)
+        if (std::fabs(s.placements[k].scaleY - 1.0f) < std::fabs(s.placements[pick].scaleY - 1.0f)) pick = k;
+    const ngg::Placement& p0 = s.placements[pick];
+    const float sy = p0.scaleY;
+    WindSession w(gpu, dir);
+    if (std::string e = w.Open(out); !e.empty()) return e;
+    RenderSettings set{};
+    set.vsync = 0, set.quality = 1, set.taa = 0, set.shadows = 1, set.autoExposure = 0, set.renderScale = 1, set.rayTracing = 1;
+    gpu.renderer.ApplySettings(set);
+    w.KeepOnly(p0.position);
+    // From the sun's side, level with the middle of the tree, inside LOD0 (50 m at scale 1).
+    const float* sd = w.weather.sunDirection;
+    float hx = -sd[0], hz = -sd[2];
+    const float hl = std::sqrt(hx * hx + hz * hz);
+    if (hl < 1e-3f) hx = 1.0f, hz = 0.0f; else hx /= hl, hz /= hl;
+    const float at[3] = {p0.position[0], p0.position[1] + 5.0f * sy, p0.position[2]};
+    const float eye[3] = {at[0] + hx * 25.0f * sy, at[1], at[2] + hz * 25.0f * sy};
+    Image with, without, vis;
+    for (int k = 0; k < 6; ++k) w.Frame(eye, at, 0.6f, 0.0f, 0.0f, 11, nullptr);   // (the visibility's history settles)
+    if (std::string e = w.Frame(eye, at, 0.6f, 0.0f, 0.0f, 11, &vis); !e.empty()) return e;
+    if (std::string e = w.Frame(eye, at, 0.6f, 0.0f, 0.0f, 0, &with); !e.empty()) return e;
+    if (!gpu.renderer.Stats().rtActive) return "ray tracing is not active: the shell's own shadow is not checked";
+    w.RemoveAll();
+    w.Frame(eye, at, 0.6f, 0.0f, 0.0f, 0, nullptr);
+    if (std::string e = w.Frame(eye, at, 0.6f, 0.0f, 0.0f, 0, &without); !e.empty()) return e;
+    // Above the horizon only (the camera is level with the crown's middle): the upper crown has the sky behind it, where
+    // the tree's own shadow on the ground cannot count as the tree.
+    size_t n = 0;
+    double sum = 0.0;
+    for (int y = 0; y < with.h / 2 - 4; ++y)
+        for (int x = 0; x < with.w; ++x) {
+            const uint8_t *a = with.at(x, y), *b = without.at(x, y);
+            if (std::abs(int(a[0]) - b[0]) + std::abs(int(a[1]) - b[1]) + std::abs(int(a[2]) - b[2]) < 12) continue;
+            ++n, sum += vis.at(x, y)[1] / 255.0;
+        }
+    if (n < 500) return "the tree covers " + std::to_string(n) + " pixel(s) of the frame from its sunny side";
+    const double mean = sum / double(n);
+    std::printf("its own shell does not shadow it: the sun's visibility over the tree's %zu pixel(s), from its sunny side, "
+                "%.2f\n", n, mean);
+    if (mean < 0.6) return "a tree's own shell shadows its sunny side (visibility " + std::to_string(mean) + ")";
+    return "";
+}
+
 // Where a world point lands on the 320x240 frame (row; -1 behind).
 float ScreenY(const float eye[3], const float at[3], float fovY, const float p[3])
 {
@@ -867,6 +921,9 @@ int main(int argc, char** argv)
         }
         if (rayShell) {
             if (std::string e = RayOnlyTrees(gpu, bytes, s, out, rep, wind); !e.empty()) return Fail("with a ray-only LOD: " + e);
+            const std::filesystem::path dir = std::filesystem::temp_directory_path() / "ngg-check-shell";
+            std::filesystem::create_directories(dir);
+            if (std::string e = SelfShadowTrees(gpu, out, s, dir.string()); !e.empty()) return Fail("with a ray-only LOD: " + e);
         }
         if (wind) {
             // The same trees without the wind: what calm air must draw.

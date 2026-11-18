@@ -81,11 +81,12 @@ if(EXISTS "${WRALLY_TEST_NGG}")
     # WIND (--wind: kModelWind, the weights baked as Wallaby bakes them): in calm air they draw exactly the frames of the
     # same trees without it; in a wind two frames 0.1 s apart differ, and nothing else moves; the motion target has the
     # leaves' own motion; the cascades' shadows move on the ground (ray tracing off); a lone billboard's top leans and
-    # its base stays. The file is the next test's.
+    # its base stays. A tree's own shell does not shadow its leaves (its rays skip their own placement): seen from the
+    # sun's side, the ray-traced sun visibility over it is mostly lit. The file is the next test's.
     set(WRALLY_TEST_TREES ${CMAKE_BINARY_DIR}/tests-bin/track-41-trees.ngg)
     add_test(NAME instancing-41 COMMAND ngg-check --trees ${WRALLY_TEST_NGG} --rt-lod ray --wind --out ${WRALLY_TEST_TREES})
     set_tests_properties(instancing-41 PROPERTIES FIXTURES_SETUP trees-41 TIMEOUT 300 PASS_REGULAR_EXPRESSION
-        "placeholder trees: 3743 placement.*read back the same.*scene: models - 1 model\\(s\\): 4 LODs \\(1 ray tracing only\\), 7 submeshes, [0-9]+ triangles.*3743 placement\\(s\\) \\(0 in other variants\\), 3743 replace a plant.*scene: models replace 3743 plant\\(s\\): [1-9][0-9]* card triangle.*a version-1 NGGD.*loaded by the renderer.*drawn the same as without the shell.*never the shell.*the ray tracer's BLAS: the shell's [0-9]+ triangles.*calm: the trees with wind drawn as without it - 0 pixel.*wind 15 m/s: two frames 0.1 s apart differ in [1-9][0-9]* pixel.s. .calm: 0.; without the trees in 0.*the motion target: [1-9][0-9]* of [0-9]+ tree pixel.s. with motion of their own .calm: 0 not black.*the cascades: the sun's visibility changed on [1-9][0-9]* of .*calm: 0 pixel.*the billboard from 400 m.*ngg-check: all good")
+        "placeholder trees: 3743 placement.*read back the same.*scene: models - 1 model\\(s\\): 4 LODs \\(1 ray tracing only\\), 7 submeshes, [0-9]+ triangles.*3743 placement\\(s\\) \\(0 in other variants\\), 3743 replace a plant.*scene: models replace 3743 plant\\(s\\): [1-9][0-9]* card triangle.*a version-1 NGGD.*loaded by the renderer.*drawn the same as without the shell.*never the shell.*the ray tracer's BLAS: the shell's [0-9]+ triangles.*its own shell does not shadow it.*calm: the trees with wind drawn as without it - 0 pixel.*wind 15 m/s: two frames 0.1 s apart differ in [1-9][0-9]* pixel.s. .calm: 0.; without the trees in 0.*the motion target: [1-9][0-9]* of [0-9]+ tree pixel.s. with motion of their own .calm: 0 not black.*the cascades: the sun's visibility changed on [1-9][0-9]* of .*calm: 0 pixel.*the billboard from 400 m.*ngg-check: all good")
     # The editor table on stage 41, and its placements (version 2) on the file with trees.
     add_test(NAME editor-api-41 COMMAND editor-api-check ${WRALLY_BIN}/modules/renderer/WRenderer.dll ${WRALLY_TEST_NGG}
              ${WRALLY_TEST_TREES})
