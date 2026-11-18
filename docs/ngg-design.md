@@ -1145,7 +1145,8 @@ which is what a converging penumbra looks like, so it never converged.
    ones never mix (the road under a bumper is within 3 % of it). Loaded once per group into a 12x12 shared window.
 2. **Temporal**: reproject by the unjittered camera, or by the prepass motion for a moved object's pixel; accept
    only the same surface (3 % + half a pixel's slope) and the same identity.
-3. **Neighbourhood clamp**: the history may not leave this frame's mean +- (sigma + 0.5/sqrt(n)).
+3. **Neighbourhood clamp**: the history may not leave this frame's mean +- (sigma + 0.5/sqrt(n)); where a moved object
+   was involved (touched, or the distrust still fading) +- sigma alone.
 
 | weight | sun / lights | AO |
 |---|---|---|
@@ -1167,6 +1168,15 @@ which is what a converging penumbra looks like, so it never converged.
   is there any more, the object has gone, and what it uncovered starts over (golden replay, TV camera: copies of the
   car on the shaded road, blurred error 5.04 -> 2.40).
 - Ground uncovered this frame (last frame's pixel was a moved object's) counts as touched, allow 0.
+- **No margin where the history is distrusted** (2026-11-19): the road a driving car has just left lay in the shadow
+  under the car a frame before, and its history says so. `blendMoved` keeps a quarter of it, and the clamp's margin
+  (0.5/4 = 12 % with the 4x4 tile's weights) let that quarter through where every ray now says lit: a band ~3 % darker
+  one frame of travel behind the shadow under the bumper, in its shape - a pale copy of the car's outline behind it at
+  low speed (forest stage, low sun behind the car, 40 km/h, view 11; ours only, NRD's SIGMA clean; TAA and FSR not
+  involved). The math was unchanged since 11-10: the case was new, not a regression. Distrusted pixels are now clamped
+  to +- sigma: lit road darker than the reference by over 4 grey 7.7 % -> 0.0 % of it (NRD 0.0 % either way), fine
+  grain and frame-to-frame change unchanged; track 42's sun stretch bias -0.51 -> -0.28, golden 2.95 -> 2.37, the AO's
+  stretches unchanged (`check-car-ghost.sh`'s forest stretch, `ghost.py --lit`).
 - **A mesh whose BLAS just landed** (4.2: a car, a prop, a stage's world) is an occluder that was 10 km away last
   frame, for one frame: its hits allow nothing, so its shadow and AO are in at once, not faded in over "unoccluded"
   (Garage shots: the Fabia's contact shadow complete in its second frame, no trail). The RT path turning on again
@@ -1179,7 +1189,8 @@ which is what a converging penumbra looks like, so it never converged.
   from the last frame's. Without it a still camera kept the old view for its long still history (car side +1 frame
   39.1/61.8 -> 0.7/13.5, x1e-3).
 - `NGG_RT_NO_HISTORY=1`: no history and no wide pass - grainy but unbiased, the reference `tools/car-ghost`
-  (`check-car-ghost.sh`, `ghost.py`) measures ghosts against (fails a mean bias over 1 grey).
+  (`check-car-ghost.sh`, `ghost.py`) measures ghosts against (fails a mean bias over 1 grey; the forest stretch, for
+  both denoisers, over 2 % of the lit road 4 grey darker).
 
 **Pitfall:** the denoiser ping-pongs its histories, so `Rt::Filtered()` changes pointer every frame; a "ready" flag
 reset on a new resource turned RT shadows off silently. The flag now gates only the descriptor write.
