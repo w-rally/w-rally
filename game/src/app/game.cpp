@@ -908,6 +908,9 @@ StageEnd RunStage(Shell& sh, const Options& given, bool fromMenu, std::string& e
         in.chaseDistance = chaseDistance;
         simThread.Post(in);
         simThread.Latest(snap);
+        // The brake lamps by the pedal the steps were given: the keys' live, a replay's recorded (each frame, the
+        // lamps' glass and their light alike).
+        lampSwitch.brake = snap.brake || (lampsForced && std::strstr(lampsEnv, "brake"));
         // The co-driver's calls ahead of the car; held with the stage (a pause, the menu), the world's sound with them.
         {
             if (const std::string r = codriver.TakeReport(); !r.empty()) {
@@ -945,7 +948,7 @@ StageEnd RunStage(Shell& sh, const Options& given, bool fromMenu, std::string& e
         instances.clear();
         if (car.Ready()) {
             instances.push_back(carUpdate);
-            // The lamps' glass, lit or not, by the switches (last frame's: the brake pedal and the gear are read below).
+            // The lamps' glass, lit or not, by the switches (the gear's is last frame's, read below).
             const bool on = carLampsLoaded && !testLights_;
             bool lit[assets::kLampGroups] = {};
             lit[assets::kLampHead] = lit[assets::kLampTail] = on && lampSwitch.beam > 0;
@@ -1228,7 +1231,6 @@ StageEnd RunStage(Shell& sh, const Options& given, bool fromMenu, std::string& e
                     lampSwitch.beam = beam;
                 }
                 lampSwitch.smallLamps = sun < 6.0f;
-                lampSwitch.brake = in.brake || (lampsForced && std::strstr(lampsEnv, "brake"));
                 lampSwitch.reverse = snap.dash.gear < 0 || (lampsForced && std::strstr(lampsEnv, "reverse"));
                 lampSwitch.seconds += in.seconds;
                 assets::LampMounts mounts;

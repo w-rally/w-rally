@@ -1611,6 +1611,10 @@ Colour temperature → linear sRGB of luminance 1 (`KelvinToRgb`, Planckian locu
 - **Glass**: RBR's lamp meshes come in pairs (`e_light_lf` / `e_light_lf_lit`); the car draws the unlit or the lit twin
   by the switches, the lit one glowing flat in its lamp's colour at the lens's brightness (~1600 nits per unit: headlamp
   ~100,000 nits, brake ~10,000, tail ~200) - not its texture (RBR's CarLight shader used the tyre sheet).
+  A lit twin is lifted 1 mm off its surface along its normals (brake and reversing 2 mm, `LiftLit`): the brake and
+  reversing twins have no unlit twin and lie ON the tail lamp's glass (the i20's right one to the bit), and at one
+  depth they z-fought - a brake lamp blinking while braking, each side differently. The brake lamps follow the pedal the
+  steps were given (`Snapshot::brake`: the keys live, the recorded control in a replay; not the entry's hold).
 - **Lamps on loose parts** (`CarRender::Mounts`, `assets::LampMounts`): a part that comes off takes its lamps dark;
   one hanging on (a bonnet on its hinge) moves its beams with it.
 - **The lamp lab** (`W-Rally --lab`, `assets::BuildLampLab`): the car on a floor, a wall 10 m ahead of the ramp, white
@@ -2278,7 +2282,7 @@ glass, and VR behind `kRendererCapVr`.
 | 25 | **Delete the established lighting balance** | physical lighting is the default and `Scene::SetPhysicalLighting` has no caller. `sunDiffuse`, `skyAmbient`, `kSpecScale`, the albedo*E convention and the lerp ambient run only when there is no environment map | nothing |
 | 26 | **Weather v2** | v1 does fog, haze and cloud cover, and the wet road is done (§5.2). Open: cloud shapes (RBR's textures or volumetric, undecided), falling rain and snow, spray, drying, snow cover, fog and cloud in the multiple-scattering table, RT reflections for puddles and glass | user's choice on clouds |
 | 27 | **Stage lights (N4)** | a light chunk in the `.ngg` (`provenance=auto|authored`). Emissive-texture detection for the automatic part, Wallaby's light placement for the authored part | Wallaby light editor |
-| 28 | **Car lamps, the rest (N3)** | `car.yaml` lamp spec and a size-based default; tuning on the user's reference shots (N3c); bloom on lit glass; beams visible in dust, mist and rain; glare; retroreflectors. Replays switch brake and reverse lamps from live input only | references; weather/dust work for beams |
+| 28 | **Car lamps, the rest (N3)** | `car.yaml` lamp spec and a size-based default; tuning on the user's reference shots (N3c); bloom on lit glass; beams visible in dust, mist and rain; glare; retroreflectors. Replays light the brake lamps from the recorded pedal, the reversing lamps from the gear | references; weather/dust work for beams |
 | 29 | **A stage's own place** | every stage is lit as 50 N 14.4 E, north 0, because no stage metadata gives a latitude, longitude or north | `stage.yaml` / stage metadata |
 | 30 | **Light pick cost** | `rt_lights.hlsl` weighs every lamp of the cluster per pixel. The 6-lamp layout's rays take 3.9 ms | nothing |
 | 31 | **TAA under camera motion** | only moving objects get the speed-based history weight. Under a pan the static world keeps ~51 % of its detail. Judge at driving speed before changing it | an in-game look |

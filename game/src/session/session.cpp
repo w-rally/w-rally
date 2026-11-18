@@ -204,7 +204,12 @@ void Session::CheckPose()
 bool Session::ReplayStep()
 {
     while (m_replayAt < m_replay.events.size() && m_replay.events[m_replayAt].type != 'S') {
-        if (m_replay.events[m_replayAt].type == 'C') m_sim.ApplyWords(m_replay.events[m_replayAt].words);
+        if (m_replay.events[m_replayAt].type == 'C') {
+            m_sim.ApplyWords(m_replay.events[m_replayAt].words);
+            physics::Control c;
+            std::memcpy(&c, m_replay.events[m_replayAt].words, sizeof c);
+            m_brake = c.brake > 0.0f && !InEntry();
+        }
         ++m_replayAt;
     }
     if (m_replayAt == m_replay.events.size()) {
@@ -275,6 +280,7 @@ void Session::Advance(const FrameInput& in)
         ctl.steering = m_steering;
         ctl.flags = m_flags;
         m_flags = 0;
+        m_brake = ctl.brake > 0.0f && !InEntry();
         if (InEntry()) ctl.brake = ctl.handbrake = 1.0f;   // the entry: the car held
         uint32_t w[8];
         std::memcpy(w, &ctl, 32);
@@ -302,6 +308,7 @@ void Session::Snap(Snapshot& out) const
     std::memcpy(out.centerOfGravity, m_cog, sizeof m_cog);
     out.failed = m_failed;
     out.replayEnded = m_replayEnded;
+    out.brake = m_brake;
 }
 
 void Session::Finish()

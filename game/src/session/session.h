@@ -77,6 +77,8 @@ struct Snapshot {
     float centerOfGravity[3]{};
     bool failed = false;       // the physics faulted: the run is over (Error())
     bool replayEnded = false;  // a replay ran out of steps (the frame stays on its last)
+    bool brake = false;        // the brake pedal of the last step's control, live or recorded (the brake lamps); not
+                               // the entry's hold
 };
 
 class Session {
@@ -130,6 +132,7 @@ private:
     size_t m_replayAt = 0;
     uint32_t m_posesChecked = 0, m_posesDiffering = 0, m_firstDifference = 0;
     bool m_replayEnded = false;
+    bool m_brake = false;          // the last control's brake pedal, the entry's hold not counted (Snapshot::brake)
     bool m_failed = false;
     std::string m_error;
 };
