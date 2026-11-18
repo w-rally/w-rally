@@ -40,7 +40,8 @@
 // test lamps on the car (=ramp two main beams and a 4-pod ramp, =bars two main beams and two LED bars, =low the dipped
 // beams; =lamp a lamp behind it alone, =noshadow the ramp never occluded), PHYS_DRIVE_LAMPS=<0|1|2>[,noramp][,brake]
 // [,reverse][,left][,right][,hazard] the car's lamps switched so from the start (brake and reverse held: captures),
-// PHYS_DRIVE_CAMERA_AT=<tick>:<camera> that camera from that tick (a cut, captured).
+// PHYS_DRIVE_CAMERA_AT=<tick>:<camera> that camera from that tick (a cut, captured), PHYS_DRIVE_UPSCALE_AT=<tick>:<mode>
+// that upscaling mode from that tick (a switch mid-stage).
 
 #include <cstdint>
 #include <filesystem>

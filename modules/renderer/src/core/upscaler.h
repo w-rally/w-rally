@@ -5,7 +5,9 @@
 // PostFx's own TAA (PSTaa). The tonemap, the HUD and the UI stay at the output.
 //
 // Two backends: FSR 3.1 (fsr.cpp: AMD's signed ffx-api DLLs, any DX12 GPU)
-// and DLSS Super Resolution (dlss.cpp: NVIDIA's NGX, RTX GPUs only). What a
+// and DLSS (dlss.cpp: NVIDIA's NGX, RTX GPUs only) - Super Resolution, or Ray
+// Reconstruction, which denoises the lit colour too and so takes guides
+// (UpscaleGuides, rr_visibility.h). What a
 // backend needs is what PostFx already has, converted once to the common
 // convention below; each backend writes down its own conversions.
 //
@@ -33,6 +35,20 @@
 namespace ngg {
 namespace core {
 
+// DLSS Ray Reconstruction's guides (rr_guides.hlsl), render size, PIXEL|NON_PIXEL_SHADER_RESOURCE: linear diffuse
+// and specular albedo (RGBA), the world normal with linear roughness in w, the bias-current-colour mask (R8: our
+// moved-object mask and moving glass), and the camera - the client's view and CONVENTIONAL projection, row-vector
+// row-major as ours are.
+struct UpscaleGuides
+{
+    ID3D12Resource* diffuseAlbedo  = nullptr;
+    ID3D12Resource* specularAlbedo = nullptr;
+    ID3D12Resource* normalRoughness = nullptr;
+    ID3D12Resource* bias           = nullptr;
+    float view[16] = {};
+    float proj[16] = {};
+};
+
 struct UpscaleDispatch
 {
     ID3D12GraphicsCommandList* list = nullptr;
@@ -49,6 +65,7 @@ struct UpscaleDispatch
     float cameraNear = 0.1f, cameraFar = 10000.0f;
     float fovY = 1.0f;                    // radians
     bool  reset = false;                  // a cut: the history describes another image
+    const UpscaleGuides* guides = nullptr;   // Ray Reconstruction's; null for the others
 };
 
 class Upscaler
@@ -71,7 +88,8 @@ public:
 // The backends. Null when this one cannot run here (its DLL missing, an
 // unsupported adapter); logs why.
 Upscaler* CreateFsrUpscaler(ID3D12Device* device);
-Upscaler* CreateDlssUpscaler(ID3D12Device* device);
+// `rayReconstruction`: DLSS Ray Reconstruction instead of Super Resolution (its own NGX feature, nvngx_dlssd.dll).
+Upscaler* CreateDlssUpscaler(ID3D12Device* device, bool rayReconstruction = false);
 
 // The render size for an output size at a per-axis scale (1 native), even and
 // at least 64 px.

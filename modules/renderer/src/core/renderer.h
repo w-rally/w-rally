@@ -37,6 +37,8 @@
 #include "rt.h"
 #include "gtao.h"
 #include "visibility.h"
+#include "nrd_visibility.h"
+#include "rr_visibility.h"
 #include "upscaler.h"
 
 namespace ngg {
@@ -57,7 +59,13 @@ enum class Quality { Low = 0, Medium = 1, High = 2 };
 // TEMPORAL UPSCALING (upscaler.h): which upscaler replaces the TAA, and at what
 // render scale. None is our own TAA at the output size - the default, and the
 // frame exactly as it was. DLSS is the second backend (RTX only).
-enum class UpscalerKind { None = 0, Fsr = 1, Dlss = 2 };
+// DlssRr: DLSS Ray Reconstruction - denoises the lit colour as it upscales, so the ray tracing goes to the main pass
+// raw (RrVisibility) and our denoisers and TAA stand down.
+enum class UpscalerKind { None = 0, Fsr = 1, Dlss = 2, DlssRr = 3 };
+
+// WHAT DENOISES THE RAY-TRACED VISIBILITY (visibility.h): our own denoisers (RtVisibility, NGG design 4.5) or NVIDIA
+// NRD's SIGMA and REBLUR over the same traces (NrdVisibility).
+enum class Denoiser { Ours = 0, Nrd = 1 };
 
 struct QualityTier
 {
@@ -93,7 +101,10 @@ public:
     // Whether a backend can run on this adapter (probed once at Create: its DLL, the GPU, the driver) - what a
     // settings menu may offer. None is always available.
     bool UpscalerAvailable(UpscalerKind kind) const
-    { return kind == UpscalerKind::None || (kind == UpscalerKind::Fsr ? m_fsrAvailable : m_dlssAvailable); }
+    {
+        return kind == UpscalerKind::None || (kind == UpscalerKind::Fsr ? m_fsrAvailable
+                                              : kind == UpscalerKind::Dlss ? m_dlssAvailable : m_rrAvailable);
+    }
     float RenderScale() const           { return m_upKind == UpscalerKind::None ? 1.0f : m_renderScale; }
 
     bool Load(Device& dev, const wchar_t* path);
@@ -116,8 +127,18 @@ public:
     void SetAoRays(uint32_t n)              { m_aoRays = n ? n : 1; }
     // The AO a ray-traced frame takes: its own (Traced, the default) or XeGTAO's (ScreenSpace), the cheap mode. The
     // cascades always take XeGTAO's.
-    void SetAoSource(AoSource s)            { m_rtVis.SetAoSource(s); }
+    void SetAoSource(AoSource s)            { m_rtVis.SetAoSource(s); m_nrdVis.SetAoSource(s); m_rrVis.SetAoSource(s); }
     AoSource GetAoSource() const            { return m_rtVis.GetAoSource(); }
+    // What denoises the ray-traced visibility: ours (RtVisibility, the default) or NVIDIA NRD's (NrdVisibility, made
+    // the first time it is chosen). Where NRD cannot run, ours (logged). The cascades are not denoised.
+    void SetDenoiser(Device& dev, Denoiser d);
+    Denoiser GetDenoiser() const            { return m_denoiser; }
+    // Whether NRD may be offered: in this build, and the adapter ray traces.
+    bool DenoiserAvailable(Denoiser d) const { return d == Denoiser::Ours || (NrdVisibility::InBuild() && m_rt.Ready()); }
+    // This frame's: "ours", "NRD"; "" without ray tracing. And its GPU time, last frame's.
+    const char* DenoiserName() const;
+    double DenoiseMs() const;
+    void ReadDenoiserStats()                { m_nrdVis.ReadStats(); }    // after the GPU wait, as Rt::ReadStats
     // The screen-space AO's knobs (the tier sets the quality).
     Gtao& ScreenSpaceAo()                   { return m_gtao; }
     uint32_t AoRays() const                 { return m_aoRays; }
@@ -178,6 +199,11 @@ private:
     // The sources of the sun's visibility and the AO (visibility.h), one of them per frame.
     RtVisibility      m_rtVis{ m_rt, m_gtao };
     CascadeVisibility m_cascadeVis{ m_scene, m_gtao };
+    NrdVisibility     m_nrdVis{ m_rt, m_gtao };
+    RrVisibility      m_rrVis{ m_rt, m_gtao };        // the ray tracing raw, when DLSS RR resolves the frame
+    UpscaleGuides     m_rrGuides;
+    Denoiser          m_denoiser = Denoiser::Ours;
+    VisibilityProvider* m_lastSource = nullptr;    // last frame's: another one starts from no history
     Visibility        m_vis;                       // this frame's
     // Out-of-band work while the client's list is open: the BVH rebuild after
     // an edit. Rt::Build is synchronous on whatever context it is given; on the
@@ -190,7 +216,7 @@ private:
     UpscalerKind m_upKind = UpscalerKind::None;
     float m_renderScale = 1.0f;
     std::unique_ptr<Upscaler> m_upscaler;
-    bool m_fsrAvailable = false, m_dlssAvailable = false;
+    bool m_fsrAvailable = false, m_dlssAvailable = false, m_rrAvailable = false;
     bool  m_preferRt = true;
     bool  m_ao = true;
     uint32_t m_aoRays = 1;          // 5.0m: one ray, accumulated by the denoiser

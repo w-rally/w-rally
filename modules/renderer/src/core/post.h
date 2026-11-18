@@ -95,6 +95,8 @@ public:
     // not in debug views and not with TAA off, which then show the render-size
     // image stretched.
     void SetUpscaler(Upscaler* u)          { m_upscaler = u; m_historyValid = false; }
+    // DLSS Ray Reconstruction's guides for this frame's Resolve (null: none - RR then does not run).
+    void SetGuides(const UpscaleGuides* g)  { m_guides = g; }
     Upscaler* GetUpscaler() const          { return m_upscaler; }
     bool Upscaling() const                 { return m_upscaler && m_upReady; }
     // The camera, for the upscaler's depth: near and far planes, vertical
@@ -218,6 +220,7 @@ private:
     void Upscale(ID3D12GraphicsCommandList* list, ID3D12Resource* depth, ID3D12Resource* motion, ID3D12Resource* glassMotion,
                  const float* consts, D3D12_GPU_DESCRIPTOR_HANDLE taaGroup, bool autoExposure);
     Upscaler* m_upscaler = nullptr;
+    const UpscaleGuides* m_guides = nullptr;
     bool  m_upReady = false;
     int   m_upPhases = 8;
     float m_near = 0.25f, m_far = 8000.0f, m_fovY = 1.0f;

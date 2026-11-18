@@ -23,6 +23,7 @@ struct Settings {
     uint32_t quality = 1;               // 0 low, 1 medium, 2 high
     bool rayTracing = true, taa = true, shadows = true, vsync = true;
     uint32_t upscaling = 0;             // kUpscaleModes: 0 off (the renderer's TAA at the full size), 1.. FSR, 5.. DLSS
+    uint32_t denoiser = 0;              // iface::kDenoiser*: 0 the renderer's own, 1 NVIDIA NRD (PHYS_DRIVE_DENOISER over it)
 
     // Sound
     bool sound = true;
@@ -70,6 +71,8 @@ struct Settings {
 // The upscaling modes (Settings::upscaling, W-Rally.ini's `upscaling`; PHYS_DRIVE_UPSCALE=<index or name> over it):
 // the upscaler, and the render scale per axis it upscales from - FSR's own ratios (1.5x, 1.7x, 2x) and NVIDIA's for
 // DLSS (DLAA 1x, 1.5x, 1.72x, 2x). A DLSS mode where DLSS cannot run (no RTX GPU) is the renderer's TAA, logged.
+// The RR modes are DLSS Ray Reconstruction at the same ratios: it denoises the ray tracing itself (the DENOISER
+// setting then does not apply).
 struct UpscaleMode {
     const char* name;                   // as PHYS_DRIVE_UPSCALE takes it
     const char* label;                  // the Settings screen's
@@ -86,6 +89,10 @@ inline constexpr UpscaleMode kUpscaleModes[] = {
     {"dlss-quality", "NVIDIA DLSS QUALITY", 2, 1.0f / 1.5f},
     {"dlss-balanced", "NVIDIA DLSS BALANCED", 2, 0.58f},
     {"dlss-performance", "NVIDIA DLSS PERFORMANCE", 2, 0.5f},
+    {"rr-dlaa", "NVIDIA DLSS RR DLAA", 3, 1.0f},
+    {"rr-quality", "NVIDIA DLSS RR QUALITY", 3, 1.0f / 1.5f},
+    {"rr-balanced", "NVIDIA DLSS RR BALANCED", 3, 0.58f},
+    {"rr-performance", "NVIDIA DLSS RR PERFORMANCE", 3, 0.5f},
 };
 inline constexpr uint32_t kUpscaleModeCount = sizeof kUpscaleModes / sizeof kUpscaleModes[0];
 

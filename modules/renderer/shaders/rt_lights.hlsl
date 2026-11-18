@@ -19,6 +19,9 @@ void CSMain(uint3 tid : SV_DispatchThreadID)
     if (tid.x >= gSize.x || tid.y >= gSize.y) return;
     float3 p, N;
     uint plant;
+#ifdef NRD_INPUTS
+    gNrdOut[tid.xy] = kNrdFp16Max;     // unoccluded, unless the one ray below says otherwise
+#endif
     if (!SurfaceAt(tid.xy, p, N, plant)) { gOut[tid.xy] = 1.0; return; }
 
     const float viewZ = dot(p - gCamPos, gCamFwd);
@@ -162,7 +165,15 @@ void CSMain(uint3 tid : SV_DispatchThreadID)
     ray.TMin = 0.0;
     ray.TMax = max(len - 0.02, 0.0);    // short of the emitter itself
     float2 mover;
-    const bool hit = Occluded(ray, false, plant, mover);
+    float t;
+    const bool hit = OccludedT(ray, false, plant, mover, t);
     // The emitter's disc as seen from here: the penumbra per metre of the hit's distance.
     gOut[tid.xy] = EncodeRaw(hit ? 0.0 : 1.0, Allow(mover, 2.0 * lradius / max(len, 1e-3)));
+#ifdef NRD_INPUTS
+    // SIGMA's IN_PENUMBRA, the local light's (NRD.hlsli SIGMA_FrontEnd_PackPenumbra): the radius of the penumbra the
+    // emitter's disc (diameter 2 r) casts at an occluder t from here and len - t from the lamp. The lamp is the one this
+    // pixel picked, so neighbours' penumbrae may be other lamps' - the ratio estimator's 0/1 as the default denoiser
+    // takes it.
+    if (hit) gNrdOut[tid.xy] = min(lradius * t / max(len - t, 1e-6), kNrdPenumbraMax);
+#endif
 }

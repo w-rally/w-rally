@@ -14,8 +14,10 @@
 //   CascadeVisibility  the cascaded shadow maps (Scene::RenderShadows), which
 //                      the main pass samples, and Gtao's AO.
 //
-// A third (NRD's SIGMA/REBLUR over the RT output, DLSS Ray Reconstruction)
-// takes the same frame and fills the same outputs.
+//   NrdVisibility      (nrd_visibility.h) the ray tracer's traces, undenoised, through
+//                      NVIDIA NRD's SIGMA and REBLUR instead of our denoiser.
+// DLSS Ray Reconstruction would be a fourth: it denoises lit colour, not
+// visibility, so it is not a drop-in provider.
 // ---------------------------------------------------------------------------
 #pragma once
 
@@ -79,6 +81,9 @@ public:
     // A camera's cut: whatever history the source keeps.
     virtual void ResetHistory() = 0;
 };
+
+// Gtao's AO into `out`, when it is wanted and can run: the cascades' AO, and a ray-traced frame's cheap mode.
+void ScreenSpaceAo(Gtao& gtao, ID3D12GraphicsCommandList* list, const VisibilityFrame& f, Visibility& out);
 
 // Which AO a ray-traced frame takes.
 enum class AoSource { Traced = 0, ScreenSpace = 1 };

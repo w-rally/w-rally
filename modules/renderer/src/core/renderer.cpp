@@ -69,7 +69,11 @@ bool Renderer::Create(Device& dev, DXGI_FORMAT outputFormat, UINT width, UINT he
     // DLSS asks the GPU's vendor first, so a non-NVIDIA adapter never loads NGX.
     if (Upscaler* u = CreateFsrUpscaler(d)) m_fsrAvailable = true, delete u;
     if (Upscaler* u = CreateDlssUpscaler(d)) m_dlssAvailable = true, delete u;
-    Log("renderer: upscalers available - FSR %s, DLSS %s", m_fsrAvailable ? "yes" : "no", m_dlssAvailable ? "yes" : "no");
+    // Ray Reconstruction denoises the ray tracing: only where the adapter ray traces, and NGX says it can.
+    if (m_dlssAvailable && m_rt.Ready())
+        if (Upscaler* u = CreateDlssUpscaler(d, true)) m_rrAvailable = true, delete u;
+    Log("renderer: upscalers available - FSR %s, DLSS %s, DLSS RR %s", m_fsrAvailable ? "yes" : "no",
+        m_dlssAvailable ? "yes" : "no", m_rrAvailable ? "yes" : "no");
     return true;
 }
 
@@ -89,16 +93,50 @@ void Renderer::OnResize(Device& dev, UINT width, UINT height)
     if (m_rt.Ready() && m_preferRt) m_rt.PrepareTargets(dev.device.Get(), m_renderWidth, m_renderHeight);
 }
 
+void Renderer::SetDenoiser(Device& dev, Denoiser d)
+{
+    if (d == m_denoiser) return;
+    // NRD is made the first time it is chosen (its pipelines, the ray tracer's variants): a game that never chooses it
+    // pays nothing for it.
+    if (d == Denoiser::Nrd && !m_nrdVis.Ready() && !m_nrdVis.Create(dev))
+    {
+        Log("renderer: NRD unavailable - the renderer's own denoisers");
+        d = Denoiser::Ours;
+    }
+    m_denoiser = d;
+    Log("renderer: denoiser %s", d == Denoiser::Nrd ? "NRD" : "ours");
+}
+
+const char* Renderer::DenoiserName() const
+{
+    if (!m_rtActive) return "";
+    return m_lastSource == &m_nrdVis ? "NRD" : m_lastSource == &m_rrVis ? "DLSS RR" : "ours";
+}
+
+double Renderer::DenoiseMs() const
+{
+    return m_lastSource == &m_nrdVis ? m_nrdVis.DenoiseMs() : m_rt.DenoiseMs();
+}
+
 void Renderer::SetUpscaling(Device& dev, UpscalerKind kind, float scale)
 {
     if (!(scale > 0.0f) || scale > 1.0f) scale = 1.0f;
     if (kind == m_upKind && (kind == UpscalerKind::None || scale == m_renderScale)) return;
     if (kind != UpscalerKind::None && (kind != m_upKind || !m_upscaler))
     {
-        // Another backend: the old one goes first (PostFx lets go of it), then the new one is made.
+        // Another backend: the old one goes first (PostFx lets go of it, the GPU finishes its last dispatch), then the
+        // new one is made. Not the other way round: NGX's init is per device, not counted - the old DLSS's
+        // Shutdown1 after the new one's Init unloaded the NGX DLL under it (SR -> RR mid-stage crashed).
         m_post.SetUpscaler(nullptr);
-        m_upscaler.reset(kind == UpscalerKind::Dlss ? CreateDlssUpscaler(dev.device.Get())
-                                                    : CreateFsrUpscaler(dev.device.Get()));
+        dev.WaitForGpu();
+        m_upscaler.reset();
+        // RR also needs its passes (rr_guides.hlsl) and the ray tracer.
+        if (kind == UpscalerKind::DlssRr && (!m_rt.Ready() || !m_rrVis.Create(dev)))
+            m_upscaler.reset();
+        else
+            m_upscaler.reset(kind == UpscalerKind::Dlss     ? CreateDlssUpscaler(dev.device.Get())
+                             : kind == UpscalerKind::DlssRr ? CreateDlssUpscaler(dev.device.Get(), true)
+                                                            : CreateFsrUpscaler(dev.device.Get()));
         if (!m_upscaler) kind = UpscalerKind::None;
     }
     if (kind == UpscalerKind::None) scale = 1.0f;
@@ -108,7 +146,8 @@ void Renderer::SetUpscaling(Device& dev, UpscalerKind kind, float scale)
     m_post.SetUpscaler(kind == UpscalerKind::None ? nullptr : m_upscaler.get());
     if (kind == UpscalerKind::None) m_upscaler.reset();
     Log("renderer: upscaling %s, render scale %.2f",
-        kind == UpscalerKind::None ? "off (TAA)" : kind == UpscalerKind::Dlss ? "DLSS" : "FSR", scale);
+        kind == UpscalerKind::None ? "off (TAA)" : kind == UpscalerKind::Dlss ? "DLSS"
+        : kind == UpscalerKind::DlssRr ? "DLSS Ray Reconstruction" : "FSR", scale);
     if (m_width && m_height) OnResize(dev, m_width, m_height);
 }
 
@@ -117,6 +156,7 @@ void Renderer::ResetHistory()
     m_post.ResetHistory();
     m_rtVis.ResetHistory();
     m_cascadeVis.ResetHistory();
+    m_nrdVis.ResetHistory();
 }
 
 bool Renderer::Load(Device& dev, const wchar_t* path)
@@ -313,6 +353,9 @@ void Renderer::RecordFrame(Device& dev, D3D12_CPU_DESCRIPTOR_HANDLE outRtv,
     m_scene.SetJitter(jx, jy);
     m_sky.SetJitter(jx, jy);
 
+    // DLSS Ray Reconstruction resolves this frame (its upscaler set, TAA on, no debug view): see the visibility below.
+    const bool rrFrame = m_upKind == UpscalerKind::DlssRr && m_post.Upscaling() && m_taa && m_scene.DebugMode() == 0 &&
+                         m_rrVis.Ready();
     m_rtActive = false;
     m_vis = Visibility();
     m_scene.ResetLocalShadows();   // (drawn by the cascades' provider only)
@@ -366,7 +409,18 @@ void Renderer::RecordFrame(Device& dev, D3D12_CPU_DESCRIPTOR_HANDLE outRtv,
         f.width = width;
         f.height = height;
         f.lights = &m_scene.GetLights();
-        VisibilityProvider& source = m_rtActive ? static_cast<VisibilityProvider&>(m_rtVis) : m_cascadeVis;
+        // A frame DLSS Ray Reconstruction resolves takes the ray tracing raw (RrVisibility) - it denoises the lit
+        // colour itself - and leaves the surface's targets for its guides. Not with TAA off or a debug view: PostFx
+        // then skips the upscaler, and the raw frame would reach the screen.
+        const bool rr = rrFrame;
+        m_scene.SetGbufferWanted(rr);
+        VisibilityProvider& source = !m_rtActive ? static_cast<VisibilityProvider&>(m_cascadeVis)
+                                   : rr ? static_cast<VisibilityProvider&>(m_rrVis)
+                                   : m_denoiser == Denoiser::Nrd && m_nrdVis.Ready() ? static_cast<VisibilityProvider&>(m_nrdVis)
+                                   : m_rtVis;
+        // Another source than last frame's (the denoiser switched): it starts from no history of its own.
+        if (&source != m_lastSource && m_lastSource) source.ResetHistory();
+        m_lastSource = &source;
         source.Record(dev, list, f, m_vis);
 
         m_scene.SetShadowSource(m_vis.shadowSource);
@@ -389,9 +443,20 @@ void Renderer::RecordFrame(Device& dev, D3D12_CPU_DESCRIPTOR_HANDLE outRtv,
     if (m_scene.Ready())
         m_scene.Record(list, hdrRtv, view, proj, width, height);
 
+    // DLSS Ray Reconstruction's guides, from the surface the main pass left (RrVisibility::RecordGuides).
+    bool guides = false;
+    if (rrFrame && m_scene.Ready() && m_scene.GbufferWritten())
+        guides = m_rrVis.RecordGuides(dev, list, m_scene.GbufferNormal(), m_scene.GbufferAlbedo(), m_scene.Depth(),
+                                      motion ? m_scene.GlassMotionBuffer() : nullptr, m_scene.LastViewProjJittered(),
+                                      m_scene.LastCameraPos(), view, proj, width, height,
+                                      m_lastSource == &m_rrVis, m_rrGuides);
+    m_post.SetGuides(guides ? &m_rrGuides : nullptr);
+
     // TAA: where a moved object's shadow fell and its occlusion, this frame and last (the RT denoisers' only), and
     // the moving glass's own motion.
-    m_post.Resolve(list, outRtv, m_scene.Depth(), motion, motion ? m_scene.GlassMotionBuffer() : nullptr, m_vis.sun,
+    // (Not on a frame RR resolves: TAA does not run, and RrVisibility's sun is R16F, not the denoisers' RGBA16F layout.)
+    m_post.Resolve(list, outRtv, m_scene.Depth(), motion, motion ? m_scene.GlassMotionBuffer() : nullptr,
+                   rrFrame ? nullptr : m_vis.sun,
                    m_vis.aoTaa, m_vis.aoTaaPrev,
                    // without the ray tracer, the local lights' moved-shadow mask in its place (Scene::LocalShadowMask)
                    m_vis.lightsTaa ? m_vis.lightsTaa : m_scene.LocalShadowMask(), m_scene.LastViewProj(), width, height);

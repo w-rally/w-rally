@@ -942,12 +942,17 @@ pass, TAA and the upscalers do with it does not depend on which provider filled 
 |---|---|---|---|
 | `RtVisibility` | RT, denoised (`Rt::Filtered`) | RT (`AoSource::Traced`, default) or XeGTAO (`AoSource::ScreenSpace`) | RT, ratio estimator |
 | `CascadeVisibility` | cascaded maps, sampled in the main pass | XeGTAO | spot/beam shadow maps (PCSS) |
+| `NrdVisibility` (4.10) | RT, NVIDIA NRD SIGMA | as `RtVisibility` (REBLUR with `NGG_NRD_AO=reblur`) | RT, NRD SIGMA |
+| `RrVisibility` (4.11) | RT, raw - DLSS RR denoises the lit colour | RT raw, or XeGTAO | RT, raw |
 
 `Renderer::RecordFrame` (`renderer.cpp`) picks RT when `m_preferRt && prepass && m_rt.HasScene() && m_rtValid &&
 ShadowsOn()`; otherwise the cascades. `Renderer::RtFallbackReason` says why not ("cascades selected", "no ray tracing
 on this adapter", "shadows off", "the acceleration structure failed to build"). The game's setting is `ray_tracing`
-(`RenderSettings::rayTracing`); `kRendererNoRayTracing` at creation skips `Rt::Create` altogether. A third provider
-(NRD SIGMA/REBLUR, DLSS Ray Reconstruction) is meant to fill the same struct.
+(`RenderSettings::rayTracing`); `kRendererNoRayTracing` at creation skips `Rt::Create` altogether. On the RT path
+`RenderSettings::denoiser` (interface 21; the game's `denoiser`, `PHYS_DRIVE_DENOISER`, `NGG_DENOISER`) picks
+`NrdVisibility` over `RtVisibility` (`Renderer::SetDenoiser`); another source than last frame's starts without history.
+DLSS Ray Reconstruction denoises lit colour, not visibility, so it is not a choice of denoiser: a frame the
+`UpscalerKind::DlssRr` upscaler resolves takes `RrVisibility` (the traces raw) whatever the denoiser setting (4.11).
 
 **The depth + normal + motion prepass runs on both paths** (`Scene::RecordPrepass`): the main pass shades every pixel
 once (`GREATER_EQUAL` against the prepass depth), both AOs read its depth and normals, TAA and the upscalers its
@@ -1241,6 +1246,101 @@ rotated comparison taps (one tap when the penumbra is under 1.5 texels); one loo
 | local shadow maps, cascades path: Garage 12.7 -> 14.4 frame (maps 0.37); night stage, 3 maps | ~0.9 |
 | keyed objects' own BLAS: worst frame driving through barriers | 292 -> 89 |
 | `RenderStats` | `rtMs` (all traces), `aoMs`, `denoiseMs`; per-pass stamps in `Rt::ReadStats` |
+
+### 4.10 NVIDIA NRD: the third source
+
+`NrdVisibility` (`core/nrd_visibility.*`, `shaders/nrd_pack.hlsl`): **the same traces, NVIDIA NRD's denoisers in
+place of ours** - SIGMA for the sun and for the local lights' shadowed fraction; the AO keeps our denoiser (REBLUR
+with `NGG_NRD_AO=reblur`, below). NRD v4.18.0 is built from source at configure, its DXIL embedded, and driven
+through its raw API: NRD hands out pipelines, texture pools and each frame's dispatches; root signatures, PSOs, the
+descriptor heap, the constants and every barrier are ours (no NRI). Plain compute, so any GPU that ray traces.
+`third_party/nrd/README.md` has the fetch and the licence.
+
+**The frame**: `Rt::Trace` with `SetNrdInputs(true)` runs the traces' `NRD_INPUTS` variants (made the first time NRD
+is chosen), which also write NRD's input beside the raw 0/1 - SIGMA's penumbra radius in metres from the first
+occluder's distance (the sun: `t tan(angle) / 2`; a lamp: `r t / (len - t)`, the lamp the pixel picked), REBLUR's
+normalized hit distance - and skips our denoisers. `CSPack` turns the prepass into NRD's guide inputs (conventions
+at the top of `nrd_visibility.cpp`): view Z through the client's view matrix, the signed-octahedron normal with
+roughness 1 and material id 1 on a moved object, the motion as the upscalers have it **plus the view Z's change**
+(without it a car moving towards the camera failed NRD's depth test every frame and kept no history). NRD's
+dispatches; then `CSUnpack` writes each output into `Rt::Filtered`'s RGBA16F layout, with the moved-object distrust
+TAA reads (from the raw traces' sign, fading over four frames) - so the main pass and TAA do not change.
+
+**History rules**:
+- the camera's cut -> `RESTART`; a resize -> `CLEAR_AND_RESTART`; another source than last frame's -> restart;
+- the road a car has left, a moved object's own pixels: NRD's disocclusion test on view Z and the motion, the
+  material id keeping a car's pixels out of the road's blur;
+- SIGMA has no input for "this pixel's ray hit a moving occluder": it is spatial, with a stabilization of at most
+  5 frames. The car's sun shadow passes the ghost check (below).
+
+**REBLUR for the AO did not pass.** Its own history rules are not ours: behind a driving car it kept the car's
+occlusion (`tools/car-ghost`'s measure, below). Fed to it: the open fraction (our AO's meaning; NRD's own normalized
+hit distance makes contact AO 33-41 grey lighter), the rays' history allowance as `IN_DIFF_CONFIDENCE` - over the
+5x5 and scattered to last frame's pixels, where REBLUR reads it - and a disocclusion mix; none of it, nor its
+accumulation, stabilization, blur or anti-firefly settings, brought the bias under 4 grey. At confidence 0 REBLUR
+still keeps about half its history (`accumSpeed *= 1 / (1 + accumSpeed)`), where ours keeps none. Its switches stay
+for that work (10.7), with two debug outputs (`NGG_NRD_SHOW=conf`, `NGG_NRD_VALIDATION`).
+
+**Measured** (RTX 5070 Ti, 1080p unless said, user-new.phr camera 4 ticks 3000-4200 on fr_joux_verte.ngg, GPU frame median, two
+runs each within 0.03 ms):
+
+| quality | ours, TAA | NRD, TAA | ours, DLSS Q | NRD, DLSS Q |
+|---|---|---|---|---|
+| medium | 5.60-5.63 | 5.87-5.89 (+0.27) | 5.38-5.39 | 5.52 (+0.14) |
+| high | 5.80 | 6.06-6.07 (+0.27) | 5.55-5.56 | 5.70-5.72 (+0.15) |
+| 1440p medium | 6.83-6.85 | 7.28-7.29 (+0.44) | 6.22-6.23 | 6.45-6.46 (+0.23) |
+| 1440p high | 7.16-7.17 | 7.62-7.63 (+0.46) | 6.54 | 6.76-6.77 (+0.22) |
+| 2160p medium | 10.37 | 11.29-11.33 (+0.94) | 8.69-8.71 | 9.15-9.16 (+0.46) |
+| 2160p high | 11.12 | 12.07-12.08 (+0.96) | 9.39-9.40 | 9.84-9.85 (+0.45) |
+
+Ghost behind the car (`tools/car-ghost`'s ghost.py on user-42.phr, i20 chase camera, native 1080p, TAA off; signed
+bias behind the car against our denoiser without history, limit 1 grey): sun (view 11) ours -0.60, NRD -0.62; AO
+(view 13, two stretches) ours +0.10 / -0.52 - NRD's default the same, REBLUR +20.20 / -4.54. The Garage floor under
+three lamps (native, TAA): grain 1.05 -> 1.25, frame-to-frame 0.33 -> 0.28 (x1e-3), the contact shadow under the car
+as dark. Door grain, fence lines and the camera cut unchanged (the AO is ours in both); side by side the forest and
+the car's shadow look the same.
+
+### 4.11 DLSS Ray Reconstruction: the traces raw, denoised as lit colour
+
+RR (NGX "DLSS-D", `nvngx_dlssd.dll`, DLSS SDK v310.9.16) is one network that denoises, anti-aliases and upscales the
+LIT colour, with guide buffers. It replaces our denoisers, the TAA and the upscaler at once, so it is an upscaler kind
+(`UpscalerKind::DlssRr`, interface 22 `kUpscalerDlssRr`, 7.2) with its own frame:
+
+- **The traces, raw** (`RrVisibility`, `core/rr_visibility.*`): `Rt::SetRawOnly(true)` traces the sun, the AO and the
+  lamps and runs none of our denoisers; `CSDecode` (`shaders/rr_guides.hlsl`) turns the raw R16F (`EncodeRaw`: the
+  sign marks a moved-object hit) into the plain 0/1 the main pass's three slots take - the main pass's shader does
+  not change - and an R8 moved mask.
+- **The guides from the G-buffer**: RR frames force the main pass's `GBUF` variant (`Scene::SetGbufferWanted`;
+  otherwise it runs only for the deferred lamps) and `CSGuides` turns its two targets into RR's: diffuse albedo
+  (albedo x (1 - metallic)), specular albedo (`EnvBRDF(f0, roughness, n.v)`, plus the clear coat's for the car's paint,
+  0 for plants), the normal with the roughness in w (`Roughness_Mode_Packed`), and the bias-current-colour mask (0.25
+  on moving glass). The sky gets albedo 1. Depth, motion, jitter, exposure and reset are DLSS SR's (7.1).
+- **Not on TAA off or a debug view**: `PostFx` then skips the upscaler, and the raw frame would reach the screen; such
+  a frame takes the denoiser setting's source. Switching sources restarts history, as in 4.1.
+- **History rules**: RR's own. The cut and a resize reset it (`InReset`). Our moved mask (the raw traces' sign)
+  can go into the bias mask (`NGG_RR_BIAS=1`), but RR passes the ghost behind the car without it and is slightly worse
+  with it, so it is off.
+
+Presets: the SDK's default (`NGG_DLSS_RR_PRESET=D|E|F` to compare). The game's modes `rr-dlaa`, `rr-quality`,
+`rr-balanced`, `rr-performance` (7.2) - offered only where DLSS is, the adapter ray traces and NGX says
+`SuperSamplingDenoising_Available` (logged with the upscalers).
+
+**Measured** (RTX 5070 Ti, 1080p, GPU frame median as 4.10, two runs each):
+
+| quality | ours, TAA | ours, DLSS Q | NRD, DLSS Q | RR Q | RR DLAA |
+|---|---|---|---|---|---|
+| medium | 5.60-5.78 | 5.38 | 5.53-5.55 | 6.34-6.37 (+0.97 over ours, DLSS Q) | 8.35 |
+| high | 5.79-5.82 | 5.56 | 5.70 | 6.54 (+0.98) | 8.54-8.55 |
+
+Image checks (1080p): the door grain after the panel falls by two thirds (fine 2.4-2.7 -> 0.73-0.93, blot 4.5-5.6
+-> 2.4-2.6, against ours + DLSS Q), fence lines 0.84 -> 0.77, no headlamp smear, the camera cut settles in 28 shots
+(DLSS Q 36). Ghost behind the car on the final image (`ghost-final.sh` at 2560x1600, two stretches, against native TAA with our
+denoiser without history; debug views skip RR): RR DLAA -0.48 / -0.70, DLSS DLAA with ours -2.37 / -1.52, with NRD
+-1.93 / -1.32, native TAA with ours -0.47 / -0.31 - DLSS SR leaves a small ghost of its own; RR does not.
+**Open: the Garage** - under RR its frame is 9 % brighter (floor mean 0.337 vs 0.310): the car's bright paint comes
+out about 10 % darker, so the auto exposure settles higher (about 94 vs 81); the radiance before exposure otherwise
+matches SR's, and neither the guides nor the exposure input change it. Floor frame-to-frame noise 0.67 -> 0.56
+(x1e-3; RR DLAA 0.21; at 2560x1600 it was 0.27 -> 0.47), grain the same. Side by side the forest, the car's shadow and the AO under it look alike.
 
 
 ## 5. Weather, surfaces and night
@@ -1737,7 +1837,7 @@ each backend file:
 | where from | headers in `third_party/fidelityfx` (MIT); AMD-signed DLLs fetched at configure, SHA-256 pinned, copied beside `WRenderer.dll` | nothing in git (NVIDIA-proprietary headers): headers, `nvsdk_ngx_s.lib`, `nvngx_dlss.dll` fetched at configure, pinned (`third_party/nvidia-dlss/README.md`) |
 | linking | none: loaded by name from the module's folder; no DLL = no FSR | static lib, /MT: Release builds only; Debug has a stub |
 | gate | the loader succeeding | **vendor 0x10DE first** (a non-NVIDIA adapter never loads NGX), then NGX and `SuperSampling_Available` |
-| notes | jitter phases from ffx | Halton(2,3), 8 x ratio² phases; reactive = bias-current-colour mask; **preset K for every mode** - M (Performance) lifted the Garage's dark floor ~6% and doubled its flicker; `NGG_DLSS_PRESET=<letter>` to compare |
+| notes | jitter phases from ffx | Halton(2,3), 8 x ratio² phases; reactive = bias-current-colour mask; **preset K for every mode** - M (Performance) lifted the Garage's dark floor ~6% and doubled its flicker; `NGG_DLSS_PRESET=<letter>` to compare. **Ray Reconstruction** (`UpscalerKind::DlssRr`, 4.11): the same NGX, a second feature (`nvngx_dlssd.dll`), with RR's guides (`UpscaleDispatch::guides`) |
 
 The renderer probes both once at create (`renderer.cpp`, logged "upscalers available") and reports them in
 `RenderStats::upscalersAvailable`; the game's Settings -> Graphics -> UPSCALING steps past and dims modes this
@@ -1745,8 +1845,9 @@ machine cannot run. The main menu credits NVIDIA DLSS and AMD FidelityFX Super R
 
 **Game modes** (`game/src/app/settings.h` `kUpscaleModes`; `upscaling` in `W-Rally.ini`; `PHYS_DRIVE_UPSCALE=<index
 or name>` overrides): `off` (TAA), `fsr-native` (1.0), `fsr-quality` (1/1.5), `fsr-balanced` (1/1.7),
-`fsr-performance` (0.5), `dlaa` (1.0), `dlss-quality` (1/1.5), `dlss-balanced` (0.58), `dlss-performance` (0.5). The
-readout shows "upscaled by <name> from WxH".
+`fsr-performance` (0.5), `dlaa` (1.0), `dlss-quality` (1/1.5), `dlss-balanced` (0.58), `dlss-performance` (0.5),
+`rr-dlaa`, `rr-quality`, `rr-balanced`, `rr-performance` (DLSS RR at the same ratios, 4.11). The readout shows
+"upscaled by <name> from WxH".
 
 **Measured** (GPU frame median):
 
@@ -1762,9 +1863,10 @@ paid out of the smaller frame.
 ### 7.3 What remains
 
 The plan was FSR 3.1 first (runs anywhere), DLSS SR behind the same interface, then NRD, then DLSS Ray
-Reconstruction. **FSR and DLSS SR are built; NRD and DLSS RR are not.** The visibility layer is shaped for them:
-a third `Visibility` source (NRD's SIGMA/REBLUR over the RT output, or DLSS RR) takes the same frame and fills the
-same outputs (`core/visibility.h`). NVIDIA-only features stay optional and are checked by eye on the RTX machine.
+Reconstruction. **All four are built**: DLSS RR (4.11) as a prototype - the traces raw into the main pass, its
+guides from the G-buffer. Open for RR: the Garage's exposure (4.11), the glass, haze and emissive
+guides it has not been given (`ColorBeforeTransparency`, `ColorBeforeFog`, `GBuffer.Emissive`), and the presets.
+NVIDIA-only features stay optional and are checked by eye on the RTX machine.
 
 
 ## 8. Editor integration (Wallaby)
@@ -2086,6 +2188,15 @@ All read once, at start-up or first use; development only unless noted.
 | `NGG_WIND=<speed>[,<gust>[,<deg>]]` | that wind over the weather's (m/s, 0..1, towards; default gust 0.5, 90 deg): the wind's A/B | `module.cpp` |
 | `NGG_NO_SOLIDS` | don't measure solid cards: every alpha-tested object treated as foliage (A/B) | `scene.cpp` |
 | `NGG_DLSS_PRESET=<A..O>` | force a DLSS render preset for every mode (default K) | `dlss.cpp` |
+| `NGG_DLSS_RR_PRESET=<D..F>` | force a DLSS Ray Reconstruction preset (default: the SDK's) | `dlss.cpp` |
+| `NGG_RR_BIAS=1` | RR's bias-current-colour mask also takes the moved-object mask (4.11; off: it ghosted slightly more) | `rr_visibility.cpp` |
+| `NGG_RR_GUIDES=nospec\|white` | RR's guides A/B: no specular albedo / white albedos | `rr_visibility.cpp` |
+| `NGG_DEBUG_LAYER=1` | the D3D12 debug layer (needs the Graphics Tools feature) | `module.cpp` |
+| `NGG_DENOISER=nrd\|ours` | the RT path's denoiser over the settings (4.10) | `module.cpp` |
+| `NGG_NRD_AO=reblur\|distance` | NRD takes the AO too: REBLUR over our open fraction, or over its own hit distance (4.10) | `nrd_visibility.cpp` |
+| `NGG_NRD_CONF=0`, `NGG_NRD_CUT=1`, `NGG_NRD_FRAMES`, `_STAB`, `_BLUR`, `_PREBLUR`, `_FIXSTRIDE`, `_HITW`, `_AF` | REBLUR's history confidence and settings, for its A/B | `nrd_visibility.cpp` |
+| `NGG_NRD_SHOW=conf`, `NGG_NRD_HISTORY=1` | REBLUR's confidence input / history length in place of the AO (view 13) | `nrd_visibility.cpp` |
+| `NGG_NRD_VALIDATION=<folder>` | REBLUR's validation layer (its view of our guide inputs) every 30th frame, `.ppm` | `nrd_visibility.cpp` |
 
 
 ## 11. Open work
@@ -2111,7 +2222,7 @@ glass, and VR behind `kRendererCapVr`.
 
 | # | item | state / why | blocked on |
 |---|---|---|---|
-| 8 | **A third visibility provider: NRD (SIGMA/REBLUR) or DLSS Ray Reconstruction** | named in `visibility.h`, not built. Most of the remaining RT grain is what it would remove (§4.5) | the RTX machine (DLSS RR), NRD integration |
+| 8 | **A third visibility provider: NRD (SIGMA/REBLUR) or DLSS Ray Reconstruction** | NRD built (§4.10): SIGMA for the sun and the lamps; REBLUR's AO failed the ghost behind the car and is off by default. DLSS RR prototyped (§4.11): passes the ghost behind the car. Open: REBLUR's history rules against ours; RR's Garage exposure, its glass/haze guides, presets | the user's look at RR |
 | 9 | **Ray-traced foliage cost** | instanced trees add +2.2 ms with opaque RT and +7.2 ms alpha-tested (§2.6), since any-hit runs through the needle tiers. Done: a ray-tracing-only LOD (`kModelLodRayOnly`, §2.6). Open: distant placements opaque or out of the TLAS, one submesh per shell; the real models decide how far the shell goes | the real tree models (Wallaby) |
 | 10 | **Cascades: penumbra and cross-fade** | the non-RT sun shadow is hard-edged (no PCSS) and switches between cascades with no blend | nothing |
 | 11 | **Cheaper distant cascades** | cascade 3 covers kilometres and changes slowly: update it every 2nd-3rd frame. 2048² for 0.7 m texels is wasted bandwidth | nothing |

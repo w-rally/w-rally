@@ -8,6 +8,7 @@
 # NGG_RT_NO_HISTORY=1 (this frame's rays alone). ghost.py takes the signed difference behind the car: a history may
 # smooth the noise there, not shift it either way. Exits non-zero when a stretch is over its limit.
 # Needs RBR=<RBR folder> (track-42.ngg, the Impreza), Python with numpy and Pillow. About 6 minutes on the dev iGPU.
+# NGG_DENOISER=nrd: the game's frames through NRD (NGG design 4.1); the reference is always our denoiser without history.
 here=$(cd "$(dirname "$0")" && pwd)
 exe=${1:-$here/../../build/bin/W-Rally.exe}
 exe=$(cd "$(dirname "$exe")" && pwd)/$(basename "$exe")
@@ -33,7 +34,7 @@ for s in "13 7000 7210" "13 9400 9606" "11 1100 1290"; do
     set -- $s
     n=v$1-$2
     shoot $n $1 $2 $3
-    shoot $n-ref $1 $2 $3 NGG_RT_NO_HISTORY=1
+    shoot $n-ref $1 $2 $3 NGG_RT_NO_HISTORY=1 NGG_DENOISER=ours
     printf '%-10s ' $n
     python "$here/ghost.py" "$out/$n" "$out/$n-ref" --max $lim || fail=1
 done
@@ -48,7 +49,7 @@ if [ -f "$gd/m5/track-41.ngg" ] && [ -f "$gd/m2/run-41-20261011-150633.phr" ]; t
         (cd "$d" && env PHYS_DRIVE_SHOTS=1 PHYS_DRIVE_OFF=vsync,taa NGG_DEBUG_VIEW=11 "$@" timeout 600 "$exe" $rbr             "$gd/m5/track-41.ngg" --stage track-41_M --step 0.1 --no-sound --overrides none             --replay "$gd/m2/run-41-20261011-150633.phr" --skip-to 4400 --exit-at 4830 --out "$d/drive.phr" > "$d/log.txt" 2>&1)
     }
     gold golden
-    gold golden-ref NGG_RT_NO_HISTORY=1
+    gold golden-ref NGG_RT_NO_HISTORY=1 NGG_DENOISER=ours
     printf '%-10s ' golden
     python "$here/ghost.py" "$out/golden" "$out/golden-ref" --box 900,500,1920,1080 --blur 6 --max-abs ${GOLDEN_MAX:-4.0} || fail=1
 else
