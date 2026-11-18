@@ -7,8 +7,9 @@
 # every frame of three stretches in view 13 (RT AO) or view 11 (RT sun), each twice: as the game draws it, and with
 # NGG_RT_NO_HISTORY=1 (this frame's rays alone). ghost.py takes the signed difference behind the car: a history may
 # smooth the noise there, not shift it either way. Exits non-zero when a stretch is over its limit.
-# Needs RBR=<RBR folder> (track-42.ngg, the Impreza), Python with numpy and Pillow. About 6 minutes on the dev iGPU.
+# Needs RBR=<RBR folder> (track-42.ngg, the Impreza), Python with numpy and Pillow. About 7 minutes on the dev iGPU.
 # NGG_DENOISER=nrd: the game's frames through NRD (NGG design 4.1); the reference is always our denoiser without history.
+# The forest stretch runs both denoisers itself.
 here=$(cd "$(dirname "$0")" && pwd)
 exe=${1:-$here/../../build/bin/W-Rally.exe}
 exe=$(cd "$(dirname "$exe")" && pwd)/$(basename "$exe")
@@ -54,6 +55,28 @@ if [ -f "$gd/m5/track-41.ngg" ] && [ -f "$gd/m2/run-41-20261011-150633.phr" ]; t
     python "$here/ghost.py" "$out/golden" "$out/golden-ref" --box 900,500,1920,1080 --blur 6 --max-abs ${GOLDEN_MAX:-4.0} || fail=1
 else
     echo "golden    skipped: no $gd/m5/track-41.ngg or its run-41 replay"
+fi
+# The forest stage (fr_cote_darbroz, track 41 with its trees; track41-i20.phr, the user's drive in the i20, the preset's
+# low sun behind the car) at 38-45 km/h, 01:26-01:28 on the clock: a pale copy of the car's outline on the lit road
+# behind it - the road that lay in the shadow under the car a frame before, kept by the sun's history (2026-11-19).
+# View 11, ours and NRD's (SIGMA), the upscaling off (the user's FSR showed it too); judged on the lit road alone.
+ngg41=$rbr/Ngg/fr_cote_darbroz.ngg
+if [ -f "$ngg41" ]; then
+    forest() {   # <dir> [ENV=val ...]
+        local d=$out/$1; shift
+        rm -rf "$d"; mkdir -p "$d"
+        (cd "$d" && env PHYS_DRIVE_STEP=0.0333333 PHYS_DRIVE_SHOTS=1 PHYS_DRIVE_OFF=vsync,taa PHYS_DRIVE_UPSCALE=off \
+            NGG_DEBUG_VIEW=11 "$@" timeout 600 "$exe" $rbr "$ngg41" --stage track-41_M --replay "$here/track41-i20.phr" \
+            --camera 0 --skip-to 11050 --exit-at 11250 --no-sound --no-codriver --out "$d/drive.phr" > "$d/log.txt" 2>&1)
+    }
+    forest forest-ref NGG_RT_NO_HISTORY=1 NGG_DENOISER=ours
+    for dn in ours nrd; do
+        forest forest-$dn NGG_DENOISER=$dn
+        printf '%-10s ' forest-$dn
+        python "$here/ghost.py" "$out/forest-$dn" "$out/forest-ref" --box 560,905,1360,1075 --lit ${FOREST_MAX:-2.0} || fail=1
+    done
+else
+    echo "forest    skipped: no $ngg41"
 fi
 [ $fail = 0 ] && echo "no ghost behind the car" || echo "THE GHOST BEHIND THE CAR IS BACK (pictures in $out)"
 exit $fail

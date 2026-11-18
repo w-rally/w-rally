@@ -1,4 +1,5 @@
-"""ghost.py <run dir> <reference dir> [--max <bias>] [--box x0,y0,x1,y1] [--blur <px> --max-abs <grey>]: the ghost behind the car, measured.
+"""ghost.py <run dir> <reference dir> [--max <bias>] [--box x0,y0,x1,y1] [--blur <px> --max-abs <grey>] [--lit <percent>]:
+the ghost behind the car, measured.
 
 Both dirs hold the same replayed frames (check-car-ghost.sh): <run> with the RT denoisers' history as the game has it,
 <reference> with none (NGG_RT_NO_HISTORY=1) - this frame's rays alone. Under the chase camera the car stands near the
@@ -9,6 +10,10 @@ darker is the car's occlusion or shadow lagging behind it, and the road the exha
 which has no history to lag, then shows lighter in their shape. Exits 1 when the mean bias is over --max either way.
 --blur: both pictures box-blurred first (the reference's grain gone) and the mean |run - reference| judged against
 --max-abs - for copies of the car under a still TV camera, lighter and darker in turn, which a signed mean misses.
+--lit: only the road the reference has lit all around (its 9x9 minimum >= 250 grey: every ray there says sun), and the
+share of it over 4 grey darker in the run, judged against <percent> - for a pale copy of the shadow under the car, a
+frame of travel behind it, on sunlit road (2026-11-19: 9% before the fix, 0 after); the grain and the penumbras, where
+a history smooths either way, are left out.
 """
 import sys, glob, os
 import numpy as np
@@ -35,8 +40,9 @@ def main():
         global BLUR
         BLUR = int(sys.argv[sys.argv.index('--blur') + 1])
     limAbs = float(sys.argv[sys.argv.index('--max-abs') + 1]) if '--max-abs' in sys.argv else None
+    limLit = float(sys.argv[sys.argv.index('--lit') + 1]) if '--lit' in sys.argv else None
     fs = sorted(glob.glob(os.path.join(run, 'shot-*.png')))[8:]     # the first frames: the history still filling
-    bias, absd = [], []
+    bias, absd, lit = [], [], []
     for f in fs:
         g = os.path.join(ref, os.path.basename(f))
         if not os.path.exists(g):
@@ -44,6 +50,10 @@ def main():
         d = load(f) - load(g)
         bias.append(float(d.mean()))
         absd.append(float(np.abs(d).mean()))
+        if limLit is not None:
+            r = load(g)
+            m = np.asarray(Image.fromarray(r.astype(np.uint8)).filter(ImageFilter.MinFilter(9)), dtype=np.float32) >= 250
+            lit.append(float((d[m] < -4).mean()) * 100 if m.any() else 0.0)
     if not bias:
         print('no frames'); return 2
     b = np.array(bias)
@@ -51,6 +61,10 @@ def main():
           % (len(b), b.mean(), b.max(), float(np.mean(absd))))
     if float(np.mean(absd)) < 0.05:
         print('the reference IS the run: this build ignores NGG_RT_NO_HISTORY - nothing measured'); return 2
+    if limLit is not None:
+        print('           lit road over 4 grey darker: %.1f%% (worst frame %.1f%%)' % (np.mean(lit), np.max(lit)))
+        if np.mean(lit) > limLit:
+            print('GHOST: %.1f%% of the lit road is darker, over %.1f%%' % (np.mean(lit), limLit)); return 1
     if limAbs is not None and float(np.mean(absd)) > limAbs:
         print('GHOST: |diff| %.2f is over %.2f' % (float(np.mean(absd)), limAbs)); return 1
     if lim is not None and abs(b.mean()) > lim:
