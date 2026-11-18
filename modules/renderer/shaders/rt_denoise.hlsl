@@ -273,10 +273,21 @@ void CSMain(uint3 tid : SV_DispatchThreadID, uint3 gid : SV_GroupID, uint gi : S
     // cannot resolve. Inside a penumbra the spread is wide and nothing
     // changes; where every sample now says lit (or shadow), a stale opposite
     // is pulled to within the margin at once.
+    //
+    // NO MARGIN where a moved object was involved (the distrust above): the
+    // road a driving car has just left lay in the car's own shadow under it
+    // a frame ago, and its history says so. gBlendMoved keeps a quarter of
+    // that, the margin (0.5 / 4 = 12% with the 4x4 tile's weights) let it
+    // through where every ray now says lit: a band of the road 3% darker
+    // one frame of travel behind the shadow under the bumper, in its shape -
+    // a pale copy of the car's outline behind it at low speed (the forest
+    // stage, the sun low behind the car, 40 km/h; tools/car-ghost). There
+    // the history is only ever trusted as far as this frame's spread.
     if (blend > 0.0 && wsum > 0.0)
     {
         const float sigma  = sqrt(max(0.0, sum2 / wsum - curr * curr));
-        const float spread = sigma + 0.5 / sqrt(wsum);
+        const bool  distrusted = !movedPixel && (touched || histDistrust > 0.5);
+        const float spread = sigma + (distrusted ? 0.0 : 0.5 / sqrt(wsum));
         hist.x = clamp(hist.x, curr - spread, curr + spread);
     }
     float vis = lerp(curr, hist.x, blend);
