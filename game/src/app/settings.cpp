@@ -30,6 +30,7 @@ template <class F> void Fields(Settings& s, F&& f)
     f("taa", s.taa);
     f("upscaling", s.upscaling);
     f("denoiser", s.denoiser);
+    f("vegetation_detail", s.vegetation);
     f("shadows", s.shadows);
     f("vsync", s.vsync);
     f("sound", s.sound);

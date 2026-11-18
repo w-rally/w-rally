@@ -323,6 +323,7 @@ SettingsChoice SettingsUi(const ImGuiLayer& ui, app::Settings& s, bool inStage, 
     int quality = static_cast<int>(std::min(s.quality, 2u));
     int upscaling = static_cast<int>(std::min(s.upscaling, app::kUpscaleModeCount - 1));
     int denoiser = s.denoiser == iface::kDenoiserNrd ? 1 : 0;
+    int vegetation = static_cast<int>(std::min(s.vegetation, 2u));
     const int tab = g_setTab;
     const bool keys = tab == 3;
     std::vector<SetRow> rows;
@@ -371,6 +372,10 @@ SettingsChoice SettingsUi(const ImGuiLayer& ui, app::Settings& s, bool inStage, 
                                "tracing and a build with it: not available here. Applies at once.");
         dn.at = &denoiser, dn.options = {"W-RALLY", "NVIDIA NRD"}, dn.optionOff = {false, !nrd};
         dn.off = !s.rayTracing;
+        SetRow& veg = add(SetRow::Choice, "VEGETATION DETAIL",
+                          "How far trees and bushes keep their full detail before simpler shapes take over. Higher "
+                          "costs more GPU time where the forest is dense. Applies at once.");
+        veg.at = &vegetation, veg.options = {"LOW", "MEDIUM", "HIGH"};
         add(SetRow::Toggle, "SHADOWS", "Shadows. Applies at once.").on = &s.shadows;
         add(SetRow::Toggle, "VERTICAL SYNC", "Frames in step with the display. Applies at once.").on = &s.vsync;
     } else if (tab == 2) {
@@ -753,6 +758,7 @@ SettingsChoice SettingsUi(const ImGuiLayer& ui, app::Settings& s, bool inStage, 
     // The copies back into the settings; a graphics change to apply now.
     if (static_cast<uint32_t>(quality) != s.quality) s.quality = static_cast<uint32_t>(quality), graphics = true;
     if (static_cast<uint32_t>(upscaling) != s.upscaling) s.upscaling = static_cast<uint32_t>(upscaling), graphics = true;
+    if (static_cast<uint32_t>(vegetation) != s.vegetation) s.vegetation = static_cast<uint32_t>(vegetation), graphics = true;
     const uint32_t denoiserWas = s.denoiser == iface::kDenoiserNrd ? iface::kDenoiserNrd : iface::kDenoiserOurs;
     const uint32_t denoiserNow = denoiser == 1 ? iface::kDenoiserNrd : iface::kDenoiserOurs;
     if (denoiserNow != denoiserWas) s.denoiser = denoiserNow, graphics = true;

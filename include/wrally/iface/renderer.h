@@ -57,7 +57,8 @@ namespace wrally::iface {
 // 21: RenderSettings::denoiser (kDenoiserNrd: the ray tracer's traces through NVIDIA NRD instead of the renderer's own
 //     denoisers), RenderStats::denoiser and denoisersAvailable.
 // 22: kUpscalerDlssRr (NVIDIA DLSS Ray Reconstruction: denoises the ray tracing within the upscale; elsewhere the TAA).
-constexpr uint32_t kRendererInterfaceVer = 22;
+// 23: RenderSettings::vegetationDetail (kVegetation*: how far instanced models keep their detailed LODs).
+constexpr uint32_t kRendererInterfaceVer = 23;
 
 struct Renderer;                     // the module's instance, opaque
 struct RendererEditApi;              // renderer_edit.h
@@ -328,6 +329,7 @@ struct RenderSettings {
     float      renderScale;       // 1 native; < 1 upscaled. Per axis; used only with an upscaler
     uint32_t   upscaler;          // kUpscaler*: what resolves the frame (none: the renderer's own TAA, native)
     uint32_t   denoiser;          // kDenoiser*: what denoises the ray-traced shadows and AO
+    uint32_t   vegetationDetail;  // kVegetation*: how far trees and bushes keep their detailed LODs
 };
 
 // RenderSettings::upscaler
@@ -339,6 +341,12 @@ constexpr uint32_t kUpscalerDlssRr = 3;  // NVIDIA DLSS Ray Reconstruction: RTX 
 // RenderSettings::denoiser
 constexpr uint32_t kDenoiserOurs = 0;    // the renderer's own (NGG design 4.5)
 constexpr uint32_t kDenoiserNrd  = 1;    // NVIDIA NRD (SIGMA, REBLUR), any DX12 GPU; where it cannot run, ours (logged)
+
+// RenderSettings::vegetationDetail: the instanced models' LOD distances (the .ngg's, NGGD) times 1, 2 or 3
+// (NGG design §2.6). The ray tracer's shape of a model does not change with it.
+constexpr uint32_t kVegetationLow    = 0;   // the file's distances
+constexpr uint32_t kVegetationMedium = 1;   // twice as far
+constexpr uint32_t kVegetationHigh   = 2;   // three times as far
 
 // What the last finished frame did - ngg_stats, the renderer's own readout.
 struct RenderStats {

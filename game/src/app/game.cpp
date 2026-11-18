@@ -127,6 +127,14 @@ iface::RenderSettings ToRender(const Settings& s)
         r.denoiser = std::strcmp(e, "nrd") == 0 ? iface::kDenoiserNrd
                    : std::strcmp(e, "ours") == 0 ? iface::kDenoiserOurs
                                                  : static_cast<uint32_t>(std::strtoul(e, nullptr, 10));
+    // How far trees and bushes keep their detail: the settings', or PHYS_DRIVE_VEGETATION's (low, medium, high, or the
+    // index) over them.
+    r.vegetationDetail = s.vegetation > iface::kVegetationHigh ? iface::kVegetationHigh : s.vegetation;
+    if (const char* e = std::getenv("PHYS_DRIVE_VEGETATION"))
+        r.vegetationDetail = std::strcmp(e, "low") == 0    ? iface::kVegetationLow
+                           : std::strcmp(e, "medium") == 0 ? iface::kVegetationMedium
+                           : std::strcmp(e, "high") == 0   ? iface::kVegetationHigh
+                                                           : static_cast<uint32_t>(std::strtoul(e, nullptr, 10));
     return r;
 }
 

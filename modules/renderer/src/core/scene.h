@@ -537,6 +537,9 @@ public:
     void SetCull(bool on) { m_cull = on; }
     bool Cull() const { return m_cull; }
     void SetShadowsOn(bool on) { m_shadowsOn = on; }
+    // How far the instanced models keep their detailed LODs: every LOD distance (and the crossfade, and how far a
+    // model is drawn at all) times `scale` - the client's vegetation detail. NGG_MODEL_LOD_SCALE, when set, wins.
+    void SetModelLodScale(float scale);
     bool ShadowsOn() const { return m_shadowsOn; }
 
     // --- editor: live material editing (design §2.3) ------------------------
@@ -992,7 +995,8 @@ private:
     std::vector<PlacementRt> m_placements;
     std::vector<ModelCell>   m_modelCells;
     bool                     m_modelCellsDirty = false;
-    float                    m_modelLodScale = 1.0f;     // NGG_MODEL_LOD_SCALE
+    float                    m_modelLodScale = 1.0f;     // in use: NGG_MODEL_LOD_SCALE, else m_modelLodSetting
+    float                    m_modelLodSetting = 1.0f;   // SetModelLodScale's
     uint32_t                 m_replacedPlants = 0, m_replacedTris = 0;
     ModelStats               m_modelStats, m_modelStatsBuild;
     uint64_t                 m_modelFrame = 0;

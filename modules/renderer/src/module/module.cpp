@@ -193,6 +193,9 @@ void Apply(Renderer& r)
     r.core.SetQuality(static_cast<ngg::core::Quality>(s.quality > 2 ? 2 : s.quality));
     r.core.SetPreferRayTracedShadows(s.rayTracing != 0);
     r.scene.SetShadowsOn(s.shadows != 0);
+    r.scene.SetModelLodScale(s.vegetationDetail >= kVegetationHigh     ? 3.0f
+                             : s.vegetationDetail == kVegetationMedium ? 2.0f
+                                                                       : 1.0f);
     r.post.SetAutoExposure(s.autoExposure != 0);
     r.core.SetUpscaling(r.dev, s.upscaler == kUpscalerFsr      ? ngg::core::UpscalerKind::Fsr
                                : s.upscaler == kUpscalerDlss   ? ngg::core::UpscalerKind::Dlss

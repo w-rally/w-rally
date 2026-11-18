@@ -418,8 +418,14 @@ touch), pieces wider than 50 m (`kPlantMaxWidth`) left out.
 - **The replaced cards are made degenerate in the index buffer at load**, so object ranges, plant parts and
   triangle numbering stay the file's; `BuildRtMesh` leaves them out; an object left with no triangle is removed.
   Only against the file's own plant table (without one, the cards stay and the load says so).
-- LODs switch by distance from the camera scaled by the placement's height and `NGG_MODEL_LOD_SCALE`; over the last
-  `fadeWidth` metres two LODs are drawn dithered to complementary pixels; the last LOD dithers out. The billboard LOD
+- LODs switch by distance from the camera scaled by the placement's height and by the **vegetation detail**
+  (`RenderSettings::vegetationDetail`, interface 23: low / medium / high = the file's distances x1 / x2 / x3,
+  `Scene::SetModelLodScale`, which also rebuilds the cells' reach; `NGG_MODEL_LOD_SCALE=<k>` wins for A/B). The
+  converter's distances are steep: LOD0 -> LOD1 at about twice the tree's height, LOD1 holding ~5 % of LOD0's
+  triangles, so trees went coarse a short way off; the game defaults to medium. Measured on stage 41 (golden replay
+  ticks 3000-9000, 390 frames, 1080p RT, dev iGPU), GPU frame median: x1 43.95 ms, x2 46.20 (+5 %), x3 47.56 (+8 %),
+  x4 47.06 - the main pass's share (7.44 -> 8.52 -> 9.06 ms); the ray tracing does not change (one `rtLod`). Over
+  the last `fadeWidth` metres two LODs are drawn dithered to complementary pixels; the last LOD dithers out. The billboard LOD
   turns about the placement's up axis and is never ray traced. One `rtLod` per model keeps the TLAS fixed as the
   camera moves. Drawing, culling and ray tracing: `modules/renderer/src/core/models.cpp`, §4.2.
 - **A ray-tracing-only LOD** (`kModelLodRayOnly`, `ModelLod` flag bit 1; NGGD **version 2**, 2026-11-10): the mesh
@@ -2204,7 +2210,7 @@ All read once, at start-up or first use; development only unless noted.
 | `NGG_LOCAL_SHADOW_TURN=<k>` | scale of the per-pixel rotation of the local shadow-map filter (default 1) | `scene.cpp` |
 | `NGG_LOCAL_SHADOW_LOG` | log the shadow-slot candidates every 300 frames | `lights.cpp` |
 | `NGG_PROBE_FACES=1..6` | cube-probe faces drawn per frame (default 2) | `scene.cpp` |
-| `NGG_MODEL_LOD_SCALE=<k>` | instanced models' LOD distances scaled (min 0.05) | `models.cpp` |
+| `NGG_MODEL_LOD_SCALE=<k>` | instanced models' LOD distances scaled (min 0.05), over the vegetation detail setting | `models.cpp` |
 | `NGG_WIND=<speed>[,<gust>[,<deg>]]` | that wind over the weather's (m/s, 0..1, towards; default gust 0.5, 90 deg): the wind's A/B | `module.cpp` |
 | `NGG_NO_SOLIDS` | don't measure solid cards: every alpha-tested object treated as foliage (A/B) | `scene.cpp` |
 | `NGG_DLSS_PRESET=<A..O>` | force a DLSS render preset for every mode (default K) | `dlss.cpp` |

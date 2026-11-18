@@ -105,6 +105,7 @@ bool Scene::LoadModels(ID3D12Device* dev, const uint8_t* models, size_t modelByt
     m_rtModelInstancesDirty = true;
     m_replacedPlants = m_replacedTris = 0;
     replacedPlants.clear();
+    m_modelLodScale = m_modelLodSetting;
     if (const char* e = std::getenv("NGG_MODEL_LOD_SCALE"))
         m_modelLodScale = (std::max)(0.05f, (float)atof(e));
     if (!models) return false;
@@ -378,6 +379,18 @@ void Scene::PlacementTransform(PlacementRt& p) const
         const float w = WindReach(m.windBend * sv);
         p.bmin[0] -= w, p.bmax[0] += w, p.bmin[2] -= w, p.bmax[2] += w, p.bmax[1] += w;
     }
+}
+
+void Scene::SetModelLodScale(float scale)
+{
+    m_modelLodSetting = (std::max)(0.05f, scale);
+    if (std::getenv("NGG_MODEL_LOD_SCALE")) return;   // the A/B switch wins
+    if (m_modelLodScale == m_modelLodSetting) return;
+    m_modelLodScale = m_modelLodSetting;
+    // The cells' reach (how far a cell's models are drawn at all) follows the distances; the batches are re-picked.
+    m_modelCellsDirty = true;
+    RebuildModelCells();
+    m_mainBatchesValid = false;
 }
 
 void Scene::RebuildModelCells()
