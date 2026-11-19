@@ -145,6 +145,8 @@ CarModel ReadCarModel(const std::string& sgcPath, const std::string& surface, co
     const Ini carIni = ReadIni(files.read(base + ".ini"));
 
     CarModel model;
+    if (&files == given) model.readAgain = given->read;
+    else model.readAgain = [dir](const std::string& rel) { return ReadFile(dir + rel); };
     std::map<std::string, std::vector<std::string>> stageNames;   // the .sgc materials' texture names
 
     // The node tree: every named record's id, parent and matrix (meshes and helpers: after the 14-float local
@@ -435,7 +437,7 @@ CarModel ReadCarModel(const std::string& sgcPath, const std::string& surface, co
         t.material = p.material;
         const std::string file = textureFile(p.material);
         t.file = file;
-        if (!file.empty()) t.dds = files.read("textures/" + file);
+        if (!file.empty()) t.dds = files.read(t.rel = "textures/" + file);
         // Its PBR maps (CarMap): <texture>_basecolor / _normal / _orm.dds, where the folder has them.
         if (!file.empty()) {
             static const char* const kSuffix[kCarMaps] = {"_basecolor.dds", "_normal.dds", "_orm.dds"};
@@ -443,7 +445,7 @@ CarModel ReadCarModel(const std::string& sgcPath, const std::string& surface, co
             for (int k = 0; k < kCarMaps; ++k)
                 for (const std::string& f : textures)
                     if (Lower(f) == stem + kSuffix[k]) {
-                        t.maps[k].dds = files.read("textures/" + f);
+                        t.maps[k].dds = files.read(t.maps[k].rel = "textures/" + f);
                         break;
                     }
         }

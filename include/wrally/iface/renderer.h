@@ -60,7 +60,9 @@ namespace wrally::iface {
 // 23: RenderSettings::vegetationDetail (kVegetation*: how far instanced models keep their detailed LODs).
 // 24: device loss survived (TDR, driver update, GPU reset): the renderer makes a new device and everything it was given
 //     again, every handle kept (see "DEVICE LOSS" below); RenderStats::deviceGeneration counts the new devices.
-constexpr uint32_t kRendererInterfaceVer = 24;
+// 25: RendererInput::reload (the client hands a scene's or texture's bytes again after a device loss) and keepCopies
+//     (the renderer keeps its own copy instead, for what the client cannot make again).
+constexpr uint32_t kRendererInterfaceVer = 25;
 
 struct Renderer;                     // the module's instance, opaque
 struct RendererEditApi;              // renderer_edit.h
@@ -386,15 +388,20 @@ struct RenderStats {
 // loading another (or unloading it) releases them - their handles are invalid
 // from then on. UI textures (createTextureRgba) are the renderer's and stay.
 //
-// DEVICE LOSS (a TDR, a driver update or crash, a GPU reset; NGG design §10.6): the renderer survives it on its own.
-// The frame it happens in is lost (renderFrame and present return Ok, nothing is shown); the next call that needs the
-// GPU makes a new device and swap chain on the same window and gives it everything again - the scene, the textures,
-// models and instances, UI textures, settings and the editor table's state - keeping it for that (the .ngg's bytes
-// among it: memory for what the GPU holds). Every handle, object index and material stays as it was; the client does
-// nothing. That call takes as long as the scene's load. Instances and stage objects stand where the frames last put
-// them. RenderStats::deviceGeneration counts the new devices. Calls return ErrDevice while no device can be made (the
+// DEVICE LOSS (a TDR, a driver update or crash, a GPU reset; NGG design §10.6): the renderer survives it. The frame it
+// happens in is lost (renderFrame and present return Ok, nothing is shown); the next call that needs the GPU makes a
+// new device and swap chain on the same window and gives it everything again - the scene, the textures, models and
+// instances, UI textures, settings and the editor table's state. Every handle, object index and material stays as it
+// was. That call takes as long as the scene's load. Instances and stage objects stand where the frames last put them.
+// RenderStats::deviceGeneration counts the new devices. Calls return ErrDevice while no device can be made (the
 // adapter gone; tried again at most once a second), and ErrFault if a device came but the renderer on it did not
 // (destroy the instance).
+//   The big bytes - a scene's .ngg, a texture's DDS - the renderer does not keep: it asks the client for them again
+// (RendererInput::reload), in the order they were first handed over, during that call. What the client cannot make
+// again (an editor's unsaved scene, a texture changed in memory) it hands over under keepCopies(1): the renderer keeps
+// those bytes itself. Without a reload callback it keeps everything. A texture the client cannot give again is drawn
+// white; a scene it cannot give again is gone (lastError says so). Models, UI textures and the editor's state the
+// renderer keeps itself (small).
 struct RendererApi {
     void        (WRALLY_CALL* destroy)(Renderer*);
     const char* (WRALLY_CALL* lastError)(Renderer*);           // never null; valid until the next call
@@ -464,6 +471,23 @@ struct RendererApi {
     // and are not traced; object indices and keys stay the file's.
     Status (WRALLY_CALL* loadSceneVariant)(Renderer*, const void* ngg, uint64_t bytes, const char* variant,
                                            SceneHandle* out);
+
+    // Whether the loadScene / createTexture / createTextureData calls from here on keep their own copy of the bytes for
+    // a device loss (1), or ask RendererInput::reload for them again (0). Default: 0 with a reload callback, else 1.
+    Status (WRALLY_CALL* keepCopies)(Renderer*, uint32_t on);
+};
+
+// RendererReload::read's kind
+constexpr uint32_t kReloadScene   = 0;   // handle: the SceneHandle; the bytes loadScene / loadSceneVariant had
+constexpr uint32_t kReloadTexture = 1;   // handle: the TextureHandle; the DDS createTexture / createTextureData had
+
+// After a device loss (DEVICE LOSS above): the bytes of a scene or texture again, exactly as first handed over. Called on
+// the render thread, inside the call that makes the new device. `out` filled and Ok, or ErrIo when the client cannot;
+// `release` is called on every filled blob once it is read.
+struct RendererReload {
+    void* ctx;
+    Status (WRALLY_CALL* read)(void* ctx, uint32_t kind, uint32_t handle, Blob* out);
+    void   (WRALLY_CALL* release)(void* ctx, Blob* blob);
 };
 
 struct RendererInput {
@@ -475,6 +499,7 @@ struct RendererInput {
     uint32_t     adapterLuidLow;  // 0, 0: the renderer picks
     int32_t      adapterLuidHigh;
     RenderSettings settings;      // the starting ones
+    RendererReload reload;        // null read: none - the renderer keeps its own copies (keepCopies)
 };
 
 struct RendererOutput {

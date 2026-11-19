@@ -197,8 +197,9 @@ struct OwnedModel {
 // (Recover). Two kinds:
 //   - `ops`: the loaded scene's creations and the placements' edits, IN ORDER - replayed in that order, they hand out
 //     the same texture, material, model and instance handles and the same object indices, so the client's handles and
-//     the editor's indices stay valid. Started afresh by every loadScene: the scene's textures and models live until
-//     the next load anyway (renderer.h), so this holds in memory what the GPU already holds.
+//     the editor's indices stay valid. Started afresh by every loadScene. The big bytes (the .ngg, a texture's DDS) are
+//     kept only under keepCopies; otherwise the client is asked for them again (RendererInput::reload). Models are
+//     kept whole (small).
 //   - the setters' last values, applied after the ops: a later call replaces an earlier one, so a drag in the editor
 //     does not grow it.
 // UI textures are the renderer's, not the scene's: kept by slot with their last pixels.
@@ -207,13 +208,13 @@ struct Journal {
         enum Kind { Texture, TextureData, Model, ReleaseModel, Instance, DestroyInstance, AddPlacements, SetPlacements,
                     RemovePlacements } kind;
         uint32_t handle = 0;                     // ReleaseModel's, Instance's model, DestroyInstance's
-        std::vector<uint8_t> bytes;              // a texture's DDS
+        std::vector<uint8_t> bytes;              // a texture's DDS; empty: the client gives it again (kReloadTexture)
         std::shared_ptr<OwnedModel> model;
         std::vector<EditPlacement> placements;
         std::vector<uint32_t> handles;           // Set/RemovePlacements'
     };
     bool scene = false;                          // a scene is loaded (bytes + variant)
-    std::vector<uint8_t> sceneBytes;
+    std::vector<uint8_t> sceneBytes;             // empty: the client gives them again (kReloadScene)
     std::string variant;
     std::vector<Op> ops;
 
@@ -266,6 +267,8 @@ struct Renderer {
     LUID luid{};
     bool pickLuid = false;                 // the client named an adapter
     Journal journal;
+    RendererReload reload{};               // the client's bytes again (RendererInput::reload)
+    bool keepCopies = true;                // keepCopies: the big bytes kept here (default: no reload callback)
     bool replaying = false;                // Recover is calling the table: nothing journaled
     bool lost = false;                     // removed; the next call that needs the device makes a new one
     bool broken = false;                   // a new device was made but the rest of the renderer was not: ErrFault
@@ -624,9 +627,10 @@ Status WRALLY_CALL LoadScene(Renderer* r, const void* bytes, uint64_t count, Sce
     if (!r->replaying) r->journal.ForgetScene();
     const Status s = Retry(r, [&] { return LoadSceneNow(r, bytes, count, out); });
     if (s == Status::Ok && !r->replaying) {
-        // The bytes kept for a new device: what the GPU holds of the scene, a second time in memory.
+        // For a new device: the bytes kept here (keepCopies), or asked for again (kReloadScene).
         r->journal.scene = true;
-        r->journal.sceneBytes.assign(static_cast<const uint8_t*>(bytes), static_cast<const uint8_t*>(bytes) + count);
+        if (r->keepCopies)
+            r->journal.sceneBytes.assign(static_cast<const uint8_t*>(bytes), static_cast<const uint8_t*>(bytes) + count);
     }
     return s;
 }
@@ -709,7 +713,7 @@ Status AddSceneTexture(Renderer* r, const void* dds, uint64_t bytes, TextureHand
     if (s == Status::Ok && !r->replaying) {
         Journal::Op op{data ? Journal::Op::TextureData : Journal::Op::Texture};
         op.handle = *out;
-        op.bytes.assign(static_cast<const uint8_t*>(dds), static_cast<const uint8_t*>(dds) + bytes);
+        if (r->keepCopies) op.bytes.assign(static_cast<const uint8_t*>(dds), static_cast<const uint8_t*>(dds) + bytes);
         r->journal.ops.push_back(std::move(op));
     }
     return s;
@@ -1555,7 +1559,43 @@ Status WRALLY_CALL EditApi(Renderer* r, uint32_t editVer, const RendererEditApi*
     return Status::Ok;
 }
 
+Status WRALLY_CALL KeepCopies(Renderer* r, uint32_t on)
+{
+    if (!r) return Status::ErrInvalidArg;
+    r->keepCopies = on != 0;
+    return Status::Ok;
+}
+
 // ---- a new device after a removal (NGG design §10.6)
+
+// The client's bytes again (RendererInput::reload), released when this goes. ok false: it could not.
+struct Asked {
+    Renderer& r;
+    Blob blob{};
+    bool ok = false;
+    Asked(Renderer& r, uint32_t kind, uint32_t handle) : r(r)
+    {
+        ok = r.reload.read && r.reload.read(r.reload.ctx, kind, handle, &blob) == Status::Ok && blob.data && blob.size;
+        if (!ok) ngg::core::Log("wrenderer: the client did not give %s %u again", kind == kReloadScene ? "scene" : "texture", handle);
+    }
+    ~Asked()
+    {
+        if (ok && r.reload.release) r.reload.release(r.reload.ctx, &blob);
+    }
+};
+
+// What a texture the client could not give again is: a 4x4 white DXT1 - in its place, so the handles after it stay.
+std::vector<uint8_t> WhiteDds()
+{
+    std::vector<uint8_t> d(128, 0);
+    std::memcpy(d.data(), "DDS ", 4);
+    auto w32 = [&](size_t off, uint32_t v) { std::memcpy(d.data() + off, &v, 4); };
+    w32(4, 124), w32(8, 0x1 | 0x2 | 0x4 | 0x1000 | 0x80000), w32(12, 4), w32(16, 4), w32(20, 8), w32(28, 1);
+    w32(76, 32), w32(80, 0x4), w32(84, 0x31545844u), w32(108, 0x1000);   // FOURCC 'DXT1'
+    const uint8_t block[8] = {0xFF, 0xFF, 0xFF, 0xFF, 0, 0, 0, 0};
+    d.insert(d.end(), block, block + 8);
+    return d;
+}
 
 // The journal into a new Gpu, through the table itself (replaying: nothing journaled again). A handle that comes out
 // otherwise than it first did is logged: the client's would then name something else.
@@ -1567,7 +1607,7 @@ void Replay(Renderer& r)
     std::vector<Instance> placed = r.instances;
     std::unordered_map<int32_t, StageObjectUpdate> moved = r.stageMoved;
     ForgetScene(r);
-    uint32_t mismatches = 0;
+    uint32_t mismatches = 0, whites = 0;
     auto expect = [&](uint32_t got, uint32_t was, const char* what) {
         if (got != was && mismatches++ < 8) ngg::core::Log("wrenderer: after the new device a %s is %u, was %u", what, got, was);
     };
@@ -1578,18 +1618,39 @@ void Replay(Renderer& r)
     }
     if (j.scene) {
         SceneHandle h = 0;
-        if (LoadSceneVariant(&r, j.sceneBytes.data(), j.sceneBytes.size(), j.variant.empty() ? nullptr : j.variant.c_str(), &h) !=
-            Status::Ok)
-            ngg::core::Log("wrenderer: the scene would not load on the new device: %s", r.error.c_str());
+        const char* variant = j.variant.empty() ? nullptr : j.variant.c_str();
+        Status s = Status::ErrIo;
+        if (!j.sceneBytes.empty()) {
+            s = LoadSceneVariant(&r, j.sceneBytes.data(), j.sceneBytes.size(), variant, &h);
+        } else if (Asked a(r, kReloadScene, 1); a.ok) {
+            s = LoadSceneVariant(&r, a.blob.data, a.blob.size, variant, &h);
+        }
+        if (s != Status::Ok) {
+            r.Fail(Status::ErrIo, "device lost: the scene could not be made again (the client did not give it, or it "
+                                  "would not load) - load it again");
+            ngg::core::Log("wrenderer: the scene is gone with the device: %s", r.error.c_str());
+        }
     }
     for (Journal::Op& op : j.ops) {
         uint32_t h = 0;
         switch (op.kind) {
         case Journal::Op::Texture:
-        case Journal::Op::TextureData:
-            AddSceneTexture(&r, op.bytes.data(), op.bytes.size(), &h, op.kind == Journal::Op::TextureData);
+        case Journal::Op::TextureData: {
+            if (!r.sceneLoaded) break;
+            const bool data = op.kind == Journal::Op::TextureData;
+            if (!op.bytes.empty()) {
+                AddSceneTexture(&r, op.bytes.data(), op.bytes.size(), &h, data);
+            } else if (Asked a(r, kReloadTexture, op.handle); a.ok) {
+                AddSceneTexture(&r, a.blob.data, a.blob.size, &h, data);
+            }
+            if (!h) {   // white in its place: the handles after it stay as they were
+                const std::vector<uint8_t> white = WhiteDds();
+                AddSceneTexture(&r, white.data(), white.size(), &h, data);
+                ++whites;
+            }
             expect(h, op.handle, "texture");
             break;
+        }
         case Journal::Op::Model: {
             const ModelDesc d = op.model->Desc();
             CreateModel(&r, &d, &h);
@@ -1649,6 +1710,7 @@ void Replay(Renderer& r)
     }
     r.replaying = false;
     if (mismatches) ngg::core::Log("wrenderer: %u handles came out otherwise on the new device", mismatches);
+    if (whites) ngg::core::Log("wrenderer: %u textures not given again - drawn white", whites);
 }
 
 bool Recover(Renderer& r)
@@ -1657,8 +1719,15 @@ bool Recover(Renderer& r)
     if (r.lastFailed != std::chrono::steady_clock::time_point{} && now - r.lastFailed < std::chrono::seconds(1))
         return false;   // the last try failed a moment ago
     r.lastFailed = now;   // (until it succeeds)
-    ngg::core::Log("wrenderer: the device was lost - making a new one (%zu scene ops, %zu UI textures to restore)",
-                   r.journal.ops.size(), r.journal.uiTextures.size());
+    {
+        size_t kept = r.journal.sceneBytes.size(), asked = r.journal.scene && r.journal.sceneBytes.empty() ? 1 : 0;
+        for (const Journal::Op& op : r.journal.ops)
+            if (op.kind == Journal::Op::Texture || op.kind == Journal::Op::TextureData)
+                op.bytes.empty() ? void(++asked) : void(kept += op.bytes.size());
+        ngg::core::Log("wrenderer: the device was lost - making a new one (%zu scene ops, %zu UI textures; %zu scene / "
+                       "texture bytes asked for again, %.1f MB kept)",
+                       r.journal.ops.size(), r.journal.uiTextures.size(), asked, kept / 1048576.0);
+    }
     // All of the old device let go first: D3D12 has one device per adapter, and while any of the old one lives a new
     // D3D12CreateDevice hands it back, removed. That includes the swap chain (the window takes one flip chain).
     ngg::core::ClosePipelineCache();
@@ -1695,7 +1764,7 @@ const RendererApi kApi = {&Destroy,       &LastError,         &ApplySettings,  &
                           &ReleaseTexture, &CreateModel,      &ReleaseModel,   &CreateInstance, &DestroyInstance,
                           &RenderFrame,   &Present,           &Stats,          &CaptureFrame,   &SetDebugView,
                           &DebugViewName, &SetLegacyProfile, &UpdateTextureRgba, &CreateTextureData, &EditApi,
-                          &LoadSceneVariant};
+                          &LoadSceneVariant, &KeepCopies};
 
 } // namespace
 
@@ -1732,6 +1801,8 @@ WRALLY_EXPORT Status WRALLY_CALL InitWInterface(uint32_t gameVersion, const Stru
         r->luid = LUID{input.adapterLuidLow, input.adapterLuidHigh};
         r->pickLuid = input.adapterLuidLow || input.adapterLuidHigh;
         r->initFlags = input.flags;
+        r->reload = input.reload;
+        r->keepCopies = input.reload.read == nullptr;   // without the client's bytes again: the renderer's own copies
         r->testRemovals = TestRemovals();
         r->settings = input.settings;
         if (r->settings.mode != WindowMode::Windowed) r->settings.mode = WindowMode::Windowed;

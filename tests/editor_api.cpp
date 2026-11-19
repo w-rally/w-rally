@@ -504,7 +504,8 @@ namespace {
 
 using InitFn = Status(WRALLY_CALL*)(uint32_t, const StructHeader*, StructHeader*);
 
-bool OpenRenderer(InitFn init, HWND hwnd, uint32_t flags, const RenderSettings& settings, Rig& rig)
+bool OpenRenderer(InitFn init, HWND hwnd, uint32_t flags, const RenderSettings& settings, Rig& rig,
+                  RendererReload reload = {})
 {
     RendererInput in{};
     RendererOutput out{};
@@ -519,6 +520,7 @@ bool OpenRenderer(InitFn init, HWND hwnd, uint32_t flags, const RenderSettings& 
     in.width = kW, in.height = kH;
     in.flags = flags;
     in.settings = settings;
+    in.reload = reload;
     if (init(MakeVersion(0, 1, 0), &in.header, &out.header) != Status::Ok) return false;
     rig.api = out.api;
     rig.r = out.instance;
@@ -534,6 +536,46 @@ std::vector<char> ReadFile(const char* path)
 // One renderFrame (the renderer counts them from 1: NGG_TEST_DEVICE_REMOVED's frame numbers).
 bool Frame(Rig& rig) { return rig.Render(); }
 
+// A 4x4 DXT1 of one colour (565), a scene texture to hand over.
+std::vector<uint8_t> SolidDds(uint16_t c565)
+{
+    std::vector<uint8_t> d(128, 0);
+    std::memcpy(d.data(), "DDS ", 4);
+    auto w32 = [&](size_t off, uint32_t v) { std::memcpy(d.data() + off, &v, 4); };
+    w32(4, 124), w32(8, 0x1 | 0x2 | 0x4 | 0x1000 | 0x80000), w32(12, 4), w32(16, 4), w32(20, 8), w32(28, 1);
+    w32(76, 32), w32(80, 0x4), w32(84, 0x31545844u), w32(108, 0x1000);
+    const uint8_t block[8] = {uint8_t(c565), uint8_t(c565 >> 8), uint8_t(c565), uint8_t(c565 >> 8), 0, 0, 0, 0};
+    d.insert(d.end(), block, block + 8);
+    return d;
+}
+
+// The client's side of RendererReload: the scene and the one texture given again, each ask counted.
+struct Reloads {
+    const std::vector<char>* ngg = nullptr;
+    std::vector<uint8_t> dds;
+    TextureHandle texture = 0;
+    int scenes = 0, textures = 0, released = 0;
+    bool refuseTexture = false;   // the client cannot make it again: white in its place
+
+    static Status WRALLY_CALL Read(void* ctx, uint32_t kind, uint32_t handle, Blob* out)
+    {
+        Reloads& r = *static_cast<Reloads*>(ctx);
+        if (kind == kReloadScene && handle == 1) {
+            ++r.scenes;
+            *out = {r.ngg->data(), r.ngg->size(), nullptr};
+            return Status::Ok;
+        }
+        if (kind == kReloadTexture && handle == r.texture) {
+            ++r.textures;
+            if (r.refuseTexture) return Status::ErrIo;
+            *out = {r.dds.data(), r.dds.size(), nullptr};
+            return Status::Ok;
+        }
+        return Status::ErrIo;
+    }
+    static void WRALLY_CALL Release(void* ctx, Blob*) { ++static_cast<Reloads*>(ctx)->released; }
+};
+
 int CheckDeviceLost(InitFn init, HWND hwnd, const std::vector<char>& ngg)
 {
     // The removals: frame 6 (a stage on screen), frame 11 (the next call is createModel, not a frame).
@@ -544,149 +586,178 @@ int CheckDeviceLost(InitFn init, HWND hwnd, const std::vector<char>& ngg)
     settings.shadows = 1;
     settings.renderScale = 1.0f;
     settings.upscaler = kUpscalerNone;
-    Rig rig;
-    if (!OpenRenderer(init, hwnd, kRendererNoRayTracing, settings, rig))
-        return std::printf("InitWInterface failed:\n%s", TakeLog().c_str()), 2;
-    const RendererApi& api = *rig.api;
-    const RendererEditApi& edit = *rig.edit;
-    SceneHandle scene = 0;
-    if (api.loadScene(rig.r, ngg.data(), ngg.size(), &scene) != Status::Ok)
-        return std::printf("loadScene failed: %s\n%s", api.lastError(rig.r), TakeLog().c_str()), 2;
-    const uint32_t n = edit.objectCount(rig.r);
+    // Twice: the renderer keeping its own copies (no reload callback), then the client giving the bytes again.
+    FrameDesc lastFrame{};
+    V3 lastEye{}, lastAt{};
+    for (int pass = 0; pass < 2; ++pass) {
+        const bool asking = pass == 1;
+        std::printf("      -- %s\n", asking ? "the client gives the bytes again (RendererInput::reload)" : "the renderer's own copies");
+        Reloads reloads;
+        reloads.ngg = &ngg;
+        reloads.dds = SolidDds(0x07E0);
+        Rig rig;
+        if (!OpenRenderer(init, hwnd, kRendererNoRayTracing, settings, rig,
+                          asking ? RendererReload{&reloads, &Reloads::Read, &Reloads::Release} : RendererReload{}))
+            return std::printf("InitWInterface failed:\n%s", TakeLog().c_str()), 2;
+        const RendererApi& api = *rig.api;
+        const RendererEditApi& edit = *rig.edit;
+        SceneHandle scene = 0;
+        if (api.loadScene(rig.r, ngg.data(), ngg.size(), &scene) != Status::Ok)
+            return std::printf("loadScene failed: %s\n%s", api.lastError(rig.r), TakeLog().c_str()), 2;
+        const uint32_t n = edit.objectCount(rig.r);
 
-    // What a client makes: a UI texture, a model (a quad, its material edited), an instance placed once, a stage object
-    // moved and one hidden, a selection and an overlay layer.
-    const uint32_t white[16] = {0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu,
-                                0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu,
-                                0xFFFFFFFFu, 0xFFFFFFFFu};
-    TextureHandle ui = 0;
-    api.createTextureRgba(rig.r, white, 4, 4, &ui);
-    float focus[3] = {};
-    edit.focusPoint(rig.r, focus);
-    const V3 fp{focus[0], focus[1], focus[2]};
-    rig.frame.scene = scene;
-    rig.Aim(fp + V3{-120, 45, -120}, fp);
-    rig.frame.weatherPreset = api.weatherPresetCount(rig.r, scene) ? 0 : -1;
-    if (rig.frame.weatherPreset < 0) {
-        WeatherDesc& w = rig.frame.weather;
-        w.sunDirection[0] = -0.843f, w.sunDirection[1] = -0.504f, w.sunDirection[2] = 0.187f;
-        w.sunIntensity = 22, w.turbidity = 2, w.groundAlbedo = 0.12f;
-        w.groundColour[0] = w.groundColour[1] = w.groundColour[2] = 0.3f;
-        w.exposure = 0.8f;
+        // What a client makes: a UI texture, a model (a quad, its material edited), an instance placed once, a stage object
+        // moved and one hidden, a selection and an overlay layer.
+        const uint32_t white[16] = {0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu,
+                                    0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu,
+                                    0xFFFFFFFFu, 0xFFFFFFFFu};
+        TextureHandle ui = 0;
+        api.createTextureRgba(rig.r, white, 4, 4, &ui);
+        api.createTexture(rig.r, reloads.dds.data(), reloads.dds.size(), &reloads.texture);
+        float focus[3] = {};
+        edit.focusPoint(rig.r, focus);
+        const V3 fp{focus[0], focus[1], focus[2]};
+        rig.frame.scene = scene;
+        rig.Aim(fp + V3{-120, 45, -120}, fp);
+        rig.frame.weatherPreset = api.weatherPresetCount(rig.r, scene) ? 0 : -1;
+        if (rig.frame.weatherPreset < 0) {
+            WeatherDesc& w = rig.frame.weather;
+            w.sunDirection[0] = -0.843f, w.sunDirection[1] = -0.504f, w.sunDirection[2] = 0.187f;
+            w.sunIntensity = 22, w.turbidity = 2, w.groundAlbedo = 0.12f;
+            w.groundColour[0] = w.groundColour[1] = w.groundColour[2] = 0.3f;
+            w.exposure = 0.8f;
+        }
+        const V3 fwd = Normalize(rig.at - rig.eye), side = Normalize(Cross({0, 1, 0}, fwd));
+        const V3 c = rig.eye + fwd * 40.0f;
+        Vertex q[4] = {};
+        const V3 corners[4] = {c - side * 4 + V3{0, -4, 0}, c + side * 4 + V3{0, -4, 0}, c + side * 4 + V3{0, 4, 0},
+                               c - side * 4 + V3{0, 4, 0}};
+        for (int i = 0; i < 4; ++i) {
+            q[i].pos[0] = corners[i].x, q[i].pos[1] = corners[i].y, q[i].pos[2] = corners[i].z;
+            q[i].normal[0] = -fwd.x, q[i].normal[1] = -fwd.y, q[i].normal[2] = -fwd.z;
+            q[i].colour = 0xFFFFFFFFu;
+        }
+        const uint32_t idx[6] = {0, 1, 2, 0, 2, 3};
+        const MaterialDesc mat = DefaultMaterialDesc();
+        ModelMesh mesh{};
+        mesh.vertices = q, mesh.vertexCount = 4, mesh.indices = idx, mesh.indexCount = 6, mesh.material = 0, mesh.node = 0;
+        ModelNode node{};
+        node.parent = -1;
+        Identity(node.local);
+        ModelDesc md{};
+        md.nodes = &node, md.nodeCount = 1, md.meshes = &mesh, md.meshCount = 1, md.materials = &mat, md.materialCount = 1;
+        ModelHandle model = 0;
+        InstanceHandle inst = 0;
+        api.createModel(rig.r, &md, &model);
+        api.createInstance(rig.r, model, &inst);
+        uint32_t objs[4] = {}, cnt = 0;
+        edit.instanceObjects(rig.r, inst, objs, 4, &cnt);
+        Check(cnt == 1 && objs[0] == n, "device loss: the client's model and instance", "model %u, instance %u: object %u", model,
+              inst, objs[0]);
+        uint32_t quadMat = 0;
+        edit.objectMaterial(rig.r, objs[0], &quadMat);
+        MaterialDesc red{};
+        edit.getMaterial(rig.r, quadMat, &red);
+        red.baseColourFactor[0] = 1.0f, red.baseColourFactor[1] = 0.1f, red.baseColourFactor[2] = 0.05f;
+        edit.setMaterial(rig.r, quadMat, &red);
+        float lift[16];
+        Translation(lift, {0, 3, 0});
+        edit.setObjectTransform(rig.r, 1 % n, lift);
+        edit.setObjectVisible(rig.r, 2 % n, 0);
+        edit.setSelection(rig.r, objs, 1);
+        const LineVertex cross[4] = {{fp.x - 30, fp.y + 1, fp.z, 0xFF00FFFFu}, {fp.x + 30, fp.y + 1, fp.z, 0xFF00FFFFu},
+                                     {fp.x, fp.y + 1, fp.z - 30, 0xFF00FFFFu}, {fp.x, fp.y + 1, fp.z + 30, 0xFF00FFFFu}};
+        edit.setOverlayLines(rig.r, 0, cross, 4, 0);
+        const uint32_t visibleBefore = edit.visibleObjectCount(rig.r);
+
+        // Frames 1-3: placed in the first only (it stays where it was put), captured in the third.
+        InstanceUpdate u{};
+        u.instance = inst, u.visible = 1;
+        Identity(u.world);
+        rig.frame.instances = &u, rig.frame.instanceCount = 1;
+        Frame(rig);
+        rig.frame.instances = nullptr, rig.frame.instanceCount = 0;
+        Frame(rig);
+        api.captureFrame(rig.r, asking ? "device-lost-before-asked.png" : "device-lost-before.png");
+        Frame(rig);
+        const EditOverlayStats before = rig.Stats();
+        Frame(rig);
+        Frame(rig);   // 5
+        TakeLog();
+
+        // Frame 6: removed in it.
+        const bool lostOk = Frame(rig);
+        const std::string lostLog = TakeLog();
+        Check(lostOk && api.present(rig.r) == Status::Ok, "device loss: the lost frame and its present return Ok");
+        Check(lostLog.find("NGG_TEST_DEVICE_REMOVED") != std::string::npos && lostLog.find("DEVICE REMOVED") != std::string::npos,
+              "device loss: removed in that frame, and DRED's record logged",
+              "%s", lostLog.find("reason 0x") != std::string::npos ? lostLog.substr(lostLog.find("reason 0x"), 18).c_str() : "");
+        RenderStats st{};
+        api.stats(rig.r, &st);
+        Check(st.deviceGeneration == 0, "device loss: no new device until a call needs one", "generation %u", st.deviceGeneration);
+
+        // Frames 7-9: the first makes the new device; captured in the third, as before.
+        const bool recovered = Frame(rig);
+        const std::string recoverLog = TakeLog();
+        api.stats(rig.r, &st);
+        Check(recovered && st.deviceGeneration == 1 && recoverLog.find("device 1 ready") != std::string::npos,
+              "device loss: the next frame is on a new device", "generation %u; %s", st.deviceGeneration,
+              recoverLog.find("device 1 ready") != std::string::npos
+                  ? recoverLog.substr(recoverLog.find("device 1 ready"), recoverLog.find('\n', recoverLog.find("device 1 ready")) -
+                                                                           recoverLog.find("device 1 ready")).c_str()
+                  : api.lastError(rig.r));
+        Check(recoverLog.find("came out otherwise") == std::string::npos, "device loss: every handle came out as before");
+        Frame(rig);
+        api.captureFrame(rig.r, asking ? "device-lost-after-asked.png" : "device-lost-after.png");
+        Frame(rig);
+        const EditOverlayStats after = rig.Stats();
+        const std::vector<char> a = ReadFile(asking ? "device-lost-before-asked.png" : "device-lost-before.png"),
+                                b = ReadFile(asking ? "device-lost-after-asked.png" : "device-lost-after.png");
+        if (asking)
+            Check(reloads.scenes == 1 && reloads.textures == 1 && reloads.released == 2 &&
+                      recoverLog.find("2 scene / texture bytes asked for again, 0.0 MB kept") != std::string::npos,
+                  "device loss: the scene and the texture asked for, none kept", "%d scene(s), %d texture(s), %d released",
+                  reloads.scenes, reloads.textures, reloads.released);
+        else
+            Check(recoverLog.find("0 scene / texture bytes asked for again") != std::string::npos,
+                  "device loss: without a callback, all kept by the renderer");
+        Check(!a.empty() && a == b, "device loss: the same picture after it, byte for byte", "%zu and %zu bytes", a.size(), b.size());
+        Check(before.selectionVisible == after.selectionVisible && before.linesVisible == after.linesVisible &&
+                  before.linesOccluded == after.linesOccluded && before.selectionVisible > 0 && before.linesVisible > 0,
+              "device loss: the selection and the overlay, pixel for pixel", "selection %u -> %u, lines %u -> %u",
+              before.selectionVisible, after.selectionVisible, before.linesVisible, after.linesVisible);
+        uint32_t objs2[4] = {}, cnt2 = 0;
+        MaterialDesc back{};
+        const Status objsBack = edit.instanceObjects(rig.r, inst, objs2, 4, &cnt2);
+        Check(objsBack == Status::Ok && cnt2 == cnt && objs2[0] == objs[0] &&
+                  edit.objectCount(rig.r) == n + 1 && edit.visibleObjectCount(rig.r) == visibleBefore,
+              "device loss: the instance's objects and the stage's as they were", "object %u of %u, %u visible", objs2[0],
+              edit.objectCount(rig.r), edit.visibleObjectCount(rig.r));
+        Check(edit.getMaterial(rig.r, quadMat, &back) == Status::Ok && std::memcmp(&back, &red, sizeof red) == 0,
+              "device loss: the edited material too");
+        Check(api.updateTextureRgba(rig.r, ui, white) == Status::Ok, "device loss: the UI texture's handle works");
+
+        // Frame 10, then 11 removed: the next call is not a frame but createModel - it makes the new device, then the model.
+        Frame(rig);
+        reloads.refuseTexture = true;
+        Frame(rig);
+        TakeLog();
+        ModelHandle model2 = 0;
+        const Status made = api.createModel(rig.r, &md, &model2);
+        if (asking)
+            Check(TakeLog().find("1 textures not given again - drawn white") != std::string::npos,
+                  "device loss: a texture not given again is drawn white, its place kept");
+        api.stats(rig.r, &st);
+        Check(made == Status::Ok && model2 == model + 1 && st.deviceGeneration == 2, "device loss: a call between frames makes it",
+              "model %u, generation %u", model2, st.deviceGeneration);
+        Check(Frame(rig) && api.present(rig.r) == Status::Ok, "device loss: and the frames go on");
+        if (asking)
+            Check(reloads.scenes == 2 && reloads.textures == 2, "device loss: asked again for the second one",
+                  "%d scene(s), %d texture(s)", reloads.scenes, reloads.textures);
+        lastFrame = rig.frame, lastEye = rig.eye, lastAt = rig.at;
+        api.destroy(rig.r);
+        TakeLog();
     }
-    const V3 fwd = Normalize(rig.at - rig.eye), side = Normalize(Cross({0, 1, 0}, fwd));
-    const V3 c = rig.eye + fwd * 40.0f;
-    Vertex q[4] = {};
-    const V3 corners[4] = {c - side * 4 + V3{0, -4, 0}, c + side * 4 + V3{0, -4, 0}, c + side * 4 + V3{0, 4, 0},
-                           c - side * 4 + V3{0, 4, 0}};
-    for (int i = 0; i < 4; ++i) {
-        q[i].pos[0] = corners[i].x, q[i].pos[1] = corners[i].y, q[i].pos[2] = corners[i].z;
-        q[i].normal[0] = -fwd.x, q[i].normal[1] = -fwd.y, q[i].normal[2] = -fwd.z;
-        q[i].colour = 0xFFFFFFFFu;
-    }
-    const uint32_t idx[6] = {0, 1, 2, 0, 2, 3};
-    const MaterialDesc mat = DefaultMaterialDesc();
-    ModelMesh mesh{};
-    mesh.vertices = q, mesh.vertexCount = 4, mesh.indices = idx, mesh.indexCount = 6, mesh.material = 0, mesh.node = 0;
-    ModelNode node{};
-    node.parent = -1;
-    Identity(node.local);
-    ModelDesc md{};
-    md.nodes = &node, md.nodeCount = 1, md.meshes = &mesh, md.meshCount = 1, md.materials = &mat, md.materialCount = 1;
-    ModelHandle model = 0;
-    InstanceHandle inst = 0;
-    api.createModel(rig.r, &md, &model);
-    api.createInstance(rig.r, model, &inst);
-    uint32_t objs[4] = {}, cnt = 0;
-    edit.instanceObjects(rig.r, inst, objs, 4, &cnt);
-    Check(cnt == 1 && objs[0] == n, "device loss: the client's model and instance", "model %u, instance %u: object %u", model,
-          inst, objs[0]);
-    uint32_t quadMat = 0;
-    edit.objectMaterial(rig.r, objs[0], &quadMat);
-    MaterialDesc red{};
-    edit.getMaterial(rig.r, quadMat, &red);
-    red.baseColourFactor[0] = 1.0f, red.baseColourFactor[1] = 0.1f, red.baseColourFactor[2] = 0.05f;
-    edit.setMaterial(rig.r, quadMat, &red);
-    float lift[16];
-    Translation(lift, {0, 3, 0});
-    edit.setObjectTransform(rig.r, 1 % n, lift);
-    edit.setObjectVisible(rig.r, 2 % n, 0);
-    edit.setSelection(rig.r, objs, 1);
-    const LineVertex cross[4] = {{fp.x - 30, fp.y + 1, fp.z, 0xFF00FFFFu}, {fp.x + 30, fp.y + 1, fp.z, 0xFF00FFFFu},
-                                 {fp.x, fp.y + 1, fp.z - 30, 0xFF00FFFFu}, {fp.x, fp.y + 1, fp.z + 30, 0xFF00FFFFu}};
-    edit.setOverlayLines(rig.r, 0, cross, 4, 0);
-    const uint32_t visibleBefore = edit.visibleObjectCount(rig.r);
-
-    // Frames 1-3: placed in the first only (it stays where it was put), captured in the third.
-    InstanceUpdate u{};
-    u.instance = inst, u.visible = 1;
-    Identity(u.world);
-    rig.frame.instances = &u, rig.frame.instanceCount = 1;
-    Frame(rig);
-    rig.frame.instances = nullptr, rig.frame.instanceCount = 0;
-    Frame(rig);
-    api.captureFrame(rig.r, "device-lost-before.png");
-    Frame(rig);
-    const EditOverlayStats before = rig.Stats();
-    Frame(rig);
-    Frame(rig);   // 5
-    TakeLog();
-
-    // Frame 6: removed in it.
-    const bool lostOk = Frame(rig);
-    const std::string lostLog = TakeLog();
-    Check(lostOk && api.present(rig.r) == Status::Ok, "device loss: the lost frame and its present return Ok");
-    Check(lostLog.find("NGG_TEST_DEVICE_REMOVED") != std::string::npos && lostLog.find("DEVICE REMOVED") != std::string::npos,
-          "device loss: removed in that frame, and DRED's record logged",
-          "%s", lostLog.find("reason 0x") != std::string::npos ? lostLog.substr(lostLog.find("reason 0x"), 18).c_str() : "");
-    RenderStats st{};
-    api.stats(rig.r, &st);
-    Check(st.deviceGeneration == 0, "device loss: no new device until a call needs one", "generation %u", st.deviceGeneration);
-
-    // Frames 7-9: the first makes the new device; captured in the third, as before.
-    const bool recovered = Frame(rig);
-    const std::string recoverLog = TakeLog();
-    api.stats(rig.r, &st);
-    Check(recovered && st.deviceGeneration == 1 && recoverLog.find("device 1 ready") != std::string::npos,
-          "device loss: the next frame is on a new device", "generation %u; %s", st.deviceGeneration,
-          recoverLog.find("device 1 ready") != std::string::npos
-              ? recoverLog.substr(recoverLog.find("device 1 ready"), recoverLog.find('\n', recoverLog.find("device 1 ready")) -
-                                                                       recoverLog.find("device 1 ready")).c_str()
-              : api.lastError(rig.r));
-    Check(recoverLog.find("came out otherwise") == std::string::npos, "device loss: every handle came out as before");
-    Frame(rig);
-    api.captureFrame(rig.r, "device-lost-after.png");
-    Frame(rig);
-    const EditOverlayStats after = rig.Stats();
-    const std::vector<char> a = ReadFile("device-lost-before.png"), b = ReadFile("device-lost-after.png");
-    Check(!a.empty() && a == b, "device loss: the same picture after it, byte for byte", "%zu and %zu bytes", a.size(), b.size());
-    Check(before.selectionVisible == after.selectionVisible && before.linesVisible == after.linesVisible &&
-              before.linesOccluded == after.linesOccluded && before.selectionVisible > 0 && before.linesVisible > 0,
-          "device loss: the selection and the overlay, pixel for pixel", "selection %u -> %u, lines %u -> %u",
-          before.selectionVisible, after.selectionVisible, before.linesVisible, after.linesVisible);
-    uint32_t objs2[4] = {}, cnt2 = 0;
-    MaterialDesc back{};
-    const Status objsBack = edit.instanceObjects(rig.r, inst, objs2, 4, &cnt2);
-    Check(objsBack == Status::Ok && cnt2 == cnt && objs2[0] == objs[0] &&
-              edit.objectCount(rig.r) == n + 1 && edit.visibleObjectCount(rig.r) == visibleBefore,
-          "device loss: the instance's objects and the stage's as they were", "object %u of %u, %u visible", objs2[0],
-          edit.objectCount(rig.r), edit.visibleObjectCount(rig.r));
-    Check(edit.getMaterial(rig.r, quadMat, &back) == Status::Ok && std::memcmp(&back, &red, sizeof red) == 0,
-          "device loss: the edited material too");
-    Check(api.updateTextureRgba(rig.r, ui, white) == Status::Ok, "device loss: the UI texture's handle works");
-
-    // Frame 10, then 11 removed: the next call is not a frame but createModel - it makes the new device, then the model.
-    Frame(rig);
-    Frame(rig);
-    TakeLog();
-    ModelHandle model2 = 0;
-    const Status made = api.createModel(rig.r, &md, &model2);
-    api.stats(rig.r, &st);
-    Check(made == Status::Ok && model2 == model + 1 && st.deviceGeneration == 2, "device loss: a call between frames makes it",
-          "model %u, generation %u", model2, st.deviceGeneration);
-    Check(Frame(rig) && api.present(rig.r) == Status::Ok, "device loss: and the frames go on");
-    api.destroy(rig.r);
-    TakeLog();
 
     // With ray tracing, NRD and FSR (where this adapter has them): back after the loss, as they were.
     settings.rayTracing = 1;
@@ -696,9 +767,10 @@ int CheckDeviceLost(InitFn init, HWND hwnd, const std::vector<char>& ngg)
     Rig rt;
     SetEnvironmentVariableA("NGG_TEST_DEVICE_REMOVED", "12");   // (read when a renderer is made)
     if (!OpenRenderer(init, hwnd, 0, settings, rt)) return std::printf("InitWInterface (ray traced) failed:\n%s", TakeLog().c_str()), 2;
-    rt.api->loadScene(rt.r, ngg.data(), ngg.size(), &scene);
-    rt.frame = rig.frame;
-    rt.eye = rig.eye, rt.at = rig.at;
+    SceneHandle rtScene = 0;
+    rt.api->loadScene(rt.r, ngg.data(), ngg.size(), &rtScene);
+    rt.frame = lastFrame;
+    rt.eye = lastEye, rt.at = lastAt;
     // Frames 1-11 to settle (the BLASes are built off the frame), 12 removed, then on until it ray traces again.
     RenderStats s0{}, s1{};
     for (int i = 0; i < 11; ++i) rt.Render();

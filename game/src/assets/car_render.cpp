@@ -274,16 +274,23 @@ void CarRender::Create(render::Renderer& renderer, const CarModel* read, const s
         m_wheelRadius = model.wheelRadius;
         size_t textured = 0;
         std::vector<bool> hasOrm;   // per material: its ORM map says the finish (materialOf)
+        // Read again after a device loss rather than kept by the renderer (NGG design §10.6).
+        auto again = [&](const std::string& rel) -> render::Renderer::Source {
+            if (!model.readAgain || rel.empty()) return {};
+            return [read = model.readAgain, rel] { return read(rel); };
+        };
         for (const CarTexture& t : model.materials) {
-            const iface::TextureHandle tex = t.uploaded ? t.uploaded : t.dds.empty() ? 0 : renderer.CreateTexture(t.dds.data(), t.dds.size());
+            const iface::TextureHandle tex = t.uploaded ? t.uploaded
+                                           : t.dds.empty() ? 0
+                                                           : renderer.CreateTexture(t.dds.data(), t.dds.size(), again(t.rel));
             textured += tex != 0;
             iface::TextureHandle maps[kCarMaps] = {};
             for (int k = 0; k < kCarMaps; ++k) {
                 const CarMap& cm = t.maps[k];
                 maps[k] = cm.uploaded ? cm.uploaded
                         : cm.dds.empty() ? 0
-                        : k == kMapBaseColour ? renderer.CreateTexture(cm.dds.data(), cm.dds.size())
-                                              : renderer.CreateTextureData(cm.dds.data(), cm.dds.size());
+                        : k == kMapBaseColour ? renderer.CreateTexture(cm.dds.data(), cm.dds.size(), again(cm.rel))
+                                              : renderer.CreateTextureData(cm.dds.data(), cm.dds.size(), again(cm.rel));
             }
             if (std::getenv("PHYS_DRIVE_MATERIALS")) {
                 std::string found;
