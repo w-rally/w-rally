@@ -22,7 +22,12 @@ jobs:
           dotnet tool install --global wix --version 5.0.2
           wix extension add -g WixToolset.UI.wixext/5.0.2
 
+      # The net module (cmake/WNet.cmake): the pinned WNet.dll from the private w-rally/wnet releases, verified. The
+      # WNET_RELEASES_TOKEN secret (read access to w-rally/wnet) lets the build fetch it; without it the MSI ships no
+      # net module (the game runs offline).
       - name: Configure
+        env:
+          WNET_GITHUB_TOKEN: ${{ secrets.WNET_RELEASES_TOKEN }}
         run: cmake -A x64 -S . -B build   # the newest Visual Studio on the runner
 
       - name: Build

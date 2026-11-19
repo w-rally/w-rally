@@ -33,14 +33,12 @@ wrally_build_info(W-Rally)   # the version and commit in the screens' corner
 target_link_libraries(W-Rally PRIVATE wrally-json wrally-vfs phys-data rbr-collision ngg-format wrally-modules wrally-signals wrally-png imgui mfplat mfreadwrite mfuuid)
 # Not linked: loaded at run time from bin/modules - but built with the game.
 add_dependencies(W-Rally WPhysicsRBR WAudio WRenderer)
-# The net module is not built here: WNet.dll comes from the private wnet repo. WRALLY_WNET_DLL=<its path> puts it in
-# bin/modules/net with each build (until the build fetches a pinned, verified release of it). Without it the game runs
-# offline.
-set(WRALLY_WNET_DLL "" CACHE FILEPATH "WNet.dll to put in bin/modules/net (a build of the private wnet repo)")
-if(WRALLY_WNET_DLL)
+# The net module is not built here (cmake/WNet.cmake: the pinned, verified release, or WRALLY_WNET_DLL): into
+# bin/modules/net with each build. None, the game runs offline.
+if(WRALLY_WNET_MODULE)
     add_custom_command(TARGET W-Rally POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E make_directory ${WRALLY_BIN}/modules/net
-        COMMAND ${CMAKE_COMMAND} -E copy_if_different ${WRALLY_WNET_DLL} ${WRALLY_BIN}/modules/net/
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different ${WRALLY_WNET_MODULE} ${WRALLY_BIN}/modules/net/
         COMMENT "WNet.dll into bin/modules/net")
 endif()
 # Where WRallyFile finds content/ and game/config/ when they are not beside the exe (a build run from its tree).
