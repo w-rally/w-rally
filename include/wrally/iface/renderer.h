@@ -58,7 +58,9 @@ namespace wrally::iface {
 //     denoisers), RenderStats::denoiser and denoisersAvailable.
 // 22: kUpscalerDlssRr (NVIDIA DLSS Ray Reconstruction: denoises the ray tracing within the upscale; elsewhere the TAA).
 // 23: RenderSettings::vegetationDetail (kVegetation*: how far instanced models keep their detailed LODs).
-constexpr uint32_t kRendererInterfaceVer = 23;
+// 24: device loss survived (TDR, driver update, GPU reset): the renderer makes a new device and everything it was given
+//     again, every handle kept (see "DEVICE LOSS" below); RenderStats::deviceGeneration counts the new devices.
+constexpr uint32_t kRendererInterfaceVer = 24;
 
 struct Renderer;                     // the module's instance, opaque
 struct RendererEditApi;              // renderer_edit.h
@@ -370,6 +372,7 @@ struct RenderStats {
     char     aoSource[32];                 // "ray traced, 1 ray", "XeGTAO medium"; "off"
     char     denoiser[16];                 // what denoised this frame's ray tracing, "ours" or "NRD"; "" without it
     uint32_t denoisersAvailable;           // bit 1 << kDenoiser*: what this build and adapter can run (ours always)
+    uint32_t deviceGeneration;             // devices made after a device loss (0: the first one still)
 };
 
 #pragma pack(pop)
@@ -382,6 +385,16 @@ struct RenderStats {
 // ONE SCENE AT A TIME: textures and models live in the loaded scene, and
 // loading another (or unloading it) releases them - their handles are invalid
 // from then on. UI textures (createTextureRgba) are the renderer's and stay.
+//
+// DEVICE LOSS (a TDR, a driver update or crash, a GPU reset; NGG design §10.6): the renderer survives it on its own.
+// The frame it happens in is lost (renderFrame and present return Ok, nothing is shown); the next call that needs the
+// GPU makes a new device and swap chain on the same window and gives it everything again - the scene, the textures,
+// models and instances, UI textures, settings and the editor table's state - keeping it for that (the .ngg's bytes
+// among it: memory for what the GPU holds). Every handle, object index and material stays as it was; the client does
+// nothing. That call takes as long as the scene's load. Instances and stage objects stand where the frames last put
+// them. RenderStats::deviceGeneration counts the new devices. Calls return ErrDevice while no device can be made (the
+// adapter gone; tried again at most once a second), and ErrFault if a device came but the renderer on it did not
+// (destroy the instance).
 struct RendererApi {
     void        (WRALLY_CALL* destroy)(Renderer*);
     const char* (WRALLY_CALL* lastError)(Renderer*);           // never null; valid until the next call

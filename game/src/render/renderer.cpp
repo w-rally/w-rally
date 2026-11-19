@@ -26,7 +26,7 @@ Renderer::~Renderer()
 }
 
 std::string Renderer::Open(const std::filesystem::path& modulesDir, const std::string& moduleId, void* window,
-                           uint32_t width, uint32_t height, const iface::RenderSettings& settings)
+                           uint32_t width, uint32_t height, const iface::RenderSettings& settings, uint32_t flags)
 {
     m = std::make_unique<Impl>();
     m->host.Scan(modulesDir);
@@ -48,6 +48,7 @@ std::string Renderer::Open(const std::filesystem::path& modulesDir, const std::s
         in.window = window;
         in.width = width, in.height = height;
         in.settings = settings;
+        in.flags = flags;
         std::string error;
         if (m->host.Init(*e, &in.header, &out.header, &error) != Status::Ok) {
             tried += "\n  " + e->path.filename().string() + ": " + error;

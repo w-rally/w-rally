@@ -30,6 +30,11 @@ public:
     // 0 on failure.
     uint32_t AddTexture(ngg::core::Device& dev, const void* rgba, uint32_t width, uint32_t height, std::string& error);
     void ReleaseTexture(uint32_t slot);
+    // A texture made again at the slot it had (on a new device after a device loss: its handle stays the client's).
+    bool Restore(ngg::core::Device& dev, uint32_t slot, const void* rgba, uint32_t width, uint32_t height, std::string& error)
+    {
+        return slot > 0 && slot < kSlots && rgba && width && height && Make(dev, rgba, width, height, slot, error);
+    }
     // A texture's pixels replaced (its own size), uploaded now as AddTexture's.
     bool UpdateTexture(ngg::core::Device& dev, uint32_t slot, const void* rgba, std::string& error);
 

@@ -226,6 +226,11 @@ environment → prepass → sun visibility (RT or cascades) → AO → sky → s
   and the `denoiser` setting does not apply (`RenderStats::denoiser` says "DLSS RR"). RTX GPUs that ray trace only,
   with NGX's RR DLL beside the module; elsewhere the TAA (logged). TAA off or a debug view: the denoiser's
   frame, as without RR.
+- Device loss (interface 24): a TDR, a driver update or crash, a GPU reset. The renderer makes a new device on the same
+  window and gives it everything again from what it kept of the client's calls; every handle stays valid and the
+  client does nothing. `RenderStats::deviceGeneration` counts the new devices (NGG design §10.6).
+- The D3D12 debug layer: `RendererInput::flags` `kRendererDebugLayer`; the game sets it for `--debug-layer` or
+  `PHYS_DRIVE_DEBUG_LAYER` (NGG design §10.5).
 - `kMaterialBlend` (glass) is drawn blended since 2026-10-30: after the opaque, far to near, premultiplied, no
   shadow and not ray traced (NGG design §5.3). The car's glass uses it.
 - UI textures carry a high bit in their handle (`UiPass::kTextureBit`). A UI command naming any other texture draws

@@ -92,8 +92,13 @@ if(EXISTS "${WRALLY_TEST_NGG}")
              ${WRALLY_TEST_TREES})
     set_tests_properties(editor-api-41 PROPERTIES PASS_REGULAR_EXPRESSION "editor-api-check: all good" TIMEOUT 300
                          FIXTURES_REQUIRED trees-41)
+    # A device removal forced in a frame and between frames (NGG design 10.6): the renderer makes a new device and
+    # everything again, the same handles, the same picture; then with ray tracing, NRD and FSR. Writes two .png here.
+    add_test(NAME device-lost-41 COMMAND editor-api-check ${WRALLY_BIN}/modules/renderer/WRenderer.dll ${WRALLY_TEST_NGG}
+             --device-lost WORKING_DIRECTORY ${CMAKE_BINARY_DIR}/tests-bin)
+    set_tests_properties(device-lost-41 PROPERTIES PASS_REGULAR_EXPRESSION "editor-api-check: all good" TIMEOUT 300)
 else()
-    message(STATUS "editor-api-41 left out: needs WRALLY_TEST_NGG")
+    message(STATUS "editor-api-41 and device-lost-41 left out: need WRALLY_TEST_NGG")
 endif()
 
 # A car's part drawn where the physics has it (game/src/assets/car_render.cpp's PartNode): at rest exactly the body,
