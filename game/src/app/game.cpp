@@ -90,6 +90,7 @@ struct Shell {
     ui::ImGuiLayer ui;
     int width = 0, height = 0;   // the size the renderer has
     bool rendererLog = false;
+    uint32_t rendererFlags = 0;  // RendererInput::flags (--debug-layer: kRendererDebugLayer)
 
     // The renderer follows the window's size.
     void FollowSize()
@@ -149,7 +150,8 @@ std::string OpenShell(Shell& sh, const std::string& rendererId)
     sh.width = sh.window.Width();
     sh.height = sh.window.Height();
     const std::string e = sh.renderer.Open(ExeDir() / "modules" / "renderer", rendererId, sh.window.Handle(),
-                                           static_cast<uint32_t>(sh.width), static_cast<uint32_t>(sh.height), ToRender(sh.settings));
+                                           static_cast<uint32_t>(sh.width), static_cast<uint32_t>(sh.height), ToRender(sh.settings),
+                                           sh.rendererFlags);
     if (sh.rendererLog) std::printf("%s", sh.renderer.TakeLog().c_str());
     if (!e.empty()) return "renderer: " + e;
     std::printf("renderer module: %s\n", sh.renderer.ModuleName().c_str());
@@ -1612,10 +1614,13 @@ int RunLab(Shell& sh, const std::vector<std::string>& args)
     return 0;
 }
 
-int RunGame(const std::vector<std::string>& args)
+int RunGame(const std::vector<std::string>& commandLine)
 {
     Shell sh;
     sh.settings = LoadSettings();
+    // --debug-layer / PHYS_DRIVE_DEBUG_LAYER, wherever the line goes on (app/options.h).
+    std::vector<std::string> args = commandLine;
+    if (TakeDebugLayer(args)) sh.rendererFlags |= iface::kRendererDebugLayer;
     if (std::find(args.begin(), args.end(), std::string("--lab")) != args.end()) {
         if (const std::string e = OpenShell(sh, "wrenderer"); !e.empty()) return std::fprintf(stderr, "%s\n", e.c_str()), 3;
         return RunLab(sh, args);

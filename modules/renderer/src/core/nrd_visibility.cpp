@@ -26,7 +26,7 @@
 // And back (CSUnpack): SIGMA's shadow squared (its back end), REBLUR's occlusion as it is, each into the RGBA16F layout
 // of Rt::Filtered - x visibility, y depth, z the moved-object distrust TAA reads.
 //
-// The development switches (NGG design 10.7): NGG_NRD_AO=reblur|distance, NGG_NRD_CONF=0, NGG_NRD_CUT=1,
+// The development switches (NGG design 10.8): NGG_NRD_AO=reblur|distance, NGG_NRD_CONF=0, NGG_NRD_CUT=1,
 // NGG_NRD_FRAMES / _STAB / _BLUR / _PREBLUR / _FIXSTRIDE / _HITW / _AF (REBLUR's settings), NGG_NRD_HISTORY=1 and
 // NGG_NRD_SHOW=conf (debug outputs in view 13), NGG_NRD_VALIDATION=<folder> (REBLUR's validation layer as .ppm).
 #include "nrd_visibility.h"

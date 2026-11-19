@@ -21,9 +21,9 @@ public:
     Renderer& operator=(const Renderer&) = delete;
 
     // The module with id `moduleId` ("wrenderer") among the renderer DLLs in `modulesDir`, on `window` (an HWND).
-    // Returns "" or what is wrong.
+    // `flags`: RendererInput's (iface::kRendererDebugLayer ...). Returns "" or what is wrong.
     std::string Open(const std::filesystem::path& modulesDir, const std::string& moduleId, void* window, uint32_t width,
-                     uint32_t height, const iface::RenderSettings& settings);
+                     uint32_t height, const iface::RenderSettings& settings, uint32_t flags = 0);
 
     // The module's table and instance, for the calls this wrapper does not spell out. Null until Open succeeded.
     const iface::RendererApi* Api() const { return m_api; }

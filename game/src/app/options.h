@@ -9,7 +9,7 @@
 //          [--skip-to <tick>] [--pause-at <tick>] [--exit-at <tick>] [--step <seconds>] [--camera-angle <degrees>]
 //          [--chase-distance <metres>] [--chase-pull <metres per 100 km/h>] [--entry <seconds>] [--quick-start]
 //          [--no-sound] [--no-codriver] [--codriver-replay] [--codriver-lead 3] [--codriver-volume 1]
-//          [--pacenote-next 8]
+//          [--pacenote-next 8] [--debug-layer]
 //   W-Rally --lab [--camera 1] [--time HH:MM ...] [--exit-at <frame>]   the lamp lab: the test lamps in a synthetic scene
 //          (no stage, no physics; app/game.cpp RunLab, assets/lamp_lab.h)
 //          [--eng Focus03-08] [--mix sound-mix.ini] [--overrides cars/s_i2003.ini | none]
@@ -41,7 +41,8 @@
 // beams; =lamp a lamp behind it alone, =noshadow the ramp never occluded), PHYS_DRIVE_LAMPS=<0|1|2>[,noramp][,brake]
 // [,reverse][,left][,right][,hazard] the car's lamps switched so from the start (brake and reverse held: captures),
 // PHYS_DRIVE_CAMERA_AT=<tick>:<camera> that camera from that tick (a cut, captured), PHYS_DRIVE_UPSCALE_AT=<tick>:<mode>
-// that upscaling mode from that tick (a switch mid-stage).
+// that upscaling mode from that tick (a switch mid-stage), PHYS_DRIVE_DEBUG_LAYER (or --debug-layer anywhere on the
+// line, every mode: the menus, the lab, the showroom, a stage) the renderer under the D3D12 debug layer.
 
 #include <cstdint>
 #include <filesystem>
@@ -103,6 +104,11 @@ int Parse(const std::vector<std::string>& args, Options& o);
 // --time HH:MM [--date] [--utc-offset] [--latitude] [--longitude] [--north] into `o` (the sky's time and place);
 // `defaultTime` when there is no --time (null: none, the weather's sun). 0, or an exit code after the message.
 int ParseSkyTime(const std::vector<std::string>& args, Options& o, const char* defaultTime = nullptr);
+
+// --debug-layer (anywhere on the command line, taken off it) or PHYS_DRIVE_DEBUG_LAYER: the renderer under the D3D12
+// debug layer (iface::kRendererDebugLayer; its messages go to the renderer's log - PHYS_DRIVE_NGGLOG shows it). Needs
+// Windows' Graphics Tools optional feature; slow. Read where the renderer is opened, before the rest of the line.
+bool TakeDebugLayer(std::vector<std::string>& args);
 
 // The folder the exe is in.
 std::filesystem::path ExeDir();
