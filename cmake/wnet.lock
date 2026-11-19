@@ -1,8 +1,8 @@
 {
   "comment": "The net module the game ships (cmake/WNet.cmake, tools/fetch-wnet/fetch_wnet.py): a release of the private w-rally/wnet repo, pinned. Bump all of tag, version and sha256 together, from the release's WNet.dll.manifest.json; publicKey is the release signing key (wnet: tools/release_sign.py pub).",
   "repo": "w-rally/wnet",
-  "tag": "v0.1.0-rc.1",
-  "version": "0.1.0-rc.1",
-  "sha256": "703fba04a3a49fbbd87b7ad94783b79606722271a877eca7b55418ed66984b2e",
+  "tag": "v0.1.0",
+  "version": "0.1.0",
+  "sha256": "4af3919b4f971186d74bedf43ab36dc6c954ff09d4d4be0e7607360c7320dca9",
   "publicKey": "29157223f874c8a78c88739fd81bd4156407aa5cc41ceed6c2a25fd142a2cf79"
 }
