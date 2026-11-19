@@ -34,6 +34,18 @@ std::string ArgOrEnv(const Args& args, const char* name, const char* env)
     return !a.empty() ? a : std::string(std::getenv(env) ? std::getenv(env) : "");
 }
 
+} // namespace
+
+bool TakeDebugLayer(std::vector<std::string>& args)
+{
+    const auto it = std::find(args.begin() + (args.empty() ? 0 : 1), args.end(), std::string("--debug-layer"));
+    const bool flag = it != args.end();
+    if (flag) args.erase(it);
+    return flag || std::getenv("PHYS_DRIVE_DEBUG_LAYER") != nullptr;
+}
+
+namespace {
+
 // A path's file name without its extension.
 std::string Stem(const std::string& path)
 {

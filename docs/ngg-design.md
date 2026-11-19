@@ -92,7 +92,7 @@ material cutoff, alpha sampled at fixed LOD 2) at no measurable cost.
 | `src/core/log.*` | the one log sink; the host points it somewhere |
 | `src/format/ngg_format.h` | the `.ngg` container: chunks, records, vertex layout |
 | `src/format/ngg_scene.*` | `.ngg` writer + strict reader (the legacy importer writes through it; `tools/ngg-check` round-trips it against the renderer's own loader) |
-| `src/module/module.cpp` | `WRenderer.dll`: `RendererApi` / `RendererEditApi` over the core - swap chain on the game's window, settings, models / instances, the frame, capture, stats |
+| `src/module/module.cpp` | `WRenderer.dll`: `RendererApi` / `RendererEditApi` over the core - swap chain on the game's window, settings, models / instances, the frame, capture, stats; the device-bound part (`Gpu`) and the journal it is made again from after a device loss (10.6) |
 | `src/module/ui.*` | the game's UI pass: alpha-blended, scissored draw lists onto the back buffer after the frame |
 | `src/shaderc/main.cpp` | `ngg-shaderc`: compiles `shaders.txt` at build time into `generated/ngg_shaders.cpp` |
 | `shaders/scene.hlsl` | the scene pass: prepass, main (opaque / alpha-tested / blended / G-buffer / reflection-ray variants), shadow and lamp maps, deferred local lights |
@@ -155,8 +155,8 @@ opens the list, sets sky time, and records. The order is the code's:
 
 After step 12 the frame starts the threads of the BLAS batches step 5 queued (`Rt::StartBatches`), so their
 allocations overlap the frame's wait for the GPU (4.2). Then the module draws the editor overlay (only at native render size: it depth-tests against the render-size depth),
-the UI pass, the optional capture copy, `EndAndWait`, the probe / overlay readbacks, `DrainMessages` and
-`CheckRemoved`. `present` is a separate call (`vsync` from the settings).
+the UI pass, the optional capture copy, `EndAndWait`, `DrainMessages`, `CheckRemoved` (a removal: the frame is lost,
+10.6), the probe / overlay readbacks. `present` is a separate call (`vsync` from the settings).
 
 **Upscaling:** everything up to step 12 runs at the render size (`RenderWidth/Height`); the materials' mip bias is
 `log2(render/output)`. When the render size has at most half the output's pixels, AO traces twice the tier's rays
@@ -1344,7 +1344,7 @@ hit distance makes contact AO 33-41 grey lighter), the rays' history allowance a
 5x5 and scattered to last frame's pixels, where REBLUR reads it - and a disocclusion mix; none of it, nor its
 accumulation, stabilization, blur or anti-firefly settings, brought the bias under 4 grey. At confidence 0 REBLUR
 still keeps about half its history (`accumSpeed *= 1 / (1 + accumSpeed)`), where ours keeps none. Its switches stay
-for that work (10.7), with two debug outputs (`NGG_NRD_SHOW=conf`, `NGG_NRD_VALIDATION`).
+for that work (10.8), with two debug outputs (`NGG_NRD_SHOW=conf`, `NGG_NRD_VALIDATION`).
 
 **Measured** (RTX 5070 Ti, 1080p unless said, user-new.phr camera 4 ticks 3000-4200 on fr_joux_verte.ngg, GPU frame median, two
 runs each within 0.03 ms):
@@ -1950,8 +1950,10 @@ keeps producing "looks right in the editor, wrong in the game" bugs.
 - **In-process, through the module's flat C tables**, not C++/CLI and not a second process. The old out-of-process
   argument was RBR's (32-bit game). Wallaby is x64 and P/Invokes a plain DLL. Wallaby generates its bindings from the
   headers, so it follows `kRendererInterfaceVer`.
-- **The cost accepted:** a device removal or driver hang takes the editor down with it. WRenderer has DRED
-  breadcrumbs (`core/device.cpp`) but **no device-lost recovery** (re-create, reload). That is open (§11).
+- **A device removal or driver hang does not take the editor down:** WRenderer logs DRED's record (10.5), makes a
+  new device and gives it the scene and everything the editor made or changed through either table again, under the
+  same handles, object indices and material handles (10.6). The editor does nothing; `RenderStats::deviceGeneration`
+  says it happened.
 - **Two tables.** The editor opens the renderer and loads a scene like the game does (`renderer.h`: `loadScene`
   from memory, `createModel`/`createInstance` for added content, `FrameDesc` per frame). It then asks
   `RendererApi::editApi(r, kRendererEditVer, &t)` for
@@ -2210,9 +2212,84 @@ batches' are their own). **`CheckRemoved` runs after every submit, on a failed `
 `renderFrame`**, and logs once per device: the removal reason, for each unfinished list the breadcrumb window around
 the last completed command, and the page fault (GPU VA and up to 6 recently freed allocations near it, by name and
 type). Recently-freed allocations near a fault mean use-after-free - the one such hang found was a descriptor keyed on a reused pointer
-(1.3). The D3D12 debug layer exists behind `kRendererDebugLayer`; `DrainMessages` logs its messages.
+(1.3).
 
-### 10.6 PIX and RGA
+**The D3D12 debug layer:** `kRendererDebugLayer` (`RendererInput::flags`), or `NGG_DEBUG_LAYER=1`. The game sets the flag
+for `--debug-layer` anywhere on its command line (every mode: the menus, `--lab`, `--showroom`, a stage; taken off the
+line before the rest is read) or `PHYS_DRIVE_DEBUG_LAYER` (`app/options.h`, `TakeDebugLayer`). It needs Windows'
+Graphics Tools optional feature (without it the log says so and the game runs without). `DrainMessages` logs every
+warning, error and corruption message after each frame (`D3D12 [WARNING] ...`; `PHYS_DRIVE_NGGLOG` shows the log). In
+the Garage on 2026-11-19 it reported five warnings, all at start-up (`CreateCommittedResource` ignoring a buffer's
+`UNORDERED_ACCESS` initial state), and no errors.
+
+### 10.6 Device loss: a new device, everything again
+
+A TDR, a driver update or crash, a GPU reset or an unplugged adapter removes the device. **The renderer survives it
+inside WRenderer; the client's handles stay valid, and all it does is hand the big bytes over again when asked**
+(`module.cpp`, "device loss"; `renderer.h`, "DEVICE LOSS"; interfaces 24 and 25).
+
+- **Detected** where D3D12 says so: `CheckRemoved` after every submit of the frame's list (`EndAndWait`: the frame,
+  the uploads) and at the end of `renderFrame`, a failed `Begin`, `present`'s `DXGI_ERROR_DEVICE_REMOVED` / `_RESET`,
+  and `GetDeviceRemovedReason` at the start of every table call that needs the device (`NeedDevice`). DRED's record
+  is logged once, as before (10.5). The frame it happens in is lost: `renderFrame` and `present` return `Ok`, nothing
+  is shown, a capture asked for is taken from the next frame. `RenderStats` keeps the sun's elevation (the game lights
+  its lamps by it) and reads nothing else until there is a device.
+- **Made again** by the next call that needs the device (`Recover`), usually the next `renderFrame`: everything bound
+  to the device lives in one `Gpu` (device, swap chain, `core::Renderer` with its scene, the UI pass, the capture
+  buffer), and nothing else in `Renderer` holds a device object. The pipeline cache is closed and the whole `Gpu`
+  dropped **first** - D3D12 has one device per adapter, and while any of the old one lives, a new `D3D12CreateDevice`
+  hands the removed one back; the window also takes only one flip swap chain. Then `MakeGpu`, as at start-up: the
+  device on the client's adapter (a driver update gives it a new LUID: then the best one there is), the pipeline
+  cache, the swap chain on the same window at the last size, the core, the UI pass, the settings, the environment's
+  switches.
+- **Everything again from a journal:** what the client gave that lives on the GPU is recorded as it is handed over
+  (`Journal`): the scene and its variant; the scene's creations IN ORDER - textures, models (their whole `ModelDesc`,
+  copied: small), releases, instances and their destruction, the editor's placement batches; the setters' last values - edited materials, object moves and visibility, selection, overlay layers, the font, labels, debug
+  view, legacy profile, light mode, culling, the probe pixel; the UI textures by slot with their last pixels. Replayed
+  through the table itself, in order, they hand out **the same texture, material, model and instance handles and the
+  same object indices** (a handle that came out otherwise would be logged: none has). The instances and stage
+  objects are then put where the frames last put them: `FrameDesc` sends only what moves. Everything built from those
+  - BLASes (the async path), TLAS, NRD, FSR, DLSS, the probe, the cascades - is built as at a scene's load.
+- **The big bytes come from the client again (interface 25):** the `.ngg` (fr_cote_darbroz with its trees: 164 MB)
+  and the textures' DDS (the i20's: 140 MB) are not kept. During the replay the renderer asks for them, in their
+  order, through `RendererInput::reload` (`read(kind, handle)`: `kReloadScene` 1, `kReloadTexture` the handle;
+  `release` after each). The game's wrapper (`render::Renderer`) takes a `Source` per `LoadScene` / `CreateTexture` -
+  the stage's file read again, an `.lbs` imported again (the same wetness), the Garage's and the lab's scenes built
+  again, a car's textures read again through its item (`CarModel::readAgain`, `CarTexture::rel`) - and answers the
+  callback from them. A call with no source runs under `keepCopies(1)`: the renderer keeps those bytes itself (the
+  lamps' 4x4 colours, the fences' textures changed in memory). Without a reload callback (an editor that has none)
+  everything is kept, as before. A texture the client cannot give again is drawn white in its place (the handles after
+  it stay); a scene it cannot give again is gone, `lastError` says so. The log says what was asked for and what kept:
+  golden replay and Garage `13 scene / texture bytes asked for again, 0.0 MB kept`. Models, UI textures and the
+  editor's state stay in the journal (small); a drag in the editor replaces its last move, so it does not grow.
+- **What does not come back:** histories (TAA, the upscaler's, the denoisers', auto exposure's adaptation) start over
+  as after a camera cut, and the per-frame sequences (jitter, XeGTAO's noise, the rays' decorrelation, the probe's
+  faces) start from 0 - after a loss a frame is the same frame as a fresh start's, not the run's. Measured on the
+  golden replay without TAA, RT and upscaler: from the same shots without the loss, |mean bias| <= 0.46/255, the
+  differences noise only; with RT, NRD and FSR the same, edges and leaves only. The Garage (car mid-load at the
+  removal): the car whole, edge differences only (bias 0.55/255).
+- **When no device can be made** (the adapter gone; a driver mid-update): calls that need the device return
+  `ErrDevice` and `lastError` says why; a new try at most once a second, the journal kept. A device made but the
+  renderer on it not (it never happened): `ErrFault`, the instance must be destroyed.
+- **Cost:** 0.7 s for the editor test's stage, 0.8-1.0 s for track 41 and the Garage with the bytes read again from
+  disk (0.66-0.85 s from kept copies) - one hitch.
+- **Testing:** `NGG_TEST_DEVICE_REMOVED=<frame>[,<frame>...]` calls `ID3D12Device5::RemoveDevice` in that `renderFrame`
+  (the renderer's count, from 1), after recording, before the submit - the DXGI_ERROR_DEVICE_REMOVED (0x887A0005) a
+  hang gives. CTest `device-lost-41` (`editor-api-check --device-lost`): a model, an instance placed once, an edited
+  material, a moved and a hidden object, a selection, an overlay layer and a UI texture; removed in frame 6, the frame
+  9 capture is the frame 3 capture **byte for byte**, the overlay's and selection's pixel counts the same, every handle
+  the same; removed in frame 11, the next call (`createModel`, between frames) makes the device and hands out the
+  next model handle. Twice: the renderer keeping copies, then the client giving the scene and a texture again
+  (counted; refused the second time: white, the next handle still the next). Then with RT, NRD and FSR at 0.67, all
+  three back. In the game: `NGG_TEST_DEVICE_REMOVED=60` on
+  the golden replay (bit-exact still), and `--showroom` with it at 25 (while the car's textures go up).
+- **DLSS (SR and RR) is untested here:** no NVIDIA GPU on the dev machine. Its path is the others': `Dlss`'s
+  destructor calls `NVSDK_NGX_D3D12_Shutdown1` on the dead device with the old `Gpu`, and `SetUpscaling` on the new one
+  initialises NGX on it as at start-up (`core/dlss.cpp`). On the RTX machine: `device-lost-41`, then a stage with DLSS
+  and with DLSS RR under `NGG_TEST_DEVICE_REMOVED=60`; the log must say `device 1 ready`, the upscaler the same, and
+  the picture right.
+
+### 10.7 PIX and RGA
 
 - **`NGG_PIX=<frame>`** loads the newest PIX GPU capturer from `Program Files\Microsoft PIX` before the device is
   made, and captures renderer frame `<frame>` (>= 2) to `ngg-frame-<frame>.wpix` in the working directory - for PIX,
@@ -2223,7 +2300,7 @@ type). Recently-freed allocations near a fault mean use-after-free - the one suc
   for registers, occupancy and ISA. How the local lights' cost was taken apart.
 - `NGG_SHADER_DUMP=<dir>` writes every shader as handed out (proved the move to files byte-identical).
 
-### 10.7 Environment variables (renderer)
+### 10.8 Environment variables (renderer)
 
 All read once, at start-up or first use; development only unless noted.
 
@@ -2260,7 +2337,8 @@ All read once, at start-up or first use; development only unless noted.
 | `NGG_DLSS_RR_PRESET=<D..F>` | force a DLSS Ray Reconstruction preset (default: the SDK's) | `dlss.cpp` |
 | `NGG_RR_BIAS=1` | RR's bias-current-colour mask also takes the moved-object mask (4.11; off: it ghosted slightly more) | `rr_visibility.cpp` |
 | `NGG_RR_GUIDES=nospec\|white` | RR's guides A/B: no specular albedo / white albedos | `rr_visibility.cpp` |
-| `NGG_DEBUG_LAYER=1` | the D3D12 debug layer (needs the Graphics Tools feature) | `module.cpp` |
+| `NGG_DEBUG_LAYER=1` | the D3D12 debug layer (needs the Graphics Tools feature); the game's `--debug-layer` / `PHYS_DRIVE_DEBUG_LAYER` set it through `kRendererDebugLayer` (10.5) | `module.cpp` |
+| `NGG_TEST_DEVICE_REMOVED=<frame>[,...]` | the device removed in that `renderFrame` (`ID3D12Device5::RemoveDevice`), to test the recovery (10.6); read when the renderer is made | `module.cpp` |
 | `NGG_DENOISER=nrd\|ours` | the RT path's denoiser over the settings (4.10) | `module.cpp` |
 | `NGG_NRD_AO=reblur\|distance` | NRD takes the AO too: REBLUR over our open fraction, or over its own hit distance (4.10) | `nrd_visibility.cpp` |
 | `NGG_NRD_CONF=0`, `NGG_NRD_CUT=1`, `NGG_NRD_FRAMES`, `_STAB`, `_BLUR`, `_PREBLUR`, `_FIXSTRIDE`, `_HITW`, `_AF` | REBLUR's history confidence and settings, for its A/B | `nrd_visibility.cpp` |
@@ -2284,8 +2362,8 @@ glass, and VR behind `kRendererCapVr`.
 | 3 | **Pipelines in parallel** | built and reverted (§1.6). A cold start was ~5 s shorter, but AMD driver 32.0.31021.5001 crashed in `amdxc64.dll` or hung in about 1 run of 12-28 whenever two threads compiled. `NGG_PIPELINE_THREADS=<n>` retries it. Run it 60+ times with the crash/hang harness before trusting it | a driver that survives it (newer AMD, or NVIDIA) |
 | 4 | **Measure the pipeline library on NVIDIA** | it saves nothing on the AMD iGPU, so it is opt-in (`NGG_PIPELINE_CACHE=library`). On the RTX machine, run with `NGG_DRIVER_SHADER_CACHE=clear`, with and without it, and compare the log's `pipelines:` lines. If there is no win there either, delete `pipeline_cache`'s library and keep the wrappers | the RTX machine |
 | 5 | **Shader hot reload** | `NGG_SHADER_DIR` compiles from the files at start only. Recreating the pipelines without a restart is not built | nothing (optional) |
-| 6 | **D3D12 debug layer reachable** | `kRendererDebugLayer` exists, but nothing in `game/` or `tools/` sets it, so there is no way to run the game under validation | nothing |
-| 7 | **Device-lost recovery** | the game and the in-process editor (§8.1) die on a device removal. Re-create the device and reload the scene | nothing |
+| 6 | **D3D12 debug layer reachable** | done (10.5): `--debug-layer` / `PHYS_DRIVE_DEBUG_LAYER`. Left: a stage run under it, its messages read | nothing |
+| 7 | **Device-lost recovery** | done (10.6): a new device and everything again from the module's journal, every handle kept. Left: DLSS SR and RR after a loss, on the RTX machine | the RTX machine |
 
 **Visibility, shadows and AO**
 
