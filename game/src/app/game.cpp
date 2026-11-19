@@ -37,12 +37,15 @@
 #include "data/sgc.h"
 #include "input/bindings.h"
 #include "input/keyboard.h"
+#include "net/net.h"
 #include "render/renderer.h"
 #include "render/stage_objects.h"
 #include "session/session.h"
 #include "session/sim_thread.h"
 #include "signals/bus.h"
 #include "signals/car.h"
+#include "wrally/iface/net_records.h"
+#include "wrally/modules/module_host.h"
 #include "sound/codriver.h"
 #include "sound/sound.h"
 #include "ui/hud.h"
@@ -91,6 +94,18 @@ struct Shell {
     int width = 0, height = 0;   // the size the renderer has
     bool rendererLog = false;
     uint32_t rendererFlags = 0;  // RendererInput::flags (--debug-layer: kRendererDebugLayer)
+    // Online (WNet.dll, modules/net): open for the whole run when a server is set. Its records arrive on netBus, on this
+    // thread, once a frame (PumpNet) - in the menus and in a stage alike. netBus before net: net goes first.
+    signals::Bus netBus;
+    net::Net net;
+    uint32_t netTick = 0;
+
+    void PumpNet()
+    {
+        if (!net.IsOpen()) return;
+        net.Pump(++netTick);
+        if (const std::string log = net.TakeLog(); !log.empty()) std::printf("%s", log.c_str());
+    }
 
     // The renderer follows the window's size.
     void FollowSize()
@@ -139,6 +154,36 @@ iface::RenderSettings ToRender(const Settings& s)
     return r;
 }
 
+// Online: the net module (WNet.dll in modules/net) against the server in the settings' net_server, WRALLY_NET_SERVER
+// over it; none set, no net module (the game runs offline). A missing or failing module is reported, not fatal.
+// WRALLY_NET_TOKEN=<token> logs in at once (development, until the game has a login screen). What it reports is on
+// the console.
+void OpenNet(Shell& sh)
+{
+    std::string server = sh.settings.netServer;
+    if (const char* e = std::getenv("WRALLY_NET_SERVER")) server = e;
+    if (server.empty()) return;
+    if (const std::string e = sh.net.Open(ExeDir() / "modules" / "net", server, UserDir() / "cache"); !e.empty()) {
+        std::fprintf(stderr, "net: %s\n", e.c_str());
+        return;
+    }
+    std::printf("net module: %s, server %s\n", sh.net.ModuleName().c_str(), server.c_str());
+    namespace rec = iface::netrec;
+    sh.netBus.Connect<rec::LoginDone>([](const rec::LoginDone& r) { std::printf("net: logged in as %s\n", r.account); });
+    sh.netBus.Connect<rec::SessionExpired>([](const rec::SessionExpired& r) {
+        std::printf("net: the session ended%s\n", r.relogin ? ", logging in again" : "");
+    });
+    sh.netBus.Connect<rec::RequestFailed>([](const rec::RequestFailed& r) {
+        std::fprintf(stderr, "net: request %llu failed (%s): %s\n", static_cast<unsigned long long>(r.requestId),
+                     modules::StatusName(static_cast<iface::Status>(r.status)), r.message);
+    });
+    sh.net.Connect(&sh.netBus);
+    if (const char* token = std::getenv("WRALLY_NET_TOKEN")) {
+        std::string error;
+        if (!sh.net.Login(token, &error)) std::fprintf(stderr, "net: login: %s\n", error.c_str());
+    }
+}
+
 // The window, the renderer (module `rendererId`) on it and ImGui. Returns "" or what failed.
 std::string OpenShell(Shell& sh, const std::string& rendererId)
 {
@@ -156,6 +201,7 @@ std::string OpenShell(Shell& sh, const std::string& rendererId)
     if (!e.empty()) return "renderer: " + e;
     std::printf("renderer module: %s\n", sh.renderer.ModuleName().c_str());
     if (const std::string u = sh.ui.Init(sh.window.Handle(), sh.renderer); !u.empty()) std::fprintf(stderr, "the HUD: %s\n", u.c_str());
+    OpenNet(sh);
     return "";
 }
 
@@ -379,6 +425,7 @@ private:
 template <class F, class W> bool MenuFrame(Shell& sh, F&& draw, W&& world)
 {
     if (!sh.window.Pump()) return false;
+    sh.PumpNet();
     sh.FollowSize();
     sh.ui.NewFrame();
     draw();
@@ -793,6 +840,7 @@ StageEnd RunStage(Shell& sh, const Options& given, bool fromMenu, std::string& e
     // A quit (the close box, the menu, --exit-at, a fault) still finishes its frame - its steps are in the recording.
     while (!quit) {
         if (!window.Pump()) quit = true, end = StageEnd::Quit;
+        sh.PumpNet();
         // Esc: the menu up, down again, or a step back from its Settings / Debug (the settings kept as they are).
         const UINT keyDown = window.TakeKeyDown();   // (for Settings -> Controls)
         // (The pause menu's question takes Esc first: no.)

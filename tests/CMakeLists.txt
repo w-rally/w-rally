@@ -101,6 +101,33 @@ else()
     message(STATUS "editor-api-41 and device-lost-41 left out: need WRALLY_TEST_NGG")
 endif()
 
+# The net module's wrapper (game/src/net/net.cpp) against a running server: log in, a catalogue page, a content match,
+# the records off the game's signals bus. Needs WRALLY_WNET_DLL (game/CMakeLists.txt) and a server at
+# WRALLY_TEST_NET_SERVER that knows the token WRALLY_TEST_NET_TOKEN (the wnet repo's tools/mock_server.py: dev-token).
+add_executable(net-check net_check.cpp ${PROJECT_SOURCE_DIR}/game/src/net/net.cpp)
+target_include_directories(net-check PRIVATE ${PROJECT_SOURCE_DIR}/game/src)
+target_link_libraries(net-check PRIVATE wrally-modules wrally-signals wrally-vfs)
+target_compile_definitions(net-check PRIVATE _CRT_SECURE_NO_WARNINGS NOMINMAX)
+target_compile_options(net-check PRIVATE /W4)
+set_target_properties(net-check PROPERTIES CXX_STANDARD 17)
+if(WRALLY_WNET_DLL)
+    add_test(NAME net-handshake COMMAND module-info ${WRALLY_WNET_DLL} --init --data ${CMAKE_BINARY_DIR}/tests-bin)
+    set_tests_properties(net-handshake PROPERTIES PASS_REGULAR_EXPRESSION
+        "WNet.dll: net interface [0-9]+ - compatible\n +id wnet, \"WNet\"")
+    if(WRALLY_TEST_NET_SERVER)
+        if(NOT WRALLY_TEST_NET_TOKEN)
+            set(WRALLY_TEST_NET_TOKEN dev-token)
+        endif()
+        get_filename_component(_wnet_dir ${WRALLY_WNET_DLL} DIRECTORY)
+        add_test(NAME net-check COMMAND net-check ${_wnet_dir} ${WRALLY_TEST_NET_SERVER} ${WRALLY_TEST_NET_TOKEN})
+        set_tests_properties(net-check PROPERTIES PASS_REGULAR_EXPRESSION "net-check: all good")
+    else()
+        message(STATUS "net-check left out: needs WRALLY_TEST_NET_SERVER")
+    endif()
+else()
+    message(STATUS "net-handshake and net-check left out: need WRALLY_WNET_DLL")
+endif()
+
 # A car's part drawn where the physics has it (game/src/assets/car_render.cpp's PartNode): at rest exactly the body,
 # and torn off it does not jump (the world pose of a moment gives the in-car pose's node).
 set(GAME_SRC ${PROJECT_SOURCE_DIR}/game/src)

@@ -3,8 +3,9 @@
 //   module-info <dll or folder>... [--init] [--data <dir>]
 //
 // For each DLL: the kinds it implements, the interface version it reports for each and whether the game can use it.
-// --init also initialises every compatible physics and audio module (a renderer needs a window: skipped) with a
+// --init also initialises every compatible physics, audio and net module (a renderer needs a window: skipped) with a
 // FileHost over --data (default: the current folder; its one content layer), prints its ModuleInfo and destroys it again.
+// A net module is given a server on localhost it never calls: initialising makes no request.
 //
 // Exit code: 0 all fine, 1 a DLL could not be asked or an --init failed, 2 usage.
 
@@ -16,6 +17,7 @@
 #include <vector>
 
 #include "wrally/iface/audio.h"
+#include "wrally/iface/net.h"
 #include "wrally/iface/physics.h"
 #include "wrally/vfs/vfs.h"
 #include "wrally/iface/renderer.h"
@@ -84,8 +86,9 @@ int main(int argc, char** argv)
         return 2;
     }
 
-    std::printf("game %s; interfaces: renderer %u, physics %u, audio %u\n", Version(modules::kGameVersion).c_str(),
-                iface::kRendererInterfaceVer, iface::kPhysicsInterfaceVer, iface::kAudioInterfaceVer);
+    std::printf("game %s; interfaces: renderer %u, physics %u, audio %u, net %u\n", Version(modules::kGameVersion).c_str(),
+                iface::kRendererInterfaceVer, iface::kPhysicsInterfaceVer, iface::kAudioInterfaceVer,
+                iface::kNetInterfaceVer);
     modules::ModuleHost host;
     for (const auto& t : targets) host.Scan(t);
 
@@ -112,6 +115,12 @@ int main(int argc, char** argv)
             iface::AudioInput in{};
             iface::AudioOutput out{};
             in.flags = iface::kAudioOffline;   // no device opened by a listing tool
+            ok &= InitAndDestroy(host, e, files, in, out);
+        } else if (e.kind == ModuleKind::Net) {
+            iface::NetInput in{};
+            iface::NetOutput out{};
+            in.serverUrl = "http://127.0.0.1:9";   // never called: init makes no request
+            in.sink = {nullptr, [](void*, uint32_t, const void*, uint32_t) {}};
             ok &= InitAndDestroy(host, e, files, in, out);
         } else {
             std::printf("      init skipped: a renderer needs a window\n");

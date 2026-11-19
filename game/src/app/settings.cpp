@@ -42,6 +42,7 @@ template <class F> void Fields(Settings& s, F&& f)
     f("dev_engine", s.devEngine);
     f("dev_als_bangs", s.devBangs);
     f("dev_als_idle_bangs", s.devIdleBangs);
+    f("net_server", s.netServer);
     f("quick_stage", s.stage);
     f("quick_car", s.car);
     f("quick_setup", s.setup);

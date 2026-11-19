@@ -22,7 +22,7 @@ constexpr uint32_t kGameVersion = iface::MakeVersion(0, 1, 0);
 
 // The kinds the game knows, and the interface version it needs for each (0 for an unknown kind).
 inline constexpr iface::ModuleKind kKinds[] = {iface::ModuleKind::Renderer, iface::ModuleKind::Physics,
-                                               iface::ModuleKind::Audio};
+                                               iface::ModuleKind::Audio, iface::ModuleKind::Net};
 uint32_t ExpectedVersion(iface::ModuleKind kind);
 const char* KindName(iface::ModuleKind kind);
 const char* StatusName(iface::Status status);

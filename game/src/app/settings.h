@@ -36,6 +36,9 @@ struct Settings {
     // Development sounds over every car's ("" none): an .eng path, folders of anti-lag bang .wavs (moving, standing)
     std::string devEngine, devBangs, devIdleBangs;
 
+    // Online: the W-Rally server WNet.dll talks to ("" none: the net module is not loaded). WRALLY_NET_SERVER over it.
+    std::string netServer;
+
     // Controls: the keys (key_<action> = its scan code, hex)
     input::Bindings keys;
 

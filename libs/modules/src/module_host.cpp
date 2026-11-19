@@ -7,6 +7,7 @@
 #include <system_error>
 
 #include "wrally/iface/audio.h"
+#include "wrally/iface/net.h"
 #include "wrally/iface/physics.h"
 #include "wrally/iface/renderer.h"
 
@@ -21,6 +22,7 @@ uint32_t ExpectedVersion(ModuleKind kind)
     case ModuleKind::Renderer: return iface::kRendererInterfaceVer;
     case ModuleKind::Physics: return iface::kPhysicsInterfaceVer;
     case ModuleKind::Audio: return iface::kAudioInterfaceVer;
+    case ModuleKind::Net: return iface::kNetInterfaceVer;
     default: return 0;
     }
 }
@@ -31,6 +33,7 @@ const char* KindName(ModuleKind kind)
     case ModuleKind::Renderer: return "renderer";
     case ModuleKind::Physics: return "physics";
     case ModuleKind::Audio: return "audio";
+    case ModuleKind::Net: return "net";
     default: return "none";
     }
 }
