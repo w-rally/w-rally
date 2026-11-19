@@ -177,6 +177,11 @@ if(WRALLY_NRD_OK)
     set(SHADERMAKE_FIND_FXC OFF CACHE BOOL "" FORCE)
     FetchContent_MakeAvailable(nrd)
     set_target_properties(NRD NRDShaders ShaderMake ShaderMakeBlob MathLib PROPERTIES FOLDER third_party/nrd)
+    # MSVC 19.52's library marks frexp [[nodiscard]]; MathLib's ml.h (DoubleToGequal / DoubleToLequal) calls it for the
+    # exponent alone, and NRD builds with warnings as errors - so C4834 off for NRD's own sources, nowhere else.
+    if(MSVC)
+        target_compile_options(NRD PRIVATE /wd4834)
+    endif()
     FetchContent_GetProperties(nrd SOURCE_DIR WRALLY_NRD_SOURCE)
     set(WRALLY_NRD_LICENSE ${WRALLY_NRD_SOURCE}/LICENSE.txt CACHE INTERNAL "the NRD SDK's licence")
 else()
