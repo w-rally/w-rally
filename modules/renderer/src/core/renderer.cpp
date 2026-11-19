@@ -58,12 +58,8 @@ bool Renderer::Create(Device& dev, DXGI_FORMAT outputFormat, UINT width, UINT he
     if (!m_post.Create(d, outputFormat)) { Log("renderer: post-processing failed"); return false; }
     m_post.OnResize(d, width, height);
 
-    if (rayTracing && m_rt.Create(dev))  // logs and declines on an adapter without DXR 1.1
-    {
-        if (!m_buildDev.CreateSecondary(dev))
-            Log("renderer: no secondary command context - the BVH cannot be rebuilt mid-frame");
-        if (m_preferRt) m_rt.PrepareTargets(d, m_renderWidth, m_renderHeight);
-    }
+    if (rayTracing && m_rt.Create(dev) && m_preferRt)  // (Create logs and declines without DXR 1.1)
+        m_rt.PrepareTargets(d, m_renderWidth, m_renderHeight);
 
     // Which upscalers can run here, for the settings menu: each backend made and let go once (it logs why not).
     // DLSS asks the GPU's vendor first, so a non-NVIDIA adapter never loads NGX.
@@ -190,12 +186,12 @@ bool Renderer::LoadFromMemory(Device& dev, const void* data, size_t bytes)
 // alone. When meshes appear (a load, a car, a model, a first move, a hide) their
 // BLASes are SUBMITTED on the ray tracer's own queue and the frame goes on
 // without them: they join the TLAS in the first frame after the GPU has built
-// them (Rt::Land). Dropped meshes leave at once. The TLAS on the SECONDARY
-// context: this runs inside RecordFrame, with the client's list open.
+// them (Rt::Land). Dropped meshes leave at once. The TLAS is built in the
+// frame's own list (this runs inside RecordFrame, before the prepass), never
+// waited for.
 void Renderer::KeepRtCurrent(Device& dev)
 {
-    (void)dev;
-    if (!m_rt.Ready() || !m_scene.Ready() || !m_buildDev.list)
+    if (!m_rt.Ready() || !m_scene.Ready())
     {
         m_rtValid = false;
         m_rtReason = "no ray tracing on this adapter";
@@ -207,7 +203,7 @@ void Renderer::KeepRtCurrent(Device& dev)
     m_rtRevision = rev;
 
     // A new mesh's vertices, before its BLAS. A new upload is a new buffer, which the any-hit test's view must follow.
-    const bool poolMoved = m_scene.FlushDynamic(m_buildDev.device.Get());
+    const bool poolMoved = m_scene.FlushDynamic(dev.device.Get());
     std::vector<uint64_t> keys;
     std::vector<Scene::RtInstanceDesc> instances;
     m_scene.DescribeRt(keys, instances);
@@ -237,7 +233,7 @@ void Renderer::KeepRtCurrent(Device& dev)
             Scene::RtMeshData m;
             if (m_scene.BuildRtMesh(k, m)) fresh.push_back(std::move(m));
         }
-        if (!fresh.empty() && m_rt.SubmitBlases(m_buildDev, m_scene.RtVertexStride(), fresh)) building += fresh.size();
+        if (!fresh.empty() && m_rt.SubmitBlases(dev, m_scene.RtVertexStride(), fresh)) building += fresh.size();
     }
     Log("renderer: scene revision %u - %zu mesh key(s) (%zu built, %zu building%s), %zu instance(s), %zu moved -> %s",
         rev, keys.size(), built.size(), building, landed ? ", some just landed" : "", instances.size(), moved,
@@ -245,15 +241,15 @@ void Renderer::KeepRtCurrent(Device& dev)
 
     if (sameSet)
     {
-        if (poolMoved) m_rt.FollowDynamicPool(m_buildDev.device.Get(), m_scene.DynamicVertexBuffer(),
+        if (poolMoved) m_rt.FollowDynamicPool(dev.device.Get(), m_scene.DynamicVertexBuffer(),
                                               m_scene.DynamicVertexCount());
-        m_rtValid = m_rt.UpdateInstances(m_buildDev, instances);
+        m_rtValid = m_rt.UpdateInstances(dev, dev.list.Get(), instances);
     }
     else
     {
         Scene::RtShared shared;
-        m_rtValid = m_scene.BuildRtShared(m_buildDev.device.Get(), shared) &&
-                    m_rt.Rebuild(m_buildDev, shared, keys, instances);
+        m_rtValid = m_scene.BuildRtShared(dev.device.Get(), shared) &&
+                    m_rt.Rebuild(dev, dev.list.Get(), shared, keys, instances);
     }
     // An empty TLAS while the first BLASes build (a load) is not a failure: the cascades meanwhile.
     m_rtReason = m_rtValid ? nullptr
