@@ -11,6 +11,7 @@
 #   render/   the renderer module's wrapper, the stage objects             wrally::render
 #   sound/    the audio module's wrapper                                   wrally::sound
 #   physics/  the physics module's wrapper                                 wrally::physics
+#   net/      the net module's wrapper (WNet.dll: login, the catalogue)    wrally::net
 #   ui/       Dear ImGui, the menus and the HUD                            wrally::ui
 #   core/     the small 3D math                                            wrally::math
 # Still linked in: RBR's file readers (phys-data).
@@ -24,6 +25,7 @@ add_executable(W-Rally
     src/render/renderer.cpp src/render/stage_objects.cpp
     src/sound/sound.cpp src/sound/codriver.cpp src/sound/mix_edit.cpp
     src/physics/physics.cpp
+    src/net/net.cpp
     src/ui/imgui_layer.cpp src/ui/hud.cpp src/ui/menus.cpp src/ui/menu_look.cpp src/ui/quick_rally.cpp src/ui/menu_video.cpp)
 target_include_directories(W-Rally PRIVATE src)
 wrally_build_info(W-Rally)   # the version and commit in the screens' corner
@@ -31,6 +33,16 @@ wrally_build_info(W-Rally)   # the version and commit in the screens' corner
 target_link_libraries(W-Rally PRIVATE wrally-json wrally-vfs phys-data rbr-collision ngg-format wrally-modules wrally-signals wrally-png imgui mfplat mfreadwrite mfuuid)
 # Not linked: loaded at run time from bin/modules - but built with the game.
 add_dependencies(W-Rally WPhysicsRBR WAudio WRenderer)
+# The net module is not built here: WNet.dll comes from the private wnet repo. WRALLY_WNET_DLL=<its path> puts it in
+# bin/modules/net with each build (until the build fetches a pinned, verified release of it). Without it the game runs
+# offline.
+set(WRALLY_WNET_DLL "" CACHE FILEPATH "WNet.dll to put in bin/modules/net (a build of the private wnet repo)")
+if(WRALLY_WNET_DLL)
+    add_custom_command(TARGET W-Rally POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E make_directory ${WRALLY_BIN}/modules/net
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different ${WRALLY_WNET_DLL} ${WRALLY_BIN}/modules/net/
+        COMMENT "WNet.dll into bin/modules/net")
+endif()
 # Where WRallyFile finds content/ and game/config/ when they are not beside the exe (a build run from its tree).
 target_compile_definitions(W-Rally PRIVATE _CRT_SECURE_NO_WARNINGS NOMINMAX WRALLY_SOURCE_DIR="${PROJECT_SOURCE_DIR}")
 target_compile_options(W-Rally PRIVATE /W4)
