@@ -26,7 +26,7 @@
 //
 //   Status InitWInterface(uint32_t gameVersion, const StructHeader* in, StructHeader* out)
 //       Called once, after the version matched. `in` is the kind's input
-//       struct (RendererInput, PhysicsInput, AudioInput), `out` the kind's output struct;
+//       struct (RendererInput, PhysicsInput, AudioInput, NetInput), `out` the kind's output struct;
 //       both start with a StructHeader the module checks (kind, version, size)
 //       before reading or writing anything else. On Ok, `out` holds the
 //       module's info, its function table and its instance.
@@ -63,6 +63,7 @@ enum class ModuleKind : uint32_t {
     Renderer = 1,
     Physics  = 2,
     Audio    = 3,
+    Net      = 4,   // WNet.dll: login, content catalogue, online races (iface/net.h)
     // Input, ... when a module of that kind exists - not before.
 };
 
