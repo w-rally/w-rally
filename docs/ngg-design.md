@@ -72,7 +72,7 @@ material cutoff, alpha sampled at fixed LOD 2) at no measurable cost.
 
 | file | holds |
 |---|---|
-| `src/core/device.*` | `Device`: D3D12 device, queue, ONE allocator + list + fence, synchronous `Begin`/`EndAndWait`; `CreateSecondary` (a second context on the same queue, for BVH builds mid-frame); DRED, `CheckRemoved`, debug-layer message drain, `NGG_PIX` |
+| `src/core/device.*` | `Device`: D3D12 device, queue, ONE allocator + list + fence, synchronous `Begin`/`EndAndWait`; DRED, `CheckRemoved`, debug-layer message drain, `NGG_PIX` |
 | `src/core/renderer.*` | `core::Renderer`: the frame (`RecordFrame`), quality tiers, upscaler choice and render size, `KeepRtCurrent` (BVH follows the scene), whole-frame GPU timer |
 | `src/core/scene.*` | `Scene`: `.ngg` load (`Load`, `LoadFromMemory`, variants), materials, the 41 scene pipelines, prepass + main pass (`RecordPass`), cascades and local-light shadow maps' draws, deferred local lights, glass, cube-probe faces, editor overlays / labels / selection, pixel probe, debug and light modes, RT input description |
 | `src/core/textures.inl` | DDS loading for the NGGT chunk (BC1/BC2, BC4/5/7 behind a DX10 header) - included by `scene.cpp` |
@@ -125,8 +125,10 @@ The ABI the game sees (`include/wrally/iface/renderer.h`, `renderer_edit.h`) is 
   and a constant ring; it comes with the change that needs it.
 - **Never key a descriptor on a resource pointer.** A recreated texture can land at the freed one's address; the
   RT visibility / AO descriptors are rewritten on every set (`Scene::SetRtVisibility`, `SetRtAo`).
-- **Work that must happen while the client's list is open** (BVH builds) goes on `Device::CreateSecondary`'s context:
-  `Rt::Rebuild` is blocking on the context it gets and completes on the queue before the frame's list is submitted.
+- **GPU work the frame depends on goes into the frame's own list**, ahead of its readers (the TLAS: built before the
+  prepass, a UAV barrier after it). A second context that is submitted and waited for mid-frame (the old
+  `Device::CreateSecondary`, for the TLAS) cost the CPU the submit and the wait every frame the car moved. Work the
+  frame does not wait for has its own queue (the BLAS batches, 4.2).
 
 ### 1.4 One frame: `core::Renderer::RecordFrame`
 
@@ -141,7 +143,7 @@ opens the list, sets sky time, and records. The order is the code's:
 | 2 | one atmosphere for every consumer; the MS switch mirrored to the sky | `Scene::SetAtmosphere`, `Sky::SetMultipleScattering` |
 | 3 | **jitter set before the prepass** (every rasterising pass the same sub-pixel offset; the main pass tests `GREATER_EQUAL` against the prepass's depth) | `PostFx::Jitter` -> `Scene`/`Sky::SetJitter` |
 | 4 | the instance stream starts over | `Scene::BeginFrame` |
-| 5 | BVH follows the scene: finished BLAS batches land; same mesh set -> instances + TLAS only; new meshes -> their BLASes queued for the build thread and queue (never waited for), dropped ones leave; TLAS on the secondary context | `Renderer::KeepRtCurrent` |
+| 5 | BVH follows the scene: finished BLAS batches land; same mesh set -> instances + TLAS only; new meshes -> their BLASes queued for the build thread and queue (never waited for), dropped ones leave; the TLAS build recorded into the frame's list | `Renderer::KeepRtCurrent` |
 | 6 | local lights' clusters for this view | `Scene::PrepareLights` |
 | 7 | **prepass: depth + normal + motion + plant** at the render size | `Scene::RecordPrepass` |
 | 8 | shadow source: RT if preferred, prepass drawn, BVH valid and shadows on; reflection TLAS set wherever RT exists (cascades too) | `m_rtActive`, `Scene::SetReflectionTlas` |
@@ -1015,9 +1017,35 @@ SM 6.5 (`Rt::Create` logs the adapter's and declines otherwise). `modules/render
 `Rt` caches BLASes by key (`std::map`). `Renderer::KeepRtCurrent` runs when `Scene::GeometryRevision` changes, when a
 batch of BLASes has landed, or the frame after one did. **Two speeds: a change in which meshes exist builds BLASes
 (load, first move of a non-keyed object, hide/show, added car, prop or model); a change in where things are - a
-driving car, a drag - is TLAS-only.** The TLAS (`Rt::UpdateInstances`, `PREFER_FAST_BUILD`, with the instance table)
-is built on the **secondary device context** (`m_buildDev`, blocking: the frame's list is open). `Rt::Rebuild` drops
-dead BLASes and rewrites the shared any-hit buffers and the descriptor heap, then the TLAS.
+driving car, a drag - is TLAS-only.** The TLAS (`Rt::UpdateInstances`, rebuilt whole with `PREFER_FAST_BUILD`, with
+the instance table) is **recorded into the frame's own list**, before the prepass, with a UAV barrier after it - no
+second context, no wait. Its two tables (instance descs, `gInst`) are upload buffers kept and mapped for good, a
+quarter to spare; the TLAS and its scratch also grow with a quarter to spare. `Rt::Rebuild` drops dead BLASes and
+rewrites the shared any-hit buffers and the descriptor heap, then the TLAS the same way.
+
+**The TLAS per frame** (2026-11-19, dev iGPU, 1080p, the car driving; `KeepRtCurrent` CPU = the whole of step 5,
+`DescribeRt` included; GPU = timestamps around the build):
+
+| stage, instances | before: CPU | of which: 2 upload buffers created / submit + wait / GPU build | after: CPU | GPU build (now inside `frameMs`) |
+|---|---|---|---|---|
+| fr_cote_darbroz (track 41 with the instanced trees), 11 578 | 4.1-4.5 ms | 2.1 / 0.85 / 0.6 ms | 1.4 ms | 0.4 ms |
+| fr_joux_verte (track 42, no trees), 2 707 | 4.3-4.5 ms | 2.0 / 0.8 / 0.4 ms | 1.2 ms | 0.3 ms |
+| golden replay (old track-41.ngg), 924 | - | - | 0.43 ms | 0.17 ms |
+
+The whole-frame GPU time is unchanged against main (forest, interleaved: 26.02 vs 26.12 ms median), the build now
+counted in it. What is left of the 1.4 ms is CPU: `Scene::DescribeRt`, the key sort and the per-instance BLAS lookup
+over 11 578 instances (~0.5 ms each).
+
+**Not refitted.** Built with `ALLOW_UPDATE` and refitted (`PERFORM_UPDATE`) when only transforms changed - full build
+on a set change, after 60 refits, or once an instance had gone 25 m - the refit took 0.15 ms against the full build's
+0.4 (forest), images bit-identical. But the refitted tree keeps the car's parts in the nodes they were built in, whose
+boxes stretch along its path: on the golden replay (116 km/h, `--step 0.1`, a full build every ~4 frames) the RT
+trace and the main pass's reflection rays were 1-2 ms slower per frame, in both run orders. Not worth 0.25 ms;
+`PREFER_FAST_TRACE` for the TLAS measured no faster trace either. Revisit only if a bigger TLAS makes the build
+itself cost (refit with a travel limit of a few metres, or the car's parts in a TLAS of their own).
+**Skipping** the TLAS when nothing moved is the scene revision's job already (a stopped turntable, a still editor:
+no revision, no work); a parked car's idle re-pose (a hundredth of a millimetre a tick) still rebuilds it, 1.4 ms CPU
+at most.
 
 **New BLASes never stall a frame.** They are built off the frame and join the TLAS when done:
 
@@ -2177,8 +2205,8 @@ is not ported. `tools/lamp-wall/wall.py` draws the same beam model offline.
 ### 10.5 Device removal: DRED
 
 `Device::Create` enables DRED before the device exists (auto-breadcrumbs and page-fault data, forced on: the cost is
-small and a GPU reset without a record is a dead end). Command lists are named (`ngg frame`,
-`ngg secondary (BVH builds)`). **`CheckRemoved` runs after every submit, on a failed `Begin` and at the end of
+small and a GPU reset without a record is a dead end). Command lists are named (`ngg frame`; the BLAS
+batches' are their own). **`CheckRemoved` runs after every submit, on a failed `Begin` and at the end of
 `renderFrame`**, and logs once per device: the removal reason, for each unfinished list the breadcrumb window around
 the last completed command, and the page fault (GPU VA and up to 6 recently freed allocations near it, by name and
 type). Recently-freed allocations near a fault mean use-after-free - the one such hang found was a descriptor keyed on a reused pointer
@@ -2251,8 +2279,8 @@ glass, and VR behind `kRendererCapVr`.
 
 | # | item | state / why | blocked on |
 |---|---|---|---|
-| 1 | **Build a new mesh's BLAS off the frame** | done (4.2): queued, recorded on a thread, built on the ray tracer's own compute queue, fenced, landed 1-2 frames later. Left: the landing frame's publish, 7-18 ms CPU (the any-hit buffers rebuilt whole - appending the new BLASes' share would make it ~1 ms - and the blocking TLAS); dropping a car frees its BLASes on the frame (3-8 ms); a frame's other allocations can still wait a millisecond or so behind the thread's | nothing |
-| 2 | **TLAS refit instead of a full rebuild** | the TLAS is rebuilt whole (`FAST_BUILD`), blocking on the secondary context, every frame anything moves (the car). No update path. Measured once, stage 41 (922 instances): 3.5-5 ms of the frame's CPU, the upload, the build and the wait together - so worth it, and the async queue of 4.2 would take the wait out | nothing |
+| 1 | **Build a new mesh's BLAS off the frame** | done (4.2): queued, recorded on a thread, built on the ray tracer's own compute queue, fenced, landed 1-2 frames later. Left: the landing frame's publish, 7-18 ms CPU (the any-hit buffers rebuilt whole - appending the new BLASes' share would make it ~1 ms); dropping a car frees its BLASes on the frame (3-8 ms); a frame's other allocations can still wait a millisecond or so behind the thread's | nothing |
+| 2 | **TLAS refit instead of a full rebuild** | done the other way (4.2): the per-frame cost was the two upload buffers created every frame and the secondary context's submit and wait, not the build. Now kept tables and the build in the frame's list: 4.1-4.5 -> 1.4 ms CPU per moving frame (11 578 instances), GPU unchanged. A refit was built and measured: 0.25 ms saved, 1-2 ms lost in tracing around a fast car - dropped. Left: `DescribeRt` and the instance table rebuilt from scratch each frame (~1 ms CPU in the forest) | nothing |
 | 3 | **Pipelines in parallel** | built and reverted (§1.6). A cold start was ~5 s shorter, but AMD driver 32.0.31021.5001 crashed in `amdxc64.dll` or hung in about 1 run of 12-28 whenever two threads compiled. `NGG_PIPELINE_THREADS=<n>` retries it. Run it 60+ times with the crash/hang harness before trusting it | a driver that survives it (newer AMD, or NVIDIA) |
 | 4 | **Measure the pipeline library on NVIDIA** | it saves nothing on the AMD iGPU, so it is opt-in (`NGG_PIPELINE_CACHE=library`). On the RTX machine, run with `NGG_DRIVER_SHADER_CACHE=clear`, with and without it, and compare the log's `pipelines:` lines. If there is no win there either, delete `pipeline_cache`'s library and keep the wrappers | the RTX machine |
 | 5 | **Shader hot reload** | `NGG_SHADER_DIR` compiles from the files at start only. Recreating the pipelines without a restart is not built | nothing (optional) |

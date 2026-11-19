@@ -46,13 +46,6 @@ struct Device
     // this wrong fails at OpenSharedHandle, far from the cause.
     bool Create(const LUID* luid, bool enableDebugLayer = false);
 
-    // A SECOND command context on another Device's device and queue: its own
-    // allocator, list and fence. For work that must happen while the primary
-    // list is open - a BVH rebuild after an edit, recorded mid-frame by the
-    // Renderer. It executes and completes on the shared queue before the
-    // primary list is even submitted, so ordering on the GPU is free.
-    bool CreateSecondary(const Device& primary);
-
     // Begin/End wrap the one command list. End submits and blocks until the GPU
     // is done, because the caller's target may be handed straight to another
     // process the moment we return.
