@@ -59,6 +59,7 @@ struct CarPart {
 enum CarMapKind : int { kMapBaseColour, kMapNormal, kMapOrm, kCarMaps };
 struct CarMap {
     std::vector<uint8_t> dds;   // empty: none
+    std::string rel;            // its file, relative to the car's folder (CarFiles::read: read again after a device loss)
     uint32_t uploaded = 0;      // as CarTexture::uploaded
 };
 
@@ -66,6 +67,7 @@ struct CarTexture {
     std::string material;
     std::string file;           // its texture's file name in the car's textures folder ("" none)
     std::vector<uint8_t> dds;   // empty: none
+    std::string rel;            // as CarMap::rel
     uint32_t uploaded = 0;      // the renderer's texture made of it already (a frame at a time: the showroom's); 0 not yet
     float diffuse[3] = {0.5f, 0.5f, 0.5f};
     bool transparent = false;
@@ -73,6 +75,9 @@ struct CarTexture {
 };
 
 struct CarModel {
+    // Its files read again (CarFiles::read, kept beyond ReadCarModel): a texture's bytes after a device loss, which the
+    // renderer asks for rather than keeping a copy (render::Renderer::Source).
+    std::function<std::vector<uint8_t>(const std::string& rel)> readAgain;
     std::vector<CarPart> parts;         // one per mesh and material group, in the car's frame
     std::vector<CarTexture> materials;  // per material name used
     // Where the wheels stand without the physics (a car in a menu): each Point_e_wheel_<lf|rf|lb|rb>'s place in the car's

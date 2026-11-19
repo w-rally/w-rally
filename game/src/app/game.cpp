@@ -181,7 +181,7 @@ public:
         if (m_scene) return;
         const auto t0 = std::chrono::steady_clock::now();
         const std::vector<uint8_t> bytes = assets::BuildShowroom();
-        m_scene = renderer.LoadScene(bytes.data(), bytes.size());
+        m_scene = renderer.LoadScene(bytes.data(), bytes.size(), nullptr, [] { return assets::BuildShowroom(); });
         m_carsInScene = 0;
         if (!m_scene) return void(std::fprintf(stderr, "the showroom: %s\n", renderer.Error().c_str()));
         std::printf("the showroom: its scene loaded in %.0f ms\n", std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count());
@@ -219,14 +219,19 @@ public:
                 for (int k = -1; k < assets::kCarMaps && all; ++k) {
                     std::vector<uint8_t>& dds = k < 0 ? t.dds : t.maps[k].dds;
                     uint32_t& uploaded = k < 0 ? t.uploaded : t.maps[k].uploaded;
+                    const std::string& rel = k < 0 ? t.rel : t.maps[k].rel;
+                    // (read again after a device loss: the renderer keeps no copy - NGG design §10.6)
+                    render::Renderer::Source again;
+                    if (m_pending->model.readAgain && !rel.empty())
+                        again = [read = m_pending->model.readAgain, rel] { return read(rel); };
                     if (uploaded || dds.empty()) continue;
                     if (spent() > 4.0) {   // (this frame's share spent: the rest next frame)
                         all = false;
                         break;
                     }
                     const double before = spent();
-                    uploaded = k > assets::kMapBaseColour ? renderer.CreateTextureData(dds.data(), dds.size())
-                                                          : renderer.CreateTexture(dds.data(), dds.size());
+                    uploaded = k > assets::kMapBaseColour ? renderer.CreateTextureData(dds.data(), dds.size(), std::move(again))
+                                                          : renderer.CreateTexture(dds.data(), dds.size(), std::move(again));
                     if (!uploaded && k < 0) dds.clear();   // (refused: the material's colour instead; a map is tried again,
                                                            // and named rejected, as the model is made)
                     if (std::getenv("WRALLY_SHOWROOM_TIMES"))
@@ -555,7 +560,25 @@ StageEnd RunStage(Shell& sh, const Options& given, bool fromMenu, std::string& e
     if (imported) renderer.SetLegacyProfile(legacyProfile);   // (the renderer keeps it from stage to stage)
     // The stage's own of a map's .ngg (its stages, NGGR: Joux Verte's 42 and its reverse 45 in one file): asked for by
     // the stage's name, which the file lists (NGGA). A file of one stage ignores it.
-    const iface::SceneHandle scene = renderer.LoadScene(bytes.data(), bytes.size(), o.stage.c_str());
+    // After a device loss the renderer asks for the bytes again (NGG design §10.6): the file read again, an import made
+    // again (the same .lbs, the same wetness) - not kept in memory meanwhile.
+    render::Renderer::Source again = [path = o.ngg, imported, wet]() -> std::vector<uint8_t> {
+        if (imported) {
+            assets::LegacyImport imp;
+            if (!assets::ImportLegacyStage(path, wet, imp).empty()) return {};
+            return std::vector<uint8_t>(imp.ngg.begin(), imp.ngg.end());
+        }
+        std::vector<uint8_t> v;
+        if (FILE* f = std::fopen(path.c_str(), "rb")) {
+            std::fseek(f, 0, SEEK_END);
+            v.resize(static_cast<size_t>(std::ftell(f)));
+            std::fseek(f, 0, SEEK_SET);
+            v.resize(std::fread(v.data(), 1, v.size(), f));
+            std::fclose(f);
+        }
+        return v;
+    };
+    const iface::SceneHandle scene = renderer.LoadScene(bytes.data(), bytes.size(), o.stage.c_str(), std::move(again));
     if (rendererLog) std::printf("%s", renderer.TakeLog().c_str());
     if (!scene) return fail("renderer: " + renderer.Error());
     bytes.clear();
@@ -1561,7 +1584,7 @@ int RunLab(Shell& sh, const std::vector<std::string>& args)
     renderer.ApplySettings(settings);
     renderer.SetDebugView(std::getenv("NGG_DEBUG_VIEW") ? std::atoi(std::getenv("NGG_DEBUG_VIEW")) : 0);
     const std::vector<uint8_t> bytes = assets::BuildLampLab();
-    const iface::SceneHandle scene = renderer.LoadScene(bytes.data(), bytes.size());
+    const iface::SceneHandle scene = renderer.LoadScene(bytes.data(), bytes.size(), nullptr, [] { return assets::BuildLampLab(); });
     if (!scene) return std::fprintf(stderr, "the lab: %s\n", renderer.Error().c_str()), 3;
 
     // The car at the origin, unturned (facing the physics frame's -y), its lamps the test layout's.

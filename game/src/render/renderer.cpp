@@ -1,5 +1,7 @@
 #include "render/renderer.h"
 
+#include <unordered_map>
+
 #include "app/paths.h"
 
 #include "wrally/modules/file_host.h"
@@ -16,6 +18,35 @@ struct Renderer::Impl {
     std::mutex logLock;
     std::string log;
     std::string error;
+    // After a device loss the renderer asks for these again (iface::RendererReload): the loaded scene's, and its
+    // textures' by handle (a scene's load drops them: its textures went with it).
+    Source scene;
+    std::unordered_map<iface::TextureHandle, Source> textures;
+
+    static iface::Status WRALLY_CALL Read(void* ctx, uint32_t kind, uint32_t handle, iface::Blob* out)
+    {
+        Impl& m = *static_cast<Impl*>(ctx);
+        const Source* src = nullptr;
+        if (kind == iface::kReloadScene) src = m.scene ? &m.scene : nullptr;
+        else if (const auto it = m.textures.find(handle); kind == iface::kReloadTexture && it != m.textures.end()) src = &it->second;
+        if (!src) return iface::Status::ErrIo;
+        auto bytes = std::make_unique<std::vector<uint8_t>>();
+        try {
+            *bytes = (*src)();
+        } catch (...) {
+            return iface::Status::ErrIo;
+        }
+        if (bytes->empty()) return iface::Status::ErrIo;
+        out->data = bytes->data();
+        out->size = bytes->size();
+        out->owner = bytes.release();
+        return iface::Status::Ok;
+    }
+    static void WRALLY_CALL Release(void*, iface::Blob* blob)
+    {
+        delete static_cast<std::vector<uint8_t>*>(blob->owner);
+        *blob = {};
+    }
 };
 
 Renderer::Renderer() = default;
@@ -49,6 +80,7 @@ std::string Renderer::Open(const std::filesystem::path& modulesDir, const std::s
         in.width = width, in.height = height;
         in.settings = settings;
         in.flags = flags;
+        in.reload = {m.get(), &Impl::Read, &Impl::Release};
         std::string error;
         if (m->host.Init(*e, &in.header, &out.header, &error) != Status::Ok) {
             tried += "\n  " + e->path.filename().string() + ": " + error;
@@ -101,28 +133,36 @@ template <class H> H Made(Status s, H h, const iface::RendererApi* api, iface::R
 
 } // namespace
 
-iface::SceneHandle Renderer::LoadScene(const void* ngg, uint64_t bytes, const char* stage)
+iface::SceneHandle Renderer::LoadScene(const void* ngg, uint64_t bytes, const char* stage, Source source)
 {
     if (!m_instance) return 0;
     iface::SceneHandle h = 0;
+    m_api->keepCopies(m_instance, source ? 0u : 1u);   // no way to make it again: the renderer keeps the bytes
+    m->scene = {};
+    m->textures.clear();
     const Status s = stage && *stage ? m_api->loadSceneVariant(m_instance, ngg, bytes, stage, &h)
                                      : m_api->loadScene(m_instance, ngg, bytes, &h);
+    if (s == Status::Ok) m->scene = std::move(source);
     return Made(s, h, m_api, m_instance, m->error);
 }
 
-iface::TextureHandle Renderer::CreateTexture(const void* dds, uint64_t bytes)
+iface::TextureHandle Renderer::CreateTexture(const void* dds, uint64_t bytes, Source source)
 {
     if (!m_instance) return 0;
     iface::TextureHandle h = 0;
+    m_api->keepCopies(m_instance, source ? 0u : 1u);
     const Status s = m_api->createTexture(m_instance, dds, bytes, &h);
+    if (s == Status::Ok && source) m->textures[h] = std::move(source);
     return Made(s, h, m_api, m_instance, m->error);
 }
 
-iface::TextureHandle Renderer::CreateTextureData(const void* dds, uint64_t bytes)
+iface::TextureHandle Renderer::CreateTextureData(const void* dds, uint64_t bytes, Source source)
 {
     if (!m_instance) return 0;
     iface::TextureHandle h = 0;
+    m_api->keepCopies(m_instance, source ? 0u : 1u);
     const Status s = m_api->createTextureData(m_instance, dds, bytes, &h);
+    if (s == Status::Ok && source) m->textures[h] = std::move(source);
     return Made(s, h, m_api, m_instance, m->error);
 }
 

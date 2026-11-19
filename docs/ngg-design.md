@@ -2225,8 +2225,8 @@ the Garage on 2026-11-19 it reported five warnings, all at start-up (`CreateComm
 ### 10.6 Device loss: a new device, everything again
 
 A TDR, a driver update or crash, a GPU reset or an unplugged adapter removes the device. **The renderer survives it
-inside WRenderer, and the client does nothing** (`module.cpp`, "device loss"; `renderer.h`, "DEVICE LOSS"; interface
-24).
+inside WRenderer; the client's handles stay valid, and all it does is hand the big bytes over again when asked**
+(`module.cpp`, "device loss"; `renderer.h`, "DEVICE LOSS"; interfaces 24 and 25).
 
 - **Detected** where D3D12 says so: `CheckRemoved` after every submit of the frame's list (`EndAndWait`: the frame,
   the uploads) and at the end of `renderFrame`, a failed `Begin`, `present`'s `DXGI_ERROR_DEVICE_REMOVED` / `_RESET`,
@@ -2242,18 +2242,26 @@ inside WRenderer, and the client does nothing** (`module.cpp`, "device loss"; `r
   device on the client's adapter (a driver update gives it a new LUID: then the best one there is), the pipeline
   cache, the swap chain on the same window at the last size, the core, the UI pass, the settings, the environment's
   switches.
-- **Everything again from a journal:** what the client gave that lives on the GPU is kept as it is handed over
-  (`Journal`): the `.ngg`'s bytes and variant; the scene's creations IN ORDER - textures (their DDS), models (their
-  whole `ModelDesc`, copied), releases, instances and their destruction, the editor's placement batches; the setters'
-  last values - edited materials, object moves and visibility, selection, overlay layers, the font, labels, debug
+- **Everything again from a journal:** what the client gave that lives on the GPU is recorded as it is handed over
+  (`Journal`): the scene and its variant; the scene's creations IN ORDER - textures, models (their whole `ModelDesc`,
+  copied: small), releases, instances and their destruction, the editor's placement batches; the setters' last values - edited materials, object moves and visibility, selection, overlay layers, the font, labels, debug
   view, legacy profile, light mode, culling, the probe pixel; the UI textures by slot with their last pixels. Replayed
   through the table itself, in order, they hand out **the same texture, material, model and instance handles and the
   same object indices** (a handle that came out otherwise would be logged: none has). The instances and stage
   objects are then put where the frames last put them: `FrameDesc` sends only what moves. Everything built from those
   - BLASes (the async path), TLAS, NRD, FSR, DLSS, the probe, the cascades - is built as at a scene's load.
-- **The memory:** the journal holds again what the GPU already holds of the scene - the `.ngg` (fr_cote_darbroz with its trees: 164 MB; the golden replay's track 41: 39 MB)
-  and every texture and model made in it, until the next `loadScene`. A drag in the editor replaces its last move
-  (`setPlacements` of the same handles, the setters' maps), so it does not grow.
+- **The big bytes come from the client again (interface 25):** the `.ngg` (fr_cote_darbroz with its trees: 164 MB)
+  and the textures' DDS (the i20's: 140 MB) are not kept. During the replay the renderer asks for them, in their
+  order, through `RendererInput::reload` (`read(kind, handle)`: `kReloadScene` 1, `kReloadTexture` the handle;
+  `release` after each). The game's wrapper (`render::Renderer`) takes a `Source` per `LoadScene` / `CreateTexture` -
+  the stage's file read again, an `.lbs` imported again (the same wetness), the Garage's and the lab's scenes built
+  again, a car's textures read again through its item (`CarModel::readAgain`, `CarTexture::rel`) - and answers the
+  callback from them. A call with no source runs under `keepCopies(1)`: the renderer keeps those bytes itself (the
+  lamps' 4x4 colours, the fences' textures changed in memory). Without a reload callback (an editor that has none)
+  everything is kept, as before. A texture the client cannot give again is drawn white in its place (the handles after
+  it stay); a scene it cannot give again is gone, `lastError` says so. The log says what was asked for and what kept:
+  golden replay and Garage `13 scene / texture bytes asked for again, 0.0 MB kept`. Models, UI textures and the
+  editor's state stay in the journal (small); a drag in the editor replaces its last move, so it does not grow.
 - **What does not come back:** histories (TAA, the upscaler's, the denoisers', auto exposure's adaptation) start over
   as after a camera cut, and the per-frame sequences (jitter, XeGTAO's noise, the rays' decorrelation, the probe's
   faces) start from 0 - after a loss a frame is the same frame as a fresh start's, not the run's. Measured on the
@@ -2263,15 +2271,17 @@ inside WRenderer, and the client does nothing** (`module.cpp`, "device loss"; `r
 - **When no device can be made** (the adapter gone; a driver mid-update): calls that need the device return
   `ErrDevice` and `lastError` says why; a new try at most once a second, the journal kept. A device made but the
   renderer on it not (it never happened): `ErrFault`, the instance must be destroyed.
-- **Cost:** 0.5 s for the editor test's stage, 0.66-0.85 s for track 41 and the Garage (the load, pipelines from the
-  cache) - one hitch.
+- **Cost:** 0.7 s for the editor test's stage, 0.8-1.0 s for track 41 and the Garage with the bytes read again from
+  disk (0.66-0.85 s from kept copies) - one hitch.
 - **Testing:** `NGG_TEST_DEVICE_REMOVED=<frame>[,<frame>...]` calls `ID3D12Device5::RemoveDevice` in that `renderFrame`
   (the renderer's count, from 1), after recording, before the submit - the DXGI_ERROR_DEVICE_REMOVED (0x887A0005) a
   hang gives. CTest `device-lost-41` (`editor-api-check --device-lost`): a model, an instance placed once, an edited
   material, a moved and a hidden object, a selection, an overlay layer and a UI texture; removed in frame 6, the frame
   9 capture is the frame 3 capture **byte for byte**, the overlay's and selection's pixel counts the same, every handle
   the same; removed in frame 11, the next call (`createModel`, between frames) makes the device and hands out the
-  next model handle; then with RT, NRD and FSR at 0.67, all three back. In the game: `NGG_TEST_DEVICE_REMOVED=60` on
+  next model handle. Twice: the renderer keeping copies, then the client giving the scene and a texture again
+  (counted; refused the second time: white, the next handle still the next). Then with RT, NRD and FSR at 0.67, all
+  three back. In the game: `NGG_TEST_DEVICE_REMOVED=60` on
   the golden replay (bit-exact still), and `--showroom` with it at 25 (while the car's textures go up).
 - **DLSS (SR and RR) is untested here:** no NVIDIA GPU on the dev machine. Its path is the others': `Dlss`'s
   destructor calls `NVSDK_NGX_D3D12_Shutdown1` on the dead device with the old `Gpu`, and `SetUpscaling` on the new one
