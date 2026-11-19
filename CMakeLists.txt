@@ -31,6 +31,7 @@ endforeach()
 
 include(cmake/BuildHash.cmake)
 include(cmake/BuildInfo.cmake)
+include(cmake/WNet.cmake)   # WRALLY_WNET_MODULE: the pinned, verified net module (or none)
 
 enable_testing()
 
