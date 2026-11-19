@@ -65,15 +65,16 @@ public:
     bool IsBuilding(uint64_t key) const;     // (or failed to: not queued again until the next scene)
     // The BLASes whose keys are no longer live dropped (a superseded world
     // kept while its successor builds: see rt.cpp), then the shared any-hit
-    // buffers and the descriptor heap, then the TLAS over the built meshes.
-    // Blocking on `dev` - the TLAS, which is why the Renderer hands it a
-    // secondary context.
-    bool Rebuild(Device& dev, const Scene::RtShared& shared,
+    // buffers and the descriptor heap, then the TLAS over the built meshes
+    // (UpdateInstances, into `list`).
+    bool Rebuild(Device& dev, ID3D12GraphicsCommandList* list, const Scene::RtShared& shared,
                  const std::vector<uint64_t>& liveKeys,
                  const std::vector<Scene::RtInstanceDesc>& instances);
     // When only instances changed (a drag, an added instance of a known mesh):
     // the TLAS and the instance table, nothing else.
-    bool UpdateInstances(Device& dev, const std::vector<Scene::RtInstanceDesc>& instances);
+    // Recorded into `list` - the frame's, before its first ray - and not waited for.
+    bool UpdateInstances(Device& dev, ID3D12GraphicsCommandList* list,
+                         const std::vector<Scene::RtInstanceDesc>& instances);
     // The dynamic pool was uploaded again (a new buffer, the old one freed) and nothing else changed for the TLAS:
     // the any-hit test's view of it follows, without a Rebuild.
     void FollowDynamicPool(ID3D12Device* device, ID3D12Resource* dynVb, uint32_t dynVertexCount);
@@ -269,6 +270,8 @@ private:
     std::vector<uint64_t>                        m_failedKeys;   // a batch that failed: counted as building (IsBuilding)
     bool WriteTargetViews(ID3D12Device* device);
     Microsoft::WRL::ComPtr<ID3D12Resource>       m_tlas, m_scratch, m_instances, m_instInfo;
+    void*                                        m_instancesMapped = nullptr;   // (upload, mapped for good)
+    void*                                        m_instInfoMapped = nullptr;
     ID3D12Resource*                              m_staticVb = nullptr;
     ID3D12Resource*                              m_dynVb = nullptr;
     uint32_t                                     m_instanceCount = 0;

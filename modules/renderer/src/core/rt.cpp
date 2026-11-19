@@ -73,31 +73,6 @@ D3D12_RESOURCE_BARRIER Transition(ID3D12Resource* r, D3D12_RESOURCE_STATES a,
     return t;
 }
 
-ComPtr<ID3D12Resource> MakeUploadBuffer(ID3D12Device* dev, const void* data, size_t bytes)
-{
-    D3D12_HEAP_PROPERTIES hp = {};
-    hp.Type = D3D12_HEAP_TYPE_UPLOAD;
-    D3D12_RESOURCE_DESC d = {};
-    d.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
-    d.Width = bytes ? bytes : 4;
-    d.Height = 1;
-    d.DepthOrArraySize = 1;
-    d.MipLevels = 1;
-    d.SampleDesc.Count = 1;
-    d.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
-    ComPtr<ID3D12Resource> r;
-    if (FAILED(dev->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &d,
-                                            D3D12_RESOURCE_STATE_GENERIC_READ, nullptr,
-                                            IID_PPV_ARGS(&r))))
-        return nullptr;
-    void* p = nullptr;
-    D3D12_RANGE none = { 0, 0 };
-    if (FAILED(r->Map(0, &none, &p))) return nullptr;
-    memcpy(p, data, bytes);
-    r->Unmap(0, nullptr);
-    return r;
-}
-
 ComPtr<ID3D12Resource> MakeBuffer(ID3D12Device* dev, UINT64 bytes,
                                   D3D12_HEAP_TYPE heap, D3D12_RESOURCE_STATES state,
                                   D3D12_RESOURCE_FLAGS flags = D3D12_RESOURCE_FLAG_NONE)
@@ -837,7 +812,7 @@ bool Rt::Land()
     return landed;
 }
 
-bool Rt::Rebuild(Device& dev, const Scene::RtShared& shared,
+bool Rt::Rebuild(Device& dev, ID3D12GraphicsCommandList* list, const Scene::RtShared& shared,
                  const std::vector<uint64_t>& liveKeys,
                  const std::vector<Scene::RtInstanceDesc>& instances)
 {
@@ -972,7 +947,7 @@ bool Rt::Rebuild(Device& dev, const Scene::RtShared& shared,
 
     std::vector<Scene::RtInstanceDesc> all = instances;
     for (uint64_t k : held) all.push_back(Scene::RtInstanceDesc{ k });
-    const bool ok = UpdateInstances(dev, all);
+    const bool ok = UpdateInstances(dev, list, all);
 
     Log("rt: published %zu BLAS(es)%s: %u instance(s) in the TLAS, %zu alpha-tested triangles for the any-hit test, "
         "%zu textures - %.1f ms", published.size(), held.empty() ? "" : " (the old world kept while the new builds)",
@@ -999,10 +974,13 @@ void Rt::FollowDynamicPool(ID3D12Device* dev, ID3D12Resource* dynVb, uint32_t dy
 // How far away a newly built mesh "was" last frame (UpdateInstances): far beyond any penumbra, so no history.
 constexpr float kRtAppearedFrom = 1.0e4f;
 
-// The TLAS and the instance table only. What a drag costs: a handful of
-// instances, rebuilt whole - FAST_BUILD, because it is rebuilt far more often
-// than any single version of it is traced.
-bool Rt::UpdateInstances(Device& dev, const std::vector<Scene::RtInstanceDesc>& instances)
+// The TLAS and the instance table only. What a drag or a driving car costs: the
+// TLAS rebuilt whole - FAST_BUILD, because it is rebuilt far more often than
+// any single version of it is traced. Not refitted (ALLOW_UPDATE +
+// PERFORM_UPDATE): measured (design 4.2), a refit saved 0.25 ms of a 0.4 ms
+// build and the stretched boxes around a fast car cost 1-2 ms of tracing.
+bool Rt::UpdateInstances(Device& dev, ID3D12GraphicsCommandList* list,
+                         const std::vector<Scene::RtInstanceDesc>& instances)
 {
     if (!Ready() || !m_heap) return false;
     ComPtr<ID3D12Device5> dev5;
@@ -1041,9 +1019,24 @@ bool Rt::UpdateInstances(Device& dev, const std::vector<Scene::RtInstanceDesc>& 
     m_appeared.clear();
     if (descs.empty()) { m_tlas.Reset(); m_instanceCount = 0; return false; }
 
-    m_instances = MakeUploadBuffer(dev.device.Get(), descs.data(), descs.size() * sizeof(descs[0]));
-    m_instInfo  = MakeUploadBuffer(dev.device.Get(), info.data(), info.size() * sizeof(info[0]));
-    if (!m_instances || !m_instInfo) return false;
+    // The two tables go into upload buffers kept from frame to frame (mapped once, a quarter to spare): creating them
+    // every frame was 2 ms of the 3.5 a moving car's TLAS cost. Overwriting is safe - the frames are synchronous, and
+    // last frame's trace and build are done.
+    auto fill = [&](ComPtr<ID3D12Resource>& buf, void*& mapped, const void* data, size_t bytes) {
+        if (!buf || buf->GetDesc().Width < bytes)
+        {
+            mapped = nullptr;
+            buf = MakeBuffer(dev.device.Get(), bytes + bytes / 4, D3D12_HEAP_TYPE_UPLOAD,
+                             D3D12_RESOURCE_STATE_GENERIC_READ);
+            D3D12_RANGE none = { 0, 0 };
+            if (!buf || FAILED(buf->Map(0, &none, &mapped))) { buf.Reset(); mapped = nullptr; return false; }
+        }
+        memcpy(mapped, data, bytes);
+        return true;
+    };
+    if (!fill(m_instances, m_instancesMapped, descs.data(), descs.size() * sizeof(descs[0])) ||
+        !fill(m_instInfo, m_instInfoMapped, info.data(), info.size() * sizeof(info[0])))
+        return false;
 
     D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS top = {};
     top.Type = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL;
@@ -1053,26 +1046,33 @@ bool Rt::UpdateInstances(Device& dev, const std::vector<Scene::RtInstanceDesc>& 
     top.InstanceDescs = m_instances->GetGPUVirtualAddress();
     D3D12_RAYTRACING_ACCELERATION_STRUCTURE_PREBUILD_INFO topInfo = {};
     dev5->GetRaytracingAccelerationStructurePrebuildInfo(&top, &topInfo);
+    const UINT64 scratchBytes = topInfo.ScratchDataSizeInBytes;
 
+    // A quarter to spare: the count goes up and down by a few as car parts land and leave.
     if (!m_tlas || m_tlas->GetDesc().Width < topInfo.ResultDataMaxSizeInBytes)
-        m_tlas = MakeBuffer(dev.device.Get(), topInfo.ResultDataMaxSizeInBytes, D3D12_HEAP_TYPE_DEFAULT,
-                            D3D12_RESOURCE_STATE_RAYTRACING_ACCELERATION_STRUCTURE,
+        m_tlas = MakeBuffer(dev.device.Get(), topInfo.ResultDataMaxSizeInBytes + topInfo.ResultDataMaxSizeInBytes / 4,
+                            D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_RAYTRACING_ACCELERATION_STRUCTURE,
                             D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
-    if (!m_scratch || m_scratch->GetDesc().Width < topInfo.ScratchDataSizeInBytes)
-        m_scratch = MakeBuffer(dev.device.Get(), topInfo.ScratchDataSizeInBytes, D3D12_HEAP_TYPE_DEFAULT,
+    if (!m_scratch || m_scratch->GetDesc().Width < scratchBytes)
+        m_scratch = MakeBuffer(dev.device.Get(), scratchBytes + scratchBytes / 4, D3D12_HEAP_TYPE_DEFAULT,
                                D3D12_RESOURCE_STATE_COMMON,
                                D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
     if (!m_tlas || !m_scratch) return false;
 
+    // Recorded in the FRAME's list, before its first ray (the prepass is next; the traces come after it): no
+    // secondary context, no wait - the CPU goes on recording while the GPU builds. The UAV barrier orders the build
+    // before every read of the TLAS in this list (the sun, AO, lamps, NRD's and DLSS RR's traces, the reflection rays).
     ComPtr<ID3D12GraphicsCommandList4> list4;
-    if (!dev.Begin()) return false;
-    if (FAILED(dev.list.As(&list4))) { dev.EndAndWait(); return false; }
+    if (!list || FAILED(list->QueryInterface(IID_PPV_ARGS(&list4)))) return false;
     D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_DESC td = {};
     td.Inputs = top;
     td.ScratchAccelerationStructureData = m_scratch->GetGPUVirtualAddress();
     td.DestAccelerationStructureData = m_tlas->GetGPUVirtualAddress();
     list4->BuildRaytracingAccelerationStructure(&td, 0, nullptr);
-    dev.EndAndWait();
+    D3D12_RESOURCE_BARRIER uav = {};
+    uav.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
+    uav.UAV.pResource = m_tlas.Get();
+    list4->ResourceBarrier(1, &uav);
 
     auto slot = [&](UINT i) {
         D3D12_CPU_DESCRIPTOR_HANDLE h = m_heap->GetCPUDescriptorHandleForHeapStart();

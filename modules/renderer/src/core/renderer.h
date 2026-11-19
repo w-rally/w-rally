@@ -205,10 +205,6 @@ private:
     Denoiser          m_denoiser = Denoiser::Ours;
     VisibilityProvider* m_lastSource = nullptr;    // last frame's: another one starts from no history
     Visibility        m_vis;                       // this frame's
-    // Out-of-band work while the client's list is open: the BVH rebuild after
-    // an edit. Rt::Build is synchronous on whatever context it is given; on the
-    // client's own one it reset an allocator mid-recording and failed.
-    Device     m_buildDev;
 
     DXGI_FORMAT m_outputFormat = DXGI_FORMAT_R8G8B8A8_UNORM;
     UINT  m_width = 0, m_height = 0;                 // the output

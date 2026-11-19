@@ -213,24 +213,6 @@ bool Device::Create(const LUID* luid, bool enableDebugLayer)
     return fenceEvent != nullptr;
 }
 
-bool Device::CreateSecondary(const Device& primary)
-{
-    if (!primary.device || !primary.queue) return false;
-    device = primary.device;
-    queue = primary.queue;
-    rtTier = primary.rtTier;
-    shaderModel = primary.shaderModel;
-    if (FAILED(device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT,
-                                              IID_PPV_ARGS(&alloc)))) return false;
-    if (FAILED(device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, alloc.Get(),
-                                         nullptr, IID_PPV_ARGS(&list)))) return false;
-    list->Close();
-    list->SetName(L"ngg secondary (BVH builds)");
-    if (FAILED(device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&fence)))) return false;
-    fenceEvent = CreateEventW(nullptr, FALSE, FALSE, nullptr);
-    return fenceEvent != nullptr;
-}
-
 bool Device::Begin()
 {
     if (FAILED(alloc->Reset())) { CheckRemoved("at Begin"); return false; }
