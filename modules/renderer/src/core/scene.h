@@ -349,7 +349,8 @@ public:
     // into a foliage-only sun shadow map (the cascades' targets, idle on this path; RenderFoliageShadows), which the
     // main pass multiplies into the ray-traced sun; their shells leave the sun's rays (kRtMaskNearShell) and their
     // crown's ellipsoid stands down. The far placements keep the shell and the ellipsoid. A/B and tuning only:
-    // NGG_FOLIAGE_SHADOW=off (as before), NGG_FOLIAGE_NEAR (metres), NGG_FOLIAGE_CASCADES (the map's slices, 1-4).
+    // NGG_FOLIAGE_SHADOW=off (as before), NGG_FOLIAGE_NEAR (metres), NGG_FOLIAGE_CASCADES (the map's slices, 1-4),
+    // NGG_FOLIAGE_PENUMBRA (the map's penumbra over the sun's, default 0.5).
     // UpdateFoliageNear: once a frame before the TLAS is kept current (the near set decides the TLAS).
     // `sunAngle`: the sun's angular radius (radians) - the map's penumbra (FoliageMapVis), as the rays' (§4.3).
     void UpdateFoliageNear(const float* view, const float* proj, const float* sunDirTravel, float sunAngle);

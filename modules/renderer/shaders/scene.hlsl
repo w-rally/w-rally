@@ -847,7 +847,7 @@ static const float2 kFoliageTaps[12] = {
 // one, so the receivers of its shadow do too (UpdateFoliageNear). The point steps towards the sun by a couple of texels
 // - a leaf has no thickness, and its normal (a volume normal on foliage) says nothing about which side faces the sun -
 // and an opaque receiver also along its normal, as the cascades do.
-// THE PENUMBRA is the sun's, as the rays draw it (4.3): a fleck of light under a canopy is an image of the sun's disc,
+// THE PENUMBRA is the sun's (gFoliageParams.x: by default HALF its angular radius, a look - Scene::UpdateFoliageNear): a fleck of light under a canopy is an image of the sun's disc,
 // as wide as the leaves are high times its angular diameter (10 m up: ~9 cm) - wider than a near slice's texel
 // (2.5-7 cm), which a plain PCF showed as squares that popped from texel to texel as the leaves swayed. So a blocker
 // search (4 gathers round the point, as far as a leaf 30 m up could hide the disc), then 12 comparison taps over the

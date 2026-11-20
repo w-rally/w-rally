@@ -45,7 +45,12 @@ bool Renderer::Create(Device& dev, DXGI_FORMAT outputFormat, UINT width, UINT he
 
     ID3D12Device* d = dev.device.Get();
     if (!m_sky.Create(d, PostFx::kHdrFormat)) Log("renderer: sky unavailable - frames clear instead");
-    if (!m_shadows.Create(d, 2048)) Log("renderer: cascaded shadow maps unavailable");
+    {
+        // NGG_FOLIAGE_RES: the maps' resolution (the cascades', and on the RT path the foliage map's) - A/B only.
+        const char* e = std::getenv("NGG_FOLIAGE_RES");
+        const UINT res = e ? (UINT)(std::min)((std::max)(atoi(e), 512), 8192) : 2048u;
+        if (!m_shadows.Create(d, res)) Log("renderer: cascaded shadow maps unavailable");
+    }
     if (!m_gtao.Create(d, dev.queue.Get())) Log("renderer: no screen-space AO - the cascades go without AO");
     m_scene.SetShadowMaps(&m_shadows);
     if (!m_localShadows.Create(d, 1024)) Log("renderer: no local-light shadow maps - local lights unshadowed without RT");

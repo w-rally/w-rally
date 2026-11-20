@@ -603,19 +603,24 @@ void Scene::UpdateFoliageNear(const float* view, const float* proj, const float*
         bool on = true;
         float metres = 60.0f;
         int slices = 2;
+        // The map's penumbra over the sun's: half, the user's pick (2026-11-20) - the real sun's softened the flecks
+        // under a canopy to dim blurs; none is crisper than the sun (NGG design §2.6).
+        float penumbra = 0.5f;
         Overrides()
         {
             if (const char* e = std::getenv("NGG_FOLIAGE_SHADOW")) on = strcmp(e, "off") != 0;
             if (const char* e = std::getenv("NGG_FOLIAGE_NEAR")) metres = (std::max)(1.0f, (float)atof(e));
             if (const char* e = std::getenv("NGG_FOLIAGE_CASCADES"))
                 slices = (std::min)((std::max)(atoi(e), 1), (int)ShadowMaps::kCascades);
-            Log("scene: foliage map %s, near %.0f m, %d slice(s)", on ? "on" : "off", metres, slices);
+            if (const char* e = std::getenv("NGG_FOLIAGE_PENUMBRA")) penumbra = (std::max)(0.0f, (float)atof(e));
+            Log("scene: foliage map %s, near %.0f m, %d slice(s), penumbra x%.2f", on ? "on" : "off", metres, slices,
+                penumbra);
         }
     } kOverrides;
     m_foliageMap = kOverrides.on;
     m_foliageNear = kOverrides.metres;
     m_foliageCascades = kOverrides.slices;
-    m_foliageSunAngle = sunAngle;
+    m_foliageSunAngle = sunAngle * kOverrides.penumbra;
     m_foliageFit = false;
     m_foliageDrawn = false;
     std::vector<uint8_t> next(m_placements.size(), 0);
