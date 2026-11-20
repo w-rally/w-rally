@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdlib>
 #include <cstring>
 
 using Microsoft::WRL::ComPtr;
@@ -48,6 +49,21 @@ void LookAtLH(const float* eye, const float* dir, const float* upHint, float* m)
     m[4]=x[1]; m[5]=y[1]; m[6]=z[1];  m[7]=0.0f;
     m[8]=x[2]; m[9]=y[2]; m[10]=z[2]; m[11]=0.0f;
     m[12]=-Dot3(x,eye); m[13]=-Dot3(y,eye); m[14]=-Dot3(z,eye); m[15]=1.0f;
+}
+
+// TEXEL SNAP for a light view looking at `centre` (LookAtLH from centre + sun * back): its x, y translation set so
+// that the texel grid stays put IN THE WORLD - the centre's light-space position measured from the world's origin,
+// rounded down to a whole texel. (Measured from the light's own eye, as this once did, the centre is always at 0, the
+// remainder always 0: the grid slid with the camera and every shadow edge crawled from texel to texel as the car
+// drove.) The ortho square's half side is resolution/2 texels, a whole number, so its texel edges land on the grid.
+void SnapToTexels(float* lview, const float* centre, float texel)
+{
+    if (!(texel > 0.0f)) return;
+    for (int a = 0; a < 2; ++a)
+    {
+        const double c = (double)centre[0] * lview[0 + a] + (double)centre[1] * lview[4 + a] + (double)centre[2] * lview[8 + a];
+        lview[12 + a] = (float)-(floor(c / texel) * texel);
+    }
 }
 
 void OrthoLH(float w, float h, float zn, float zf, float* m)
@@ -260,20 +276,11 @@ void ShadowMaps::Update(const float* view, const float* proj, const float* sunTo
         float lview[16];
         LookAtLH(lightEye, toward, up, lview);
 
-        // TEXEL SNAP. Project the centre into light space, round it to a whole
-        // texel, and translate back by the remainder. Without this, sub-texel
-        // camera motion changes which texel a world point falls in and the
-        // shadow edge crawls - the classic "shimmering shadows" artefact, and
-        // one that reads as a filtering problem rather than a fitting one.
-        {
-            const float cx = centre[0]*lview[0] + centre[1]*lview[4] + centre[2]*lview[8]  + lview[12];
-            const float cy = centre[0]*lview[1] + centre[1]*lview[5] + centre[2]*lview[9]  + lview[13];
-            const float texel = m_texelWorld[i];
-            const float sx = floorf(cx / texel) * texel - cx;
-            const float sy = floorf(cy / texel) * texel - cy;
-            lview[12] += sx;
-            lview[13] += sy;
-        }
+        // TEXEL SNAP. Without it, sub-texel camera motion changes which texel a
+        // world point falls in and the shadow edge crawls - the classic
+        // "shimmering shadows" artefact, and one that reads as a filtering
+        // problem rather than a fitting one.
+        SnapToTexels(lview, centre, m_texelWorld[i]);
 
         float lproj[16];
         OrthoLH(diameter, diameter, 0.0f, back + radius + 2000.0f, lproj);
@@ -297,11 +304,18 @@ void ShadowMaps::FitFoliage(const float* view, const float* proj, const float* s
         eye[j] = -(view[12] * view[j*4+0] + view[13] * view[j*4+1] + view[14] * view[j*4+2]);
     const float tanX = (proj[0] != 0.0f) ? 1.0f / proj[0] : 1.0f;
     const float tanY = (proj[5] != 0.0f) ? 1.0f / proj[5] : 1.0f;
-    // Slices: 1 - the whole; 2 - a third, then the rest; more - geometric.
+    // Slices: 1 - the whole; 2 - to 8 m (~0.9 cm texels at 2048: the dapples by the car sharp), then the rest (~7 cm);
+    // more - geometric. (2 split at a third - 20 m, 2.4 / 6.8 cm - was softer near; the user's pick, NGG design §2.6.)
     float splits[kCascades + 1] = { 0.5f };
     for (int i = 1; i <= count; ++i)
         splits[i] = count == 1 ? farZ : 0.5f * powf(farZ / 0.5f, (float)i / (float)count);
-    if (count == 2) splits[1] = farZ / 3.0f;
+    if (count == 2) splits[1] = (std::min)(8.0f, farZ * 0.5f);
+    // NGG_FOLIAGE_SPLIT=<m>[,<m>] (measuring): where the first slices end.
+    static float splitEnv[2] = {0.0f, 0.0f};
+    static const int splitN = std::getenv("NGG_FOLIAGE_SPLIT")
+                                  ? sscanf_s(std::getenv("NGG_FOLIAGE_SPLIT"), "%f,%f", &splitEnv[0], &splitEnv[1]) : 0;
+    for (int s = 0; s < splitN && s + 1 < count; ++s)
+        if (splitEnv[s] > splits[s] && splitEnv[s] < farZ) splits[s + 1] = splitEnv[s];
     for (int i = 0; i < count; ++i)
     {
         float corners[8][3];
@@ -336,18 +350,17 @@ void ShadowMaps::FitFoliage(const float* view, const float* proj, const float* s
         const float up[3] = { 0.0f, 1.0f, 0.0f };
         float lview[16];
         LookAtLH(lightEye, toward, up, lview);
-        {
-            const float cx = centre[0]*lview[0] + centre[1]*lview[4] + centre[2]*lview[8]  + lview[12];
-            const float cy = centre[0]*lview[1] + centre[1]*lview[5] + centre[2]*lview[9]  + lview[13];
-            const float texel = m_texelWorld[i];
-            lview[12] += floorf(cx / texel) * texel - cx;
-            lview[13] += floorf(cy / texel) * texel - cy;
-        }
+        SnapToTexels(lview, centre, m_texelWorld[i]);
         float lproj[16];
         OrthoLH(diameter, diameter, 0.0f, back + radius + reach, lproj);
         Mul(lview, lproj, m_lightViewProj[i]);
     }
     for (int i = count; i < kCascades; ++i) m_splitFar[i] = 0.0f, m_texelWorld[i] = 0.0f;
+    static bool logged = false;
+    if (!logged && count >= 2)
+        logged = true, Log("shadow: foliage slices to %.1f / %.1f / %.1f m, texels %.1f / %.1f / %.1f cm", m_splitFar[0],
+                           m_splitFar[1], m_splitFar[2], m_texelWorld[0] * 100.0f, m_texelWorld[1] * 100.0f,
+                           m_texelWorld[2] * 100.0f);
 }
 
 } // namespace core

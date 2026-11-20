@@ -849,7 +849,7 @@ static const float2 kFoliageTaps[12] = {
 // and an opaque receiver also along its normal, as the cascades do.
 // THE PENUMBRA is the sun's (gFoliageParams.x: by default HALF its angular radius, a look - Scene::UpdateFoliageNear): a fleck of light under a canopy is an image of the sun's disc,
 // as wide as the leaves are high times its angular diameter (10 m up: ~9 cm) - wider than a near slice's texel
-// (2.5-7 cm), which a plain PCF showed as squares that popped from texel to texel as the leaves swayed. So a blocker
+// (0.9-7 cm), which a plain PCF showed as squares that popped from texel to texel as the leaves swayed. So a blocker
 // search (4 gathers round the point, as far as a leaf 30 m up could hide the disc), then 12 comparison taps over the
 // disc's footprint at the blockers' mean height - at least a texel. Turned per pixel and per frame; TAA or the
 // upscaler resolves the pattern.
