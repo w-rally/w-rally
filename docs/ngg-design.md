@@ -671,8 +671,8 @@ two `WindBend`s in the camera's passes and one in each cascade. These runs had t
 frame set no `FrameDesc::time` yet, fixed since) - the bend is computed the same either way. By eye, and whether the
 static RT shadows under moving leaves show while driving (phase 2: K bent RT shells), waits on the real models.
 
-**Foliage shading.** This covers a model's leaves, in `scene.hlsl`'s alpha-tested path. It is on branch
-`claude/foliage-look` (2026-11-20), PROPOSED and still being measured.
+**Foliage shading.** This covers a model's leaves, in `scene.hlsl`'s alpha-tested path (branch `claude/foliage-look`,
+merged 2026-11-20 after the user tried round 2 in the game: "it's looking good").
 
 Wallaby's trees now draw each leaf with its own outline, tilt, colour and roughness (Wallaby
 `tools/vegetation/README.md`, "Leaves"), and the user judged them a step forward. What the shading did with them:
@@ -692,7 +692,7 @@ turns a term off):
 | `NGG_FOLIAGE_CROWN_AO` | 0.45 | The ambient a crown's centre keeps, now applied whatever the AO (it is analytic). 0 is the old rule: 0.7, under ray-traced AO only. |
 
 The fourth is the converter's: Wallaby's `PlantReplacement` gives each placement its own hue, warmer or cooler by up
-to 0.06 through the NGGE tint. It needs no renderer change. The user's choice of defaults is to follow.
+to 0.06 through the NGGE tint. It needs no renderer change. The defaults are round 2's (below), as tried in the game.
 
 Round 1 (RTX 5070 Ti, Cote d'Arbroz 41 at 1920x1080, `foliage-shot`, gain 2 / saturation 0.5 / sheen 1 / crown 0.55):
 - **No measurable cost:** 35.60 -> 35.38 ms and 14.88 -> 14.69 ms GPU frame, three interleaved rounds each.
@@ -704,7 +704,17 @@ Round 1 (RTX 5070 Ti, Cote d'Arbroz 41 at 1920x1080, `foliage-shot`, gain 2 / sa
 - **LOD1 and LOD2** kept their ratio to LOD0 within 0.5%. The billboard gains less and falls 2-9% against LOD0:
   Wallaby's `billboard.gain` compensates.
 
-Round 2: gain 1, saturation 0.25, a flat-F0 sheen with its peak clamped, at 0.5, and crown 0.45.
+Round 2: gain 1, saturation 0.25, a flat-F0 sheen with its peak clamped, at 0.5, and crown 0.45. Measured the
+same way:
+- **The specks are gone:** 0 clipped leaf pixels in every run.
+- **The lime cast is gone:** distant backlit crowns are a natural yellow-green.
+- **Against the sun:** +36% leaf luma at 08:00 and +19% at 17:30 (round 1: +43% / +26%); from the sun's side, +1%.
+- **Most of that is the crown passing light to its far side** (`BACKLIGHT_K`), not the view lobe: a gain of 1.5 adds
+  only 0.3-2% over 1. So lower the gain or raise `BACKLIGHT_K` if crowns read too bright against the sun.
+- **The crown AO at 0.45** still moves the mean leaf luma under 1%.
+- **The billboard** stays 3-7% darker against LOD0 than under the old shading (poplar -0.033, ash -0.073, maple
+  -0.040, alder 0; the measurement window takes in neighbours). A follow-up for Wallaby's `billboard.gain`.
+- **In the game:** the user's verdict on the notebook, Cote d'Arbroz, was "looking good".
 
 ### 2.7 Load-time fallbacks
 
