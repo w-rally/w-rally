@@ -476,7 +476,21 @@ touch), pieces wider than 50 m (`kPlantMaxWidth`) left out.
     Small caster bias (40 units, slope 1.5): leaves are meant to shadow each other.
   - **The main pass multiplies it into the traced sun** (`FoliageMapVis` in `SunVisInner`): the finest slice holding
     the point, a leaf stepped 2 texels towards the sun (its volume normal says nothing of which side faces it), an
-    opaque receiver along its normal as the cascades do; 3x3 PCF. So it is the same for `RtVisibility`, NRD and RR.
+    opaque receiver along its normal as the cascades do. So it is the same for `RtVisibility`, NRD and RR.
+  - **With the sun's penumbra** (2026-11-20, the user's first look: "a mosaic of squares", worse in the wind). A fleck
+    of light under a canopy is an image of the sun's disc, as wide as the leaves are high times its angular diameter
+    (10 m up: ~9 cm) - wider than a near slice's texel (2.5 cm to 20 m, 7 cm to 60 m). The first version's 3x3 PCF
+    showed each fleck as a texel square, popping from texel to texel as the leaves swayed. Now as the lamps' maps do
+    (5.5): a blocker search (4 gathers out to where a leaf 30 m up could hide the disc), then 12 comparison taps over
+    the disc's footprint at the blockers' mean height (at least a texel), turned per pixel and per frame for TAA or the
+    upscaler to resolve. The taps are a Vogel disc (`kFoliageTaps`, evenly over the area): with the lamps' rim-heavy
+    pattern a gap smaller than the footprint printed a ring instead of the sun's filled disc. A pixel the rays already
+    have dark skips it. Cost (the same replay, three interleaved rounds, main pass median): before 8.58 / 8.98 / 9.53 ms,
+    the 3x3 map 9.45 / 9.60 / 9.35, the penumbra 10.06 / 10.80 / 10.22 - about +0.9 ms over the 3x3 map, ray tracing
+    unchanged (15.7-15.9 ms; before 16.1-16.8). The GPU frame's medians were noisier (penumbra against the 3x3 map
+    +0.34 / +5.82 / +1.40 ms; round 2's frame jumped with its main pass up only 1.2 ms). The sun's angular radius comes from the sky (`UpdateFoliageNear`), so the map's penumbra is
+    the rays'. Against the traced truth unchanged (ground IoU 0.975, MAE 0.017; leaf MAE 0.076 -> 0.085 with TAA off,
+    the pattern unresolved).
   - **A near placement's shell leaves the sun's rays only:** its TLAS instances carry `kRtMaskNearShell` alone and the
     sun ray traces with `~kRtMaskNearShell` (`rt_trace.hlsl`); the AO, the lamps and the reflections still see it.
     The instance flag `kInstNearMap` turns its `ModelSelfShadow` off in the shader; the crown's inner AO stays.

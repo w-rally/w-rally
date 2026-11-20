@@ -595,7 +595,7 @@ void Scene::BeginFrame(ID3D12Device* dev)
 
 // ------------------------------------------------------- foliage shadows near the camera
 
-void Scene::UpdateFoliageNear(const float* view, const float* proj, const float* sunTravel)
+void Scene::UpdateFoliageNear(const float* view, const float* proj, const float* sunTravel, float sunAngle)
 {
     // The A/B and tuning overrides (scene.h), read once.
     static const struct Overrides
@@ -615,6 +615,7 @@ void Scene::UpdateFoliageNear(const float* view, const float* proj, const float*
     m_foliageMap = kOverrides.on;
     m_foliageNear = kOverrides.metres;
     m_foliageCascades = kOverrides.slices;
+    m_foliageSunAngle = sunAngle;
     m_foliageFit = false;
     m_foliageDrawn = false;
     std::vector<uint8_t> next(m_placements.size(), 0);
@@ -627,8 +628,7 @@ void Scene::UpdateFoliageNear(const float* view, const float* proj, const float*
         float eye[3];
         for (int j = 0; j < 3; ++j) eye[j] = -(view[12] * view[j * 4] + view[13] * view[j * 4 + 1] + view[14] * view[j * 4 + 2]);
         const float R = m_foliageNear;
-        // How far above or below a slice's sphere a near placement can stand: a tall tree on a slope.
-        m_shadows->FitFoliage(view, proj, toward, R, m_foliageCascades, 80.0f);
+        m_shadows->FitFoliage(view, proj, toward, R, m_foliageCascades, kFoliageReach);
         m_foliageFit = true;
         for (uint32_t i = 0; i < m_placements.size(); ++i)
         {

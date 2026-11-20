@@ -363,7 +363,7 @@ void Renderer::RecordFrame(Device& dev, D3D12_CPU_DESCRIPTOR_HANDLE outRtv,
     if (m_scene.Ready())
     {
         // The placements near the camera under the foliage map: they decide the TLAS (their shells' masks).
-        if (m_rt.Ready()) m_scene.UpdateFoliageNear(view, proj, sky.sunDir);
+        if (m_rt.Ready()) m_scene.UpdateFoliageNear(view, proj, sky.sunDir, 0.00465f * sky.sunDiscSize);
         KeepRtCurrent(dev);
         // The local lights' clusters for this view (lights.h), before anything reads them: the ray tracer below, the
         // scene pass after it.

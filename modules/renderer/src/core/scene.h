@@ -351,7 +351,8 @@ public:
     // crown's ellipsoid stands down. The far placements keep the shell and the ellipsoid. A/B and tuning only:
     // NGG_FOLIAGE_SHADOW=off (as before), NGG_FOLIAGE_NEAR (metres), NGG_FOLIAGE_CASCADES (the map's slices, 1-4).
     // UpdateFoliageNear: once a frame before the TLAS is kept current (the near set decides the TLAS).
-    void UpdateFoliageNear(const float* view, const float* proj, const float* sunDirTravel);
+    // `sunAngle`: the sun's angular radius (radians) - the map's penumbra (FoliageMapVis), as the rays' (§4.3).
+    void UpdateFoliageNear(const float* view, const float* proj, const float* sunDirTravel, float sunAngle);
     uint32_t FoliageRevision() const { return m_foliageRevision; }
     bool FoliageMapOn() const { return m_foliageMap; }
     void RenderFoliageShadows(ID3D12GraphicsCommandList* list, const float* view);
@@ -1049,6 +1050,11 @@ private:
     // rebuilds the TLAS on a change).
     bool                     m_foliageMap = true;
     float                    m_foliageNear = 60.0f;
+    float                    m_foliageSunAngle = 0.00465f;
+    uint32_t                 m_foliageFrame = 0;            // turns the map filter's pattern each frame
+    // How far above or below a slice's sphere a near placement can stand (a tall tree on a slope): a slice's depth
+    // range is its diameter plus twice this (ShadowMaps::FitFoliage).
+    static constexpr float   kFoliageReach = 80.0f;
     int                      m_foliageCascades = 2;
     std::vector<uint8_t>     m_placementNear;
     uint32_t                 m_foliageRevision = 0;

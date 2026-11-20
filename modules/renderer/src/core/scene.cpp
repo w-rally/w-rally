@@ -132,6 +132,7 @@ struct CameraCB
     float localShadowParams[4];
     float wind[4];         // gWind (Scene::SetWind): direction x, z; speed; gustiness
     float windTime, windPrevTime, windPrevOn, windPad;   // gWindTime, gWindPrevTime, gWindPrevOn, gFoliageMap
+    float foliageParams[4];   // gFoliageParams: the sun's angular radius, kFoliageReach, the map's resolution, the turn
 };
 static_assert(sizeof(CameraCB) % 16 == 0,
               "CameraCB must be a whole number of float4 registers - see the note above");
@@ -1890,6 +1891,7 @@ void Scene::RenderFoliageShadows(ID3D12GraphicsCommandList* list, const float* v
     dev->Release();
     m_shadows->ToShaderResource(list);
     m_foliageDrawn = true;
+    ++m_foliageFrame;
     if (timed)
     {
         list->EndQuery(m_shadowTimer.Get(), D3D12_QUERY_TYPE_TIMESTAMP, 1);
@@ -5228,6 +5230,10 @@ void Scene::RecordPass(ID3D12GraphicsCommandList* list, D3D12_CPU_DESCRIPTOR_HAN
         if (m_foliageDrawn && m_shadowSource == 1)
         {
             cb.windPad = (float)m_foliageCascades;
+            cb.foliageParams[0] = m_foliageSunAngle;
+            cb.foliageParams[1] = kFoliageReach;
+            cb.foliageParams[2] = (float)m_shadows->Resolution();
+            cb.foliageParams[3] = (float)(m_foliageFrame & 63u);
             for (int c = 0; c < ShadowMaps::kCascades; ++c) cb.cascadeSplit[c] = m_shadows->TexelWorldSize(c);
         }
     }

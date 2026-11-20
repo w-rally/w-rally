@@ -111,6 +111,9 @@ cbuffer Camera : register(b0)
     // The foliage map (Scene::RenderFoliageShadows, the RT path): its slices, 0 none. Then gLightViewProj are its
     // slices' and gCascadeSplit their texels in metres (FoliageMapVis).
     float              gFoliageMap;
+    // x the sun's angular radius (radians), y Scene::kFoliageReach (a slice's depth range is its diameter plus twice
+    // this), z the map's resolution, w a per-frame turn of the filter's pattern (0..63).
+    float4             gFoliageParams;
 };
 
 // Cascaded shadow maps. A comparison sampler so the hardware does the depth
@@ -831,12 +834,26 @@ float CarBoxVis(float3 p, float3 dir)
     return (tFar >= max(tNear, 0.0)) ? 0.0 : 1.0;
 }
 
+// The foliage map's filter (FoliageMapVis): a Vogel disc - golden-angle steps, radius sqrt((i + 0.5) / 12) - whose taps
+// fill the disc evenly, so a gap in the leaves smaller than the sun's footprint shows as a filled disc (the rim-heavy
+// kLocalTaps printed a ring).
+static const float2 kFoliageTaps[12] = {
+    float2(0.204124, 0.000000), float2(-0.260699, 0.238822), float2(0.039904, -0.454688), float2(0.328595, 0.428593),
+    float2(-0.603011, -0.106664), float2(0.571225, -0.363367), float2(-0.191064, 0.710747), float2(-0.364379, -0.701590),
+    float2(0.790557, 0.288710), float2(-0.822442, 0.339492), float2(0.396472, -0.847237), float2(0.292982, 0.934074) };
+
 // THE FOLIAGE MAP's answer (Scene::RenderFoliageShadows): the near placements' drawn leaves, which the traced sun does
 // not see (their shells leave its rays). The finest slice whose square holds the point: a near placement lies wholly in
 // one, so the receivers of its shadow do too (UpdateFoliageNear). The point steps towards the sun by a couple of texels
 // - a leaf has no thickness, and its normal (a volume normal on foliage) says nothing about which side faces the sun -
-// and an opaque receiver also along its normal, as the cascades do. 3x3 hardware PCF.
-float FoliageMapVis(float3 wpos, float3 N)
+// and an opaque receiver also along its normal, as the cascades do.
+// THE PENUMBRA is the sun's, as the rays draw it (4.3): a fleck of light under a canopy is an image of the sun's disc,
+// as wide as the leaves are high times its angular diameter (10 m up: ~9 cm) - wider than a near slice's texel
+// (2.5-7 cm), which a plain PCF showed as squares that popped from texel to texel as the leaves swayed. So a blocker
+// search (4 gathers round the point, as far as a leaf 30 m up could hide the disc), then 12 comparison taps over the
+// disc's footprint at the blockers' mean height - at least a texel. Turned per pixel and per frame; TAA or the
+// upscaler resolves the pattern.
+float FoliageMapVis(float3 wpos, float3 N, float2 pixel)
 {
     const float3 L = gSunTowards;
     const float3 Nl = dot(N, L) < 0.0 ? -N : N;
@@ -853,12 +870,30 @@ float FoliageMapVis(float3 wpos, float3 N)
         float4 lp = mul(float4(p, 1.0), gLightViewProj[c]);
         if (any(abs(lp.xy) > 0.995) || lp.z < 0.0 || lp.z > 1.0) continue;
         const float2 uv = float2(lp.x * 0.5 + 0.5, -lp.y * 0.5 + 0.5);
-        const float t = 1.0 / max(gShadowParams.w, 1.0);
-        float sum = 0.0;
-        [unroll] for (int y = -1; y <= 1; ++y)
-            [unroll] for (int x = -1; x <= 1; ++x)
-                sum += gShadow.SampleCmpLevelZero(gShadowSamp, float3(uv + float2(x, y) * t, c), lp.z);
-        return sum / 9.0;
+        const float res = max(gFoliageParams.z, 1.0);
+        const float texelUv = 1.0 / res;
+        const float uvPerM = texelUv / texel;
+        const float depthM = texel * res + 2.0 * gFoliageParams.y;   // the slice's depth range (ShadowMaps::FitFoliage)
+        const float tanSun = max(gFoliageParams.x, 1e-4);
+        const float ign = frac(52.9829189 * frac(dot(pixel + 5.588238 * gFoliageParams.w, float2(0.06711056, 0.00583715))));
+        float2 cs;
+        sincos(ign * 6.28318530, cs.y, cs.x);
+        const float2x2 rot = float2x2(cs.x, -cs.y, cs.y, cs.x);
+        const float search = clamp(30.0 * tanSun * uvPerM, 1.5 * texelUv, 16.0 * texelUv);
+        float zSum = 0.0, nB = 0.0;
+        [unroll] for (uint k = 0; k < 4u; ++k)
+        {
+            const float4 g = gShadow.GatherRed(gSampVolume, float3(uv + mul(rot, kFoliageTaps[k * 3u + 2u]) * search, (float)c));
+            [unroll] for (uint j = 0; j < 4u; ++j)
+                if (g[j] < lp.z) { zSum += g[j]; nB += 1.0; }
+        }
+        if (nB < 0.5) return 1.0;
+        const float heightM = (lp.z - zSum / nB) * depthM;   // the blockers' mean distance towards the sun
+        const float r = clamp(heightM * tanSun * uvPerM, texelUv, 16.0 * texelUv);
+        float v = 0.0;
+        [unroll] for (uint t = 0; t < 12u; ++t)
+            v += gShadow.SampleCmpLevelZero(gShadowSamp, float3(uv + mul(rot, kFoliageTaps[t]) * r, (float)c), lp.z);
+        return v * (1.0 / 12.0);
     }
     return 1.0;
 }
@@ -884,7 +919,7 @@ float SunVisInner(float3 wpos, float2 pixel, float3 N)
     return 1.0;
 #else
     float v = gRtVis.Load(int3(pixel, 0));
-    if (gFoliageMap > 0.5) v *= FoliageMapVis(wpos, N);
+    [branch] if (gFoliageMap > 0.5 && v > 0.0) v *= FoliageMapVis(wpos, N, pixel);   // (already dark: no taps)
     return v;
 #endif
 }

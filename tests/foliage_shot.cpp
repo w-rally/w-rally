@@ -4,7 +4,7 @@
 // NGG_MODEL_LOD_SCALE...) are its environment's, so a script runs this once per variant with the same view.
 //
 // usage: foliage-shot <WRenderer.dll> <stage.ngg> <out prefix> [--variant 41] [--eye x y z --at x y z]
-//                     [--size 1920 1080] [--settle 90] [--time 11.5] [--frames 0] [--quality 2] [--vegetation 1]
+//                     [--size 1920 1080] [--settle 90] [--time 11.5] [--frames 0] [--quality 2] [--vegetation 1] [--taa]
 //   --eye/--at default: above the stage's start (NGGS of the variant), looking down the road.
 //   --frames n: then n more frames timed (median GPU frame, main pass, ray tracing), the camera still.
 // Writes <prefix>-lit.png, <prefix>-vis.png and <prefix>-mask.png (the alpha-tested pixels, debug view 14).
@@ -132,13 +132,13 @@ int main(int argc, char** argv)
 {
     if (argc < 4) {
         std::printf("usage: foliage-shot <WRenderer.dll> <stage.ngg> <out prefix> [--variant 41] [--eye x y z --at x y z] "
-                    "[--size w h] [--settle n] [--time h] [--frames n] [--quality q] [--vegetation v]\n");
+                    "[--size w h] [--settle n] [--time h] [--frames n] [--quality q] [--vegetation v] [--taa]\n");
         return 2;
     }
     const char* variant = "41";
     bool eyeSet = false;
     V3 eye{}, at{};
-    uint32_t W = 1920, H = 1080, settle = 90, frames = 0, quality = 2, vegetation = 1;
+    uint32_t W = 1920, H = 1080, settle = 90, frames = 0, quality = 2, vegetation = 1, taa = 0;
     float hour = -1.0f;
     for (int i = 4; i < argc; ++i) {
         if (!std::strcmp(argv[i], "--variant") && i + 1 < argc) variant = argv[++i];
@@ -152,6 +152,7 @@ int main(int argc, char** argv)
         else if (!std::strcmp(argv[i], "--time") && i + 1 < argc) hour = (float)atof(argv[++i]);
         else if (!std::strcmp(argv[i], "--quality") && i + 1 < argc) quality = atoi(argv[++i]);
         else if (!std::strcmp(argv[i], "--vegetation") && i + 1 < argc) vegetation = atoi(argv[++i]);
+        else if (!std::strcmp(argv[i], "--taa")) taa = 1;
     }
     std::ifstream f(argv[2], std::ios::binary);
     const std::vector<char> ngg((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
@@ -197,7 +198,7 @@ int main(int argc, char** argv)
     in.settings.width = W, in.settings.height = H;
     in.settings.quality = quality;
     in.settings.rayTracing = 1;
-    in.settings.taa = 0;            // a still picture, the same every run: no history in the colour
+    in.settings.taa = taa;          // off: a still picture, the same every run, no history in the colour
     in.settings.autoExposure = 0;
     in.settings.shadows = 1;
     in.settings.renderScale = 1.0f;
