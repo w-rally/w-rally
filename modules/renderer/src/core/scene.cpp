@@ -146,7 +146,7 @@ struct FoliageLookParams { float backlight, backlightK, sheen, crownAo; };
 static const FoliageLookParams& FoliageLook()
 {
     static const FoliageLookParams p = [] {
-        FoliageLookParams v{2.0f, 0.35f, 1.0f, 0.55f};
+        FoliageLookParams v{1.0f, 0.35f, 0.5f, 0.45f};   // round 2 (round 1: 2, 0.35, 1, 0.55 - lime, specks)
         auto read = [](const char* name, float& out) {
             if (const char* e = std::getenv(name)) out = (std::max)(0.0f, (float)std::atof(e));
         };

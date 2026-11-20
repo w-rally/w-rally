@@ -686,14 +686,25 @@ turns a term off):
 
 | switch | default | what |
 |---|---|---|
-| `NGG_FOLIAGE_BACKLIGHT` | 2 | The transmission gains a forward-scattering lobe, `1 + gain x max(0, -V.L)^4`, so a crown glows where the camera looks towards the sun past it. The transmitted light is tinted more saturated than the albedo (`kFoliageTransSat` 0.5): light through a leaf crosses its chlorophyll twice. |
+| `NGG_FOLIAGE_BACKLIGHT` | 1 | The transmission gains a forward-scattering lobe, `1 + gain x max(0, -V.L)^4`, so a crown glows where the camera looks towards the sun past it. The transmitted light is tinted more saturated than the albedo (`kFoliageTransSat` 0.25): light through a leaf crosses its chlorophyll twice. |
 | `NGG_FOLIAGE_BACKLIGHT_K` | 0.35 | The crown's extinction for that light, as a share of the direct shadow's (`ModelSelfShadowK`). Transmitted light crosses the crown leaf to leaf rather than being stopped, so the far side of a crown, where the glow is, is no longer all but unlit. Near the camera, where the foliage map shadows the leaves, the crown's estimate x 0.6 is a floor under the leaf-exact shadow. |
-| `NGG_FOLIAGE_SHEEN` | 1 | A dim, broad specular on the normal-mapped per-leaf normal (F0 0.04, GGX alpha at least 0.2). Full to 25 m, faded out by 50 m. |
-| `NGG_FOLIAGE_CROWN_AO` | 0.55 | The ambient a crown's centre keeps, now applied whatever the AO (it is analytic). 0 is the old rule: 0.7, under ray-traced AO only. |
+| `NGG_FOLIAGE_SHEEN` | 0.5 | A dim, broad specular on the normal-mapped per-leaf normal: a flat 4% with no Fresnel rise, GGX alpha at least 0.2, the peak clamped to `kSheenMax` and faded where a leaf is seen edge on. Full to 25 m, faded out by 50 m. |
+| `NGG_FOLIAGE_CROWN_AO` | 0.45 | The ambient a crown's centre keeps, now applied whatever the AO (it is analytic). 0 is the old rule: 0.7, under ray-traced AO only. |
 
 The fourth is the converter's: Wallaby's `PlantReplacement` gives each placement its own hue, warmer or cooler by up
-to 0.06 through the NGGE tint. It needs no renderer change. The measurements and the user's choice of defaults are
-to follow.
+to 0.06 through the NGGE tint. It needs no renderer change. The user's choice of defaults is to follow.
+
+Round 1 (RTX 5070 Ti, Cote d'Arbroz 41 at 1920x1080, `foliage-shot`, gain 2 / saturation 0.5 / sheen 1 / crown 0.55):
+- **No measurable cost:** 35.60 -> 35.38 ms and 14.88 -> 14.69 ms GPU frame, three interleaved rounds each.
+- **The backlight is almost all of the visible change:** +11-43% leaf luma against the sun, +1% from the sun's side.
+  At the round's strength, backlit crowns at a distance turned lime.
+- **The sheen** added 1-3% and left pure-white texels on a crown's edge against the sun (0.16% of the leaf pixels):
+  Schlick's Fresnel at grazing H.
+- **The crown AO** added 1-2%.
+- **LOD1 and LOD2** kept their ratio to LOD0 within 0.5%. The billboard gains less and falls 2-9% against LOD0:
+  Wallaby's `billboard.gain` compensates.
+
+Round 2: gain 1, saturation 0.25, a flat-F0 sheen with its peak clamped, at 0.5, and crown 0.45.
 
 ### 2.7 Load-time fallbacks
 

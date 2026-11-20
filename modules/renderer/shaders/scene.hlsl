@@ -641,8 +641,9 @@ float ModelSelfShadowK(float3 q, float3 L, float3 R3, float R, float k)
     return exp(-min(kFoliageDensity, kFoliageDensityCap / R) * k * s);
 }
 // A model leaf's look (gFoliageLook): the transmitted light's extra saturation, and the sheen's limits.
-static const float kFoliageTransSat = 0.5;
+static const float kFoliageTransSat = 0.25;   // 0.5 turned backlit crowns lime at a distance (round 1)
 static const float kSheenMinA = 0.2;       // GGX alpha, a roughness of about 0.45
+static const float kSheenMax = 0.25;       // the lobe's peak: unclamped, crown-edge texels against the sun went white
 static const float kSheenNear = 25.0, kSheenFar = 50.0;   // metres: whole, then faded out
 float FoliageSelfShadow(float3 q, float3 L, float radius)
 {
@@ -1655,11 +1656,14 @@ float4 Shade(VSOut i, bool frontFace, out GBufOut g)
             // THE SHEEN: a leaf's wax, a dim broad lobe on the normal map's per-leaf tilt (the sheet draws each leaf
             // turned its own way), never sharper than kSheenMinA - a glint off a 40-texel leaf would crawl. Near
             // leaves only: farther off the tilt is mipped away and what is left would be a sheen of the crown.
+            // No Fresnel rise: at a crown's edge against the sun V and L are near opposite, H grazes the leaf and
+            // Schlick goes to 1 - those texels went pure white (round 1: 0.16% of the leaf pixels, V3 at 17:30).
+            // A flat 4%, the peak clamped, and nothing where the leaf is seen edge on.
             const float ndlS = saturate(dot(N, gSunTowards));
             const float3 H = normalize(V + gSunTowards);
             const float as = max(a, kSheenMinA);
-            const float sheen = FresnelSchlick(float3(0.04, 0.04, 0.04), saturate(dot(V, H))).x
-                              * DistributionGGX(saturate(dot(N, H)), as) * VisSmith(ndv, ndlS, as) * ndlS;
+            const float sheen = min(0.04 * DistributionGGX(saturate(dot(N, H)), as) * VisSmith(ndv, ndlS, as) * ndlS,
+                                    kSheenMax) * saturate(ndv * 4.0);
             const float fade = saturate((kSheenFar - length(gCamPos - i.wpos)) / (kSheenFar - kSheenNear));
             lit += sunColour * (sheen * kSpecScale * gFoliageLook.z * fade * vis);
         }
