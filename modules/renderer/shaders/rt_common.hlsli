@@ -156,7 +156,9 @@ static const float kLegacyCardSkip = 1.5;
 static const uint kRtOwnerModel = 0x80000000u;
 // `hitT`: how far along the ray the hit is (metres), for NRD's penumbra and hit distance. ACCEPT_FIRST_HIT: the first
 // occluder found, not always the nearest - the same ray as the default path's, at the same cost.
-bool OccludedT(RayDesc ray, bool count, uint fromPlant, out float2 mover, out float hitT)
+// `mask`: the TLAS instance mask the ray takes - the sun's leaves out the near placements' shells under the foliage map
+// (scene.h kRtMaskNearShell, rt_trace.hlsl); every other ray takes all.
+bool OccludedT(RayDesc ray, bool count, uint fromPlant, out float2 mover, out float hitT, uint mask = 0xFF)
 {
     mover = float2(-1.0, 0.0);
     hitT = 0.0;
@@ -165,7 +167,7 @@ bool OccludedT(RayDesc ray, bool count, uint fromPlant, out float2 mover, out fl
     // From a legacy card (~0, scene.cpp PSPrepass): the cards within kLegacyCardSkip of the start do not count -
     // the card's own tuft or tree, whose crossing cards split it card by card - while cards farther off (a
     // canopy over the grass) still shadow it, as everything opaque does.
-    q.TraceRayInline(gScene, RAY_FLAG_NONE, 0xFF, ray);
+    q.TraceRayInline(gScene, RAY_FLAG_NONE, mask, ray);
     while (q.Proceed())
     {
         if (q.CandidateType() != CANDIDATE_NON_OPAQUE_TRIANGLE) continue;

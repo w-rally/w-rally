@@ -131,7 +131,7 @@ struct CameraCB
     float localShadowInfo[4][4];
     float localShadowParams[4];
     float wind[4];         // gWind (Scene::SetWind): direction x, z; speed; gustiness
-    float windTime, windPrevTime, windPrevOn, windPad;   // gWindTime, gWindPrevTime, gWindPrevOn
+    float windTime, windPrevTime, windPrevOn, windPad;   // gWindTime, gWindPrevTime, gWindPrevOn, gFoliageMap
 };
 static_assert(sizeof(CameraCB) % 16 == 0,
               "CameraCB must be a whole number of float4 registers - see the note above");
@@ -643,8 +643,10 @@ void Scene::DescribeRt(std::vector<uint64_t>& meshes, std::vector<RtInstanceDesc
 // change with a placement edit or a load.
 void Scene::DescribeModelsRt(std::vector<uint64_t>& meshes, std::vector<RtInstanceDesc>& instances) const
 {
-    if (m_rtModelInstancesDirty || m_rtModelGen != m_rtGeneration)
+    if (m_rtModelInstancesDirty || m_rtModelGen != m_rtGeneration || m_rtModelNearRev != m_foliageRevision)
     {
+        const bool logIt = m_rtModelInstancesDirty;
+        m_rtModelNearRev = m_foliageRevision;
         m_rtModelInstances.clear();
         m_rtModelMeshes.clear();
         auto key = [&](uint32_t mesh) { return kRtDynamic | ((uint64_t)m_rtGeneration << 32) | mesh; };
@@ -667,11 +669,15 @@ void Scene::DescribeModelsRt(std::vector<uint64_t>& meshes, std::vector<RtInstan
             const ModelDef& m = m_models[p.d.model];
             RtInstanceDesc d;
             // Its leaves' rays pass through it (OccludedT) where the crown stands in for it (the shader's ModelCrown).
-            if (m.crown[3] > 0.5f) d.owner = kRtOwnerModel | (uint32_t)(&p - m_placements.data());
+            const uint32_t pi = (uint32_t)(&p - m_placements.data());
+            if (m.crown[3] > 0.5f) d.owner = kRtOwnerModel | pi;
             for (int r = 0; r < 3; ++r)          // row vectors: the transpose of the stream's rows, t in row 3
                 for (int c = 0; c < 3; ++c) d.xform[r * 4 + c] = p.cols[c][r];
             for (int c = 0; c < 3; ++c) d.xform[12 + c] = p.cols[c][3];
             memcpy(d.prevXform, d.xform, sizeof(d.xform));
+            // Near the camera (UpdateFoliageNear): its shell out of the sun's rays - the foliage map shadows with its
+            // drawn leaves instead; every other ray still sees it.
+            if (pi < m_placementNear.size() && m_placementNear[pi]) d.mask = kRtMaskNearShell;
             for (const ModelSub& s : m.lods[m.rtLod].subs)
             {
                 if (!live(s.mesh)) continue;
@@ -681,7 +687,7 @@ void Scene::DescribeModelsRt(std::vector<uint64_t>& meshes, std::vector<RtInstan
                 m_rtModelInstances.push_back(d);
             }
         }
-        if (m_rtModelInstancesDirty && !m_models.empty())
+        if (logIt && !m_models.empty())
             Log("scene: models ray traced - %zu BLAS mesh(es), %zu triangle(s) (%zu model(s) from a ray-only LOD); "
                 "%zu TLAS instance(s)", m_rtModelMeshes.size(), blasTris, rayOnly, m_rtModelInstances.size());
         m_rtModelInstancesDirty = false;
@@ -1767,6 +1773,127 @@ void Scene::RenderShadows(ID3D12GraphicsCommandList* list,
         list->EndQuery(m_shadowTimer.Get(), D3D12_QUERY_TYPE_TIMESTAMP, 1);
         list->ResolveQueryData(m_shadowTimer.Get(), D3D12_QUERY_TYPE_TIMESTAMP, 0, 2,
                                m_shadowTimerReadback.Get(), 0);
+        m_shadowTimerPending = true;
+    }
+}
+
+// THE FOLIAGE MAP (UpdateFoliageNear, the RT path): the near placements' DRAWN LOD - the LOD the camera sees, swaying
+// with the wind - into the cascades' targets (idle on this path) as fitted by ShadowMaps::FitFoliage, nothing else:
+// the rays shadow the rest. The main pass multiplies it into the traced sun (FoliageMapVis), the leaves' own
+// included - leaf-on-leaf self-shadow and leaf-exact ground shadows.
+void Scene::RenderFoliageShadows(ID3D12GraphicsCommandList* list, const float* view)
+{
+    if (!m_foliageFit || !m_shadows || !m_shadows->Ready() || !m_psoShadow || !Ready() || !m_shadowsOn) return;
+    ID3D12Device* dev = nullptr;
+    list->GetDevice(IID_PPV_ARGS(&dev));
+    if (!dev) return;
+    const bool timed = m_shadowTimer && m_shadowTimerReadback && m_timerHz;
+    if (timed && m_shadowTimerPending)
+    {
+        UINT64* t = nullptr;
+        D3D12_RANGE r = { 0, 2 * sizeof(UINT64) };
+        if (SUCCEEDED(m_shadowTimerReadback->Map(0, &r, reinterpret_cast<void**>(&t))))
+        {
+            if (t[1] >= t[0]) m_foliageMapMs = 1000.0 * double(t[1] - t[0]) / double(m_timerHz);
+            D3D12_RANGE none = { 0, 0 };
+            m_shadowTimerReadback->Unmap(0, &none);
+        }
+        m_shadowTimerPending = false;
+    }
+    if (timed) list->EndQuery(m_shadowTimer.Get(), D3D12_QUERY_TYPE_TIMESTAMP, 0);
+    m_shadows->ToDepthWrite(list);
+    const UINT res = m_shadows->Resolution();
+    D3D12_VIEWPORT vp = { 0.0f, 0.0f, (float)res, (float)res, 0.0f, 1.0f };
+    D3D12_RECT sc = { 0, 0, (LONG)res, (LONG)res };
+    float eye[3] = {};
+    CameraPosFromView(view, eye);
+    // The billboard turn's "camera" (none is near, but VSMain reads it): far towards the sun, as RenderShadows.
+    float toward[3] = {};
+    {
+        const float* M = m_shadows->LightViewProj(0);
+        // The light's forward axis is the view's third column; the sun is behind it.
+        const float z[3] = { M[2], M[6], M[10] };
+        const float l = sqrtf(z[0] * z[0] + z[1] * z[1] + z[2] * z[2]);
+        for (int k = 0; k < 3; ++k) toward[k] = l > 0.0f ? -z[k] / l : 0.0f;
+    }
+    std::vector<ModelBatch> batches;
+    ID3D12PipelineState* alphaPso = m_psoFoliageShadowAlpha ? m_psoFoliageShadowAlpha.Get() : m_psoShadowAlpha.Get();
+    for (int c = 0; c < m_foliageCascades; ++c)
+    {
+        CameraCB cb = {};
+        for (int k = 0; k < 3; ++k) cb.camPos[k] = eye[k] + toward[k] * 1.0e4f;
+        memcpy(cb.view, m_shadows->LightViewProj(c), sizeof(cb.view));
+        memcpy(cb.wind, m_wind, sizeof(cb.wind));
+        cb.windTime = cb.windPrevTime = m_windTime;
+        cb.proj[0] = cb.proj[5] = cb.proj[10] = cb.proj[15] = 1.0f;
+        cb.bakedScale = m_bakedScale;
+        ComPtr<ID3D12Resource> cbRes = MakeUploadBuffer(dev, &cb, sizeof(cb));
+        if (!cbRes) continue;
+        D3D12_CPU_DESCRIPTOR_HANDLE dsv = m_shadows->Dsv(c);
+        list->OMSetRenderTargets(0, nullptr, FALSE, &dsv);
+        list->ClearDepthStencilView(dsv, D3D12_CLEAR_FLAG_DEPTH, 1.0f, 0, 0, nullptr);
+        list->RSSetViewports(1, &vp);
+        list->RSSetScissorRects(1, &sc);
+        list->SetGraphicsRootSignature(m_rootSig.Get());
+        list->SetGraphicsRootConstantBufferView(0, cbRes->GetGPUVirtualAddress());
+        if (m_probe) list->SetGraphicsRootUnorderedAccessView(2, m_probe->GetGPUVirtualAddress());
+        if (m_rayQuery && m_reflTlas) list->SetGraphicsRootShaderResourceView(13, m_reflTlas);
+        list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+        EnsureInstanceStream(dev);
+        if (m_srvHeap)
+        {
+            ID3D12DescriptorHeap* heaps[] = { m_srvHeap.Get() };
+            list->SetDescriptorHeaps(1, heaps);
+        }
+        float cplanes[6][4];
+        ExtractPlanes(m_shadows->LightViewProj(c), cplanes);
+        const uint32_t notMoved = 0;
+        list->SetGraphicsRoot32BitConstants(4, 1, &notMoved, 2);
+        CullModels(dev, cplanes, eye, true, batches, true);
+        if (!batches.empty())
+        {
+            int xformState = -1, geomState = -1;
+            static const float kIdentity[16] = { 1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1 };
+            BindObjectXform(list, kIdentity, true, xformState);
+            m_shadowOrder.clear();
+            ModelDrawItems(batches, m_shadowOrder, true);
+            int bound = -1;
+            for (const DrawOrder& d : m_shadowOrder)
+            {
+                const DrawItem& o = *d.item;
+                const int want = d.alphaTest ? 1 : 0;
+                if (want != bound)
+                {
+                    list->SetPipelineState(want ? alphaPso : m_psoShadow.Get());
+                    bound = want;
+                }
+                if (want && m_srvHeap)
+                {
+                    D3D12_GPU_DESCRIPTOR_HANDLE h = m_srvHeap->GetGPUDescriptorHandleForHeapStart();
+                    h.ptr += (UINT64)o.materialId * kMaterialSrvCount * m_srvStride;
+                    list->SetGraphicsRootDescriptorTable(1, h);
+                    // The cutoff (PSShadowFoliage), where the main pass puts the material.
+                    const MaterialSlot& m = m_materials[o.materialId];
+                    const float pbr[12] = { m.baseColourFactor[0], m.baseColourFactor[1], m.baseColourFactor[2],
+                                            m.baseColourFactor[3], m.roughness, m.metallic, m.normalScale,
+                                            m.occlusionStrength, m.emissiveStrength, m.alphaCutoff, m.clearCoat, 0.0f };
+                    list->SetGraphicsRoot32BitConstants(4, 12, pbr, 20);
+                }
+                BindGeometry(list, true, geomState, m_dynVbv, m_dynIbv);
+                list->IASetVertexBuffers(1, 1, d.inst);
+                list->DrawIndexedInstanced(o.indexCount, d.instCount, o.firstIndex, o.baseVertex, 0);
+                ++m_modelStatsBuild.draws;
+            }
+        }
+        m_shadowCB[c] = cbRes;
+    }
+    dev->Release();
+    m_shadows->ToShaderResource(list);
+    m_foliageDrawn = true;
+    if (timed)
+    {
+        list->EndQuery(m_shadowTimer.Get(), D3D12_QUERY_TYPE_TIMESTAMP, 1);
+        list->ResolveQueryData(m_shadowTimer.Get(), D3D12_QUERY_TYPE_TIMESTAMP, 0, 2, m_shadowTimerReadback.Get(), 0);
         m_shadowTimerPending = true;
     }
 }
@@ -3065,6 +3192,7 @@ bool Scene::CreatePipelines(ID3D12Device* dev, DXGI_FORMAT rtvFormat, float mipB
                           dxil ? (vertex ? "vs_6_0" : refl ? "ps_6_5" : "ps_6_0") : (vertex ? "vs_5_1" : "ps_5_1"), args);
     };
     ComPtr<ID3DBlob> vs, ps, psAlpha, psBlend, psPre, psPreAlpha, psShadowAlpha;   // (the opaque shadow pass: no PS)
+    ComPtr<ID3DBlob> psFoliageShadow;                                                // the foliage map's leaves
     ComPtr<ID3DBlob> psFlag, psFlagAlpha;                                            // the local lights' maps
     ComPtr<ID3DBlob> psGlassMotion;
     ComPtr<ID3DBlob> psG, psAlphaG, vsFull, psDeferred;                              // the deferred local lights
@@ -3077,6 +3205,7 @@ bool Scene::CreatePipelines(ID3D12Device* dev, DXGI_FORMAT rtvFormat, float mipB
         psPreAlpha = compile("PSPrepass", false, kAlphaTest);
         psGlassMotion = compile("PSGlassMotion", false, kOpaque);
         psShadowAlpha = compile("PSShadow", false, kAlphaTest);
+        psFoliageShadow = compile("PSShadowFoliage", false, kAlphaTest);
         psFlag = compile("PSShadowFlag", false, kOpaque);
         psFlagAlpha = compile("PSShadowFlag", false, kAlphaTest);
         psG = compile("PSMain", false, kOpaque, true);
@@ -3246,6 +3375,19 @@ bool Scene::CreatePipelines(ID3D12Device* dev, DXGI_FORMAT rtvFormat, float mipB
         if (psShadowAlpha)
             sp.PS = { psShadowAlpha->GetBufferPointer(), psShadowAlpha->GetBufferSize() };
         batch.Add(sp, &m_psoShadowAlpha, "scene: alpha-test shadow PSO creation failed");
+        // The foliage map's leaves (RenderFoliageShadows): they are MEANT to shadow each other, so a small caster bias
+        // (NGG_FOLIAGE_BIAS depth units, NGG_FOLIAGE_SLOPE) - the receiver steps towards the sun instead (FoliageMapVis).
+        {
+            const char* eb = getenv("NGG_FOLIAGE_BIAS");
+            const char* es = getenv("NGG_FOLIAGE_SLOPE");
+            sp.RasterizerState.DepthBias = eb ? atoi(eb) : 40;
+            sp.RasterizerState.SlopeScaledDepthBias = es ? (float)atof(es) : 1.5f;
+            if (psFoliageShadow)
+            {
+                sp.PS = { psFoliageShadow->GetBufferPointer(), psFoliageShadow->GetBufferSize() };
+                batch.Add(sp, &m_psoFoliageShadowAlpha, "scene: foliage shadow PSO creation failed");
+            }
+        }
 
         // The local lights' maps (RenderLocalShadows): a perspective from the lamp, conventional depth. Both faces -
         // the Garage's floor and a stage's ground are single-sided sheets, and the car's panels are not closed - with
@@ -5081,6 +5223,13 @@ void Scene::RecordPass(ID3D12GraphicsCommandList* list, D3D12_CPU_DESCRIPTOR_HAN
         // bias is expressed in texels so it stays correct as cascades change
         // scale, but a single value keeps the shader branch-free.
         cb.shadowParams[1] = m_shadows->TexelWorldSize(0);
+        // The foliage map instead (RenderFoliageShadows drew it this frame): its slices' count, and each slice's
+        // texel in metres where the split goes (FoliageMapVis picks a slice by where the point falls, not by depth).
+        if (m_foliageDrawn && m_shadowSource == 1)
+        {
+            cb.windPad = (float)m_foliageCascades;
+            for (int c = 0; c < ShadowMaps::kCascades; ++c) cb.cascadeSplit[c] = m_shadows->TexelWorldSize(c);
+        }
     }
 
     ID3D12Device* dev = nullptr;

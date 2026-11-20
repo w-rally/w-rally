@@ -33,6 +33,8 @@ const uint32_t kMaxLods = 8;
 const uint32_t kInstBillboard = 1u << 0;
 const uint32_t kInstModel = 1u << 1;
 const uint32_t kInstWind = 1u << 2;        // the wind bends it (kModelWind); InstanceRec::pad its constants
+// Near the camera (Scene::UpdateFoliageNear): the foliage map shadows its leaves, the crown's ellipsoid stands down.
+const uint32_t kInstNearMap = 1u << 3;
 // wind.py's amplitudes (shaders/wind.hlsli): a branch tip's sway and a leaf's flutter at weight 1 and 10 m/s.
 const float kWindBranchM = 0.25f, kWindFlutterM = 0.025f;
 // Records the stream starts with: the identity plus a stage's worth of trees in every view.
@@ -99,6 +101,8 @@ bool Scene::LoadModels(ID3D12Device* dev, const uint8_t* models, size_t modelByt
                 }
     m_models.clear();
     m_placements.clear();
+    m_placementNear.clear();
+    ++m_foliageRevision;
     m_modelCells.clear();
     m_mainBatches.clear();
     m_mainBatchesValid = false;
@@ -589,10 +593,80 @@ void Scene::BeginFrame(ID3D12Device* dev)
             m_modelStats.draws, m_modelStats.cullMs);
 }
 
+// ------------------------------------------------------- foliage shadows near the camera
+
+void Scene::UpdateFoliageNear(const float* view, const float* proj, const float* sunTravel)
+{
+    // The A/B and tuning overrides (scene.h), read once.
+    static const struct Overrides
+    {
+        bool on = true;
+        float metres = 60.0f;
+        int slices = 2;
+        Overrides()
+        {
+            if (const char* e = std::getenv("NGG_FOLIAGE_SHADOW")) on = strcmp(e, "off") != 0;
+            if (const char* e = std::getenv("NGG_FOLIAGE_NEAR")) metres = (std::max)(1.0f, (float)atof(e));
+            if (const char* e = std::getenv("NGG_FOLIAGE_CASCADES"))
+                slices = (std::min)((std::max)(atoi(e), 1), (int)ShadowMaps::kCascades);
+            Log("scene: foliage map %s, near %.0f m, %d slice(s)", on ? "on" : "off", metres, slices);
+        }
+    } kOverrides;
+    m_foliageMap = kOverrides.on;
+    m_foliageNear = kOverrides.metres;
+    m_foliageCascades = kOverrides.slices;
+    m_foliageFit = false;
+    m_foliageDrawn = false;
+    std::vector<uint8_t> next(m_placements.size(), 0);
+    float toward[3] = { -sunTravel[0], -sunTravel[1], -sunTravel[2] };
+    const float len = sqrtf(toward[0] * toward[0] + toward[1] * toward[1] + toward[2] * toward[2]);
+    const bool sunUp = len > 1e-6f && -sunTravel[1] / len > 0.02f;
+    if (m_foliageMap && !m_placements.empty() && sunUp && m_shadowsOn && m_shadows && m_shadows->Ready())
+    {
+        for (int k = 0; k < 3; ++k) toward[k] /= len;
+        float eye[3];
+        for (int j = 0; j < 3; ++j) eye[j] = -(view[12] * view[j * 4] + view[13] * view[j * 4 + 1] + view[14] * view[j * 4 + 2]);
+        const float R = m_foliageNear;
+        // How far above or below a slice's sphere a near placement can stand: a tall tree on a slope.
+        m_shadows->FitFoliage(view, proj, toward, R, m_foliageCascades, 80.0f);
+        m_foliageFit = true;
+        for (uint32_t i = 0; i < m_placements.size(); ++i)
+        {
+            const PlacementRt& p = m_placements[i];
+            if (p.removed || m_models[p.d.model].crown[3] < 0.5f) continue;
+            if (BoxDistance(p.bmin, p.bmax, eye) > R) continue;
+            // Near: wholly inside one slice's square and depth range - then every receiver of its shadow is in that
+            // slice too (an orthographic projection along the sun), and the shader takes the finest slice holding the
+            // receiver, which this placement is drawn into (RenderFoliageShadows, per slice).
+            bool inside = false;
+            for (int c = 0; c < m_foliageCascades && !inside; ++c)
+            {
+                const float* M = m_shadows->LightViewProj(c);
+                inside = true;
+                for (int k = 0; k < 8 && inside; ++k)
+                {
+                    const float x = (k & 1) ? p.bmax[0] : p.bmin[0], y = (k & 2) ? p.bmax[1] : p.bmin[1],
+                                z = (k & 4) ? p.bmax[2] : p.bmin[2];
+                    const float cx = x * M[0] + y * M[4] + z * M[8] + M[12];
+                    const float cy = x * M[1] + y * M[5] + z * M[9] + M[13];
+                    const float cz = x * M[2] + y * M[6] + z * M[10] + M[14];
+                    inside = fabsf(cx) < 0.98f && fabsf(cy) < 0.98f && cz > 0.0f && cz < 1.0f;
+                }
+            }
+            if (inside) next[i] = 1;
+        }
+    }
+    if (next != m_placementNear)
+    {
+        m_placementNear.swap(next);
+        ++m_foliageRevision;
+    }
+}
+
 // ------------------------------------------------------------------ the cull
 
 void Scene::CullModels(ID3D12Device* dev, const float planes[6][4], const float eye[3], bool shadow,
-                       std::vector<ModelBatch>& out)
+                       std::vector<ModelBatch>& out, bool nearOnly)
 {
     out.clear();
     if (m_placements.empty() || m_models.empty()) return;
@@ -611,8 +685,10 @@ void Scene::CullModels(ID3D12Device* dev, const float planes[6][4], const float 
         memcpy(r.c, p.cols, sizeof(r.c));
         r.tint = p.d.tint;
         r.fade = fade;
+        const uint32_t pi = (uint32_t)(&p - m_placements.data());
+        const uint8_t nr = pi < m_placementNear.size() ? m_placementNear[pi] : 0;
         r.flags = kInstModel | (m.lods[lod].billboard ? kInstBillboard : 0u) | (m.wind ? kInstWind : 0u)
-                | ((uint32_t)(&p - m_placements.data()) << 8);
+                | (nr ? kInstNearMap : 0u) | (pi << 8);
         r.pad = m.wind ? Half(m.windBend * p.d.scaleY) | Half(m.height * p.d.scaleY) << 16 : 0u;
         m_cullScratch.emplace_back(key, r);
         ++counts[key];
@@ -629,6 +705,7 @@ void Scene::CullModels(ID3D12Device* dev, const float planes[6][4], const float 
         for (uint32_t idx : c.items)
         {
             const PlacementRt& p = m_placements[idx];
+            if (nearOnly && (idx >= m_placementNear.size() || !m_placementNear[idx])) continue;
             if (Outside(planes, p.bmin, p.bmax)) continue;
             const ModelDef& m = m_models[p.d.model];
             const float s = p.d.scaleY * m_modelLodScale;

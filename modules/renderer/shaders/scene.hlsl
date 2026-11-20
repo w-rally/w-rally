@@ -108,7 +108,9 @@ cbuffer Camera : register(b0)
     float              gWindTime;
     float              gWindPrevTime;
     float              gWindPrevOn;
-    float              gWindPad;
+    // The foliage map (Scene::RenderFoliageShadows, the RT path): its slices, 0 none. Then gLightViewProj are its
+    // slices' and gCascadeSplit their texels in metres (FoliageMapVis).
+    float              gFoliageMap;
 };
 
 // Cascaded shadow maps. A comparison sampler so the hardware does the depth
@@ -528,7 +530,10 @@ struct VSOut { float4 pos : SV_Position; float3 nrm : NORMAL; float2 uv0 : TEXCO
               // A model's leaf (ModelCrown): where it is in the placed crown, |q| = 1 its surface, at rest (the wind
               // does not move the shading); and the crown's world half extents and mean radius, metres (w 0: none).
               float3 crownQ : TEXCOORD10;
-              nointerpolation float4 crownR : TEXCOORD11; };
+              nointerpolation float4 crownR : TEXCOORD11;
+              // Near the camera (Scene::UpdateFoliageNear): 1 the foliage map shadows its leaves and the crown's
+              // ellipsoid stands down; 0 far.
+              nointerpolation uint nearShadow : TEXCOORD12; };
 
 // The motion target's value (PSPrepass; the debug view "MOTION" shows the same): for a moving object (gObjectMoved) or
 // a vertex the wind bent (swayed), where the point was last frame on screen minus where it is now, last frame's depth,
@@ -640,6 +645,7 @@ VSOut VSMain(VSIn i)
     const bool model = (i.ix.z & 2u) != 0u;
     o.crownQ = float3(0.0, 0.0, 0.0);
     o.crownR = float4(0.0, 0.0, 0.0, 0.0);
+    o.nearShadow = model && (i.ix.z & 8u) != 0u ? 1u : 0u;
     // THE WIND (wind.hlsli): a model that carries it (kInstWind), in a wind at all - in calm air nothing is computed,
     // so the frame is the one without wind exactly.
     const bool windy = model && (i.ix.z & 4u) != 0u && gWind.z > 0.0;
@@ -772,6 +778,17 @@ void PSShadow(VSOut i)
 #endif
 }
 
+// The foliage map's leaves (Scene::RenderFoliageShadows): the ray tracer's own alpha test (rt_common.hlsli OccludedT) -
+// texture alpha at a fixed LOD 2 times the vertex alpha against the material's cutoff - so the map holds the leaves the
+// rays would, at any texel size. With the map's own mip the alpha of a coarse slice averaged under the cutoff and its
+// leaves fell away (one 60 m slice: the crowns' sun visibility 0.62 against the traced LOD0's 0.24).
+void PSShadowFoliage(VSOut i)
+{
+#ifdef ALPHA_TEST
+    clip(gTex0.SampleLevel(gSamp, i.uv0, 2.0).a * i.col.a - gPbrB.y);
+#endif
+}
+
 // The local lights' shadow pass (RenderLocalShadows): beside the depth, what the nearest caster is - 1 a moving
 // object's (gObjectMoved, set per draw there), 0 the world's - so their lighting knows a moving object's shadow.
 float PSShadowFlag(VSOut i) : SV_Target
@@ -814,6 +831,38 @@ float CarBoxVis(float3 p, float3 dir)
     return (tFar >= max(tNear, 0.0)) ? 0.0 : 1.0;
 }
 
+// THE FOLIAGE MAP's answer (Scene::RenderFoliageShadows): the near placements' drawn leaves, which the traced sun does
+// not see (their shells leave its rays). The finest slice whose square holds the point: a near placement lies wholly in
+// one, so the receivers of its shadow do too (UpdateFoliageNear). The point steps towards the sun by a couple of texels
+// - a leaf has no thickness, and its normal (a volume normal on foliage) says nothing about which side faces the sun -
+// and an opaque receiver also along its normal, as the cascades do. 3x3 hardware PCF.
+float FoliageMapVis(float3 wpos, float3 N)
+{
+    const float3 L = gSunTowards;
+    const float3 Nl = dot(N, L) < 0.0 ? -N : N;
+    [loop] for (int c = 0; c < 4; ++c)
+    {
+        if ((float)c >= gFoliageMap) break;
+        const float texel = gCascadeSplit[c];
+#ifdef ALPHA_TEST
+        const float3 p = wpos + L * (texel * 2.0);
+#else
+        const float slope = saturate(1.0 - dot(Nl, L));
+        const float3 p = wpos + Nl * (texel * 1.5 * (1.0 + 2.0 * slope)) + L * texel;
+#endif
+        float4 lp = mul(float4(p, 1.0), gLightViewProj[c]);
+        if (any(abs(lp.xy) > 0.995) || lp.z < 0.0 || lp.z > 1.0) continue;
+        const float2 uv = float2(lp.x * 0.5 + 0.5, -lp.y * 0.5 + 0.5);
+        const float t = 1.0 / max(gShadowParams.w, 1.0);
+        float sum = 0.0;
+        [unroll] for (int y = -1; y <= 1; ++y)
+            [unroll] for (int x = -1; x <= 1; ++x)
+                sum += gShadow.SampleCmpLevelZero(gShadowSamp, float3(uv + float2(x, y) * t, c), lp.z);
+        return sum / 9.0;
+    }
+    return 1.0;
+}
+
 float SunVisInner(float3 wpos, float2 pixel, float3 N);
 float SunVis(float3 wpos, float2 pixel, float3 N)
 {
@@ -834,7 +883,9 @@ float SunVisInner(float3 wpos, float2 pixel, float3 N)
     // cascades are not drawn under ray tracing: it takes the sun whole.
     return 1.0;
 #else
-    return gRtVis.Load(int3(pixel, 0));
+    float v = gRtVis.Load(int3(pixel, 0));
+    if (gFoliageMap > 0.5) v *= FoliageMapVis(wpos, N);
+    return v;
 #endif
 }
 
@@ -1513,7 +1564,8 @@ float4 Shade(VSOut i, bool frontFace, out GBufOut g)
         if (VolumeNormal(i.nrm) && gShadowParams.x > 0.5 && gShadowSource > 0.5 && gRtReady > 0.5)
             vis *= FoliageSelfShadow(i.nrm / kVolumeScale, gSunTowards, i.plantSize);
         // A model's leaf: its rays skipped its own placement as well (kRtOwnerModel), and its crown stands in.
-        else if (i.crownR.w > 0.0 && gShadowParams.x > 0.5 && gShadowSource > 0.5 && gRtReady > 0.5)
+        // (Near the camera its own leaves shadow it instead, through the foliage map.)
+        else if (i.crownR.w > 0.0 && i.nearShadow == 0u && gShadowParams.x > 0.5 && gShadowSource > 0.5 && gRtReady > 0.5)
             vis *= ModelSelfShadow(i.crownQ, gSunTowards, i.crownR.xyz, i.crownR.w);
         gProbeNdl = ndl; gProbeAmbient = ambient; gProbeVis = vis;
         // No specular lobe on foliage. A leaf card is not a surface with a

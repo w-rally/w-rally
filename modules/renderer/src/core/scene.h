@@ -344,6 +344,18 @@ public:
     bool AmbientSpecular() const { return m_ambientSpecular; }
     void RenderShadows(ID3D12GraphicsCommandList* list,
                        const float* view, const float* proj, const float* sunDirTravel);
+    // THE FOLIAGE MAP (the RT path; NGG design §2.6 "Leaf-exact foliage shadows"). The placements of models with
+    // foliage within 60 m of the camera (a NEAR placement) cast their DRAWN LOD - leaf-exact, swaying with the wind -
+    // into a foliage-only sun shadow map (the cascades' targets, idle on this path; RenderFoliageShadows), which the
+    // main pass multiplies into the ray-traced sun; their shells leave the sun's rays (kRtMaskNearShell) and their
+    // crown's ellipsoid stands down. The far placements keep the shell and the ellipsoid. A/B and tuning only:
+    // NGG_FOLIAGE_SHADOW=off (as before), NGG_FOLIAGE_NEAR (metres), NGG_FOLIAGE_CASCADES (the map's slices, 1-4).
+    // UpdateFoliageNear: once a frame before the TLAS is kept current (the near set decides the TLAS).
+    void UpdateFoliageNear(const float* view, const float* proj, const float* sunDirTravel);
+    uint32_t FoliageRevision() const { return m_foliageRevision; }
+    bool FoliageMapOn() const { return m_foliageMap; }
+    void RenderFoliageShadows(ID3D12GraphicsCommandList* list, const float* view);
+    double FoliageMapMs() const { return m_foliageMapMs; }
     // --- editor: per-object visibility (design §8, tier 1) -----------------
     //
     // Hiding is a DRAW-LIST edit and costs no GPU work, which is what makes an
@@ -654,6 +666,7 @@ public:
         // A model placement's (kRtOwnerModel | its index), 0 for anything else: the rays FROM that placement's own
         // leaves pass through its alpha-tested geometry (rt_common.hlsli OccludedT), as a card plant's skip its cards.
         uint32_t owner = 0;
+        uint32_t mask = 0;                   // the instance mask; 0: kRtMaskAll (| kRtMaskFocus)
         bool     forceOpaque = false;        // a dynamic mesh drawn with an opaque material
         // It went further than kRtMovedMin (scene.cpp) since last frame: a ray
         // that hits it sees an occluder that was elsewhere, so the denoiser
@@ -698,6 +711,9 @@ public:
     void SetReflectionTlas(D3D12_GPU_VIRTUAL_ADDRESS tlas) { m_reflTlas = tlas; }
     // TLAS instance masks: every instance has kRtMaskAll's bits; the reflection focus's also kRtMaskFocus.
     static constexpr uint32_t kRtMaskAll = 0x01, kRtMaskFocus = 0x02;
+    // A near placement's shell (UpdateFoliageNear): ONLY this bit, so the sun rays (mask
+    // ~kRtMaskNearShell, rt_trace.hlsl) pass it - the map shadows with its leaves - and every other ray sees it.
+    static constexpr uint32_t kRtMaskNearShell = 0x04;
     // RtInstanceDesc::owner of a model placement, and the prepass's id of its leaves (scene.hlsl, rt_common.hlsli):
     // this bit, then the placement's index - apart from a card plant's (+ 1, under 2^24).
     static constexpr uint32_t kRtOwnerModel = 0x80000000u;
@@ -1020,6 +1036,7 @@ private:
     mutable std::vector<uint64_t>       m_rtModelMeshes;
     mutable bool                        m_rtModelInstancesDirty = true;
     mutable uint32_t                    m_rtModelGen = 0xFFFFFFFFu;
+    mutable uint32_t                    m_rtModelNearRev = 0xFFFFFFFFu;
     std::vector<DrawOrder>              m_shadowOrder;      // a cascade's model draws (RenderShadows)
     void PlacementTransform(PlacementRt& p) const;
     void RebuildModelCells();
@@ -1027,7 +1044,18 @@ private:
     // Culls the placements against `planes` from `eye` (LODs and fades by the distance from `lodEye`; a shadow view
     // takes the camera's), writes the survivors to the stream and returns its batches.
     void CullModels(ID3D12Device* dev, const float planes[6][4], const float eye[3], bool shadow,
-                    std::vector<ModelBatch>& out);
+                    std::vector<ModelBatch>& out, bool nearOnly = false);
+    // The foliage map (UpdateFoliageNear): per placement 1 near (in the map), 0 far; the set's revision (KeepRtCurrent
+    // rebuilds the TLAS on a change).
+    bool                     m_foliageMap = true;
+    float                    m_foliageNear = 60.0f;
+    int                      m_foliageCascades = 2;
+    std::vector<uint8_t>     m_placementNear;
+    uint32_t                 m_foliageRevision = 0;
+    bool                     m_foliageFit = false;         // the cascades' targets hold this frame's foliage fit
+    bool                     m_foliageDrawn = false;       // ... and were drawn (the main pass reads them)
+    double                   m_foliageMapMs = 0.0;
+    Microsoft::WRL::ComPtr<ID3D12PipelineState>  m_psoFoliageShadowAlpha;   // a leaf's caster bias, small
     // The DrawItems of `batches` for a pass: one per batch submesh; `fadeSolid` - a crossfading batch's opaque submesh
     // through its alpha-tested twin, which dithers.
     void ModelDrawItems(const std::vector<ModelBatch>& batches, std::vector<DrawOrder>& order, bool shadow);

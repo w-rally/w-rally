@@ -996,7 +996,7 @@ bool Rt::UpdateInstances(Device& dev, ID3D12GraphicsCommandList* list,
         D3D12_RAYTRACING_INSTANCE_DESC id = {};
         ToInstanceTransform(d.xform, id.Transform);
         id.InstanceID = (UINT)descs.size();          // indexes the table below
-        id.InstanceMask = Scene::kRtMaskAll | (d.focus ? Scene::kRtMaskFocus : 0u);   // (the rays here: 0xFF, all)
+        id.InstanceMask = d.mask ? d.mask : Scene::kRtMaskAll | (d.focus ? Scene::kRtMaskFocus : 0u);
         id.Flags = d.forceOpaque ? D3D12_RAYTRACING_INSTANCE_FLAG_FORCE_OPAQUE
                                  : D3D12_RAYTRACING_INSTANCE_FLAG_NONE;
         id.AccelerationStructure = it->second.Va();

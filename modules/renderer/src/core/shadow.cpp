@@ -1,6 +1,7 @@
 #include "shadow.h"
 #include "log.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstring>
 
@@ -281,6 +282,72 @@ void ShadowMaps::Update(const float* view, const float* proj, const float* sunTo
 
         sliceNear = sliceFar;
     }
+}
+
+void ShadowMaps::FitFoliage(const float* view, const float* proj, const float* sunTowards, float farZ, int count,
+                            float reach)
+{
+    if (count < 1) count = 1;
+    if (count > kCascades) count = kCascades;
+    const float camX[3] = { view[0], view[4], view[8] };
+    const float camY[3] = { view[1], view[5], view[9] };
+    const float camZ[3] = { view[2], view[6], view[10] };
+    float eye[3];
+    for (int j = 0; j < 3; ++j)
+        eye[j] = -(view[12] * view[j*4+0] + view[13] * view[j*4+1] + view[14] * view[j*4+2]);
+    const float tanX = (proj[0] != 0.0f) ? 1.0f / proj[0] : 1.0f;
+    const float tanY = (proj[5] != 0.0f) ? 1.0f / proj[5] : 1.0f;
+    // Slices: 1 - the whole; 2 - a third, then the rest; more - geometric.
+    float splits[kCascades + 1] = { 0.5f };
+    for (int i = 1; i <= count; ++i)
+        splits[i] = count == 1 ? farZ : 0.5f * powf(farZ / 0.5f, (float)i / (float)count);
+    if (count == 2) splits[1] = farZ / 3.0f;
+    for (int i = 0; i < count; ++i)
+    {
+        float corners[8][3];
+        int n = 0;
+        for (int f = 0; f < 2; ++f)
+        {
+            const float d = splits[i + f];
+            for (int sy = -1; sy <= 1; sy += 2)
+                for (int sx = -1; sx <= 1; sx += 2, ++n)
+                    for (int k = 0; k < 3; ++k)
+                        corners[n][k] = eye[k] + camZ[k] * d + camX[k] * (d * tanX * sx) + camY[k] * (d * tanY * sy);
+        }
+        float centre[3] = {}, radius = 0.0f;
+        for (int k = 0; k < 3; ++k)
+        {
+            for (int c = 0; c < 8; ++c) centre[k] += corners[c][k];
+            centre[k] /= 8.0f;
+        }
+        for (int c = 0; c < 8; ++c)
+        {
+            const float dx = corners[c][0] - centre[0], dy = corners[c][1] - centre[1], dz = corners[c][2] - centre[2];
+            radius = (std::max)(radius, sqrtf(dx*dx + dy*dy + dz*dz));
+        }
+        radius = ceilf(radius * 16.0f) / 16.0f;
+        const float diameter = radius * 2.0f;
+        m_texelWorld[i] = diameter / (float)m_resolution;
+        m_splitFar[i] = splits[i + 1];
+        const float back = radius + reach;
+        float lightEye[3];
+        for (int k = 0; k < 3; ++k) lightEye[k] = centre[k] + sunTowards[k] * back;
+        const float toward[3] = { -sunTowards[0], -sunTowards[1], -sunTowards[2] };
+        const float up[3] = { 0.0f, 1.0f, 0.0f };
+        float lview[16];
+        LookAtLH(lightEye, toward, up, lview);
+        {
+            const float cx = centre[0]*lview[0] + centre[1]*lview[4] + centre[2]*lview[8]  + lview[12];
+            const float cy = centre[0]*lview[1] + centre[1]*lview[5] + centre[2]*lview[9]  + lview[13];
+            const float texel = m_texelWorld[i];
+            lview[12] += floorf(cx / texel) * texel - cx;
+            lview[13] += floorf(cy / texel) * texel - cy;
+        }
+        float lproj[16];
+        OrthoLH(diameter, diameter, 0.0f, back + radius + reach, lproj);
+        Mul(lview, lproj, m_lightViewProj[i]);
+    }
+    for (int i = count; i < kCascades; ++i) m_splitFar[i] = 0.0f, m_texelWorld[i] = 0.0f;
 }
 
 } // namespace core

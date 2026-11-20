@@ -222,6 +222,7 @@ private:
     int   m_curve = PostFx::kCurveAces;
 
     uint32_t    m_rtRevision = 0xFFFFFFFFu;   // scene geometry the BVH was built from
+    uint32_t    m_rtFoliageRevision = 0xFFFFFFFFu;   // and the near placements' foliage shadows (Scene::UpdateFoliageNear)
     bool        m_rtValid = false;            // the TLAS holds the scene's meshes whose BLASes are built (design §4.2)
     bool        m_rtActive = false;
     bool        m_rtTraced = false;           // m_rtActive as of the last frame that drew the world

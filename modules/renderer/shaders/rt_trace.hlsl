@@ -46,7 +46,9 @@ void CSMain(uint3 tid : SV_DispatchThreadID)
 
     float2 mover;
     float t;
-    bool hit = OccludedT(ray, true, plant, mover, t);
+    // Not the near placements' shells under the foliage map (scene.h kRtMaskNearShell): the main pass multiplies in
+    // the map, which holds their drawn leaves.
+    bool hit = OccludedT(ray, true, plant, mover, t, 0xFF & ~0x04u);
     // The sun's disc: the penumbra per metre of the hit's distance.
     gOut[tid.xy] = EncodeRaw(hit ? 0.0 : 1.0, Allow(mover, 2.0 * tan(gSunAngle)));
 #ifdef NRD_INPUTS

@@ -687,6 +687,61 @@ std::string SelfShadowTrees(Gpu& gpu, const std::vector<uint8_t>& out, const ngg
     return "";
 }
 
+// --trees --rt-lod ray: the FOLIAGE MAP (NGG design §2.6 "Leaf-exact foliage shadows"). A tree within 60 m of the
+// camera casts its sun shadow through the map - its drawn LOD's leaves - and its shell leaves the sun's rays
+// (kRtMaskNearShell); a farther one keeps the shell. Either way it must shadow the ground: one tree, alone, its shadow
+// looked at from 30 m (near: the map) and from 150 m (far: the shell), the sun visibility as the main pass applies it
+// (debug view 7) with the tree and without it. A map that is not drawn, or a shell masked where the map does not stand
+// in, leaves the near or the far tree without a shadow.
+std::string FoliageMapTrees(Gpu& gpu, const std::vector<uint8_t>& out, const ngg::SceneData& s, const std::string& dir)
+{
+    using namespace wrally::iface;
+    if (!gpu.error.empty()) return "";
+    size_t pick = 0;
+    for (size_t k = 1; k < s.placements.size(); ++k)
+        if (std::fabs(s.placements[k].scaleY - 1.0f) < std::fabs(s.placements[pick].scaleY - 1.0f)) pick = k;
+    const ngg::Placement& p0 = s.placements[pick];
+    const float sy = p0.scaleY;
+    WindSession w(gpu, dir);
+    if (std::string e = w.Open(out); !e.empty()) return e;
+    RenderSettings set{};
+    set.vsync = 0, set.quality = 1, set.taa = 0, set.shadows = 1, set.autoExposure = 0, set.renderScale = 1, set.rayTracing = 1;
+    gpu.renderer.ApplySettings(set);
+    w.KeepOnly(p0.position);
+    // Where the crown's middle (5 m up at scale 1) throws its shadow on level ground, and the sun's way across it.
+    const float* sd = w.weather.sunDirection;
+    if (sd[1] > -0.1f) return "the sun is too low for a shadow on the ground";
+    const float h = 5.0f * sy;
+    const float shadow[3] = {p0.position[0] + sd[0] / -sd[1] * h, p0.position[1], p0.position[2] + sd[2] / -sd[1] * h};
+    float hx = sd[0], hz = sd[2];
+    const float hl = std::sqrt(hx * hx + hz * hz);
+    if (hl < 1e-3f) hx = 1.0f, hz = 0.0f; else hx /= hl, hz /= hl;
+    struct View { const char* name; float back, up, fovY; size_t shadowed = 0; };
+    View views[2] = {{"near (the foliage map)", 12.0f, 26.0f, 0.9f}, {"far (the shell)", 130.0f, 75.0f, 0.2f}};
+    Image with[2], without[2];
+    for (int pass = 0; pass < 2; ++pass) {
+        if (pass == 1) w.RemoveAll();
+        for (int v = 0; v < 2; ++v) {
+            // Beyond the shadow, looking back at it and the tree.
+            const float eye[3] = {shadow[0] + hx * views[v].back, shadow[1] + views[v].up, shadow[2] + hz * views[v].back};
+            for (int k = 0; k < 6; ++k) w.Frame(eye, shadow, views[v].fovY, 0.0f, 0.0f, 7, nullptr);   // (history settles)
+            if (std::string e = w.Frame(eye, shadow, views[v].fovY, 0.0f, 0.0f, 7, pass ? &without[v] : &with[v]); !e.empty())
+                return e;
+            if (!gpu.renderer.Stats().rtActive) return "ray tracing is not active: the foliage map is not checked";
+        }
+    }
+    for (int v = 0; v < 2; ++v) {
+        for (int y = 0; y < with[v].h; ++y)
+            for (int x = 0; x < with[v].w; ++x)
+                if (with[v].at(x, y)[1] < 128 && without[v].at(x, y)[1] > 204) ++views[v].shadowed;
+        std::printf("the foliage map: a tree's shadow %s - %zu pixel(s)\n", views[v].name, views[v].shadowed);
+        if (views[v].shadowed < 200)
+            return std::string("a tree seen ") + views[v].name + " casts no shadow (" + std::to_string(views[v].shadowed) +
+                   " pixel(s))";
+    }
+    return "";
+}
+
 // Where a world point lands on the 320x240 frame (row; -1 behind).
 float ScreenY(const float eye[3], const float at[3], float fovY, const float p[3])
 {
@@ -924,6 +979,7 @@ int main(int argc, char** argv)
             const std::filesystem::path dir = std::filesystem::temp_directory_path() / "ngg-check-shell";
             std::filesystem::create_directories(dir);
             if (std::string e = SelfShadowTrees(gpu, out, s, dir.string()); !e.empty()) return Fail("with a ray-only LOD: " + e);
+            if (std::string e = FoliageMapTrees(gpu, out, s, dir.string()); !e.empty()) return Fail("with a ray-only LOD: " + e);
         }
         if (wind) {
             // The same trees without the wind: what calm air must draw.

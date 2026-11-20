@@ -461,6 +461,63 @@ touch), pieces wider than 50 m (`kPlantMaxWidth`) left out.
   Measured with Wallaby's plants on stage 41 (sun side, LOD0, the visible luma): bramble 0.24 -> 0.63, grey alder
   0.08 -> 0.34, privet 0.39 -> 0.56; the plants without a shell (dock, fern, rose: LOD0 traced) barely move. Their
   baked cluster cards had been brightened to make up for the shell's darkness; Wallaby re-tuned them against this.
+- **Leaf-exact foliage shadows near the camera: the FOLIAGE MAP** (2026-11-20, the RT path). The shell and the
+  crown's ellipsoid read well from afar and badly up close: on Cote d'Arbroz the crowns' edges came out lit and their
+  insides flat dark (the ellipsoid), and the ground shadows were blobs (the shell). Now a placement of a model with a
+  crown within **60 m** of the camera (a NEAR placement; `Scene::UpdateFoliageNear`, once a frame before the TLAS is
+  kept current) casts its sun shadow from its **drawn LOD** - the leaves the camera sees, swaying with the wind - into
+  a foliage-only sun shadow map, and the far ones keep the shell and the ellipsoid:
+  - **The map** (`Scene::RenderFoliageShadows`) is the cascades' targets, idle on the RT path (4.6): 2 slices
+    (`ShadowMaps::FitFoliage`: [0.5, 20] and [20, 60] m by the camera's frustum, a bounding sphere and texel snap each,
+    the depth range tight round it plus 80 m), only the near placements drawn into them. A placement is near only if
+    its box lies wholly inside one slice (then so does every receiver of its shadow). Its leaves pass the ray
+    tracer's own alpha test (`PSShadowFoliage`: texture alpha at a fixed LOD 2 x vertex alpha against the material's
+    cutoff); with the map's own mip a coarse slice's leaves fell away (crown visibility 0.62 against the truth's 0.24).
+    Small caster bias (40 units, slope 1.5): leaves are meant to shadow each other.
+  - **The main pass multiplies it into the traced sun** (`FoliageMapVis` in `SunVisInner`): the finest slice holding
+    the point, a leaf stepped 2 texels towards the sun (its volume normal says nothing of which side faces it), an
+    opaque receiver along its normal as the cascades do; 3x3 PCF. So it is the same for `RtVisibility`, NRD and RR.
+  - **A near placement's shell leaves the sun's rays only:** its TLAS instances carry `kRtMaskNearShell` alone and the
+    sun ray traces with `~kRtMaskNearShell` (`rt_trace.hlsl`); the AO, the lamps and the reflections still see it.
+    The instance flag `kInstNearMap` turns its `ModelSelfShadow` off in the shader; the crown's inner AO stays.
+    The near set changes the TLAS (`Scene::FoliageRevision`, `Renderer::KeepRtCurrent`).
+  - Editor and game are the same path (`WRenderer.dll`). Ray tracing off, nothing changes: the cascades draw every
+    model already. `NGG_FOLIAGE_SHADOW=off`, `NGG_FOLIAGE_NEAR`, `NGG_FOLIAGE_CASCADES` are for A/B only (10.8).
+  - **What else was tried** (same day, same measurements): (B) tracing the near placements against their drawn LOD
+    instead of the shell, own leaves included - +43-46 ms GPU frame on the dev iGPU (ray tracing 65-67 ms: the
+    any-hit tests through LOD0's 18-24 alpha layers again), out; (C) the map plus the generator's baked crown
+    occlusion (COLOR_0) in place of the inner AO - the same visibility, lit-frame error 13.5 -> 12.5, a subtle change
+    to every near leaf's ambient, not taken. Opacity micromaps (DXR 1.2), the industry's answer to alpha-tested
+    foliage in a BVH, run on NVIDIA RTX only, not on RDNA3 (the dev 780M) - so not the default path. The split - a
+    shadow map for the alpha-tested foliage near, rays for the rest - is what hybrid renderers do (NVIDIA's hybrid
+    ray-traced shadows, GDC 2015; Northlight leaving some alpha-tested vegetation out of ray tracing, EG 2024); a
+    virtual shadow map over swaying foliage is what UE5 finds costly.
+  - **Quality, measured** (Cote d'Arbroz from above the start of 41, LOD0 forced, the sun's visibility against LOD0
+    itself ray traced to 250 m as the truth; `foliage-shot`, debug views 7 and 14):
+
+    | | ground shadow IoU (vis < 0.5) | ground MAE | leaf MAE | leaf corr. | leaf mean (truth 0.24) | lit frame MAE (8-bit) |
+    |---|---|---|---|---|---|---|
+    | before: shell + ellipsoid | 0.939 | 0.037 | 0.180 | 0.77 | 0.37 | 24.4 |
+    | **the foliage map, 60 m** | **0.975** | **0.017** | **0.076** | **0.92** | **0.27** | **13.5** |
+    | the map, 40 m / 100 m | about the same in this view | | | | | |
+    | (B) traced, LOD1 / LOD2 | 0.969 / 0.954 | 0.022 / 0.032 | 0.098 / 0.118 | 0.86 / 0.82 | | 10.1 / 12.6 |
+
+  - **Cost, measured** (dev iGPU, RBR's run on 41 replayed, `--step 0.0333`, 1,618 frames, TAA and vsync off, native
+    1080p, four interleaved rounds - the machine drifted 43 -> 39 ms over them, so against "before" of the same
+    round; GPU frame median):
+
+    | round | before | the map, 60 m | 40 m | 100 m (3 slices) | (C) |
+    |---|---|---|---|---|---|
+    | 1 | 43.35 | +0.67 | | | |
+    | 2 | 41.24 | +1.96 | +1.70 | +1.84 | |
+    | 3 | 40.20 | +0.20 | -0.71 | +0.37 | +1.32 |
+    | 4 | 38.61 | +0.32 | +0.31 | +1.68 | +0.92 / +0.18 |
+
+    About **+0.5 ms at 60 m** (+0.3 at 40 m; 100 m +1.7 with spikes, its mean 4 ms over its median). The ray tracing
+    gets 0.3-1.2 ms cheaper (the near shells out of the sun's rays), the main pass and the map's pass add 0-0.7 ms.
+    60 m chosen: 40 m switches trees from the map to the shell visibly closer to the car. Not yet judged: the switch
+    at 60 m while driving. `instancing-41` checks it: one placeholder tree's shadow on the ground seen from 30 m (the
+    map) and from 150 m (the shell) - with the map not drawn the near shadow is 7 pixels, not ~1,200.
 
 **Measured on stage 41** (dev iGPU, RBR's run replayed in lock-step, TAA and vsync off, GPU frame), with
 `ngg-check --trees` placing a code-generated conifer (LOD0 142 tris to 50 m, LOD1 40 to 150 m, billboard to 900 m)
@@ -1139,6 +1196,8 @@ footprint; mip 0 gives a shadow sharper than the leaf on screen). On top:
   white noise a 5x5 window drew its samples unevenly and the denoiser kept that luck as blotches.
 - The raw result is `R16_FLOAT`; `EncodeRaw` stores a hit on a moved object as a negative value carrying the history
   weight its rays allow (4.5).
+- **Instance mask `~kRtMaskNearShell`:** the shells of the instanced models near the camera are left out - the foliage
+  map shadows with their drawn leaves instead, multiplied in by the main pass (§2.6 "the foliage map").
 
 ### 4.4 RT ambient occlusion
 
@@ -1227,7 +1286,8 @@ reset on a new resource turned RT shadows off silently. The flag now gates only 
 
 The non-RT path's sun (`modules/renderer/src/core/shadow.*`, `Scene::RenderShadows`), drawn only by
 `CascadeVisibility`. **Not drawn at all on the RT path** - four full-scene passes were the most expensive thing in
-the frame. Four cascades at 2048^2 (`R32` typeless, conventional depth), split 1-1500 m with a log/uniform blend
+the frame. (Its targets are, though: on the RT path they hold the foliage map, two slices of the near trees' leaves
+alone - §2.6.) Four cascades at 2048^2 (`R32` typeless, conventional depth), split 1-1500 m with a log/uniform blend
 (lambda 0.85), depth-only through the scene's own `VSMain`.
 
 | choice | why |
@@ -2332,6 +2392,9 @@ All read once, at start-up or first use; development only unless noted.
 | `NGG_PROBE_FACES=1..6` | cube-probe faces drawn per frame (default 2) | `scene.cpp` |
 | `NGG_MODEL_LOD_SCALE=<k>` | instanced models' LOD distances scaled (min 0.05), over the vegetation detail setting | `models.cpp` |
 | `NGG_WIND=<speed>[,<gust>[,<deg>]]` | that wind over the weather's (m/s, 0..1, towards; default gust 0.5, 90 deg): the wind's A/B | `module.cpp` |
+| `NGG_FOLIAGE_SHADOW=off` | no foliage map on the RT path: every instanced model's sun shadow from its shell, the crown's ellipsoid on its leaves (A/B; §2.6) | `models.cpp` |
+| `NGG_FOLIAGE_NEAR=<m>`, `NGG_FOLIAGE_CASCADES=1..4` | the foliage map's reach (default 60 m) and slices (default 2) | `models.cpp` |
+| `NGG_FOLIAGE_BIAS=<units>`, `NGG_FOLIAGE_SLOPE=<k>` | the foliage map's caster bias (default 40, 1.5) | `scene.cpp` |
 | `NGG_NO_SOLIDS` | don't measure solid cards: every alpha-tested object treated as foliage (A/B) | `scene.cpp` |
 | `NGG_DLSS_PRESET=<A..O>` | force a DLSS render preset for every mode (default K) | `dlss.cpp` |
 | `NGG_DLSS_RR_PRESET=<D..F>` | force a DLSS Ray Reconstruction preset (default: the SDK's) | `dlss.cpp` |
@@ -2370,7 +2433,7 @@ glass, and VR behind `kRendererCapVr`.
 | # | item | state / why | blocked on |
 |---|---|---|---|
 | 8 | **A third visibility provider: NRD (SIGMA/REBLUR) or DLSS Ray Reconstruction** | NRD built (§4.10): SIGMA for the sun and the lamps; REBLUR's AO failed the ghost behind the car and is off by default. DLSS RR prototyped (§4.11): passes the ghost behind the car. Open: REBLUR's history rules against ours; RR's Garage exposure, its glass/haze guides, presets | the user's look at RR |
-| 9 | **Ray-traced foliage cost** | instanced trees add +2.2 ms with opaque RT and +7.2 ms alpha-tested (§2.6), since any-hit runs through the needle tiers. Done: a ray-tracing-only LOD (`kModelLodRayOnly`, §2.6). Open: distant placements opaque or out of the TLAS, one submesh per shell; the real models decide how far the shell goes | the real tree models (Wallaby) |
+| 9 | **Ray-traced foliage cost** | instanced trees add +2.2 ms with opaque RT and +7.2 ms alpha-tested (§2.6), since any-hit runs through the needle tiers. Done: a ray-tracing-only LOD (`kModelLodRayOnly`, §2.6); near the camera (60 m) the sun shadow from the drawn LOD through the foliage map instead of the shell (§2.6, 2026-11-20: +0.5 ms, leaf-exact). Open: the 60 m switch judged while driving; distant placements opaque or out of the TLAS, one submesh per shell | a look while driving |
 | 10 | **Cascades: penumbra and cross-fade** | the non-RT sun shadow is hard-edged (no PCSS) and switches between cascades with no blend | nothing |
 | 11 | **Cheaper distant cascades** | cascade 3 covers kilometres and changes slowly: update it every 2nd-3rd frame. 2048² for 0.7 m texels is wasted bandwidth | nothing |
 | 12 | **Re-measure RT vs the raster path in W-Rally** | the "cascades cost more than RT" number is from the plugin (§4.9). Env, aerial and multiple scattering were last timed before the probe and weather were added | nothing |
@@ -2381,7 +2444,7 @@ glass, and VR behind `kRendererCapVr`.
 | # | item | state / why | blocked on |
 |---|---|---|---|
 | 14 | **The legacy `.lbs` import, finished** | no de-atlas (road seams stay on imported stages), no weld in the importer (the renderer's fallback welds), no variants, no `NGGS`, no cache. The planned order is a hand-finished server `.ngg` before the import (§2.1) | the stage server |
-| 15 | **Instanced models, the rest** | not in the lamps' shadow maps or the car's reflection probe. A model's own `kMaterialBlend` is drawn opaque. One RT LOD only (no per-LOD BLAS), no billboard normal map. The wind: ray tracing static (its shadows stand still under moving leaves with RT on) | nothing; phase 2 of the wind if it shows |
+| 15 | **Instanced models, the rest** | not in the lamps' shadow maps or the car's reflection probe. A model's own `kMaterialBlend` is drawn opaque. One RT LOD only (no per-LOD BLAS), no billboard normal map. The wind: ray tracing static (its shadows stand still under moving leaves with RT on) beyond 60 m; nearer, the foliage map's shadows sway with the drawn leaves | nothing; phase 2 of the wind if it shows |
 | 16 | **GPU culling of placements** (`ExecuteIndirect`) | the CPU cull takes 0.03 ms (camera) and 0.34 ms (with cascades) at 3.7k placements, so it is not worth it yet. Measure again at ~25k (bushes, grass) | bush and grass placements |
 | 17 | **Finer culling of stage objects** | every pass frustum-culls per object, but stage objects are large: stage 41 culls 299 of 2,987. Converter-chosen bounds and grouping, distance culling and occlusion culling are open | the converters |
 | 18 | **PBR maps for stages** | roughness, metallic, normal and emissive are read but fall back to white, so stage surfaces are uniform rough dielectrics. Generating maps from albedo is converter work. The catch: RBR textures carry baked shading, which generated normals would read as geometry | converter (Wallaby), importer |

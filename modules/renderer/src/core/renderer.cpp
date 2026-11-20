@@ -199,8 +199,10 @@ void Renderer::KeepRtCurrent(Device& dev)
     }
     const bool landed = m_rt.Land();
     const uint32_t rev = m_scene.GeometryRevision();
-    if (rev == m_rtRevision && !landed && !m_rt.InstancesStale()) return;
+    const uint32_t foliageRev = m_scene.FoliageRevision();
+    if (rev == m_rtRevision && foliageRev == m_rtFoliageRevision && !landed && !m_rt.InstancesStale()) return;
     m_rtRevision = rev;
+    m_rtFoliageRevision = foliageRev;
 
     // A new mesh's vertices, before its BLAS. A new upload is a new buffer, which the any-hit test's view must follow.
     const bool poolMoved = m_scene.FlushDynamic(dev.device.Get());
@@ -360,6 +362,8 @@ void Renderer::RecordFrame(Device& dev, D3D12_CPU_DESCRIPTOR_HANDLE outRtv,
     ID3D12Resource* motion = nullptr;
     if (m_scene.Ready())
     {
+        // The placements near the camera under the foliage map: they decide the TLAS (their shells' masks).
+        if (m_rt.Ready()) m_scene.UpdateFoliageNear(view, proj, sky.sunDir);
         KeepRtCurrent(dev);
         // The local lights' clusters for this view (lights.h), before anything reads them: the ray tracer below, the
         // scene pass after it.
@@ -418,6 +422,9 @@ void Renderer::RecordFrame(Device& dev, D3D12_CPU_DESCRIPTOR_HANDLE outRtv,
         if (&source != m_lastSource && m_lastSource) source.ResetHistory();
         m_lastSource = &source;
         source.Record(dev, list, f, m_vis);
+        // The near placements' leaves into the foliage map (the cascades' targets, idle on this path), which the main
+        // pass multiplies into the traced sun.
+        if (m_rtActive && m_scene.FoliageMapOn()) m_scene.RenderFoliageShadows(list, view);
 
         m_scene.SetShadowSource(m_vis.shadowSource);
         if (m_vis.sun)    m_scene.SetRtVisibility(m_vis.sun);

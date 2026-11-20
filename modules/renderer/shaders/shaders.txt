@@ -13,6 +13,7 @@ scene.hlsl  PSPrepass         ps_6_0  -HV 2018
 scene.hlsl  PSPrepass         ps_6_0  -HV 2018 -DALPHA_TEST=1
 scene.hlsl  PSGlassMotion     ps_6_0  -HV 2018
 scene.hlsl  PSShadow          ps_6_0  -HV 2018 -DALPHA_TEST=1
+scene.hlsl  PSShadowFoliage   ps_6_0  -HV 2018 -DALPHA_TEST=1
 scene.hlsl  PSShadowFlag      ps_6_0  -HV 2018
 scene.hlsl  PSShadowFlag      ps_6_0  -HV 2018 -DALPHA_TEST=1
 scene.hlsl  PSMain            ps_6_0  -HV 2018 -DGBUF=1

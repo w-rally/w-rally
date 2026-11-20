@@ -44,6 +44,11 @@ public:
     // read, and reverse-Z does not touch those.
     void Update(const float* view, const float* proj, const float* sunTowards,
                 float nearZ, float farZ);
+    // THE FOLIAGE MAP on the ray-traced path (Scene::RenderFoliageShadows): `count` (1..kCascades) of the slices
+    // fitted to the camera's first `farZ` metres only, with a depth range tight round what can stand there (the near
+    // placements: `reach` metres above and below the slice's sphere) - the near trees' leaves, nothing else, so their
+    // leaf-exact shadow beside the rays. Bounding sphere and texel snap as Update's.
+    void FitFoliage(const float* view, const float* proj, const float* sunTowards, float farZ, int count, float reach);
 
     // Row-major, row-vector, ready to multiply a world position by.
     const float* LightViewProj(int cascade) const { return m_lightViewProj[cascade]; }
