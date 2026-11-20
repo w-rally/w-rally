@@ -114,6 +114,10 @@ cbuffer Camera : register(b0)
     // x the sun's angular radius (radians), y Scene::kFoliageReach (a slice's depth range is its diameter plus twice
     // this), z the map's resolution, w a per-frame turn of the filter's pattern (0..63).
     float4             gFoliageParams;
+    // A model leaf's look (scene.cpp FoliageLook, NGG_FOLIAGE_*; 0 turns a term off): x the backlight's forward lobe
+    // gain, y the crown's extinction for transmitted light as a share of the direct shadow's, z the sheen, w the
+    // ambient a crown's centre keeps (0: the old rule, kFoliageInnerAo under ray-traced AO only).
+    float4             gFoliageLook;
 };
 
 // Cascaded shadow maps. A comparison sampler so the hardware does the depth
@@ -627,6 +631,19 @@ float ModelSelfShadow(float3 q, float3 L, float3 R3, float R)
     const float s = d > 0.0 ? max(0.0, (-b + sqrt(d)) / a) : 0.0;
     return exp(-min(kFoliageDensity, kFoliageDensityCap / R) * s);
 }
+// The same through-path at a share k of the density: the light a crown passes on leaf to leaf (the backlight).
+float ModelSelfShadowK(float3 q, float3 L, float3 R3, float R, float k)
+{
+    const float3 u = L / R3;
+    const float a = dot(u, u), b = dot(q, u), c = dot(q, q) - 1.0;
+    const float d = b * b - a * c;
+    const float s = d > 0.0 ? max(0.0, (-b + sqrt(d)) / a) : 0.0;
+    return exp(-min(kFoliageDensity, kFoliageDensityCap / R) * k * s);
+}
+// A model leaf's look (gFoliageLook): the transmitted light's extra saturation, and the sheen's limits.
+static const float kFoliageTransSat = 0.5;
+static const float kSheenMinA = 0.2;       // GGX alpha, a roughness of about 0.45
+static const float kSheenNear = 25.0, kSheenFar = 50.0;   // metres: whole, then faded out
 float FoliageSelfShadow(float3 q, float3 L, float radius)
 {
     const float b = dot(q, L);
@@ -1255,9 +1272,12 @@ float4 Shade(VSOut i, bool frontFace, out GBufOut g)
         matAo *= lerp(inner, 1.0, saturate(length(i.nrm) / kVolumeScale));
     }
     // A model's leaf, the same from its crown (its AO rays skip its own placement, rt_common.hlsli kRtOwnerModel).
-    else if (gAoReady > 0.5 && gAoOn > 0.5 && i.crownR.w > 0.0)
+    // With gFoliageLook.w the crown's depth is applied whatever the AO: it is analytic, and without it a crown under
+    // the cheaper AO had no inside at all.
+    else if (i.crownR.w > 0.0 && (gFoliageLook.w > 0.0 || (gAoReady > 0.5 && gAoOn > 0.5)))
     {
-        const float inner = lerp(1.0, kFoliageInnerAo,
+        const float innerAo = gFoliageLook.w > 0.0 ? gFoliageLook.w : kFoliageInnerAo;
+        const float inner = lerp(1.0, innerAo,
                                  min(kFoliageDensity * i.crownR.w, kFoliageDensityCap) / kFoliageDensityCap);
         matAo *= lerp(inner, 1.0, saturate(length(i.crownQ)));
     }
@@ -1582,6 +1602,7 @@ float4 Shade(VSOut i, bool frontFace, out GBufOut g)
         float ndl   = saturate((dot(N, gSunTowards) + kFoliageWrap) / (1.0 + kFoliageWrap));
         float trans = saturate(dot(-N, gSunTowards)) * kFoliageTransmission;
         float vis = SunVis(i.wpos, i.pos.xy, N);
+        const float visOpen = vis;   // before the plant's own volume: what the backlight starts from
         // A plant under the RAY-TRACED sun: its rays skipped its own cards, so
         // the volume stands in for them (FoliageSelfShadow). The cascades keep
         // their own answer - their foliage caster bias already removes most of
@@ -1608,6 +1629,40 @@ float4 Shade(VSOut i, bool frontFace, out GBufOut g)
         // already (see SphericalFoliageNormals) - and a highlight computed from
         // a fiction lands in the wrong place and flickers as the camera moves.
         lit = diffuseCol * (sunColour * (ndl + trans) * vis + ambient * matAo);
+        // A MODEL'S LEAF (NGG design §2.6 "Foliage shading", gFoliageLook):
+        if (i.crownR.w > 0.0 && gFoliageLook.x > 0.0)
+        {
+            // THE BACKLIGHT. Light through a leaf scatters forward, so a crown glows most where the camera looks
+            // towards the sun past it - the old term ignored the view, and took the crown's whole self-shadow, which
+            // left the far side of a crown (where the glow is) all but unlit. Transmitted light crosses the crown
+            // leaf to leaf rather than being stopped, so its extinction is a share (y) of the direct shadow's. Near
+            // the camera the foliage map shadows the leaves exactly, as opaque: the crown's estimate is its floor.
+            const float fwd = pow(saturate(dot(-V, gSunTowards)), 4.0);
+            float through = vis;
+            if (gShadowParams.x > 0.5 && gShadowSource > 0.5 && gRtReady > 0.5)
+            {
+                const float selfT = ModelSelfShadowK(i.crownQ, gSunTowards, i.crownR.xyz, i.crownR.w, gFoliageLook.y);
+                through = i.nearShadow == 0u ? visOpen * selfT : max(vis, 0.6 * selfT);
+            }
+            // Its colour: light through a leaf is more saturated than light off it (chlorophyll absorbs twice).
+            const float lum = max(dot(albedo, float3(0.2126, 0.7152, 0.0722)), 1e-3);
+            const float3 transCol = diffuseCol * lerp(float3(1.0, 1.0, 1.0), albedo / lum, kFoliageTransSat);
+            lit = diffuseCol * (sunColour * ndl * vis + ambient * matAo)
+                + transCol * sunColour * trans * (1.0 + gFoliageLook.x * fwd) * through;
+        }
+        if (i.crownR.w > 0.0 && gFoliageLook.z > 0.0)
+        {
+            // THE SHEEN: a leaf's wax, a dim broad lobe on the normal map's per-leaf tilt (the sheet draws each leaf
+            // turned its own way), never sharper than kSheenMinA - a glint off a 40-texel leaf would crawl. Near
+            // leaves only: farther off the tilt is mipped away and what is left would be a sheen of the crown.
+            const float ndlS = saturate(dot(N, gSunTowards));
+            const float3 H = normalize(V + gSunTowards);
+            const float as = max(a, kSheenMinA);
+            const float sheen = FresnelSchlick(float3(0.04, 0.04, 0.04), saturate(dot(V, H))).x
+                              * DistributionGGX(saturate(dot(N, H)), as) * VisSmith(ndv, ndlS, as) * ndlS;
+            const float fade = saturate((kSheenFar - length(gCamPos - i.wpos)) / (kSheenFar - kSheenNear));
+            lit += sunColour * (sheen * kSpecScale * gFoliageLook.z * fade * vis);
+        }
         // The legacy profile's two ways (Scene::SetLegacyProfile); `vis` is already from opaque geometry only (the
         // card's rays skipped every card). RBR's bake is the vertex colour times its scale.
         if (gLegacyMode > 0.5 && !VolumeNormal(i.nrm))

@@ -671,6 +671,30 @@ two `WindBend`s in the camera's passes and one in each cascade. These runs had t
 frame set no `FrameDesc::time` yet, fixed since) - the bend is computed the same either way. By eye, and whether the
 static RT shadows under moving leaves show while driving (phase 2: K bent RT shells), waits on the real models.
 
+**Foliage shading.** This covers a model's leaves, in `scene.hlsl`'s alpha-tested path. It is on branch
+`claude/foliage-look` (2026-11-20), PROPOSED and still being measured.
+
+Wallaby's trees now draw each leaf with its own outline, tilt, colour and roughness (Wallaby
+`tools/vegetation/README.md`, "Leaves"), and the user judged them a step forward. What the shading did with them:
+- the sun was wrapped;
+- the transmission ignored the view and was multiplied by the crown's whole self-shadow;
+- the crown's inner darkening applied only under ray-traced AO;
+- there was no specular.
+
+Four changes. Three are in the renderer, each with its own switch (`FoliageLook()` in scene.cpp, `gFoliageLook`; 0
+turns a term off):
+
+| switch | default | what |
+|---|---|---|
+| `NGG_FOLIAGE_BACKLIGHT` | 2 | The transmission gains a forward-scattering lobe, `1 + gain x max(0, -V.L)^4`, so a crown glows where the camera looks towards the sun past it. The transmitted light is tinted more saturated than the albedo (`kFoliageTransSat` 0.5): light through a leaf crosses its chlorophyll twice. |
+| `NGG_FOLIAGE_BACKLIGHT_K` | 0.35 | The crown's extinction for that light, as a share of the direct shadow's (`ModelSelfShadowK`). Transmitted light crosses the crown leaf to leaf rather than being stopped, so the far side of a crown, where the glow is, is no longer all but unlit. Near the camera, where the foliage map shadows the leaves, the crown's estimate x 0.6 is a floor under the leaf-exact shadow. |
+| `NGG_FOLIAGE_SHEEN` | 1 | A dim, broad specular on the normal-mapped per-leaf normal (F0 0.04, GGX alpha at least 0.2). Full to 25 m, faded out by 50 m. |
+| `NGG_FOLIAGE_CROWN_AO` | 0.55 | The ambient a crown's centre keeps, now applied whatever the AO (it is analytic). 0 is the old rule: 0.7, under ray-traced AO only. |
+
+The fourth is the converter's: Wallaby's `PlantReplacement` gives each placement its own hue, warmer or cooler by up
+to 0.06 through the NGGE tint. It needs no renderer change. The measurements and the user's choice of defaults are
+to follow.
+
 ### 2.7 Load-time fallbacks
 
 **Every repair the renderer does at load follows one pattern: measure first, act only where the data is

@@ -13,6 +13,7 @@
 #include <cstdio>
 #include <string>
 #include <cmath>
+#include <cstdlib>
 #include <utility>   // std::swap, for the selection counter's barrier flips
 #include <algorithm>
 #include <atomic>
@@ -133,7 +134,33 @@ struct CameraCB
     float wind[4];         // gWind (Scene::SetWind): direction x, z; speed; gustiness
     float windTime, windPrevTime, windPrevOn, windPad;   // gWindTime, gWindPrevTime, gWindPrevOn, gFoliageMap
     float foliageParams[4];   // gFoliageParams: the sun's angular radius, kFoliageReach, the map's resolution, the turn
+    float foliageLook[4];     // gFoliageLook (FoliageLook()): backlight lobe, its extinction, sheen, crown inner AO
 };
+// A model leaf's look (NGG design §2.6 "Foliage shading"), read once. Each term has its own switch for A/B; 0 turns
+// it off (the crown AO: 0 is the old rule - kFoliageInnerAo, and only under ray-traced AO).
+//   NGG_FOLIAGE_BACKLIGHT     the forward-scattering lobe's gain over the transmission (1 + gain x lobe)
+//   NGG_FOLIAGE_BACKLIGHT_K   the crown's extinction for transmitted light, as a share of the direct shadow's
+//   NGG_FOLIAGE_SHEEN         a dim broad specular on near leaves, from their normal map and roughness
+//   NGG_FOLIAGE_CROWN_AO      the ambient a crown's centre keeps, applied with or without ray-traced AO
+struct FoliageLookParams { float backlight, backlightK, sheen, crownAo; };
+static const FoliageLookParams& FoliageLook()
+{
+    static const FoliageLookParams p = [] {
+        FoliageLookParams v{2.0f, 0.35f, 1.0f, 0.55f};
+        auto read = [](const char* name, float& out) {
+            if (const char* e = std::getenv(name)) out = (std::max)(0.0f, (float)std::atof(e));
+        };
+        read("NGG_FOLIAGE_BACKLIGHT", v.backlight);
+        read("NGG_FOLIAGE_BACKLIGHT_K", v.backlightK);
+        read("NGG_FOLIAGE_SHEEN", v.sheen);
+        read("NGG_FOLIAGE_CROWN_AO", v.crownAo);
+        Log("scene: foliage look - backlight %.2f (extinction x%.2f), sheen %.2f, crown inner AO %.2f%s", v.backlight,
+            v.backlightK, v.sheen, v.crownAo, v.crownAo > 0.0f ? "" : " (the old rule: under RT AO only)");
+        return v;
+    }();
+    return p;
+}
+
 static_assert(sizeof(CameraCB) % 16 == 0,
               "CameraCB must be a whole number of float4 registers - see the note above");
 
@@ -5250,6 +5277,13 @@ void Scene::RecordPass(ID3D12GraphicsCommandList* list, D3D12_CPU_DESCRIPTOR_HAN
         }
     }
 
+    {
+        const FoliageLookParams& look = FoliageLook();
+        cb.foliageLook[0] = look.backlight;
+        cb.foliageLook[1] = look.backlightK;
+        cb.foliageLook[2] = look.sheen;
+        cb.foliageLook[3] = look.crownAo;
+    }
     ID3D12Device* dev = nullptr;
     list->GetDevice(IID_PPV_ARGS(&dev));
     ComPtr<ID3D12Resource> cbRes = MakeUploadBuffer(dev, &cb, sizeof(cb));
