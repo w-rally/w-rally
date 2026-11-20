@@ -635,6 +635,15 @@ void Scene::UpdateFoliageNear(const float* view, const float* proj, const float*
         const float R = m_foliageNear;
         m_shadows->FitFoliage(view, proj, toward, R, m_foliageCascades, kFoliageReach);
         m_foliageFit = true;
+        // The camera's view-projection (row vectors), for which near placements' shadows can reach the view at all.
+        float VP[16];
+        for (int r = 0; r < 4; ++r)
+            for (int c = 0; c < 4; ++c)
+            {
+                float v = 0.0f;
+                for (int k = 0; k < 4; ++k) v += view[r * 4 + k] * proj[k * 4 + c];
+                VP[r * 4 + c] = v;
+            }
         for (uint32_t i = 0; i < m_placements.size(); ++i)
         {
             const PlacementRt& p = m_placements[i];
@@ -644,7 +653,8 @@ void Scene::UpdateFoliageNear(const float* view, const float* proj, const float*
             // slice too (an orthographic projection along the sun), and the shader takes the finest slice holding the
             // receiver, which this placement is drawn into (RenderFoliageShadows, per slice).
             bool inside = false;
-            for (int c = 0; c < m_foliageCascades && !inside; ++c)
+            int c = 0;
+            for (; c < m_foliageCascades && !inside; ++c)
             {
                 const float* M = m_shadows->LightViewProj(c);
                 inside = true;
@@ -658,20 +668,45 @@ void Scene::UpdateFoliageNear(const float* view, const float* proj, const float*
                     inside = fabsf(cx) < 0.98f && fabsf(cy) < 0.98f && cz > 0.0f && cz < 1.0f;
                 }
             }
-            if (inside) next[i] = 1;
+            // The finest slice it lies wholly in, + 1 (c is one past it here). RenderFoliageShadows draws it into that
+            // slice and the finer ones it reaches into, never a coarser one: its shadow falls inside this slice's
+            // square, whose receivers read this slice or a finer one.
+            if (!inside) continue;
+            next[i] = (uint8_t)(c);
+            // Drawn into the map only if its shadow can land in view: its box swept along the sun's travel, down past
+            // its foot (its height + 20 m of slope, at most 150 m), not wholly outside one of the camera's side or near
+            // planes. Behind or beside the camera a tree's leaves fill the map for receivers nobody sees - the map pass
+            // is fill-bound. It stays near either way (its shell out of the sun's rays: the near set, and the TLAS,
+            // do not change as the camera turns).
+            const float sweep = (std::min)(150.0f, ((p.bmax[1] - p.bmin[1]) + 20.0f) / (std::max)(toward[1], 0.1f));
+            bool out[5] = { true, true, true, true, true };
+            for (int k = 0; k < 16; ++k)
+            {
+                float q[3] = { (k & 1) ? p.bmax[0] : p.bmin[0], (k & 2) ? p.bmax[1] : p.bmin[1], (k & 4) ? p.bmax[2] : p.bmin[2] };
+                if (k & 8) for (int j = 0; j < 3; ++j) q[j] -= toward[j] * sweep;
+                float h[4];
+                for (int j = 0; j < 4; ++j) h[j] = q[0] * VP[j] + q[1] * VP[4 + j] + q[2] * VP[8 + j] + VP[12 + j];
+                out[0] = out[0] && h[0] + h[3] < 0.0f;
+                out[1] = out[1] && h[3] - h[0] < 0.0f;
+                out[2] = out[2] && h[1] + h[3] < 0.0f;
+                out[3] = out[3] && h[3] - h[1] < 0.0f;
+                out[4] = out[4] && h[3] < 0.0f;
+            }
+            static const bool viewCull = !(getenv("NGG_FOLIAGE_VIEW_CULL") && getenv("NGG_FOLIAGE_VIEW_CULL")[0] == '0');
+            if (!viewCull || !(out[0] || out[1] || out[2] || out[3] || out[4])) next[i] |= kNearInView;
         }
     }
-    if (next != m_placementNear)
-    {
-        m_placementNear.swap(next);
-        ++m_foliageRevision;
-    }
+    // The TLAS cares about near or far only (the shell's mask), not the slice.
+    bool nearChanged = next.size() != m_placementNear.size();
+    for (size_t i = 0; i < next.size() && !nearChanged; ++i) nearChanged = (next[i] != 0) != (m_placementNear[i] != 0);
+    m_placementNear.swap(next);
+    if (nearChanged) ++m_foliageRevision;
 }
 
 // ------------------------------------------------------------------ the cull
 
 void Scene::CullModels(ID3D12Device* dev, const float planes[6][4], const float eye[3], bool shadow,
-                       std::vector<ModelBatch>& out, bool nearOnly)
+                       std::vector<ModelBatch>& out, int nearSlice)
 {
     out.clear();
     if (m_placements.empty() || m_models.empty()) return;
@@ -710,7 +745,9 @@ void Scene::CullModels(ID3D12Device* dev, const float planes[6][4], const float 
         for (uint32_t idx : c.items)
         {
             const PlacementRt& p = m_placements[idx];
-            if (nearOnly && (idx >= m_placementNear.size() || !m_placementNear[idx])) continue;
+            if (nearSlice >= 0 && (idx >= m_placementNear.size() || !m_placementNear[idx]
+                                   || !(m_placementNear[idx] & kNearInView)
+                                   || (m_placementNear[idx] & ~kNearInView) - 1 < nearSlice)) continue;
             if (Outside(planes, p.bmin, p.bmax)) continue;
             const ModelDef& m = m_models[p.d.model];
             const float s = p.d.scaleY * m_modelLodScale;

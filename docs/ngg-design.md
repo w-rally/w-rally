@@ -497,25 +497,55 @@ touch), pieces wider than 50 m (`kPlantMaxWidth`) left out.
     it (10.8). **Resolution is not what blurs them:** a 4096 map looked the same as 2048 with the real penumbra, and
     cost +11-13 ms GPU frame under a dense canopy (the chase camera at 41's start, the alpha-tested leaves' fill in the
     map pass), so it stays 2048 on any GPU.
-  - **Open: the map pass under a dense canopy.** In that view (native 1080p, 400 still frames, two rounds) the map
-    costs the frame +6-9 ms (36.9 / 37.3 -> 46.2 / 43.2 ms; main pass +1.0-1.8 ms, ray tracing -1.6 ms): every near
-    tree's drawn LOD0 into two slices. Over the replayed run it averages ~+1 ms. A coarser LOD in the far slice would
-    take part of it back.
+  - **The map pass under a dense canopy** (2026-11-20). In that view (native 1080p, still frames) the map cost the
+    frame +6-9 ms (36.9 / 37.3 -> 46.2 / 43.2 ms; main pass +1.0-1.8 ms, ray tracing -1.6 ms). Its own GPU time
+    (`NGG_FOLIAGE_TIMES=1` logs it every 120th frame) was 6.1-7.6 ms, and **it is fill-bound** - the alpha-tested
+    leaves, a crown 15-24 layers deep from the sun, each layer tested into the map:
+    - the resolution moves it (2048 -> 1024: 7.2 -> 3.2 ms; 4096 cost +11-13 ms);
+    - the triangles do not (LOD1 in both slices, 4.2 M -> 0.23 M triangles: 7.2 -> 5.2 ms; LOD1 in the far slice
+      alone, 1.9 M -> 0.1 M: no faster);
+    - drawing each crown's leaves top-down (sorted at load, for the early depth test) did nothing: an alpha-tested
+      draw's depth is written after its test.
+    **So the map draws fewer trees:** only those whose shadow can reach the view - the box swept along the sun's
+    travel past its foot (its height + 20 m, at most 150 m) against the camera's side and near planes
+    (`UpdateFoliageNear`, `kNearInView`). A tree behind or beside the camera stays near (its shell out of the sun's
+    rays - the near set and the TLAS do not change as the camera turns) but is not drawn. And each slice draws only
+    its own placements and the coarser slices' that reach into it, never a finer slice's (its shadow falls inside that
+    slice's square, whose receivers read it). In that view: 6.1 / 6.7 -> 5.1 / 5.1 ms, the frame pixel for pixel the
+    same (traced truth: unchanged, IoU 0.976). `NGG_FOLIAGE_VIEW_CULL=0` for A/B. What is left there (~5 ms) is the
+    in-view crowns' fill at 2.5 cm texels: only a lower resolution takes it back. Over RBR's run replayed (three
+    interleaved rounds, GPU frame median / mean, ms): no foliage map 41.90 / 41.80, 41.07 / 40.91, 40.72 / 41.11;
+    the map before the cull 41.86 / 44.00, 42.33 / 44.56, 41.44 / 44.45; with it 43.32 / 43.65, 42.45 / 44.54,
+    41.31 / 43.33. The map's cost is in the dense stretches - the medians barely move, the means 2-4 ms - and the cull
+    takes 0-1.1 ms of the mean.
   - **A near placement's shell leaves the sun's rays only:** its TLAS instances carry `kRtMaskNearShell` alone and the
     sun ray traces with `~kRtMaskNearShell` (`rt_trace.hlsl`); the AO, the lamps and the reflections still see it.
     The instance flag `kInstNearMap` turns its `ModelSelfShadow` off in the shader; the crown's inner AO stays.
     The near set changes the TLAS (`Scene::FoliageRevision`, `Renderer::KeepRtCurrent`).
   - Editor and game are the same path (`WRenderer.dll`). Ray tracing off, nothing changes: the cascades draw every
     model already. `NGG_FOLIAGE_SHADOW=off`, `NGG_FOLIAGE_NEAR`, `NGG_FOLIAGE_CASCADES` are for A/B only (10.8).
-  - **What else was tried** (same day, same measurements): (B) tracing the near placements against their drawn LOD
-    instead of the shell, own leaves included - +43-46 ms GPU frame on the dev iGPU (ray tracing 65-67 ms: the
-    any-hit tests through LOD0's 18-24 alpha layers again), out; (C) the map plus the generator's baked crown
-    occlusion (COLOR_0) in place of the inner AO - the same visibility, lit-frame error 13.5 -> 12.5, a subtle change
-    to every near leaf's ambient, not taken. Opacity micromaps (DXR 1.2), the industry's answer to alpha-tested
-    foliage in a BVH, run on NVIDIA RTX only, not on RDNA3 (the dev 780M) - so not the default path. The split - a
-    shadow map for the alpha-tested foliage near, rays for the rest - is what hybrid renderers do (NVIDIA's hybrid
-    ray-traced shadows, GDC 2015; Northlight leaving some alpha-tested vegetation out of ray tracing, EG 2024); a
-    virtual shadow map over swaying foliage is what UE5 finds costly.
+  - **Why this design:** the split - a shadow map for the alpha-tested foliage near, rays for the rest - is what
+    hybrid renderers do (NVIDIA's hybrid ray-traced shadows, GDC 2015; Northlight leaving some alpha-tested vegetation
+    out of ray tracing, EG 2024); a virtual shadow map over swaying foliage is what UE5 finds costly.
+  - **TRIED AND NOT TAKEN - do not repeat without a new reason** (2026-11-20, dev iGPU 780M, Cote d'Arbroz; the
+    numbers are in the bullets above and below):
+
+    | tried | result | why not |
+    |---|---|---|
+    | (B) trace the near placements against their drawn LOD (0, 1 or 2) instead of the shell, own leaves included | +43-46 ms GPU frame, ray tracing 65-67 ms | the any-hit tests through LOD0's 15-24 alpha layers per ray again |
+    | (C) the map + the generator's baked crown occlusion (COLOR_0) in place of the inner AO | same visibility, lit-frame error 13.5 -> 12.5 | a subtle change to every near leaf's ambient; not worth it |
+    | opacity micromaps (DXR 1.2) for alpha-tested foliage in the BVH | - | NVIDIA RTX only, not RDNA3; not a default path |
+    | the map's alpha test at the map's own mip | a coarse slice's leaves fell away (crown visibility 0.62 against the truth's 0.24) | fixed: alpha at LOD 2, as the rays (`PSShadowFoliage`) |
+    | one slice for the whole 60 m | ~7 cm texels everywhere; tried only together with the mip fault above, not again after it | two slices: 2.5 cm to 20 m |
+    | reach 40 m / 100 m (3 slices) | 40 m: +0.3 ms, the map-to-shell switch closer to the car; 100 m: +1.7 ms with spikes (mean 4 ms over the median) | 60 m |
+    | a plain 3x3 PCF on the map | each fleck a texel square, popping from texel to texel in the wind | the sun's penumbra filter |
+    | the lamps' Poisson taps (`kLocalTaps`, rim-heavy) for that filter | a gap smaller than the footprint printed a ring | a Vogel disc (`kFoliageTaps`) |
+    | the real sun's penumbra (x1) / none (x0) | x1: dim fuzzy blurs (the user: too soft); x0: crisp dots, sharper than the sun | x0.5, the user's pick |
+    | a 4096 map | looks the same as 2048 with the penumbra on; +11-13 ms under a dense canopy | 2048 on any GPU |
+    | three geometric slices (`NGG_FOLIAGE_CASCADES=3`) | no visible gain near; +1.4-5 ms; a thin bright line at a slice edge (not fixed) | two slices |
+    | a coarser LOD in the far slice (1 or 2 steps) | its triangles 1.9 M -> 0.1 M, the map pass no faster | the pass is fill-bound, not triangle-bound |
+    | LOD1 in both slices | 7.2 -> 5.2 ms | the near shadows would no longer be the drawn leaves' |
+    | each crown's leaf triangles sorted top-down at load (for the early depth test) | no faster (6.7 / 7.6 -> 7.4 / 7.8 ms) | an alpha-tested draw writes depth after its test: nothing is rejected early |
   - **Quality, measured** (Cote d'Arbroz from above the start of 41, LOD0 forced, the sun's visibility against LOD0
     itself ray traced to 250 m as the truth; `foliage-shot`, debug views 7 and 14):
 
@@ -2421,6 +2451,8 @@ All read once, at start-up or first use; development only unless noted.
 | `NGG_FOLIAGE_BIAS=<units>`, `NGG_FOLIAGE_SLOPE=<k>` | the foliage map's caster bias (default 40, 1.5) | `scene.cpp` |
 | `NGG_FOLIAGE_PENUMBRA=<k>` | the foliage map's penumbra over the sun's (default 0.5; 1 the real sun's, 0 crisp) | `models.cpp` |
 | `NGG_FOLIAGE_RES=<n>` | the sun maps' resolution, the cascades' and the foliage map's (default 2048; A/B) | `renderer.cpp` |
+| `NGG_FOLIAGE_VIEW_CULL=0` | the foliage map draws every near placement, not only those whose shadow can reach the view (A/B) | `models.cpp` |
+| `NGG_FOLIAGE_TIMES=1` | log the foliage map pass's GPU time and draws every 120th frame | `scene.cpp` |
 | `NGG_NO_SOLIDS` | don't measure solid cards: every alpha-tested object treated as foliage (A/B) | `scene.cpp` |
 | `NGG_DLSS_PRESET=<A..O>` | force a DLSS render preset for every mode (default K) | `dlss.cpp` |
 | `NGG_DLSS_RR_PRESET=<D..F>` | force a DLSS Ray Reconstruction preset (default: the SDK's) | `dlss.cpp` |
@@ -2459,7 +2491,7 @@ glass, and VR behind `kRendererCapVr`.
 | # | item | state / why | blocked on |
 |---|---|---|---|
 | 8 | **A third visibility provider: NRD (SIGMA/REBLUR) or DLSS Ray Reconstruction** | NRD built (§4.10): SIGMA for the sun and the lamps; REBLUR's AO failed the ghost behind the car and is off by default. DLSS RR prototyped (§4.11): passes the ghost behind the car. Open: REBLUR's history rules against ours; RR's Garage exposure, its glass/haze guides, presets | the user's look at RR |
-| 9 | **Ray-traced foliage cost** | instanced trees add +2.2 ms with opaque RT and +7.2 ms alpha-tested (§2.6), since any-hit runs through the needle tiers. Done: a ray-tracing-only LOD (`kModelLodRayOnly`, §2.6); near the camera (60 m) the sun shadow from the drawn LOD through the foliage map instead of the shell (§2.6, 2026-11-20: +0.5 ms, leaf-exact). Open: the 60 m switch judged while driving; the map pass under a dense canopy (+6-9 ms there, §2.6); distant placements opaque or out of the TLAS, one submesh per shell | a look while driving |
+| 9 | **Ray-traced foliage cost** | instanced trees add +2.2 ms with opaque RT and +7.2 ms alpha-tested (§2.6), since any-hit runs through the needle tiers. Done: a ray-tracing-only LOD (`kModelLodRayOnly`, §2.6); near the camera (60 m) the sun shadow from the drawn LOD through the foliage map instead of the shell (§2.6, 2026-11-20: +0.5 ms, leaf-exact). Open: the 60 m switch judged while driving; the map pass under a dense canopy (fill-bound, ~5 ms there after the view cull, §2.6); distant placements opaque or out of the TLAS, one submesh per shell | a look while driving |
 | 10 | **Cascades: penumbra and cross-fade** | the non-RT sun shadow is hard-edged (no PCSS) and switches between cascades with no blend | nothing |
 | 11 | **Cheaper distant cascades** | cascade 3 covers kilometres and changes slowly: update it every 2nd-3rd frame. 2048² for 0.7 m texels is wasted bandwidth | nothing |
 | 12 | **Re-measure RT vs the raster path in W-Rally** | the "cascades cost more than RT" number is from the plugin (§4.9). Env, aerial and multiple scattering were last timed before the probe and weather were added | nothing |

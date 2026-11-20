@@ -1818,6 +1818,8 @@ void Scene::RenderFoliageShadows(ID3D12GraphicsCommandList* list, const float* v
         for (int k = 0; k < 3; ++k) toward[k] = l > 0.0f ? -z[k] / l : 0.0f;
     }
     std::vector<ModelBatch> batches;
+    uint32_t draws[ShadowMaps::kCascades] = {};
+    uint64_t tris[ShadowMaps::kCascades] = {};
     ID3D12PipelineState* alphaPso = m_psoFoliageShadowAlpha ? m_psoFoliageShadowAlpha.Get() : m_psoShadowAlpha.Get();
     for (int c = 0; c < m_foliageCascades; ++c)
     {
@@ -1850,7 +1852,10 @@ void Scene::RenderFoliageShadows(ID3D12GraphicsCommandList* list, const float* v
         ExtractPlanes(m_shadows->LightViewProj(c), cplanes);
         const uint32_t notMoved = 0;
         list->SetGraphicsRoot32BitConstants(4, 1, &notMoved, 2);
-        CullModels(dev, cplanes, eye, true, batches, true);
+        // Each slice its own near placements and the coarser slices' that reach into it, those whose shadow can reach
+        // the view (UpdateFoliageNear). (A coarser LOD in the far slice was tried: its triangles 1.9 M -> 0.1 M, the
+        // pass no faster - it is fill-bound.)
+        CullModels(dev, cplanes, eye, true, batches, c);
         if (!batches.empty())
         {
             int xformState = -1, geomState = -1;
@@ -1884,6 +1889,8 @@ void Scene::RenderFoliageShadows(ID3D12GraphicsCommandList* list, const float* v
                 list->IASetVertexBuffers(1, 1, d.inst);
                 list->DrawIndexedInstanced(o.indexCount, d.instCount, o.firstIndex, o.baseVertex, 0);
                 ++m_modelStatsBuild.draws;
+                ++draws[c];
+                tris[c] += (uint64_t)(o.indexCount / 3) * d.instCount;
             }
         }
         m_shadowCB[c] = cbRes;
@@ -1892,6 +1899,11 @@ void Scene::RenderFoliageShadows(ID3D12GraphicsCommandList* list, const float* v
     m_shadows->ToShaderResource(list);
     m_foliageDrawn = true;
     ++m_foliageFrame;
+    // NGG_FOLIAGE_TIMES: the map pass's GPU time and what it drew, every 120th frame (measuring only).
+    static const bool times = getenv("NGG_FOLIAGE_TIMES") != nullptr;
+    if (times && m_foliageFrame % 120 == 0)
+        Log("scene: foliage map pass %.2f ms GPU; slice 0: %u draws, %.0fk tris; slice 1: %u draws, %.0fk tris",
+            m_foliageMapMs, draws[0], tris[0] / 1000.0, draws[1], tris[1] / 1000.0);
     if (timed)
     {
         list->EndQuery(m_shadowTimer.Get(), D3D12_QUERY_TYPE_TIMESTAMP, 1);

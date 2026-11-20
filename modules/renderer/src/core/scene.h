@@ -1044,11 +1044,14 @@ private:
     void RebuildModelCells();
     bool InstanceAlloc(ID3D12Device* dev, size_t records, uint8_t*& cpu, D3D12_GPU_VIRTUAL_ADDRESS& gpu);
     // Culls the placements against `planes` from `eye` (LODs and fades by the distance from `lodEye`; a shadow view
-    // takes the camera's), writes the survivors to the stream and returns its batches.
+    // takes the camera's), writes the survivors to the stream and returns its batches. `nearSlice` >= 0: the foliage
+    // map's slice - only the near placements drawn into it (kNearInView, that slice or a coarser one's).
     void CullModels(ID3D12Device* dev, const float planes[6][4], const float eye[3], bool shadow,
-                    std::vector<ModelBatch>& out, bool nearOnly = false);
-    // The foliage map (UpdateFoliageNear): per placement 1 near (in the map), 0 far; the set's revision (KeepRtCurrent
-    // rebuilds the TLAS on a change).
+                    std::vector<ModelBatch>& out, int nearSlice = -1);
+    // The foliage map (UpdateFoliageNear): per placement 0 far, else near - the finest slice it lies in + 1, and
+    // kNearInView where its shadow can reach the view (only then drawn into the map); the near set's revision
+    // (KeepRtCurrent rebuilds the TLAS on a change).
+    static constexpr uint8_t kNearInView = 0x80;
     bool                     m_foliageMap = true;
     float                    m_foliageNear = 60.0f;
     float                    m_foliageSunAngle = 0.00465f;
