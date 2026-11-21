@@ -96,6 +96,10 @@ if(EXISTS "${WRALLY_TEST_NGG}")
     set_tests_properties(instancing-41 PROPERTIES FIXTURES_SETUP trees-41 TIMEOUT 300 PASS_REGULAR_EXPRESSION
         "placeholder trees: 3743 placement.*read back the same.*scene: models - 1 model\\(s\\): 4 LODs \\(1 ray tracing only\\), 7 submeshes, [0-9]+ triangles.*3743 placement\\(s\\) \\(0 in other variants\\), 3743 replace a plant.*scene: models replace 3743 plant\\(s\\): [1-9][0-9]* card triangle.*a version-1 NGGD.*loaded by the renderer.*drawn the same as without the shell.*never the shell.*the ray tracer's BLAS: the shell's [0-9]+ triangles.*its own shell does not shadow it.*a tree's shadow near .the foliage map. - [0-9]+ pixel.*a tree's shadow far .the shell. - [0-9]+ pixel.*calm: the trees with wind drawn as without it - 0 pixel.*wind 15 m/s: two frames 0.1 s apart differ in [1-9][0-9]* pixel.s. .calm: 0.; without the trees in 0.*the motion target: [1-9][0-9]* of [0-9]+ tree pixel.s. with motion of their own .calm: 0 not black.*the cascades: the sun's visibility changed on [1-9][0-9]* of .*calm: 0 pixel.*the billboard from 400 m.*ngg-check: all good")
     # The editor table on stage 41, and its placements (version 2) on the file with trees.
+    # Grass (NGGF, NGG design §2.6 "Grass"): a made-up chunk on stage 41 - drawn, not drawn without it or off, and
+    # every refusal rule refused by both readers.
+    add_test(NAME grass-41 COMMAND ngg-check --grass ${WRALLY_TEST_NGG})
+    set_tests_properties(grass-41 PROPERTIES PASS_REGULAR_EXPRESSION "ngg-check: all good" TIMEOUT 600)
     add_test(NAME editor-api-41 COMMAND editor-api-check ${WRALLY_BIN}/modules/renderer/WRenderer.dll ${WRALLY_TEST_NGG}
              ${WRALLY_TEST_TREES})
     set_tests_properties(editor-api-41 PROPERTIES PASS_REGULAR_EXPRESSION "editor-api-check: all good" TIMEOUT 300

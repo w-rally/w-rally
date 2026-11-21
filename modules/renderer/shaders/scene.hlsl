@@ -864,13 +864,15 @@ VSOut VSGrass(GrassIn i)
         t = lod == 0u ? kRows0[row] : kRows1[row];
         side = row >= rows ? 0.0 : ((i.vid & 1u) ? 1.0 : -1.0);
     }
-    // Its shape: narrowing to the tip, curving over along F, a seed head widening the top of some.
-    const float lean = (0.12 + 0.33 * r1) * h * (r2 < 0.5 ? -1.0 : 1.0);
-    float halfW = 0.5 * width;
+    // Its shape: narrowing to the tip, curving over along F, a seed head widening the top of some. Never narrower
+    // than about 1.3 pixels at its distance: a blade a third of a pixel wide only flickers, and the field reads thin.
+    const float lean = (0.15 + 0.45 * r1) * h * (r2 < 0.5 ? -1.0 : 1.0);
+    const float pixel = dist * 2.0 * gInvScreen.y / max(gProj[1][1], 1e-3);   // metres a pixel spans there
+    float halfW = 0.5 * max(width, 1.3 * pixel);
     if (lod < 2u)
     {
         halfW *= 1.0 - 0.85 * t;
-        if (seedHead && t > 0.7) halfW = 0.5 * width * 1.6;
+        if (seedHead && t > 0.7) halfW = 0.5 * max(width, 1.3 * pixel) * 1.6;
     }
     float3 local = W * (side * halfW) + float3(0.0, h * t, 0.0);
     if (lod < 2u) local += F * (lean * t * t);
@@ -895,7 +897,8 @@ VSOut VSGrass(GrassIn i)
     const float3 ground = float3(i.b.x & 255u, (i.b.x >> 8) & 255u, (i.b.x >> 16) & 255u) / 255.0;
     float3 c = ground * ground;
     c *= 1.0 + spread * (float3(r1, r4, r3) - 0.5) * float3(0.5, 0.7, 0.4);
-    c *= lerp(0.55, 1.18, smoothstep(0.0, 0.65, t));
+    c = lerp(c, c * float3(1.3, 1.12, 0.55), saturate(spread * 2.5) * r4 * r4);   // some yellower, olive
+    c *= lerp(0.7, 1.12, smoothstep(0.0, 0.6, t));
     const float maskDry = (float)(i.b.x >> 24) / 255.0;
     const float dry = saturate(typeDry + maskDry) * (0.35 + 0.65 * r2);
     const float3 straw = float3(0.40, 0.32, 0.16) * max(dot(ground * ground, float3(0.2126, 0.7152, 0.0722)) / 0.12, 0.5);

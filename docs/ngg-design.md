@@ -285,6 +285,7 @@ and loader in step; `ngg-producer-wallaby` does the same for a Wallaby file.
 | `NGGW` | `WeatherChunkHeader` + `WeatherRecord` 172 B (§2.5) | no | `version` 1, `recordSize` >= 124 |
 | `NGGD` | model library (§2.6) | no | `kModelVersion` 3 (reads 1-3) |
 | `NGGE` | placements, `Placement` 40 B | no | `kPlacementVersion` 1, `recordSize` >= 40 |
+| `NGGF` | grass (§2.6 "Grass"): `GrassChunkHeader` 48 B, `GrassType` 64 B, `GrassMask` 16 B, `GrassTile` 16 B, replaced plants, texels | no | `kGrassVersion` 1, `recordSize`s >= the reader's |
 
 **Textures are embedded, not referenced, so a stage is one file and one hash** (§2.8). **Records grow by
 appending:** a reader takes min(`recordSize`, its own size) over defaults and skips a longer tail; a chunk
@@ -715,6 +716,75 @@ same way:
 - **The billboard** stays 3-7% darker against LOD0 than under the old shading (poplar -0.033, ash -0.073, maple
   -0.040, alder 0; the measurement window takes in neighbours). A follow-up for Wallaby's `billboard.gain`.
 - **In the game:** the user's verdict on the notebook, Cote d'Arbroz, was "looking good".
+
+**Grass** (2026-11-21; Wallaby's vegetation plan, workstream 7, "Planned: grass"). Where the ground is grass, real
+blades are drawn round the camera; nothing per blade is stored. **The producer decides where, the renderer how:**
+Wallaby writes the optional `NGGF` chunk (`ngg_format.h`; the contract is the vegetation plan's "The `NGGF` chunk,
+version 1"): grass types, a mask per ground texture (RG8: density, dryness), a paint layer of 32 m tiles (0.5 m
+cells, RGBA8: density scale, height scale x64, a type override; the `.col` veto over the road, tall-grass patches
+where the strip cards were, thinning under crowns) and the `NGGP` plants whose cards it replaces. Code:
+`core/grass.*`, `shaders/grass.hlsl`, `scene.hlsl` `VSGrass` and the `GRASS` variants.
+- **The chunk is checked whole** (`CheckGrassChunk`, shared by the loader and the format library): an unknown
+  version, a record size smaller than the reader's, a texel run past the chunk (or misaligned, or inside the
+  records), a mask naming a texture past `NGGT` or a type past the types, a mask of size 0, `cellSize <= 0` or
+  `tileCells` 0, two tiles at one position sharing a variant, a replaced plant past `NGGP`. A refusal is logged
+  ("NGGF refused (...)"), the stage loads and draws no grass, and the cards stay.
+- **The cards it replaces** are drawn exactly while the grass is not: a second static index buffer with them
+  degenerate (`Scene::StaticIbv`), used by every pass, and the ray tracer's world leaves them out then
+  (`BuildRtMesh`, the world key). Switching the grass on or off is a geometry revision (a world BLAS rebuild).
+- **The field, a clipmap round the camera** (`Grass::DrawField`): 512^2 texels of 0.25 m (128 m), the terrain
+  (layer 0, not alpha-tested, with a mask on either layer) drawn from above into three targets - the ground's height,
+  its colour (the main pass's blend, `t1.a x vertex alpha`, x the factor) with the mask's dryness, and the density
+  (`lerp(maskBase(uv0), maskDetail(uv1), w) x paint.R`), height scale and type (the dominant layer's, or the paint's
+  override). Its own root signature (the scene's is at 64 DWORDs). The masks and tiles are read from the chunk's
+  bytes as one buffer (manual bilinear, wrapping; the paint through a grid of tile offsets for the drawn variant,
+  moved by its offset). Drawn again whole when the camera has moved 4 m from its centre (not by strips yet).
+- **The spawn** (`CSSpawn`, a thread per 0.5 m patch of the world within reach): the patch culled to the frustum
+  (a sphere round its grass); its candidates at hashed points, kept when a stratified threshold `(k + jitter) / n`
+  is under `fade x density x type.density / densest` - so a patch's blades never move, and as the camera leaves they
+  go one by one. Density whole to `min(15 m, reach / 2)`, gone by the reach; blades widen as it falls (up to 2.5x).
+  One LOD per patch by distance: blades of 7 triangles to 0.16 x reach, of 3 to 0.4 x reach, then a card per clump
+  of 8 blades (a quad facing the camera, its six blades cut in the prepass's pixel shader). Instances of 32 bytes
+  into three ranges (caps 160k / 256k / 96k), counted then written with one atomic per patch, the three DRAW
+  arguments capped (`CSClamp`) - drawn with `ExecuteIndirect`.
+- **Drawn as the world is:** `VSGrass` (the instance stream's slot, triangle strips) in the prepass - depth, a normal
+  mostly up as the ground's (so its rays and its AO are the ground's: a blade's own plane traced half its AO rays into
+  the ground), motion (`NggMotion`, the wind) - and in the main pass EQUAL to that depth (the cards need no test
+  there), `PSMain` with `ALPHA_TEST` and `GRASS`: the foliage path, its colour from the vertices, its wrap and
+  translucency faded out from 8 to 30 m so that far grass is lit as the ground under it is, and the fade is not seen.
+  A blade is never narrower than 1.3 pixels at its distance (thinner ones flicker and the field reads thin).
+- **Its look:** the ground's colour at the root (stored as its square root, 8 bits), darker at the root and brighter at
+  the top so the blade's mean is the ground's, a per-blade spread (some yellower, olive), tips dry by the type and
+  the mask, a seed head on some of a seed type's blades. **The wind** is the plants' (`gWind`, `gWindTime`, motion at
+  `gWindPrevTime`): a lean with the speed squared, gusts rolling across the field as two waves, a flutter.
+- **Shadows:** grass receives the sun (traced from its prepass pixel, the foliage map's leaves, or the cascades) and
+  casts nothing: no shadow map, not in the BVH.
+- **Quality tiers** (`QualityTier::grassReach`, `grassDensity`): low off, medium 30 m at x0.6 the types' blades per
+  m2, high 50 m at x0.4 (the budget, below). `NGG_GRASS=<metres>` (0 off) and `NGG_GRASS_DENSITY` win, for A/B;
+  `NGG_GRASS_TIMES=1` logs the grass's own GPU times (field + spawn, prepass, main pass) every 300 frames.
+- **Tests:** `grass-41` (`ngg-check --grass`): a made-up NGGF on stage 41 drawn (blades counted, the ground changed),
+  none without it, grass off drawing the stage without the chunk pixel for pixel, and each refusal rule broken in
+  turn, refused by the format library and by the renderer.
+- **Cost, measured** (2026-11-21, dev iGPU 780M, RBR's run on 41 replayed, `--step 0.0333`, 8,000 ticks, 1,618 frames,
+  `PHYS_DRIVE_OFF=taa,vsync`, fullscreen 1920x1080, quality high; Wallaby's `fr_cote_darbroz` with NGGF, `NGG_GRASS`
+  for the reach; the grass's own times from `NGG_GRASS_TIMES`, field + spawn + prepass + main pass):
+
+  | | GPU frame median (2 rounds) | grass's own, mean over the run | densest 300 frames | instances (densest) |
+  |---|---|---|---|---|
+  | off | 59.61 / 58.52 ms | - | - | - |
+  | high, 50 m, density x1 (first build) | 53.2 / 54.6 / 56.0 ms (other rounds; off 55.7 / 58.9) | ~1.4 ms | 2.6-2.7 ms | 40k |
+  | high, 50 m, x0.6 / x0.45 | 55.30 / 54.22 ms (one round each) | | 1.91 / 1.61 ms | 24k / 19k |
+  | **high, 50 m, x0.4** | 58.21 / 57.35 ms | ~0.9 ms | **1.61-1.69 ms** | 16k |
+  | **medium, 30 m, x0.6** | 56.64 / 57.80 ms | ~0.7 ms | **1.21-1.24 ms** | 11k |
+
+  The whole frame does not show it (the machine drifted 2-4 ms between rounds). The grass's own time stopped
+  following the density below x0.6: what is left in the densest stretch (tall patches on the verges) is the main
+  pass's shading of the grass pixels and the prepass's overdraw, not the blade count. **The high tier's densest
+  stretch is 0.1-0.2 ms over the 1.5 ms budget; medium is inside it everywhere.** Next levers if it matters: a
+  cheaper main-pass path for far grass (it is lit as the ground already), fewer tall-patch blades, or the field
+  scrolled by strips (it is ~0.08 ms now).
+- **Not done:** the field is drawn again whole every 4 m, not by strips; the editor has no grass window and no paint
+  (Wallaby's step 4, an upload call on the editor table); the look is the user's to judge in the game.
 
 ### 2.7 Load-time fallbacks
 

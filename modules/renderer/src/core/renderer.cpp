@@ -15,9 +15,9 @@ const QualityTier& Renderer::Tier(Quality q)
     // Costs on the development machine's integrated Radeon, lab forest view
     // (965k geometry pixels) - see design §1.5 for the measurement.
     static const QualityTier kTiers[3] = {
-        { "low",    false, 0, 0, 0.25f, 0.0f },   // RT sun shadows only - the VR baseline
-        { "medium", true,  1, 1, 0.50f, 30.0f },   // + RT AO, one ray (the default); XeGTAO medium (2 slices x 2 steps)
-        { "high",   true,  2, 2, 0.50f, 50.0f },   // + RT AO, two rays: less noise at rest; XeGTAO high (3 x 3)
+        { "low",    false, 0, 0, 0.25f, 0.0f, 0.0f },   // RT sun shadows only - the VR baseline
+        { "medium", true,  1, 1, 0.50f, 30.0f, 0.6f },   // + RT AO, one ray (the default); XeGTAO medium (2 slices x 2 steps)
+        { "high",   true,  2, 2, 0.50f, 50.0f, 0.4f },   // + RT AO, two rays: less noise at rest; XeGTAO high (3 x 3)
     };
     const int i = (int)q;
     return kTiers[(i < 0 || i > 2) ? 1 : i];
@@ -36,9 +36,11 @@ void Renderer::SetQuality(Quality q)
     float grass = t.grassReach;
     if (const char* e = std::getenv("NGG_GRASS")) grass = (float)atof(e);
     m_scene.SetGrassReach(grass);
-    if (const char* e = std::getenv("NGG_GRASS_DENSITY")) m_scene.SetGrassDensity((float)atof(e));
-    Log("renderer: quality %s (AO %s, %u ray(s), sharpen %.2f, grass to %.0f m)",
-        t.name, t.ao ? "on" : "off", t.ao ? t.aoRays : 0, t.sharpen, grass);
+    float density = t.grassDensity;
+    if (const char* e = std::getenv("NGG_GRASS_DENSITY")) density = (float)atof(e);
+    m_scene.SetGrassDensity(density);
+    Log("renderer: quality %s (AO %s, %u ray(s), sharpen %.2f, grass to %.0f m at density x%.2f)",
+        t.name, t.ao ? "on" : "off", t.ao ? t.aoRays : 0, t.sharpen, grass, density);
 }
 
 bool Renderer::Create(Device& dev, DXGI_FORMAT outputFormat, UINT width, UINT height,

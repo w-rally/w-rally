@@ -75,6 +75,7 @@ struct QualityTier
     int         gtaoQuality;  // the screen-space AO's (Gtao::SetQuality)
     float       sharpen;      // TAA post-sharpen
     float       grassReach;   // metres the grass is drawn to (Scene::SetGrassReach); 0 none
+    float       grassDensity; // a scale on the grass types' blades per m2 (the 1.5 ms budget on the dev iGPU)
 };
 
 class Renderer

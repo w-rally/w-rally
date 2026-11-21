@@ -5069,15 +5069,20 @@ void Scene::DrawGrass(ID3D12GraphicsCommandList* list, bool prepass, bool gbuf)
     ID3D12CommandSignature* sig = m_grass.CommandSignature();
     if (prepass)
     {
+        m_grass.Stamp(list, 2);
         list->SetPipelineState(m_psoGrassPre[0].Get());
         list->ExecuteIndirect(sig, 2, args, 0, nullptr, 0);
         list->SetPipelineState(m_psoGrassPre[1].Get());
         list->ExecuteIndirect(sig, 1, args, 32, nullptr, 0);
+        m_grass.Stamp(list, 3);
     }
     else
     {
+        m_grass.Stamp(list, 4);
         list->SetPipelineState(main);
         list->ExecuteIndirect(sig, 3, args, 0, nullptr, 0);
+        m_grass.Stamp(list, 5);
+        m_grass.ResolveStamps(list);
     }
     list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
 }
@@ -6312,6 +6317,9 @@ void Scene::RecordPass(ID3D12GraphicsCommandList* list, D3D12_CPU_DESCRIPTOR_HAN
 
     if ((m_recordCount % 300) == 0)
         Log("scene: %u objects drawn, %u culled", drawn, culled);
+    if ((m_recordCount % 300) == 0 && GrassOn())
+        Log("scene: grass to %.0f m - %u + %u blades, %u cards%s", m_grassReach, m_grass.Count(0), m_grass.Count(1),
+            m_grass.Count(2), m_grass.Dropped() ? " (some dropped: over the caps)" : "");
 
     // Stage the probe for readback while the command list is still open.
     if (m_probe && m_probeOn)

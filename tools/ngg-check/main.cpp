@@ -12,6 +12,11 @@
 //                                  a placeholder tree model (placeholder_tree.h) in place of every tree-card plant:
 //                                  written, read back the same, loaded by the renderer, which reports its models,
 //                                  placements and the replaced plants (the CTest checks the counts)
+//   ngg-check --grass <file.ngg> [--out <file.ngg>]
+//                                  a made-up NGGF (grass, NGG design §2.6) on the stage: written and read back the same;
+//                                  each refusal rule broken in turn, refused by the format library and the renderer
+//                                  (the stage loads, no grass); then drawn - blades counted, the ground changed against
+//                                  the stage without it, and grass off (quality low) drawing exactly that stage
 //   ngg-check --trees <file.ngg> --rt-lod 0|1|ray [--out <file.ngg>]
 //                                  the LOD the ray tracer takes (1 when not given); "ray": a ray-tracing-only shell
 //                                  as a fourth LOD. With "ray" it also renders frames at distances through every LOD
@@ -28,6 +33,8 @@
 #include <wrl/client.h>
 
 #include <cstdio>
+#include <functional>
+#include <algorithm>
 #include <cstring>
 #include <fstream>
 #include <iterator>
@@ -70,6 +77,7 @@ std::string Compare(const ngg::SceneData& a, const ngg::SceneData& b)
     if (a.textures.size() != b.textures.size()) return "the texture count";
     for (size_t i = 0; i < a.textures.size(); ++i)
         if (a.textures[i].name != b.textures[i].name || a.textures[i].dds != b.textures[i].dds) return "texture " + std::to_string(i);
+    if (!SameVec(a.grass, b.grass)) return "the grass (NGGF)";
     if (a.hasSpawn != b.hasSpawn || (a.hasSpawn && std::memcmp(&a.spawn, &b.spawn, sizeof a.spawn))) return "the spawn point";
     if (a.objectKeys != b.objectKeys) return "the object keys";
     if (!SameVec(a.weather, b.weather)) return "the weather presets";
@@ -918,6 +926,207 @@ std::string WindTrees(Gpu& gpu, const std::vector<uint8_t>& out, const std::vect
 
 } // namespace
 
+// --grass: a made-up NGGF on a real stage (until Wallaby's converted file is the test's input). One type; a 4x4 mask,
+// all grass, for every texture the terrain draws with; two neutral paint tiles far off; the stage's plant 0 replaced
+// (when it has a plant table). `layout` says where the records are, for the refusal cases to break them.
+struct GrassLayout {
+    size_t masks = 0, tiles = 0, plants = 0;   // offsets of the arrays in the payload
+    uint32_t maskCount = 0, plantCount = 0;
+};
+std::vector<uint8_t> MakeGrass(const ngg::SceneData& s, GrassLayout& lay)
+{
+    std::vector<uint32_t> textures;
+    for (const ngg::Object& o : s.objects) {
+        if (o.layerId != 0 || o.materialId >= s.materials.size()) continue;
+        const ngg::Material& m = s.materials[o.materialId];
+        if (m.flags & (ngg::kMaterialAlphaTest | ngg::kMaterialBlend | ngg::kMaterialFoliage)) continue;
+        for (uint32_t t : {m.baseColour, m.detail})
+            if (t != ngg::kNoTexture && std::find(textures.begin(), textures.end(), t) == textures.end()) textures.push_back(t);
+    }
+    const uint32_t plants = ngg::PlantCount(s.plants) ? 1u : 0u;
+    ngg::GrassChunkHeader h{};
+    h.version = ngg::kGrassVersion;
+    h.typeCount = 1, h.typeRecordSize = sizeof(ngg::GrassType);
+    h.maskCount = uint32_t(textures.size()), h.maskRecordSize = sizeof(ngg::GrassMask);
+    h.tileCount = 2, h.tileRecordSize = sizeof(ngg::GrassTile);
+    h.cellSize = 0.5f, h.tileCells = 64, h.plantCount = plants;
+    lay.masks = sizeof h + sizeof(ngg::GrassType);
+    lay.tiles = lay.masks + textures.size() * sizeof(ngg::GrassMask);
+    lay.plants = lay.tiles + 2 * sizeof(ngg::GrassTile);
+    lay.maskCount = h.maskCount, lay.plantCount = plants;
+    const size_t data = lay.plants + plants * 4;
+    std::vector<uint8_t> p(data);
+    std::memcpy(p.data(), &h, sizeof h);
+    ngg::GrassType t{};
+    std::strcpy(t.name, "meadow");
+    t.heightMin = 0.15f, t.heightMax = 0.35f, t.density = 360.0f, t.bladeWidth = 0.01f;
+    t.dryness = 0.15f, t.colourSpread = 0.15f, t.windResponse = 0.6f;
+    std::memcpy(p.data() + sizeof h, &t, sizeof t);
+    for (size_t i = 0; i < textures.size(); ++i) {
+        ngg::GrassMask m{};
+        m.texture = textures[i], m.type = 0, m.width = 4, m.height = 4;
+        m.dataOffset = uint32_t(p.size());
+        for (int k = 0; k < 16; ++k) p.push_back(255), p.push_back(40);   // all grass, a little dry
+        std::memcpy(p.data() + lay.masks + i * sizeof m, &m, sizeof m);
+    }
+    for (int i = 0; i < 2; ++i) {
+        ngg::GrassTile tile{};
+        tile.tileX = 100000 + i, tile.tileZ = 100000, tile.variants = 0xFFFFFFFFu;
+        tile.dataOffset = uint32_t(p.size());
+        for (int k = 0; k < 64 * 64; ++k) p.push_back(255), p.push_back(64), p.push_back(0), p.push_back(0);   // neutral
+        std::memcpy(p.data() + lay.tiles + i * sizeof tile, &tile, sizeof tile);
+    }
+    if (plants) std::memset(p.data() + lay.plants, 0, 4);   // plant 0
+    return p;
+}
+
+// Where a chunk's payload is in a written file (0 none).
+size_t FindChunk(const std::vector<uint8_t>& b, uint32_t fourcc, size_t& size)
+{
+    if (b.size() < sizeof(ngg::FileHeader)) return 0;
+    ngg::FileHeader fh;
+    std::memcpy(&fh, b.data(), sizeof fh);
+    size_t at = sizeof fh;
+    for (uint32_t i = 0; i < fh.chunkCount && at + sizeof(ngg::ChunkHeader) <= b.size(); ++i) {
+        ngg::ChunkHeader ch;
+        std::memcpy(&ch, b.data() + at, sizeof ch);
+        at += sizeof ch;
+        if (ch.fourcc == fourcc) return size = ch.byteSize, at;
+        at += ch.byteSize + (4 - ch.byteSize % 4) % 4;
+    }
+    return 0;
+}
+
+// The renderer's log lines that contain `what`, joined.
+std::string Lines(const std::string& log, const char* what)
+{
+    std::string out;
+    size_t at = 0;
+    while (at < log.size()) {
+        const size_t end = log.find('\n', at);
+        const std::string line = log.substr(at, end == std::string::npos ? std::string::npos : end - at);
+        if (line.find(what) != std::string::npos) out += line + "\n";
+        at = end == std::string::npos ? log.size() : end + 1;
+    }
+    return out;
+}
+
+std::string GrassCheck(Gpu& gpu, const std::vector<uint8_t>& bytes, ngg::SceneData s, const std::string& out)
+{
+    using namespace wrally::iface;
+    if (!s.grass.empty()) return "the stage already has NGGF";
+    GrassLayout lay;
+    s.grass = MakeGrass(s, lay);
+    std::printf("grass: a made-up NGGF - %u mask(s), 2 tiles, %u replaced plant(s), %zu bytes\n", lay.maskCount,
+                lay.plantCount, s.grass.size());
+    std::vector<uint8_t> with;
+    if (std::string e = RoundTrip(s, with); !e.empty()) return "with grass: " + e;
+    std::printf("grass: written, read back the same (%zu bytes)\n", with.size());
+    if (!out.empty()) std::ofstream(out, std::ios::binary).write(reinterpret_cast<const char*>(with.data()), std::streamsize(with.size()));
+
+    // Each rule broken: the format library refuses the file, and the renderer the chunk (the stage loads, no grass).
+    size_t gsize = 0;
+    const size_t g = FindChunk(with, ngg::ChunkGrass(), gsize);
+    if (!g) return "no NGGF in the written file";
+    auto put32 = [](std::vector<uint8_t>& b, size_t at, uint32_t v) { std::memcpy(b.data() + at, &v, 4); };
+    struct Broken { const char* rule; std::function<void(std::vector<uint8_t>&)> patch; };
+    const uint32_t texCount = uint32_t(s.textures.size()), plantCount = ngg::PlantCount(s.plants);
+    std::vector<Broken> cases = {
+        {"an unknown version", [&](auto& b) { put32(b, g + 0, 2); }},
+        {"a record size smaller than this reader's", [&](auto& b) { put32(b, g + 8, 60); }},
+        {"a mask's texels run past the chunk", [&](auto& b) { put32(b, g + lay.masks + 12, uint32_t(gsize)); }},
+        {"a tile's texels run past the chunk", [&](auto& b) { put32(b, g + lay.tiles + 12, uint32_t(gsize - 4)); }},
+        {"a mask names a texture past NGGT", [&](auto& b) { put32(b, g + lay.masks + 0, texCount); }},
+        {"a mask names a type past the types", [&](auto& b) { put32(b, g + lay.masks + 4, 1); }},
+        {"a mask's size is 0", [&](auto& b) { b[g + lay.masks + 8] = 0, b[g + lay.masks + 9] = 0; }},
+        {"cellSize <= 0 or tileCells 0", [&](auto& b) { put32(b, g + 28, 0); }},
+        {"cellSize <= 0 or tileCells 0", [&](auto& b) { put32(b, g + 32, 0); }},
+        {"two tiles at one position share a variant", [&](auto& b) { put32(b, g + lay.tiles + 16, 100000); }},
+    };
+    if (lay.plantCount) cases.push_back({"a replaced plant past NGGP", [&](auto& b) { put32(b, g + lay.plants, plantCount); }});
+    else std::printf("grass: the stage has no plant table - the replaced-plant rule not checked\n");
+    const std::filesystem::path dir = std::filesystem::temp_directory_path() / "ngg-check-grass";
+    std::filesystem::create_directories(dir);
+    for (const Broken& c : cases) {
+        std::vector<uint8_t> b = with;
+        c.patch(b);
+        const char* why = ngg::CheckGrassChunk(b.data() + g, gsize, texCount, plantCount);
+        if (!why || std::strcmp(why, c.rule)) return std::string("broken (") + c.rule + "): the rules say " + (why ? why : "nothing");
+        ngg::SceneData back;
+        const std::string e = ngg::Read(b.data(), b.size(), back);
+        if (e.find("NGGF") == std::string::npos) return std::string("broken (") + c.rule + "): the format library read it (" + e + ")";
+        if (gpu.error.empty()) {
+            WindSession w(gpu, dir.string());
+            if (std::string oe = w.Open(b); !oe.empty()) return std::string("broken (") + c.rule + "): " + oe;
+            if (gpu.log.find(std::string("NGGF refused (") + c.rule + ")") == std::string::npos)
+                return std::string("broken (") + c.rule + "): the renderer did not refuse it:\n" + Lines(gpu.log, "grass");
+            const float eye[3] = {0, 100, 0}, at[3] = {10, 100, 0};
+            for (int k = 0; k < 2; ++k)
+                if (std::string fe = w.Frame(eye, at, 1.0f, 0.0f, 0.0f, 0, nullptr); !fe.empty()) return fe;
+            if (gpu.renderer.TakeLog().find("first frame with grass") != std::string::npos)
+                return std::string("broken (") + c.rule + "): grass drawn from a refused chunk";
+        }
+        std::printf("grass: broken (%s) - refused by the format library and the renderer\n", c.rule);
+    }
+    if (!gpu.error.empty()) return "";
+
+    // From behind the start, low, along the road.
+    // (A file with no start: the middle vertex of the biggest terrain object, looking along +x.)
+    float startPos[3] = {}, startFacing[3] = {1.0f, 0.0f, 0.0f};
+    if (s.hasSpawn)
+        std::memcpy(startPos, s.spawn.position, sizeof startPos), std::memcpy(startFacing, s.spawn.facing, sizeof startFacing);
+    else {
+        const ngg::Object* big = nullptr;
+        for (const ngg::Object& o : s.objects)
+            if (o.layerId == 0 && o.indexCount && (!big || o.indexCount > big->indexCount)) big = &o;
+        if (!big) return "the stage has no terrain to look at";
+        std::memcpy(startPos, s.vertices[s.indices[big->firstIndex + big->indexCount / 2]].pos, sizeof startPos);
+    }
+    const float* sp = startPos;
+    const float* sf = startFacing;
+    float fx = sf[0], fz = sf[2];
+    const float fl = std::sqrt(fx * fx + fz * fz);
+    fx /= fl, fz /= fl;
+    const float eye[3] = {sp[0] - fx * 4.0f, sp[1] + 1.6f, sp[2] - fz * 4.0f};
+    const float at[3] = {sp[0] + fx * 16.0f, sp[1] + 0.2f, sp[2] + fz * 16.0f};
+    auto frame = [&](const std::vector<uint8_t>& file, int quality, Image& img, std::string& log) -> std::string {
+        WindSession w(gpu, dir.string());
+        if (std::string e = w.Open(file); !e.empty()) return e;
+        log = gpu.log;
+        RenderSettings set{};
+        set.vsync = 0, set.quality = quality, set.taa = 0, set.shadows = 1, set.autoExposure = 0, set.renderScale = 1;
+        set.rayTracing = 0;
+        gpu.renderer.ApplySettings(set);
+        for (int k = 0; k < 3; ++k)
+            if (std::string e = w.Frame(eye, at, 1.0f, 0.0f, 0.0f, 0, nullptr); !e.empty()) return e;
+        if (std::string e = w.Frame(eye, at, 1.0f, 0.0f, 0.0f, 0, &img); !e.empty()) return e;
+        log += gpu.renderer.TakeLog();
+        return "";
+    };
+    Image grass, none, off, noneLow;
+    std::string logGrass, logNone, logOff, logNoneLow;
+    if (std::string e = frame(with, 1, grass, logGrass); !e.empty()) return "with grass: " + e;
+    const std::string first = Lines(logGrass, "first frame with grass");
+    unsigned b0 = 0, b1 = 0, cards = 0;
+    if (first.empty() || std::sscanf(first.c_str() + first.find(" - ") + 3, "%u + %u blades, %u cards", &b0, &b1, &cards) != 3)
+        return "with grass: no grass drawn:\n" + Lines(logGrass, "grass");
+    std::printf("grass: drawn at quality medium - %u + %u blades, %u cards\n", b0, b1, cards);
+    if (b0 + b1 + cards < 1000) return "with grass: only " + std::to_string(b0 + b1 + cards) + " blades";
+    if (std::string e = frame(bytes, 1, none, logNone); !e.empty()) return "without grass: " + e;
+    if (logNone.find("NGGF") != std::string::npos || logNone.find("first frame with grass") != std::string::npos)
+        return "without grass: the renderer drew grass";
+    const size_t differ = Differ(grass, none, grass.h / 2);
+    std::printf("grass: the lower half of the frame - %zu of %d pixels differ with the grass\n", differ, grass.w * (grass.h - grass.h / 2));
+    if (differ < size_t(grass.w * (grass.h / 2)) / 10) return "the grass changed too little of the ground";
+    // Off (quality low): the stage exactly as without the chunk - its replaced plant's cards drawn again.
+    if (std::string e = frame(with, 0, off, logOff); !e.empty()) return "grass off: " + e;
+    if (std::string e = frame(bytes, 0, noneLow, logNoneLow); !e.empty()) return "without grass, low: " + e;
+    if (logOff.find("first frame with grass") != std::string::npos) return "grass off (quality low): grass drawn";
+    if (const size_t d = Differ(off, noneLow); d) return "grass off differs from the stage without it on " + std::to_string(d) + " pixel(s)";
+    std::printf("grass: off (quality low) - the frame is the stage's without NGGF, pixel for pixel\n");
+    return "";
+}
+
 int main(int argc, char** argv)
 {
     Gpu gpu;
@@ -940,6 +1149,15 @@ int main(int argc, char** argv)
             std::ofstream(out, std::ios::binary).write(reinterpret_cast<const char*>(imp.ngg.data()), std::streamsize(imp.ngg.size()));
             std::printf("written %s (%zu bytes)\n", out.c_str(), imp.ngg.size());
         }
+        std::printf("ngg-check: all good\n");
+        return 0;
+    }
+
+    if (const std::string in = Arg(argc, argv, "--grass"); !in.empty()) {
+        const std::vector<uint8_t> bytes = ReadFile(in);
+        ngg::SceneData s;
+        if (std::string e = ngg::Read(bytes.data(), bytes.size(), s); !e.empty()) return Fail(in + ": " + e);
+        if (std::string e = GrassCheck(gpu, bytes, s, Arg(argc, argv, "--out")); !e.empty()) return Fail("grass: " + e);
         std::printf("ngg-check: all good\n");
         return 0;
     }

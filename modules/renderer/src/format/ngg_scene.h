@@ -75,6 +75,8 @@ struct SceneData {
     std::vector<std::pair<uint32_t, std::string>> variantAliases;   // NGGA: (variant index, a name it answers to)
     ModelLibrary models;                     // NGGD; empty: none
     std::vector<Placement> placements;       // NGGE; empty: none
+    std::vector<uint8_t> grass;              // NGGF's payload as it is (empty: none); checked on read and write
+                                             // (ngg_format.h CheckGrassChunk)
 };
 
 // The scene as .ngg bytes. Returns "" or what is inconsistent (an index past the vertices, an object past the

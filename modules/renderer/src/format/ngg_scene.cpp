@@ -179,6 +179,10 @@ std::string Write(const SceneData& s, std::vector<uint8_t>& out)
         return "variant masks: " + std::to_string(s.variantMasks.size()) + " for " + std::to_string(s.objects.size()) + " objects";
     if (std::string e = CheckModels(s.models, s.textures.size()); !e.empty()) return e;
     if (!s.placements.empty() && s.models.empty()) return "placements without a model library";
+    if (!s.grass.empty())
+        if (const char* e = CheckGrassChunk(s.grass.data(), s.grass.size(), uint32_t(s.textures.size()),
+                                            s.plants.empty() ? 0u : PlantCount(s.plants)))
+            return std::string("the grass (NGGF): ") + e;
     if (std::string e = CheckPlacements(s.placements, s.models.models.size(), s.plants.empty() ? 0u : PlantCount(s.plants));
         !e.empty())
         return e;
@@ -189,7 +193,7 @@ std::string Write(const SceneData& s, std::vector<uint8_t>& out)
                             (s.tagNames.empty() ? 0 : 1) + (s.plants.empty() ? 0 : 1) +
                             (s.variants.empty() ? 0 : 1) + (s.variantMasks.empty() ? 0 : 1) +
                             (s.variantAliases.empty() ? 0 : 1) + (s.models.empty() ? 0 : 1) +
-                            (s.placements.empty() ? 0 : 1);
+                            (s.placements.empty() ? 0 : 1) + (s.grass.empty() ? 0 : 1);
     const FileHeader fh{kMagic, kFormatCurrent, chunks, 0};
     Put(o, &fh, sizeof fh);
 
@@ -297,6 +301,7 @@ std::string Write(const SceneData& s, std::vector<uint8_t>& out)
         PutVec(p, s.placements);
         Chunk(o, ChunkPlacements(), p);
     }
+    if (!s.grass.empty()) Chunk(o, ChunkGrass(), s.grass);
     out.swap(o);
     return "";
 }
@@ -464,6 +469,8 @@ std::string Read(const void* bytes, size_t n, SceneData& out)
             out.placements.resize(ph.count);
             for (uint32_t k = 0; k < ph.count; ++k)
                 std::memcpy(&out.placements[k], d + sizeof ph + size_t(k) * ph.recordSize, sizeof(Placement));
+        } else if (f == ChunkGrass()) {
+            out.grass.assign(d, d + size);   // checked below, once NGGT and NGGP are read
         }
         // (an unknown chunk is skipped: that is what keeps the format open)
     }
@@ -480,6 +487,10 @@ std::string Read(const void* bytes, size_t n, SceneData& out)
     if (std::string e = CheckPlacements(out.placements, out.models.models.size(), out.plants.empty() ? 0u : PlantCount(out.plants));
         !e.empty())
         return "NGGE: " + e;
+    if (!out.grass.empty())
+        if (const char* e = CheckGrassChunk(out.grass.data(), out.grass.size(), uint32_t(out.textures.size()),
+                                            out.plants.empty() ? 0u : PlantCount(out.plants)))
+            return std::string("NGGF: ") + e;
     return "";
 }
 

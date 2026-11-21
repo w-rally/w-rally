@@ -89,6 +89,11 @@ public:
     void ReadStats();
     uint32_t Count(uint32_t lod) const { return lod < kLods ? m_counts[lod] : 0; }
     uint32_t Dropped() const { return m_dropped; }
+    // GPU timestamps round the grass's own work (NGG_GRASS_TIMES=1 logs their means every 300 frames): slot 0-1 the
+    // field and the spawn, 2-3 its prepass draws, 4-5 its main pass draws. Resolve after the main pass's.
+    void Stamp(ID3D12GraphicsCommandList* list, uint32_t slot);
+    void ResolveStamps(ID3D12GraphicsCommandList* list);
+    static bool Timed();
 
 private:
     bool CreateGpu(ID3D12Device* dev);
@@ -128,7 +133,15 @@ private:
     int32_t  m_fieldX = 0, m_fieldZ = 0;       // the clipmap's centre, in texels of the world
     uint32_t m_counts[kLods] = {}, m_dropped = 0;
     bool     m_readbackPending = false;
+    Microsoft::WRL::ComPtr<ID3D12QueryHeap> m_timer;
+    Microsoft::WRL::ComPtr<ID3D12Resource>  m_timerReadback;
+    UINT64   m_timerHz = 0;
+    bool     m_timerPending = false;
+    uint32_t m_stamped = 0;                    // slots stamped this frame (bits)
+    double   m_msSum[3] = {}, m_bladeSum = 0.0;
+    uint32_t m_msFrames = 0;
     uint32_t m_frame = 0;
+    bool     m_loggedFirst = false;            // "the first frame with grass" logged (once a load)
 };
 
 } // namespace core

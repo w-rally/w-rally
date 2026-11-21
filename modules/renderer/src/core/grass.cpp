@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdlib>
 #include <cstring>
 
 using Microsoft::WRL::ComPtr;
@@ -116,6 +117,7 @@ void Grass::Reset()
     m_typeBuf.Reset();
     for (uint32_t l = 0; l < kLods; ++l) m_counts[l] = 0;
     m_dropped = 0;
+    m_loggedFirst = false;
 }
 
 bool Grass::Load(ID3D12Device* dev, const uint8_t* p, size_t n, uint32_t textureCount, uint32_t plantCount,
@@ -557,6 +559,7 @@ void Grass::Update(ID3D12GraphicsCommandList* list, const Terrain& terrain, cons
     dev->Release();
     if (!m_gpuOk) return;
 
+    Stamp(list, 0);
     const float tx = view[12], ty = view[13], tz = view[14];
     float eye[3];
     for (int j = 0; j < 3; ++j) eye[j] = -(tx * view[j * 4 + 0] + ty * view[j * 4 + 1] + tz * view[j * 4 + 2]);
@@ -649,10 +652,75 @@ void Grass::Update(ID3D12GraphicsCommandList* list, const Terrain& terrain, cons
     m_readbackPending = true;
     ++m_frame;
     m_spawned = true;
+    Stamp(list, 1);
+}
+
+bool Grass::Timed()
+{
+    static const bool on = [] { const char* e = std::getenv("NGG_GRASS_TIMES"); return e && *e && *e != '0'; }();
+    return on;
+}
+
+void Grass::Stamp(ID3D12GraphicsCommandList* list, uint32_t slot)
+{
+    if (!Timed() || slot >= 6) return;
+    if (!m_timer)
+    {
+        ID3D12Device* dev = nullptr;
+        list->GetDevice(IID_PPV_ARGS(&dev));
+        if (!dev) return;
+        D3D12_QUERY_HEAP_DESC qh = {};
+        qh.Type = D3D12_QUERY_HEAP_TYPE_TIMESTAMP;
+        qh.Count = 6;
+        D3D12_HEAP_PROPERTIES rh = {};
+        rh.Type = D3D12_HEAP_TYPE_READBACK;
+        const D3D12_RESOURCE_DESC d = BufferDesc(6 * sizeof(UINT64));
+        ComPtr<ID3D12CommandQueue> q;
+        D3D12_COMMAND_QUEUE_DESC qd = {};
+        qd.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
+        if (FAILED(dev->CreateQueryHeap(&qh, IID_PPV_ARGS(&m_timer))) ||
+            FAILED(dev->CreateCommittedResource(&rh, D3D12_HEAP_FLAG_NONE, &d, D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
+                                                IID_PPV_ARGS(&m_timerReadback))) ||
+            FAILED(dev->CreateCommandQueue(&qd, IID_PPV_ARGS(&q))) || FAILED(q->GetTimestampFrequency(&m_timerHz)))
+            m_timer.Reset();
+        dev->Release();
+        if (!m_timer) return;
+    }
+    list->EndQuery(m_timer.Get(), D3D12_QUERY_TYPE_TIMESTAMP, slot);
+    m_stamped |= 1u << slot;
+}
+
+void Grass::ResolveStamps(ID3D12GraphicsCommandList* list)
+{
+    if (!m_timer || m_stamped != 0x3Fu) { m_stamped = 0; return; }
+    list->ResolveQueryData(m_timer.Get(), D3D12_QUERY_TYPE_TIMESTAMP, 0, 6, m_timerReadback.Get(), 0);
+    m_timerPending = true;
+    m_stamped = 0;
 }
 
 void Grass::ReadStats()
 {
+    if (m_timerPending && m_timerReadback && m_timerHz)
+    {
+        UINT64* t = nullptr;
+        D3D12_RANGE r = { 0, 6 * sizeof(UINT64) };
+        if (SUCCEEDED(m_timerReadback->Map(0, &r, reinterpret_cast<void**>(&t))))
+        {
+            for (int k = 0; k < 3; ++k)
+                if (t[2 * k + 1] >= t[2 * k]) m_msSum[k] += double(t[2 * k + 1] - t[2 * k]) * 1000.0 / double(m_timerHz);
+            m_bladeSum += double(m_counts[0]) + m_counts[1] + m_counts[2];
+            if (++m_msFrames == 300)
+            {
+                Log("grass: field + spawn %.3f ms, prepass %.3f ms, main pass %.3f ms (means of 300 frames), %.0f instances",
+                    m_msSum[0] / 300.0, m_msSum[1] / 300.0, m_msSum[2] / 300.0, m_bladeSum / 300.0);
+                m_msSum[0] = m_msSum[1] = m_msSum[2] = m_bladeSum = 0.0;
+                m_msFrames = 0;
+            }
+            D3D12_RANGE none = { 0, 0 };
+            m_timerReadback->Unmap(0, &none);
+        }
+        m_timerPending = false;
+    }
     if (!m_readbackPending || !m_argsReadback) return;
     uint32_t* a = nullptr;
     D3D12_RANGE r = { 0, kArgsBytes };
@@ -663,6 +731,11 @@ void Grass::ReadStats()
         {
             m_counts[l] = (std::min)(a[12 + l], kCap[l]);
             m_dropped += a[12 + l] - m_counts[l];
+        }
+        if (!m_loggedFirst && m_counts[0] + m_counts[1] + m_counts[2] > 0)
+        {
+            m_loggedFirst = true;
+            Log("grass: the first frame with grass - %u + %u blades, %u cards", m_counts[0], m_counts[1], m_counts[2]);
         }
         D3D12_RANGE none = { 0, 0 };
         m_argsReadback->Unmap(0, &none);
