@@ -30,6 +30,7 @@
 #include "sky.h"                    // SkyParams, shared with the sky pass
 #include "shadow.h"
 #include "env.h"
+#include "grass.h"
 #include "probe.h"
 #include "aerial.h"
 #include "lights.h"
@@ -554,6 +555,22 @@ public:
     // How far the instanced models keep their detailed LODs: every LOD distance (and the crossfade, and how far a
     // model is drawn at all) times `scale` - the client's vegetation detail. NGG_MODEL_LOD_SCALE, when set, wins.
     void SetModelLodScale(float scale);
+
+    // GRASS (grass.h; NGG design §2.6 "Grass"): drawn round the camera to `metres` where the file has an NGGF chunk
+    // (the quality tier: low 0 - off, medium 30, high 50); 0 off, and then the cards the chunk replaces are drawn.
+    // `density` scales the types' blades per m2 (NGG_GRASS_DENSITY).
+    void  SetGrassReach(float metres);
+    float GrassReach() const { return m_grassReach; }
+    void  SetGrassDensity(float scale) { m_grassDensity = scale > 0.0f ? scale : 0.0f; }
+    // Grass is drawn this frame: the file has it, it is on, and its pipelines were made.
+    bool  GrassOn() const;
+    bool  GrassLoaded() const { return m_grass.Loaded(); }
+    // The field and the spawn for this camera: before the prepass (Renderer::RecordFrame).
+    void  RecordGrass(ID3D12GraphicsCommandList* list, const float* view, const float* proj);
+    // Last frame's blades per LOD (7 triangles, 3, cards) and how many the caps dropped (after the GPU wait).
+    uint32_t GrassBlades(uint32_t lod) const { return m_grass.Count(lod); }
+    uint32_t GrassDropped() const { return m_grass.Dropped(); }
+    uint32_t GrassReplacedTriangles() const { return m_grassReplacedTris; }
     bool ShadowsOn() const { return m_shadowsOn; }
 
     // --- editor: live material editing (design §2.3) ------------------------
@@ -882,6 +899,7 @@ private:
     std::vector<int32_t> m_objectKeys;   // NGGK, parallel to the file's objects
     std::string              m_variantRequest;   // SetVariant: applies at the next load
     std::string              m_variant;          // what the last load drew
+    uint32_t                 m_variantIndex = 0;  // its index in NGGR (0 without one): the grass's tiles by it
     std::vector<std::string> m_variantNames;     // NGGR, the main one first
     float                    m_variantOffset[3] = {0, 0, 0};   // the drawn variant's world, relative to the file's
 
@@ -903,6 +921,23 @@ private:
     bool m_srvStale = false;         // a rebuild was put off by the batch
 
     std::vector<DrawItem>                                     m_objects;
+
+    // --- grass (SetGrassReach) ---
+    Grass                    m_grass;
+    std::vector<Grass::TerrainDraw> m_grassTerrain;   // what its field is drawn from
+    float                    m_grassReach = 0.0f, m_grassDensity = 1.0f;
+    // The static indices with the cards the grass replaces made degenerate, drawn while the grass is (StaticIbv), and
+    // per triangle whether it is one of them (BuildRtMesh leaves them out then).
+    Microsoft::WRL::ComPtr<ID3D12Resource> m_ibGrass;
+    D3D12_INDEX_BUFFER_VIEW  m_ibvGrass = {};
+    std::vector<uint8_t>     m_grassDropTri;
+    uint32_t                 m_grassReplacedTris = 0;
+    bool                     m_grassCardsOff = false;     // the grass is drawn and its cards are not
+    // The blades' pipelines (VSGrass): the prepass [blades, cards], the main pass [forward, deferred surface].
+    Microsoft::WRL::ComPtr<ID3D12PipelineState> m_psoGrassPre[2], m_psoGrassMain[2];
+    void UpdateGrassCards();
+    void DrawGrass(ID3D12GraphicsCommandList* list, bool prepass, bool gbuf);
+    const D3D12_INDEX_BUFFER_VIEW& StaticIbv() const { return m_grassCardsOff && m_ibGrass ? m_ibvGrass : m_ibv; }
     std::vector<MaterialSlot>                                 m_materials;
     std::vector<Microsoft::WRL::ComPtr<ID3D12Resource>>       m_textures;
     // Per texture index: true if some material binds it to a normal or ORM

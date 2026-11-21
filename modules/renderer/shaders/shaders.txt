@@ -23,6 +23,17 @@ scene.hlsl  PSDeferredLights  ps_6_0  -HV 2018
 # the reflection focus's reflection rays (RayQuery)
 scene.hlsl  PSMain            ps_6_5  -HV 2018 -DNGG_REFL_RAY=1
 scene.hlsl  PSMain            ps_6_5  -HV 2018 -DGBUF=1 -DNGG_REFL_RAY=1
+# the grass's blades (core/grass.h): their vertex shader, the prepass (blades, cards), the main pass (forward, deferred)
+scene.hlsl  VSGrass           vs_6_0  -HV 2018
+scene.hlsl  PSPrepass         ps_6_0  -HV 2018 -DGRASS=1
+scene.hlsl  PSPrepass         ps_6_0  -HV 2018 -DGRASS=1 -DGRASS_CARD=1
+scene.hlsl  PSMain            ps_6_0  -HV 2018 -DALPHA_TEST=1 -DGRASS=1
+scene.hlsl  PSMain            ps_6_0  -HV 2018 -DALPHA_TEST=1 -DGBUF=1 -DGRASS=1
+# ... and its field round the camera and the spawn (core/grass.cpp)
+grass.hlsl  VSField           vs_6_0  -HV 2018
+grass.hlsl  PSField           ps_6_0  -HV 2018
+grass.hlsl  CSSpawn           cs_6_0  -HV 2018
+grass.hlsl  CSClamp           cs_6_0  -HV 2018
 
 # --- the editor's selection, labels and overlay (scene.cpp)
 select.hlsl  VSSel      vs_5_1

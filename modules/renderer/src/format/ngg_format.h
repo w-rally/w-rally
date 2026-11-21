@@ -17,6 +17,7 @@
 #pragma once
 
 #include <stdint.h>
+#include <stddef.h>
 
 namespace ngg {
 
@@ -650,5 +651,127 @@ static_assert(sizeof(Placement) == 40,            "Placement layout - keep Walla
 
 inline uint32_t ChunkModels()      { return FourCC('N','G','G','D'); }
 inline uint32_t ChunkPlacements()  { return FourCC('N','G','G','E'); }
+
+// ---------------------------------------------------------------------------
+// 'NGGF' - GRASS (NGG design §2.6 "Grass"; the contract is Wallaby's docs/vegetation-plan.md, "The NGGF chunk,
+// version 1", which Wallaby's GrassField writes to - change neither alone). OPTIONAL: a file without it draws no
+// grass. The producer decides WHERE grass grows (a mask per ground texture, a paint layer of tiles); the renderer
+// decides how to draw it, round the camera, with nothing stored per blade.
+//
+// Layout: GrassChunkHeader, then GrassType[typeCount], GrassMask[maskCount], GrassTile[tileCount] (each of its
+// recordSize bytes; a newer, longer record keeps the prefix a reader knows), then uint32 replacedPlant[plantCount]
+// (NGGP plants whose cards the grass replaces: not drawn while grass is drawn, drawn when it is off), then the texel
+// data the records point at. Offsets count from the start of the payload and are 4-aligned.
+//
+// The density at a point of the ground: type.density * lerp(maskBase(uv0), maskDetail(uv1), w) * paint.R, w the main
+// pass's blend weight (t1.a * vertex alpha; 0 single-stage). A texture with no mask grows nothing. The type is the
+// dominant layer's mask's (w < 0.5: the base) unless the paint's B overrides it; the height is the type's range times
+// paint.G / 64. Where no tile covers a point the paint is neutral (R 1, G 64, B 0). A variant's offset moves its tiles.
+// ---------------------------------------------------------------------------
+#pragma pack(push, 4)
+struct GrassChunkHeader
+{
+    uint32_t version;                     // kGrassVersion
+    uint32_t typeCount, typeRecordSize;   // sizeof(GrassType) = 64
+    uint32_t maskCount, maskRecordSize;   // sizeof(GrassMask) = 16
+    uint32_t tileCount, tileRecordSize;   // sizeof(GrassTile) = 16
+    float    cellSize;                    // metres per paint texel (Wallaby writes 0.5)
+    uint32_t tileCells;                   // texels along a tile's side (Wallaby writes 64: a tile is 32 m)
+    uint32_t plantCount;                  // entries in replacedPlant
+    uint32_t reserved[2];                 // 0
+};
+struct GrassType                          // what grows; the renderer decides how to draw it
+{
+    char     name[32];                    // "meadow", "tall", ... UTF-8, NUL-terminated
+    float    heightMin, heightMax;        // blade height, metres, before the paint's height scale
+    float    density;                     // blades per m2 where the density is 1
+    float    bladeWidth;                  // metres, at the base
+    float    dryness;                     // 0..1: how far the tips go to straw, on top of the mask's dryness
+    float    colourSpread;                // 0..1: per-blade variation around the ground colour
+    float    windResponse;                // 0..1: how much the wind bends it (1 = as a plant's main bend)
+    uint32_t flags;                       // kGrassSeedHeads
+};
+struct GrassMask                          // where a ground texture grows grass, texel for texel
+{
+    uint32_t texture;                     // into NGGT: the ground texture it describes
+    uint32_t type;                        // into the GrassTypes
+    uint16_t width, height;               // the mask's own size; sampled with the texture's own UV, wrapping
+    uint32_t dataOffset;                  // width*height RG8 texels, rows top first: R density, G dryness
+};
+struct GrassTile                          // the paint layer, one tile of tileCells^2 texels
+{
+    int32_t  tileX, tileZ;                // covers x in [tileX, tileX+1) * tileCells*cellSize, z likewise
+    uint32_t variants;                    // bit v: applies in stage variant v (NGGR); 0xFFFFFFFF in every one
+    uint32_t dataOffset;                  // tileCells^2 RGBA8, i along +x, rows along +z: R density scale,
+                                          // G height scale x64, B type override (0 the mask's, n type n-1), A 0
+};
+#pragma pack(pop)
+
+constexpr uint32_t kGrassVersion = 1;
+constexpr uint32_t kGrassSeedHeads = 1;
+
+static_assert(sizeof(GrassChunkHeader) == 48, "GrassChunkHeader layout - keep Wallaby's GrassField in step");
+static_assert(sizeof(GrassType) == 64,        "GrassType layout - keep Wallaby's GrassField in step");
+static_assert(sizeof(GrassMask) == 16,        "GrassMask layout - keep Wallaby's GrassField in step");
+static_assert(sizeof(GrassTile) == 16,        "GrassTile layout - keep Wallaby's GrassField in step");
+
+inline uint32_t ChunkGrass()       { return FourCC('N','G','G','F'); }
+
+// The reader's rules (the contract's "a reader refuses the chunk"): null if the chunk holds together, else which rule
+// it breaks. `textureCount` is NGGT's count, `plantCount` NGGP's (0 without a plant table). A refused chunk draws no
+// grass and the replaced plants' cards stay. Shared by the renderer's loader and the format library, so they agree.
+inline const char* CheckGrassChunk(const uint8_t* p, size_t n, uint32_t textureCount, uint32_t plantCount)
+{
+    if (!p || n < sizeof(GrassChunkHeader)) return "shorter than its header";
+    auto rd = [&](uint64_t off, void* dst, size_t bytes) {
+        for (size_t i = 0; i < bytes; ++i) static_cast<uint8_t*>(dst)[i] = p[off + i];
+    };
+    GrassChunkHeader h;
+    rd(0, &h, sizeof h);
+    if (h.version != kGrassVersion) return "an unknown version";
+    if (h.typeRecordSize < sizeof(GrassType) || h.maskRecordSize < sizeof(GrassMask) ||
+        h.tileRecordSize < sizeof(GrassTile))
+        return "a record size smaller than this reader's";
+    if (!(h.cellSize > 0.0f) || h.tileCells == 0) return "cellSize <= 0 or tileCells 0";
+    const uint64_t masks = sizeof(GrassChunkHeader) + (uint64_t)h.typeCount * h.typeRecordSize;
+    const uint64_t tiles = masks + (uint64_t)h.maskCount * h.maskRecordSize;
+    const uint64_t plants = tiles + (uint64_t)h.tileCount * h.tileRecordSize;
+    const uint64_t recordsEnd = plants + (uint64_t)h.plantCount * 4u;
+    if (recordsEnd > n) return "its records run past the chunk";
+    // A texel run: 4-aligned, in the data after the records, inside the chunk.
+    auto runOk = [&](uint32_t off, uint64_t bytes) {
+        return (off & 3u) == 0 && off >= recordsEnd && (uint64_t)off + bytes <= n;
+    };
+    for (uint32_t i = 0; i < h.maskCount; ++i)
+    {
+        GrassMask m;
+        rd(masks + (uint64_t)i * h.maskRecordSize, &m, sizeof m);
+        if (m.texture >= textureCount) return "a mask names a texture past NGGT";
+        if (m.type >= h.typeCount) return "a mask names a type past the types";
+        if (m.width == 0 || m.height == 0) return "a mask's size is 0";
+        if (!runOk(m.dataOffset, (uint64_t)m.width * m.height * 2u)) return "a mask's texels run past the chunk";
+    }
+    const uint64_t tileBytes = (uint64_t)h.tileCells * h.tileCells * 4u;
+    for (uint32_t i = 0; i < h.tileCount; ++i)
+    {
+        GrassTile t;
+        rd(tiles + (uint64_t)i * h.tileRecordSize, &t, sizeof t);
+        if (!runOk(t.dataOffset, tileBytes)) return "a tile's texels run past the chunk";
+        for (uint32_t j = 0; j < i; ++j)   // (hundreds of tiles: quadratic is fine)
+        {
+            GrassTile u;
+            rd(tiles + (uint64_t)j * h.tileRecordSize, &u, sizeof u);
+            if (u.tileX == t.tileX && u.tileZ == t.tileZ && (u.variants & t.variants))
+                return "two tiles at one position share a variant";
+        }
+    }
+    for (uint32_t i = 0; i < h.plantCount; ++i)
+    {
+        uint32_t pl;
+        rd(plants + (uint64_t)i * 4u, &pl, 4);
+        if (pl >= plantCount) return "a replaced plant past NGGP";
+    }
+    return nullptr;
+}
 
 } // namespace ngg

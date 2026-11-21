@@ -615,6 +615,7 @@ void Scene::DescribeRt(std::vector<uint64_t>& meshes, std::vector<RtInstanceDesc
     uint64_t h = 1469598103934665603ull;
     auto mix = [&](uint64_t v) { h ^= v; h *= 1099511628211ull; };
     mix(m_rtGeneration);
+    mix(m_grassCardsOff ? 0x67726173ull : 0ull);   // the cards the grass replaces left out (BuildRtMesh)
     bool worldHasGeometry = false;
     for (size_t i = 0; i < m_objects.size(); ++i)
     {
@@ -744,6 +745,8 @@ bool Scene::BuildRtMesh(uint64_t key, RtMeshData& out) const
             const uint32_t* tri = src + k;
             // A replaced plant's card (degenerate: LoadFromMemory) is not in the ray-traced scene either.
             if (tri[0] == tri[1] && tri[1] == tri[2]) continue;
+            // ... nor, while the grass is drawn, a card it replaces.
+            if (m_grassCardsOff && t0 + k / 3 < m_grassDropTri.size() && m_grassDropTri[t0 + k / 3]) continue;
             dst.insert(dst.end(), tri, tri + 3);
             if (alphaTested)
             {
@@ -1705,7 +1708,7 @@ void Scene::RenderShadows(ID3D12GraphicsCommandList* list,
         if (m_rayQuery && m_reflTlas) list->SetGraphicsRootShaderResourceView(13, m_reflTlas);
         list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
         list->IASetVertexBuffers(0, 1, &m_vbv);
-        list->IASetIndexBuffer(&m_ibv);
+        list->IASetIndexBuffer(&StaticIbv());
         EnsureInstanceStream(dev);
         list->IASetVertexBuffers(1, 1, &m_instIdentity);   // the instance stream's identity (VSMain's INST0..3)
 
@@ -1756,7 +1759,7 @@ void Scene::RenderShadows(ID3D12GraphicsCommandList* list,
             // A dynamically added prop has to cast too; leaving it out gives a
             // solid object with no shadow, which reads as a lighting bug.
             BindGeometry(list, o.meshId != 0, geomState,
-                         o.meshId ? m_dynVbv : m_vbv, o.meshId ? m_dynIbv : m_ibv);
+                         o.meshId ? m_dynVbv : m_vbv, o.meshId ? m_dynIbv : StaticIbv());
             list->DrawIndexedInstanced(o.indexCount, 1, o.firstIndex, o.baseVertex, 0);
         }
         // The models this cascade sees: their instances, drawn instanced (no crossfade - one LOD each).
@@ -2055,7 +2058,7 @@ void Scene::RenderLocalShadows(ID3D12GraphicsCommandList* list, float aoShare)
         if (m_rayQuery && m_reflTlas) list->SetGraphicsRootShaderResourceView(13, m_reflTlas);
         list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
         list->IASetVertexBuffers(0, 1, &m_vbv);
-        list->IASetIndexBuffer(&m_ibv);
+        list->IASetIndexBuffer(&StaticIbv());
         EnsureInstanceStream(dev);
         list->IASetVertexBuffers(1, 1, &m_instIdentity);   // (the models cast no lamp's shadow yet)
         if (m_srvHeap)
@@ -2095,7 +2098,7 @@ void Scene::RenderLocalShadows(ID3D12GraphicsCommandList* list, float aoShare)
             const uint32_t moving = o.dynamic ? 1u : 0u;
             list->SetGraphicsRoot32BitConstants(4, 1, &moving, 2);
             BindGeometry(list, o.meshId != 0, geomState,
-                         o.meshId ? m_dynVbv : m_vbv, o.meshId ? m_dynIbv : m_ibv);
+                         o.meshId ? m_dynVbv : m_vbv, o.meshId ? m_dynIbv : StaticIbv());
             list->DrawIndexedInstanced(o.indexCount, 1, o.firstIndex, o.baseVertex, 0);
         }
         m_localShadowCB[c] = cbRes;   // must outlive GPU execution
@@ -2386,6 +2389,13 @@ void Scene::ResetScene()
     m_anchorToCamera = false;
     m_legacyImport = false;
     m_staticIndices.clear();
+    m_grass.Reset();
+    m_grassTerrain.clear();
+    m_ibGrass.Reset();
+    m_ibvGrass = {};
+    m_grassDropTri.clear();
+    m_grassReplacedTris = 0;
+    m_grassCardsOff = false;
     ++m_rtGeneration;              // every mesh key from the previous stage is dead
 }
 
@@ -2409,6 +2419,7 @@ void Scene::ApplyVariant(const uint8_t* variants, size_t variantBytes, const uin
                          const uint8_t* aliases, size_t aliasBytes)
 {
     m_variantOffset[0] = m_variantOffset[1] = m_variantOffset[2] = 0.0f;
+    m_variantIndex = 0;
     if (!variants) return;
     VariantChunkHeader h = {};
     if (variantBytes < sizeof(h)) { Log("scene: NGGR truncated - every object drawn"); return; }
@@ -2454,6 +2465,7 @@ void Scene::ApplyVariant(const uint8_t* variants, size_t variantBytes, const uin
     const bool found = want.empty() || chosen >= 0;
     if (chosen < 0) chosen = 0;
     m_variant = m_variantNames[chosen];
+    m_variantIndex = (uint32_t)chosen;
     {
         VariantRecord r = {};
         memcpy(&r, variants + sizeof(h) + (size_t)chosen * h.recordSize, (std::min)((size_t)h.recordSize, sizeof(r)));
@@ -2538,6 +2550,7 @@ bool Scene::LoadFromMemory(ID3D12Device* dev, ID3D12CommandQueue* queue,
     const uint8_t* aliases = nullptr;  size_t aliasBytes = 0;
     const uint8_t* modelLib = nullptr; size_t modelLibBytes = 0;
     const uint8_t* placed = nullptr;   size_t placedBytes = 0;
+    const uint8_t* grass = nullptr;    size_t grassBytes = 0;
 
     size_t off = sizeof(FileHeader);
     for (uint32_t i = 0; i < fh->chunkCount; ++i)
@@ -2578,6 +2591,8 @@ bool Scene::LoadFromMemory(ID3D12Device* dev, ID3D12CommandQueue* queue,
         { modelLib = payload; modelLibBytes = ch->byteSize; }
         else if (ch->fourcc == ChunkPlacements())
         { placed = payload; placedBytes = ch->byteSize; }
+        else if (ch->fourcc == ChunkGrass())
+        { grass = payload; grassBytes = ch->byteSize; }
         // Unknown chunks are skipped on purpose - that is what makes the format
         // forward-compatible.
 
@@ -2846,6 +2861,67 @@ bool Scene::LoadFromMemory(ID3D12Device* dev, ID3D12CommandQueue* queue,
     m_ibv.BufferLocation = m_ib->GetGPUVirtualAddress();
     m_ibv.SizeInBytes = (UINT)idxBytes;
     m_ibv.Format = DXGI_FORMAT_R32_UINT;
+
+    // GRASS (NGGF, grass.h): checked whole (a refusal is logged: no grass, its cards drawn), then the cards it replaces
+    // - a second index buffer with them degenerate, drawn while the grass is - and the terrain its field is drawn from.
+    if (grass)
+    {
+        uint32_t texCount = 0;
+        if (texs && texBytes >= 4) memcpy(&texCount, texs, 4);
+        const uint32_t plantCount = plantsFromFile ? (uint32_t)m_plants.size() : 0u;
+        if (m_grass.Load(dev, grass, grassBytes, texCount, plantCount, m_variantIndex, m_variantOffset))
+        {
+            const std::vector<uint32_t>& gone = m_grass.ReplacedPlants();
+            if (!gone.empty())
+            {
+                std::vector<uint8_t> drop(m_plants.size(), 0);
+                for (uint32_t pl : gone)
+                    if (pl < drop.size()) drop[pl] = 1;
+                std::vector<uint32_t> gi(m_staticIndices);
+                m_grassDropTri.assign(m_staticIndices.size() / 3, 0);
+                for (size_t t = 0; t < m_triPlant.size() && t < m_grassDropTri.size(); ++t)
+                {
+                    const uint32_t pl = m_triPlant[t];
+                    if (pl >= drop.size() || !drop[pl]) continue;
+                    gi[3 * t + 1] = gi[3 * t + 2] = gi[3 * t];
+                    m_grassDropTri[t] = 1;
+                    ++m_grassReplacedTris;
+                }
+                m_ibGrass = MakeUploadBuffer(dev, gi.data(), gi.size() * 4);
+                if (m_ibGrass)
+                {
+                    m_ibvGrass.BufferLocation = m_ibGrass->GetGPUVirtualAddress();
+                    m_ibvGrass.SizeInBytes = (UINT)(gi.size() * 4);
+                    m_ibvGrass.Format = DXGI_FORMAT_R32_UINT;
+                }
+                Log("scene: the grass replaces %zu plant(s): %u card triangle(s), drawn only while the grass is off",
+                    gone.size(), m_grassReplacedTris);
+            }
+            size_t growing = 0;
+            for (const DrawItem& o : m_objects)
+            {
+                if (o.layerId != 0 || o.removed || o.meshId != 0 || o.materialId >= m_materials.size()) continue;
+                const MaterialSlot& m = m_materials[o.materialId];
+                if (m.flags & (kMaterialAlphaTest | kMaterialBlend)) continue;
+                Grass::TerrainDraw d;
+                d.firstIndex = o.firstIndex;
+                d.indexCount = o.indexCount;
+                d.material = o.materialId;
+                d.flags = (o.matFlags | m.flags) & kDrawSingleStage;
+                d.baseMask = m.tex[0] != kNoTexture ? m_grass.MaskOf(m.tex[0]) : 0xFFFFFFFFu;
+                d.detailMask = (d.flags & kDrawSingleStage) || m.tex[1] == kNoTexture ? 0xFFFFFFFFu : m_grass.MaskOf(m.tex[1]);
+                for (int k = 0; k < 3; ++k)
+                {
+                    d.factor[k] = m.baseColourFactor[k];
+                    d.bmin[k] = o.bmin[k];
+                    d.bmax[k] = o.bmax[k];
+                }
+                if (d.baseMask != 0xFFFFFFFFu || d.detailMask != 0xFFFFFFFFu) ++growing;
+                m_grassTerrain.push_back(d);
+            }
+            Log("scene: grass grows on %zu of %zu terrain object(s)", growing, m_grassTerrain.size());
+        }
+    }
 
     m_indexCount = sh->indexCount;
     m_anchorToCamera = (sh->flags & kSceneFlagAnchorToCamera) != 0;
@@ -3221,7 +3297,7 @@ bool Scene::CreatePipelines(ID3D12Device* dev, DXGI_FORMAT rtvFormat, float mipB
     // the reflection focus's, with its reflection rays (shader model 6.5). The defines in this order: shaders.txt
     // lists the variants by them.
     auto compile = [&](const char* entry, bool vertex, Variant v, bool gbuf = false,
-                       bool refl = false) -> ComPtr<ID3DBlob> {
+                       bool refl = false, int grass = 0) -> ComPtr<ID3DBlob> {
         // -HV 2018 (DXC): the language FXC speaks (2021 changed what && || ?: do on vectors).
         std::vector<std::string> args;
         if (dxil) args = { "-HV", "2018" };
@@ -3229,6 +3305,8 @@ bool Scene::CreatePipelines(ID3D12Device* dev, DXGI_FORMAT rtvFormat, float mipB
         if (v == kBlend) args.push_back("-DBLEND=1");
         if (gbuf) args.push_back("-DGBUF=1");
         if (refl) args.push_back("-DNGG_REFL_RAY=1");
+        if (grass) args.push_back("-DGRASS=1");          // a grass blade's (VSGrass)
+        if (grass > 1) args.push_back("-DGRASS_CARD=1"); // ... far, a card standing for a clump
         return LoadShader("scene.hlsl", entry,
                           dxil ? (vertex ? "vs_6_0" : refl ? "ps_6_5" : "ps_6_0") : (vertex ? "vs_5_1" : "ps_5_1"), args);
     };
@@ -3601,6 +3679,57 @@ bool Scene::CreatePipelines(ID3D12Device* dev, DXGI_FORMAT rtvFormat, float mipB
     }
 
     // All of them at once (PipelineBatch), then what their success decides.
+    // THE GRASS's blades (grass.h, VSGrass): their instances on slot 1, two-sided, as triangle strips. The prepass
+    // writes them as it writes the rest ([0] the blades, [1] the cards, which keep their blades' pixels); the main pass
+    // shades exactly what it left: EQUAL to its depth, not written - so the cards need no test there. DXC only (the
+    // runtime FXC fallback has no grass).
+    for (auto& p : m_psoGrassPre) p.Reset();
+    for (auto& p : m_psoGrassMain) p.Reset();
+    ComPtr<ID3DBlob> vsGrass, psGrassPre, psGrassCard, psGrass, psGrassG;   // (out here: the batch reads their bytes)
+    if (dxil)
+    {
+        vsGrass = compile("VSGrass", true, kOpaque);
+        psGrassPre = compile("PSPrepass", false, kOpaque, false, false, 1);
+        psGrassCard = compile("PSPrepass", false, kOpaque, false, false, 2);
+        psGrass = compile("PSMain", false, kAlphaTest, false, false, 1);
+        psGrassG = m_deferredReady ? compile("PSMain", false, kAlphaTest, true, false, 1) : nullptr;
+        static const D3D12_INPUT_ELEMENT_DESC grassLayout[] = {
+            { "GRASS", 0, DXGI_FORMAT_R32G32B32A32_FLOAT, 1,  0, D3D12_INPUT_CLASSIFICATION_PER_INSTANCE_DATA, 1 },
+            { "GRASS", 1, DXGI_FORMAT_R32G32B32A32_UINT,  1, 16, D3D12_INPUT_CLASSIFICATION_PER_INSTANCE_DATA, 1 },
+        };
+        if (vsGrass && psGrassPre && psGrassCard && psGrass)
+        {
+            D3D12_GRAPHICS_PIPELINE_STATE_DESC gp = pso;
+            gp.VS = { vsGrass->GetBufferPointer(), vsGrass->GetBufferSize() };
+            gp.InputLayout = { grassLayout, _countof(grassLayout) };
+            gp.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
+            D3D12_GRAPHICS_PIPELINE_STATE_DESC pre = gp;
+            pre.NumRenderTargets = 3;
+            pre.RTVFormats[0] = kNormalFormat;
+            pre.RTVFormats[1] = kMotionFormat;
+            pre.RTVFormats[2] = kPlantFormat;
+            pre.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_GREATER;
+            pre.PS = { psGrassPre->GetBufferPointer(), psGrassPre->GetBufferSize() };
+            batch.Add(pre, &m_psoGrassPre[0], "scene: the grass's prepass PSO failed - no grass");
+            pre.PS = { psGrassCard->GetBufferPointer(), psGrassCard->GetBufferSize() };
+            batch.Add(pre, &m_psoGrassPre[1], "scene: the grass cards' prepass PSO failed - no grass");
+            D3D12_GRAPHICS_PIPELINE_STATE_DESC mp = gp;
+            mp.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ZERO;
+            mp.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_EQUAL;
+            mp.PS = { psGrass->GetBufferPointer(), psGrass->GetBufferSize() };
+            batch.Add(mp, &m_psoGrassMain[0], "scene: the grass's PSO failed - no grass");
+            if (psGrassG)
+            {
+                mp.NumRenderTargets = 3;
+                for (int k = 0; k < 2; ++k) mp.RTVFormats[1 + k] = kGbufFormats[k];
+                mp.PS = { psGrassG->GetBufferPointer(), psGrassG->GetBufferSize() };
+                batch.Add(mp, &m_psoGrassMain[1], "scene: the grass's deferred PSO failed - no grass under local lights");
+            }
+        }
+        else
+            Log("scene: the grass's shaders failed to compile - no grass");
+    }
+
     batch.Run("the scene's");
     if (!m_pso || !m_psoAlphaTest) return false;
     if (m_deferredReady)
@@ -4844,7 +4973,7 @@ void Scene::DrawSelection(ID3D12GraphicsCommandList* list, const float* viewProj
 {
     list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     list->IASetVertexBuffers(0, 1, &m_vbv);
-    list->IASetIndexBuffer(&m_ibv);
+    list->IASetIndexBuffer(&StaticIbv());
     int geomState = 0;
 
     // Occluded first, so the visible wire overwrites it wherever the two meet at
@@ -4872,15 +5001,90 @@ void Scene::DrawSelection(ID3D12GraphicsCommandList* list, const float* viewProj
             // Added objects are selectable like any other, so this loop needs
             // the same buffer switch the main pass has.
             BindGeometry(list, o.meshId != 0, geomState,
-                         o.meshId ? m_dynVbv : m_vbv, o.meshId ? m_dynIbv : m_ibv);
+                         o.meshId ? m_dynVbv : m_vbv, o.meshId ? m_dynIbv : StaticIbv());
             list->DrawIndexedInstanced(o.indexCount, 1, o.firstIndex, o.baseVertex, 0);
         }
     }
 }
 
 // Called AFTER the caller has waited for the GPU, exactly like LogProbe.
+// --- GRASS (grass.h) ---------------------------------------------------------------------------------------------
+
+void Scene::SetGrassReach(float metres)
+{
+    m_grassReach = metres > 0.0f ? metres : 0.0f;
+    UpdateGrassCards();
+}
+
+bool Scene::GrassOn() const
+{
+    return m_grassReach > 0.0f && m_grass.Loaded() && m_psoGrassPre[0] && m_psoGrassPre[1] && m_psoGrassMain[0];
+}
+
+// The cards the grass replaces are drawn exactly while the grass is not (the contract: a stage never loses its
+// verges). A change moves the ray tracer's world too (BuildRtMesh, DescribeRt's key).
+void Scene::UpdateGrassCards()
+{
+    const bool off = GrassOn() && m_ibGrass != nullptr;
+    if (off == m_grassCardsOff) return;
+    m_grassCardsOff = off;
+    ++m_geomRevision;
+    Log("scene: grass %s - the %u card triangle(s) it replaces %s", off ? "on" : "off", m_grassReplacedTris,
+        off ? "not drawn" : "drawn");
+}
+
+void Scene::RecordGrass(ID3D12GraphicsCommandList* list, const float* view, const float* proj)
+{
+    UpdateGrassCards();
+    if (!GrassOn() || !m_srvHeap || m_grassTerrain.empty()) return;
+    Grass::Terrain t;
+    t.vbv = m_vbv;
+    t.ibv = m_ibv;
+    t.heap = m_srvHeap.Get();
+    t.stride = m_srvStride;
+    t.draws = &m_grassTerrain;
+    m_grass.Update(list, t, view, proj, m_grassReach, m_grassDensity);
+}
+
+// The blades, in the pass being recorded (RecordPass, after the opaque and the alpha-tested): their instances on the
+// instance stream's slot, three DRAW arguments the spawn wrote (grass.h). The prepass draws the blades and the cards
+// (which keep their blades' pixels); the main pass shades what the prepass left, EQUAL to its depth.
+void Scene::DrawGrass(ID3D12GraphicsCommandList* list, bool prepass, bool gbuf)
+{
+    if (!GrassOn() || !m_grass.Spawned() || !m_grass.Args() || !m_grass.CommandSignature()) return;
+    ID3D12PipelineState* main = gbuf ? m_psoGrassMain[1].Get() : m_psoGrassMain[0].Get();
+    if (!prepass && !main) return;
+    const D3D12_VERTEX_BUFFER_VIEW iv = m_grass.InstanceView();
+    list->IASetVertexBuffers(1, 1, &iv);
+    list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
+    if (m_srvHeap) list->SetGraphicsRootDescriptorTable(1, m_srvHeap->GetGPUDescriptorHandleForHeapStart());
+    const uint32_t objConsts[4] = { 0u, (uint32_t)kDrawSingleStage, 0u, 0u };
+    list->SetGraphicsRoot32BitConstants(4, 4, objConsts, 0);
+    static const float kIdentityXform[16] = { 1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1 };
+    list->SetGraphicsRoot32BitConstants(4, 16, kIdentityXform, 4);
+    // Factor 1; rough, not metallic; no occlusion map (the blade's own root darkening stands in).
+    const float pbr[12] = { 1.0f, 1.0f, 1.0f, 1.0f, 0.85f, 0.0f, 1.0f, 0.0f, 0.0f, 0.5f, 0.0f, 0.0f };
+    list->SetGraphicsRoot32BitConstants(4, 12, pbr, 20);
+    ID3D12Resource* args = m_grass.Args();
+    ID3D12CommandSignature* sig = m_grass.CommandSignature();
+    if (prepass)
+    {
+        list->SetPipelineState(m_psoGrassPre[0].Get());
+        list->ExecuteIndirect(sig, 2, args, 0, nullptr, 0);
+        list->SetPipelineState(m_psoGrassPre[1].Get());
+        list->ExecuteIndirect(sig, 1, args, 32, nullptr, 0);
+    }
+    else
+    {
+        list->SetPipelineState(main);
+        list->ExecuteIndirect(sig, 3, args, 0, nullptr, 0);
+    }
+    list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+}
+
 void Scene::ReadOverlayStats()
 {
+    m_grass.ReadStats();
     if (!m_selCountReadback) return;
     if (m_selection.empty() && OverlayVertexCount() == 0 && LabelGlyphCount() == 0)
         return;                                                     // already zeroed
@@ -5383,7 +5587,7 @@ void Scene::RecordPass(ID3D12GraphicsCommandList* list, D3D12_CPU_DESCRIPTOR_HAN
     if (m_rayQuery && m_reflTlas) list->SetGraphicsRootShaderResourceView(13, m_reflTlas);
     list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     list->IASetVertexBuffers(0, 1, &m_vbv);
-    list->IASetIndexBuffer(&m_ibv);
+    list->IASetIndexBuffer(&StaticIbv());
     {
         ID3D12Device* d = nullptr;
         list->GetDevice(IID_PPV_ARGS(&d));
@@ -5748,7 +5952,7 @@ void Scene::RecordPass(ID3D12GraphicsCommandList* list, D3D12_CPU_DESCRIPTOR_HAN
         }
         BindObjectXform(list, o.xform, o.identity, xformState);
         BindGeometry(list, o.meshId != 0, geomState,
-                     o.meshId ? m_dynVbv : m_vbv, o.meshId ? m_dynIbv : m_ibv);
+                     o.meshId ? m_dynVbv : m_vbv, o.meshId ? m_dynIbv : StaticIbv());
         // A model batch's instances, or the identity every other draw takes.
         const D3D12_VERTEX_BUFFER_VIEW* iv = inst ? inst : &m_instIdentity;
         if (iv->BufferLocation != instBound)
@@ -5982,6 +6186,13 @@ void Scene::RecordPass(ID3D12GraphicsCommandList* list, D3D12_CPU_DESCRIPTOR_HAN
         }
         draw(o, want, refl, d.inst, d.instCount);
         if (d.inst) ++m_modelStatsBuild.draws;
+    }
+    // THE GRASS (grass.h), after the alpha-tested: its own pipelines and instances, so the draws after rebind theirs.
+    if (GrassOn() && m_grass.Spawned() && (prepass || m_prepassThisFrame))
+    {
+        DrawGrass(list, prepass, gbuf);
+        bound = nullptr;
+        instBound = 0;
     }
 
     // The deferred local lights, over the opaque world and under the glass: the surface's targets and the depth to

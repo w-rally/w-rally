@@ -4,6 +4,7 @@
 #include "shaders.h"
 
 #include <algorithm>
+#include <cstdlib>
 #include <math.h>
 
 namespace ngg {
@@ -14,9 +15,9 @@ const QualityTier& Renderer::Tier(Quality q)
     // Costs on the development machine's integrated Radeon, lab forest view
     // (965k geometry pixels) - see design §1.5 for the measurement.
     static const QualityTier kTiers[3] = {
-        { "low",    false, 0, 0, 0.25f },   // RT sun shadows only - the VR baseline
-        { "medium", true,  1, 1, 0.50f },   // + RT AO, one ray (the default); XeGTAO medium (2 slices x 2 steps)
-        { "high",   true,  2, 2, 0.50f },   // + RT AO, two rays: less noise at rest; XeGTAO high (3 x 3)
+        { "low",    false, 0, 0, 0.25f, 0.0f },   // RT sun shadows only - the VR baseline
+        { "medium", true,  1, 1, 0.50f, 30.0f },   // + RT AO, one ray (the default); XeGTAO medium (2 slices x 2 steps)
+        { "high",   true,  2, 2, 0.50f, 50.0f },   // + RT AO, two rays: less noise at rest; XeGTAO high (3 x 3)
     };
     const int i = (int)q;
     return kTiers[(i < 0 || i > 2) ? 1 : i];
@@ -30,8 +31,14 @@ void Renderer::SetQuality(Quality q)
     if (t.aoRays) SetAoRays(t.aoRays);
     m_gtao.SetQuality(t.gtaoQuality);
     m_post.SetSharpen(t.sharpen);
-    Log("renderer: quality %s (AO %s, %u ray(s), sharpen %.2f)",
-        t.name, t.ao ? "on" : "off", t.ao ? t.aoRays : 0, t.sharpen);
+    // The grass's reach (NGG design §2.6 "Grass"): low none, medium 30 m, high 50 m. NGG_GRASS=<metres> (0: off) wins,
+    // for A/B; NGG_GRASS_DENSITY scales the blades per m2.
+    float grass = t.grassReach;
+    if (const char* e = std::getenv("NGG_GRASS")) grass = (float)atof(e);
+    m_scene.SetGrassReach(grass);
+    if (const char* e = std::getenv("NGG_GRASS_DENSITY")) m_scene.SetGrassDensity((float)atof(e));
+    Log("renderer: quality %s (AO %s, %u ray(s), sharpen %.2f, grass to %.0f m)",
+        t.name, t.ao ? "on" : "off", t.ao ? t.aoRays : 0, t.sharpen, grass);
 }
 
 bool Renderer::Create(Device& dev, DXGI_FORMAT outputFormat, UINT width, UINT height,
@@ -367,6 +374,9 @@ void Renderer::RecordFrame(Device& dev, D3D12_CPU_DESCRIPTOR_HANDLE outRtv,
     ID3D12Resource* motion = nullptr;
     if (m_scene.Ready())
     {
+        // THE GRASS's field and blades for this camera (grass.h), before the prepass draws them - and before the TLAS:
+        // switching the grass on or off moves the cards it replaces in and out of the ray-traced world.
+        m_scene.RecordGrass(list, view, proj);
         // The placements near the camera under the foliage map: they decide the TLAS (their shells' masks).
         if (m_rt.Ready()) m_scene.UpdateFoliageNear(view, proj, sky.sunDir, 0.00465f * sky.sunDiscSize);
         KeepRtCurrent(dev);

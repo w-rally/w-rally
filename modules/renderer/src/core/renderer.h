@@ -74,6 +74,7 @@ struct QualityTier
     uint32_t    aoRays;       // per pixel per frame; the denoiser accumulates
     int         gtaoQuality;  // the screen-space AO's (Gtao::SetQuality)
     float       sharpen;      // TAA post-sharpen
+    float       grassReach;   // metres the grass is drawn to (Scene::SetGrassReach); 0 none
 };
 
 class Renderer

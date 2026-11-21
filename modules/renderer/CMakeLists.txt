@@ -11,7 +11,7 @@ add_library(ngg-core STATIC src/core/device.cpp src/core/aerial.cpp src/core/ren
             src/core/log.cpp src/core/mipgen.cpp src/core/post.cpp src/core/rt.cpp
             src/core/scene.cpp src/core/shadow.cpp src/core/sky.cpp src/core/weather.cpp
             src/core/astronomy.cpp src/core/lights.cpp src/core/fsr.cpp src/core/dlss.cpp src/core/gtao.cpp
-            src/core/visibility.cpp src/core/probe.cpp src/core/models.cpp src/core/nrd_visibility.cpp src/core/rr_visibility.cpp)
+            src/core/visibility.cpp src/core/probe.cpp src/core/models.cpp src/core/grass.cpp src/core/nrd_visibility.cpp src/core/rr_visibility.cpp)
 target_include_directories(ngg-core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src/core)
 # NRD (core/nrd_visibility.cpp), when its SDK was fetched and built (third_party/CMakeLists.txt): a static library with its
 # shaders embedded, built with our C runtime - every configuration. Without it nrd_visibility.cpp is a stub: no NRD, logged.

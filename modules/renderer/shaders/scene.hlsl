@@ -590,7 +590,10 @@ float AlphaCut(float cutoff, float2 px)
 // which is why real backlit foliage glows instead of silhouetting black.
 static const float kFoliageWrap = 0.4;
 static const float kFoliageTransmission = 0.5;
-static const float kPlantShadowPack = 1000.0;   // uv1.y = size + this * Plant::shadow (scene.cpp)
+static const float kPlantShadowPack = 1000.0;
+// A grass blade's nearness (VSGrass, 1 near .. 0 far): how much of the foliage wrap and translucency it takes. 1 for
+// everything else.
+static float gGrassNear = 1.0;   // uv1.y = size + this * Plant::shadow (scene.cpp)
 
 // A plant's place-in-the-plant (kVolumeScale in scene.cpp): the same seen from
 // either side of a card, so never flipped by facing.
@@ -784,6 +787,156 @@ VSOut VSMain(VSIn i)
 }
 
 
+// --- GRASS (core/grass.h, NGG design §2.6 "Grass") ----------------------------------------------------------------
+// A blade is an instance of 32 bytes the spawn wrote (grass.hlsl CSSpawn), drawn as a strip: 9 vertices (7 triangles)
+// near, 5 (3 triangles) further, and far a card of 4 standing for a clump. Its root takes the ground's colour, so where
+// the grass fades out the ground's texture carries on in the same colour. The rest of the frame takes it as any
+// surface: the prepass writes its depth, its normal (mostly up, as the ground's: its rays and its AO are the ground's)
+// and its motion (the wind); the main pass lights it as foliage, with its wrap and translucency faded out with
+// distance so that far grass is lit as the ground under it is.
+struct GrassIn { float4 a : GRASS0; uint4 b : GRASS1; uint vid : SV_VertexID; };
+
+uint GrassPcg(uint v)
+{
+    const uint s = v * 747796405u + 2891336453u;
+    const uint w = ((s >> ((s >> 28u) + 4u)) ^ s) * 277803737u;
+    return (w >> 22u) ^ w;
+}
+float GrassU01(uint h) { return (float)(h >> 8) * (1.0 / 16777216.0); }
+
+// The wind's sideways push at height fraction t of a blade `h` metres tall (the plants' gWind, gWindTime): a lean with
+// the speed squared, gusts rolling across the field along the wind as a wave, and a flutter. 0 in calm air.
+float3 GrassWind(float3 root, float h, float t, float response, float phase, float time)
+{
+    if (gWind.z <= 0.0 || response <= 0.0) return float3(0.0, 0.0, 0.0);
+    const float2 dir = gWind.xy;
+    const float speed = gWind.z;
+    const float along = dot(root.xz, dir), across = dot(root.xz, float2(-dir.y, dir.x));
+    // Time is reduced before it meets a frequency (it runs to 3600 s): the wave's phase stays small.
+    const float tw = frac(time / 64.0) * 64.0;
+    const float wave = 0.5 + 0.5 * sin(along * 0.35 - tw * (0.98174770 * 2.0));   // 2 waves in 64 s x speed below
+    const float wave2 = 0.5 + 0.5 * sin(across * 0.21 + along * 0.13 - tw * 0.98174770);
+    const float gust = lerp(1.0, (0.3 + 0.7 * wave) * (0.75 + 0.25 * wave2), saturate(0.35 + gWind.w));
+    const float lean = response * h * min(0.55, 0.005 * speed * speed) * gust;
+    const float flutter = response * h * 0.05 * saturate(speed / 12.0) * sin(tw * (0.09817477 * floor(61.0 + 31.0 * phase)) + phase * 6.2831853);
+    const float k = t * t;
+    const float2 off = dir * (lean * k) + float2(-dir.y, dir.x) * (flutter * k);
+    return float3(off.x, 0.0, off.y);
+}
+
+VSOut VSGrass(GrassIn i)
+{
+    VSOut o = (VSOut)0;
+    const float3 root = i.a.xyz;
+    const float h = i.a.w;
+    const uint lod = i.b.w & 3u;
+    const float width = f16tof32(i.b.y & 0xFFFFu), yaw = f16tof32(i.b.y >> 16);
+    const float spread = (float)((i.b.w >> 2) & 255u) / 255.0;
+    const float typeDry = (float)((i.b.w >> 10) & 255u) / 255.0;
+    const float response = (float)((i.b.w >> 18) & 255u) / 255.0;
+    const bool seedHead = ((i.b.w >> 26) & 1u) != 0u;
+    const uint h1 = GrassPcg(i.b.z), h2 = GrassPcg(h1), h3 = GrassPcg(h2), h4 = GrassPcg(h3);
+    const float r1 = GrassU01(h1), r2 = GrassU01(h2), r3 = GrassU01(h3), r4 = GrassU01(h4);
+
+    float sy, cy;
+    sincos(yaw, sy, cy);
+    float3 W = float3(cy, 0.0, sy), F = float3(-sy, 0.0, cy);   // across the blade, and the way it faces
+    const float3 toCam = gCamPos - root;
+    const float dist = length(toCam);
+    float t, side;
+    if (lod == 2u)
+    {
+        // A CARD: a quad turned about the up axis to face the camera; its blades are drawn by the pixel shader.
+        float3 f = float3(toCam.x, 0.0, toCam.z);
+        f = dot(f, f) > 1e-8 ? normalize(f) : F;
+        W = float3(f.z, 0.0, -f.x);
+        F = f;
+        side = (i.vid & 1u) ? 1.0 : -1.0;
+        t = (i.vid >> 1) != 0u ? 1.0 : 0.0;
+    }
+    else
+    {
+        // A BLADE: rows of two up to its tip (row `rows`, one vertex), as a triangle strip.
+        const uint rows = lod == 0u ? 4u : 2u;
+        const uint row = min(i.vid >> 1, rows);
+        static const float kRows0[5] = { 0.0, 0.3, 0.55, 0.78, 1.0 };
+        static const float kRows1[3] = { 0.0, 0.6, 1.0 };
+        t = lod == 0u ? kRows0[row] : kRows1[row];
+        side = row >= rows ? 0.0 : ((i.vid & 1u) ? 1.0 : -1.0);
+    }
+    // Its shape: narrowing to the tip, curving over along F, a seed head widening the top of some.
+    const float lean = (0.12 + 0.33 * r1) * h * (r2 < 0.5 ? -1.0 : 1.0);
+    float halfW = 0.5 * width;
+    if (lod < 2u)
+    {
+        halfW *= 1.0 - 0.85 * t;
+        if (seedHead && t > 0.7) halfW = 0.5 * width * 1.6;
+    }
+    float3 local = W * (side * halfW) + float3(0.0, h * t, 0.0);
+    if (lod < 2u) local += F * (lean * t * t);
+    // The wind, now and at the last frame's time (the motion target), and the height it costs a leaning blade.
+    const float3 windNow = GrassWind(root, h, t, response, r3, gWindTime);
+    const float3 windPrev = gWindPrevOn > 0.5 ? GrassWind(root, h, t, response, r3, gWindPrevTime) : windNow;
+    const float tipLean = length(GrassWind(root, h, 1.0, response, r3, gWindTime).xz);
+    const float drop = h > 1e-3 ? 1.0 - sqrt(saturate(1.0 - 0.5 * (tipLean / h) * (tipLean / h))) : 0.0;
+    const float3 sink = float3(0.0, -h * t * drop, 0.0);
+    const float3 pos = root + local + windNow + sink;
+    const float3 prev = root + local + windPrev + sink;
+
+    // Near: the blade's own shape lights it (wrap, translucency); far: the ground's light, so the fade is not seen.
+    const float near = 1.0 - smoothstep(8.0, 30.0, dist);
+    const float3 Fc = dot(F, toCam) < 0.0 ? -F : F;
+    o.nrm = normalize(float3(0.0, 1.0, 0.0) + Fc * (0.55 * near)) * 0.5;   // a volume normal (VolumeNormal): not flipped
+    o.crownQ = float3(near, 0.0, 0.0);                                    // (Shade, GRASS: the wrap's share)
+    o.crownR = float4(0.0, 0.0, 0.0, 0.0);
+
+    // Its colour: the ground's at the root, its own spread, darker at the root (its self-shadow) and brighter at the
+    // top so the blade's mean stays the ground's, the tips dry by the type and the mask.
+    const float3 ground = float3(i.b.x & 255u, (i.b.x >> 8) & 255u, (i.b.x >> 16) & 255u) / 255.0;
+    float3 c = ground * ground;
+    c *= 1.0 + spread * (float3(r1, r4, r3) - 0.5) * float3(0.5, 0.7, 0.4);
+    c *= lerp(0.55, 1.18, smoothstep(0.0, 0.65, t));
+    const float maskDry = (float)(i.b.x >> 24) / 255.0;
+    const float dry = saturate(typeDry + maskDry) * (0.35 + 0.65 * r2);
+    const float3 straw = float3(0.40, 0.32, 0.16) * max(dot(ground * ground, float3(0.2126, 0.7152, 0.0722)) / 0.12, 0.5);
+    c = lerp(c, straw, saturate(dry * smoothstep(0.45, 1.0, t)));
+    if (seedHead && t > 0.7) c = lerp(c, straw * 0.85, 0.6);
+    o.col = float4(c, 1.0);
+
+    o.uv0 = float2(side * 0.5 + 0.5, t);   // a card's blades (GrassCardCoverage)
+    o.uv1 = float2(r1, r2);
+    o.plant = 0u;
+    o.plantSize = 0.0;
+    o.plantShadow = 1.0;                   // grass: casts nothing
+    o.fade = 0.0;
+    o.tint = float3(1.0, 1.0, 1.0);
+    o.swayed = gWind.z > 0.0 && response > 0.0 ? 1u : 0u;
+    o.nearShadow = 0u;
+    const float4 world = float4(pos + gWorldOffset, 1.0);
+    o.pos = mul(mul(world, gView), gProj);
+    o.wpos = world.xyz;
+    o.prevWpos = prev + gWorldOffset;
+    return o;
+}
+
+// A card's blades: six tapering strips of their own heights and leans (uv: across 0..1, up 0..1).
+float GrassCardCoverage(float2 uv, float2 seed)
+{
+    float a = 0.0;
+    [unroll] for (uint k = 0; k < 6u; ++k)
+    {
+        const float hk = 0.55 + 0.45 * frac(seed.y * 5.31 + k * 0.381);
+        const float v = uv.y / hk;
+        if (v > 1.0) continue;
+        const float centre = 0.12 + 0.76 * frac(seed.x * 7.13 + k * 0.618);
+        const float lean = (frac(seed.x * 3.7 + k * 0.27) - 0.5) * 0.5;
+        const float w = 0.07 * (1.0 - 0.85 * v);
+        a = max(a, abs(uv.x - centre - lean * v * v) < w ? 1.0 : 0.0);
+    }
+    return a;
+}
+
+
 // Shadow pass pixel shader. Only exists to honour alpha test: without it a
 // tree casts the shadow of its bounding cards rather than of its leaves, which
 // is worse than no shadow at all. Opaque geometry uses no PS.
@@ -964,6 +1117,21 @@ struct PrepassOut
 };
 PrepassOut PSPrepass(VSOut i, bool frontFace : SV_IsFrontFace)
 {
+#ifdef GRASS
+    // A blade (VSGrass): its normal is mostly up, as the ground's under it - the rays leave from it as from the ground
+    // and its AO is the ground's (a blade's own plane would trace half its AO rays into the ground); no plant. A card
+    // (GRASS_CARD) keeps the pixels of its blades.
+    {
+#ifdef GRASS_CARD
+        clip(GrassCardCoverage(i.uv0, i.uv1) - 0.5);
+#endif
+        PrepassOut g;
+        g.normal = float4(normalize(i.nrm), 1.0);
+        g.plant = 0u;
+        g.motion = NggMotion(i.wpos, i.prevWpos, i.swayed);
+        return g;
+    }
+#endif
 #ifdef ALPHA_TEST
     FadeClip(i.fade, i.pos.xy);
     float4 t0 = gTex0.Sample(gSamp, i.uv0);
@@ -1201,7 +1369,13 @@ float4 Shade(VSOut i, bool frontFace, out GBufOut g)
     // anisotropy still works on both paths. SampleLevel would force a fixed LOD
     // and disable aniso, which would change two things at once and make the
     // comparison say nothing.
+#ifdef GRASS
+    // A blade's colour is its vertices' (VSGrass: the ground's, its own spread, the root and the tips): no texture.
+    float4 t0 = float4(1.0, 1.0, 1.0, 1.0);
+    gGrassNear = i.crownQ.x;
+#else
     float4 t0 = gTex0.Sample(gSamp, i.uv0);
+#endif
 
     // Single-stage materials skip the second fetch entirely rather than
     // fetching and then discarding: gMatFlags is constant for the draw, so this
@@ -1211,7 +1385,7 @@ float4 Shade(VSOut i, bool frontFace, out GBufOut g)
     float4 t1 = t0;
     if (!singleStage) t1 = gTex1.Sample(gSamp, i.uv1);
 
-#ifdef ALPHA_TEST
+#if defined(ALPHA_TEST) && !defined(GRASS)
     // Foliage. RBR uses AlphaFunc GreaterEqual with AlphaRef 170, and its
     // RLSingleTexture shader forms alpha as texture.a * vertex.a - so the
     // vertex alpha is coverage here, not the terrain blend weight it is on
@@ -1232,6 +1406,9 @@ float4 Shade(VSOut i, bool frontFace, out GBufOut g)
     // why the weight has to be zero here rather than merely small.
     float  weight = singleStage ? 0.0 : (t1.a * i.col.a);
     float3 albedo = lerp(t0.rgb, t1.rgb, weight) * gBaseColourFactor.rgb * i.tint;
+#ifdef GRASS
+    albedo = i.col.rgb;
+#endif
 
     // --- the rest of the material -----------------------------------------
     // Every map MULTIPLIES its factor rather than replacing it, which is glTF's
@@ -1600,8 +1777,10 @@ float4 Shade(VSOut i, bool frontFace, out GBufOut g)
         // the sun BEHIND it is not unlit, it is backlit. Without a transmission
         // term it falls back to ambient alone and reads as a black silhouette
         // against a bright sky - which is exactly how it looked.
-        float ndl   = saturate((dot(N, gSunTowards) + kFoliageWrap) / (1.0 + kFoliageWrap));
-        float trans = saturate(dot(-N, gSunTowards)) * kFoliageTransmission;
+        // (Grass: its wrap and translucency fade out with distance, gGrassNear, so far grass is lit as the ground.)
+        const float wrap = kFoliageWrap * gGrassNear;
+        float ndl   = saturate((dot(N, gSunTowards) + wrap) / (1.0 + wrap));
+        float trans = saturate(dot(-N, gSunTowards)) * kFoliageTransmission * gGrassNear;
         float vis = SunVis(i.wpos, i.pos.xy, N);
         const float visOpen = vis;   // before the plant's own volume: what the backlight starts from
         // A plant under the RAY-TRACED sun: its rays skipped its own cards, so
