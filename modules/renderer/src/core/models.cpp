@@ -303,6 +303,26 @@ bool Scene::LoadModels(ID3D12Device* dev, const uint8_t* models, size_t modelByt
         }
     }
 
+    // NGG_MODEL_LODS: each model's LODs - distance and triangles (where a forest's cost is).
+    if (std::getenv("NGG_MODEL_LODS"))
+        for (uint32_t i = 0; i < h.modelCount; ++i)
+        {
+            const ModelRecord& r = rec[i];
+            std::string line;
+            for (uint32_t l = 0; l < r.lodCount; ++l)
+            {
+                const ModelLod& L = lods[r.firstLod + l];
+                size_t t = 0;
+                for (uint32_t k = 0; k < L.submeshCount; ++k) t += subs[L.firstSubmesh + k].indexCount / 3;
+                char b[96];
+                snprintf(b, sizeof b, "  [%u] %s%.0f m %zu tris", l,
+                         (L.flags & kModelLodRayOnly) ? "ray " : (L.flags & kModelLodBillboard) ? "bb " : "", L.maxDistance, t);
+                line += b;
+            }
+            Log("scene: model %u %s, %.1f m tall, fade %.1f m:%s", i, m_models[i].name.c_str(), m_models[i].height,
+                m_models[i].fade, line.c_str());
+        }
+
     // Placements: the drawn variant's, moved into its frame.
     uint32_t variantBit = 0xFFFFFFFFu;
     for (size_t v = 0; v < m_variantNames.size(); ++v)

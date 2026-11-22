@@ -244,6 +244,47 @@ ComPtr<ID3D12Resource> MakeUploadBuffer(ID3D12Device* dev, const void* data, siz
     return res;
 }
 
+// Geometry the GPU reads every pass, in its OWN memory (a DEFAULT heap): copied there once through a staging buffer,
+// the copy waited for. An UPLOAD heap is system memory - on a discrete GPU every vertex fetch of every pass crossed
+// PCIe (the model trees: 52 ms a frame on an RTX 5070 Ti, whatever the resolution, 2026-11-23). Left in COMMON: a
+// buffer is promoted to whatever read state a pass needs (vertex, index, shader resource, BLAS input) and decays back
+// at the end of each submission. Without a queue, or if anything fails, the upload heap as before.
+ComPtr<ID3D12Resource> MakeGpuBuffer(ID3D12Device* dev, ID3D12CommandQueue* queue, const void* data, size_t bytes)
+{
+    if (!queue || !bytes) return MakeUploadBuffer(dev, data, bytes);
+    ComPtr<ID3D12Resource> staging = MakeUploadBuffer(dev, data, bytes);
+    if (!staging) return nullptr;
+    D3D12_HEAP_PROPERTIES heap = {};
+    heap.Type = D3D12_HEAP_TYPE_DEFAULT;
+    D3D12_RESOURCE_DESC desc = staging->GetDesc();
+    ComPtr<ID3D12Resource> res;
+    ComPtr<ID3D12CommandAllocator> alloc;
+    ComPtr<ID3D12GraphicsCommandList> list;
+    ComPtr<ID3D12Fence> fence;
+    if (FAILED(dev->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &desc, D3D12_RESOURCE_STATE_COMMON, nullptr,
+                                            IID_PPV_ARGS(&res))) ||
+        FAILED(dev->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&alloc))) ||
+        FAILED(dev->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, alloc.Get(), nullptr, IID_PPV_ARGS(&list))) ||
+        FAILED(dev->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&fence))))
+        return staging;
+    list->CopyBufferRegion(res.Get(), 0, staging.Get(), 0, bytes);
+    if (FAILED(list->Close())) return staging;
+    ID3D12CommandList* lists[] = { list.Get() };
+    queue->ExecuteCommandLists(1, lists);
+    if (FAILED(queue->Signal(fence.Get(), 1))) return staging;
+    // Waited here: the staging buffer must outlive the copy. (A removed device reports every fence value reached.)
+    if (fence->GetCompletedValue() < 1)
+    {
+        HANDLE ev = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+        if (ev)
+        {
+            if (SUCCEEDED(fence->SetEventOnCompletion(1, ev))) WaitForSingleObject(ev, 10000);
+            CloseHandle(ev);
+        }
+    }
+    return fence->GetCompletedValue() >= 1 ? res : staging;
+}
+
 // Frustum planes from a combined view-projection, row-vector convention:
 // clip.x = dot(v, col0) ... clip.w = dot(v, col3), so the planes come from the
 // matrix COLUMNS. (The usual write-up assumes column vectors and uses rows -
@@ -2513,6 +2554,7 @@ bool Scene::LoadFromMemory(ID3D12Device* dev, ID3D12CommandQueue* queue,
                            DXGI_FORMAT rtvFormat, UINT width, UINT height)
 {
     ++m_geomRevision;   // the RT structure follows this (Renderer::KeepRtCurrent)
+    m_copyQueue = queue;   // the geometry's copies into GPU memory (MakeGpuBuffer), the dynamic pool's later ones too
     // Const in, const through: the caller may hand us a mapped file or a buffer
     // owned by the editor, and nothing here writes to it.
     const uint8_t* base = static_cast<const uint8_t*>(data);
@@ -2848,8 +2890,8 @@ bool Scene::LoadFromMemory(ID3D12Device* dev, ID3D12CommandQueue* queue,
         vertexSource = reinterpret_cast<const uint8_t*>(fixed.data());
     }
 
-    m_vb = MakeUploadBuffer(dev, vertexSource, vertBytes);
-    m_ib = MakeUploadBuffer(dev, idx, idxBytes);
+    m_vb = MakeGpuBuffer(dev, m_copyQueue.Get(), vertexSource, vertBytes);
+    m_ib = MakeGpuBuffer(dev, m_copyQueue.Get(), idx, idxBytes);
     // And kept on the CPU: the ray tracer rebuilds BLASes from object index
     // ranges, and the GPU copy is write-combined memory that must not be read.
     m_staticIndices.assign(reinterpret_cast<const uint32_t*>(idx),
@@ -4053,8 +4095,8 @@ bool Scene::UploadDynamic(ID3D12Device* dev)
     const size_t vBytes = m_dynVerts.size() * sizeof(::ngg::Vertex);
     const size_t iBytes = m_dynIndices.size() * sizeof(uint32_t);
 
-    m_dynVb = MakeUploadBuffer(dev, m_dynVerts.data(), vBytes);
-    m_dynIb = MakeUploadBuffer(dev, m_dynIndices.data(), iBytes);
+    m_dynVb = MakeGpuBuffer(dev, m_copyQueue.Get(), m_dynVerts.data(), vBytes);
+    m_dynIb = MakeGpuBuffer(dev, m_copyQueue.Get(), m_dynIndices.data(), iBytes);
     if (!m_dynVb || !m_dynIb) { Log("scene: dynamic pool upload failed"); return false; }
 
     m_dynVbv.BufferLocation = m_dynVb->GetGPUVirtualAddress();
