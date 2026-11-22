@@ -2674,6 +2674,12 @@ glass, and VR behind `kRendererCapVr`.
 | 32 | **Car normal and base-colour maps** | the format and loader support them, but no tool drafts them: from colour alone they emboss decals. `make_pbr.py` drafts ORM only, and loses a black-painted car's lacquer | a drafting tool |
 | 33 | **Lacquer seen through glass** | glass is not in the RT scene, so lacquered parts seen through a window still reflect the stage. Some roll-cage lines remain at night | nothing |
 
+**Ground marks and particles**
+
+| # | item | state / why | blocked on |
+|---|---|---|---|
+| 35 | **Trampled grass, wheel tracks and particles, together** (the user, 2026-11-22) | grass is pushed aside by the car's box while it is there and springs back at once (§2.6 "Grass", option A); nothing persists. Option B - a trample map round the camera, world-anchored and scrolled with it (not redrawn: it holds history), the wheels and the body drawn into it every frame, fading back over seconds, read by the grass spawn into each blade's bend (the blade shader cannot read textures: the scene's root signature is full) - is about 0.1 ms. The user wants it built WITH the other persistent ground marks and the particles ([design.md §3.2](design.md): dust, gravel, spray, skid marks, decals): wheel tracks on the road and in the grass and the dust they throw come from the same contact data (which wheel touches what surface, where, how fast) and the same world-anchored maps, so one design for all of them. Also: other cars' boxes (ghosts, multiplayer) for option A meanwhile | the particle / ground-mark design |
+
 **Housekeeping**
 
 | # | item | state / why | blocked on |
