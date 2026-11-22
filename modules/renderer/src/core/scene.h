@@ -910,6 +910,8 @@ private:
     std::vector<::ngg::Vertex>                                m_dynVerts;
     std::vector<uint32_t>                                     m_dynIndices;
     Microsoft::WRL::ComPtr<ID3D12Resource>                    m_dynVb, m_dynIb;
+    // The queue the geometry is copied into GPU memory through (scene.cpp MakeGpuBuffer): LoadFromMemory's.
+    Microsoft::WRL::ComPtr<ID3D12CommandQueue>                m_copyQueue;
     D3D12_VERTEX_BUFFER_VIEW                                  m_dynVbv = {};
     D3D12_INDEX_BUFFER_VIEW                                   m_dynIbv = {};
     bool                                                      m_dynDirty = false;
