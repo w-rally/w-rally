@@ -794,6 +794,12 @@ where the strip cards were, thinning under crowns) and the `NGGP` plants whose c
   replayed with its recorded timing: the specks' patches 5,424 black pixels, 3,699 after, 3,037 without wind. Now only
   blades within 10 m (`kGrassOwnMotion`) write their own motion; farther ones reproject with the camera, as the
   ground. `grass-41` does not cover it (its frames are calm and without ray tracing).
+- **...nor a barely swaying leaf** (the same day, the user: specks left on trees and bushes in that wind - there with the
+  grass off as well, so the models' wind since §2.6 "Wind"): `NggMotion` now gives a vertex the wind bent its own motion
+  only where the sway itself moved it half a pixel or more on screen this frame; under that it reprojects with the
+  camera, as the static world, and the denoisers and TAA mix it with its neighbours. On the user's windy drive: a bush's
+  black pixels 735 -> 6, the whole drive's dark pixels 5,277 -> 4,149 (4,289 without wind). `instancing-41`'s wind
+  checks (15 m/s) still pass.
 - **Not done:** the field is drawn again whole every 4 m, not by strips; the editor has no grass window and no paint
   (Wallaby's step 4, an upload call on the editor table); the look is the user's to judge in the game.
 

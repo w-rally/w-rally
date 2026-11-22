@@ -550,6 +550,20 @@ float4 NggMotion(float3 wpos, float3 prevWpos, uint swayed)
     if (gObjectMoved == 0 && swayed == 0u) return float4(0.0, 0.0, 0.0, 0.0);
     const float4 c = mul(float4(wpos, 1.0), gViewProjNoJitter);
     const float4 p = mul(float4(prevWpos, 1.0), gPrevViewProj);
+    // A vertex the WIND bent (and nothing else moved it): its own motion only where the sway itself moved it half a
+    // pixel or more on screen. Under that it reprojects with the camera, as the static world: a moving object's pixels
+    // are denoised (and TAA'd) apart from static ones, so a thin, barely swaying leaf or far grass blade marked moving
+    // was filtered with itself alone - its raw ray samples, no history - and came out in black specks (the user,
+    // 2026-11-22, NGG_WIND=1,0.2,90, bushes and grass 15-40 m off).
+    if (gObjectMoved == 0)
+    {
+        const float4 q = mul(float4(wpos, 1.0), gPrevViewProj);   // where the camera alone puts it last frame
+        if (p.w > 1e-6 && q.w > 1e-6)
+        {
+            const float2 sway = (p.xy / p.w - q.xy / q.w) * 0.5 / max(gInvScreen, float2(1e-6, 1e-6));
+            if (dot(sway, sway) < 0.25) return float4(0.0, 0.0, 0.0, 0.0);
+        }
+    }
     // Behind last frame's camera: no previous position on screen. An
     // offset that lands outside the image makes every consumer drop the
     // history, which is the right answer.
