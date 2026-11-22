@@ -154,13 +154,16 @@ std::string RunGpu(const std::wstring& shaderPath, const std::wstring& dxcDir, c
         adapterName = "WARP";
     }
 
-    D3D12_ROOT_PARAMETER params[2] = {};
+    D3D12_ROOT_PARAMETER params[3] = {};
     params[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_SRV;
     params[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
     params[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_UAV;
     params[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+    params[2].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;   // the row count (a root SRV has no size)
+    params[2].Constants.Num32BitValues = 1;
+    params[2].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
     D3D12_ROOT_SIGNATURE_DESC rsd = {};
-    rsd.NumParameters = 2;
+    rsd.NumParameters = 3;
     rsd.pParameters = params;
     ComPtr<ID3DBlob> rsBlob, rsErr;
     ComPtr<ID3D12RootSignature> rs;
@@ -214,6 +217,7 @@ std::string RunGpu(const std::wstring& shaderPath, const std::wstring& dxcDir, c
     list->SetComputeRootSignature(rs.Get());
     list->SetComputeRootShaderResourceView(0, in->GetGPUVirtualAddress());
     list->SetComputeRootUnorderedAccessView(1, uav->GetGPUVirtualAddress());
+    list->SetComputeRoot32BitConstant(2, UINT(rows.size()), 0);
     list->Dispatch(UINT((rows.size() + 63) / 64), 1, 1);
     D3D12_RESOURCE_BARRIER b = {};
     b.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
