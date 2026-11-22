@@ -123,6 +123,7 @@ iface::RenderSettings ToRender(const Settings& s)
     r.mode = iface::WindowMode::Windowed;
     r.vsync = s.vsync;
     r.quality = std::min(s.quality, 2u);
+    r.ambientOcclusionOff = s.aoOff ? 1 : 0;
     r.rayTracing = s.rayTracing;
     r.taa = s.taa;
     r.shadows = s.shadows;
@@ -711,7 +712,7 @@ StageEnd RunStage(Shell& sh, const Options& given, bool fromMenu, std::string& e
     Press gearUpKey, gearDownKey, cameraKey, resetKey;
     int debugView = startView;
     uint32_t pauseAt = o.pauseAt;
-    bool taa = settings.taa != 0, paused = false, ao = settings.quality != 0, shadows = settings.shadows != 0, rt = settings.rayTracing != 0;
+    bool taa = settings.taa != 0, paused = false, ao = settings.ambientOcclusionOff == 0, shadows = settings.shadows != 0, rt = settings.rayTracing != 0;
     bool antiLagIdle = false;   // N: the anti-lag armed at standstill (the driver's switch before a start)
     bool debugHud = std::getenv("PHYS_DRIVE_READOUT") != nullptr;   // PHYS_DRIVE_READOUT: the readout on from the start
     double fpsSmooth = 0.0;     // wall-clock frames per second, eased, for the readout
@@ -723,7 +724,7 @@ StageEnd RunStage(Shell& sh, const Options& given, bool fromMenu, std::string& e
     if (const char* off = std::getenv("PHYS_DRIVE_OFF")) {
         if (std::strstr(off, "vsync")) settings.vsync = 0;
         if (std::strstr(off, "taa")) settings.taa = 0, taa = false;
-        if (std::strstr(off, "ao")) settings.quality = 0, ao = false;
+        if (std::strstr(off, "ao")) settings.ambientOcclusionOff = 1, ao = false;
         if (std::strstr(off, "shadows")) settings.shadows = 0, shadows = false;
         if (std::strstr(off, "rt")) settings.rayTracing = 0, rt = false;
         renderer.ApplySettings(settings);
@@ -894,7 +895,15 @@ StageEnd RunStage(Shell& sh, const Options& given, bool fromMenu, std::string& e
             std::printf("%s %s\n", name, on ? "on" : offText);
         };
         if (taaKey(focused && keys.Down(Action::Taa))) toggle(taa, settings.taa, 1, "TAA", "off");
-        if (aoKey(focused && keys.Down(Action::Ao))) toggle(ao, settings.quality, 1, "ambient occlusion", "off");
+        // AO alone: the quality tier (its grass, sharpening, ...) stays as it is.
+        auto toggleAo = [&] {
+            ao = !ao;
+            settings.ambientOcclusionOff = ao ? 0 : 1;
+            renderer.ApplySettings(settings);
+            redraw = true;
+            std::printf("ambient occlusion %s\n", ao ? "on" : "off");
+        };
+        if (aoKey(focused && keys.Down(Action::Ao))) toggleAo();
         if (shadowKey(focused && keys.Down(Action::Shadows))) toggle(shadows, settings.shadows, 1, "shadows", "off");
         if (rtKey(focused && keys.Down(Action::RayTracing))) toggle(rt, settings.rayTracing, 1, "ray tracing", "off (cascaded shadow maps)");
         // The mix file saved: read again (checked about twice a second).
@@ -1167,8 +1176,10 @@ StageEnd RunStage(Shell& sh, const Options& given, bool fromMenu, std::string& e
                                                               renderer.Stats().denoisersAvailable);
             if (c == ui::SettingsChoice::Graphics) {
                 sh.window.SetFullscreen(sh.settings.fullscreen);
+                const uint32_t aoOff = settings.ambientOcclusionOff;   // the debug switch outlives the menu
                 settings = ToRender(sh.settings);
-                taa = settings.taa != 0, ao = settings.quality != 0, shadows = settings.shadows != 0, rt = settings.rayTracing != 0;
+                settings.ambientOcclusionOff = aoOff;
+                taa = settings.taa != 0, shadows = settings.shadows != 0, rt = settings.rayTracing != 0;
                 renderer.ApplySettings(settings);
             } else if (c == ui::SettingsChoice::Back) {
                 settingsLog = SaveSettings(sh.settings);
@@ -1182,7 +1193,7 @@ StageEnd RunStage(Shell& sh, const Options& given, bool fromMenu, std::string& e
             mixDone(mixChoice);
             if (c == ui::DebugChoice::Changed) {
                 if (dbg.taa != taa) toggle(taa, settings.taa, 1, "TAA", "off");
-                if (dbg.ao != ao) toggle(ao, settings.quality, std::max(1u, std::min(sh.settings.quality, 2u)), "ambient occlusion", "off");
+                if (dbg.ao != ao) toggleAo();
                 if (dbg.shadows != shadows) toggle(shadows, settings.shadows, 1, "shadows", "off");
                 if (dbg.rayTracing != rt) toggle(rt, settings.rayTracing, 1, "ray tracing", "off (cascaded shadow maps)");
                 debugHud = dbg.readout;
@@ -1625,7 +1636,7 @@ int RunLab(Shell& sh, const std::vector<std::string>& args)
     if (const char* off = std::getenv("PHYS_DRIVE_OFF")) {
         if (std::strstr(off, "vsync")) settings.vsync = 0;
         if (std::strstr(off, "taa")) settings.taa = 0;
-        if (std::strstr(off, "ao")) settings.quality = 0;
+        if (std::strstr(off, "ao")) settings.ambientOcclusionOff = 1;
         if (std::strstr(off, "shadows")) settings.shadows = 0;
         if (std::strstr(off, "rt")) settings.rayTracing = 0;
     }
@@ -1701,7 +1712,7 @@ int RunGame(const std::vector<std::string>& commandLine)
     if (const auto it = std::find(args.begin(), args.end(), std::string("--showroom")); it != args.end() && it + 1 != args.end()) {
         if (const char* off = std::getenv("PHYS_DRIVE_OFF")) {   // as a stage's
             if (std::strstr(off, "taa")) sh.settings.taa = false;
-            if (std::strstr(off, "ao")) sh.settings.quality = 0;
+            if (std::strstr(off, "ao")) sh.settings.aoOff = true;
             if (std::strstr(off, "shadows")) sh.settings.shadows = false;
             if (std::strstr(off, "rt")) sh.settings.rayTracing = false;
         }

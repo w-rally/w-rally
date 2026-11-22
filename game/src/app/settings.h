@@ -21,6 +21,7 @@ struct Settings {
     // Graphics
     bool fullscreen = true;             // the whole screen (borderless), else a window
     uint32_t quality = 1;               // 0 low, 1 medium, 2 high
+    bool aoOff = false;                 // AO off over the tier (PHYS_DRIVE_OFF=ao, the showroom); not saved
     bool rayTracing = true, taa = true, shadows = true, vsync = true;
     uint32_t upscaling = 0;             // kUpscaleModes: 0 off (the renderer's TAA at the full size), 1.. FSR, 5.. DLSS
     uint32_t vegetation = 1;            // iface::kVegetation*: 0 low, 1 medium, 2 high (PHYS_DRIVE_VEGETATION over it)

@@ -310,6 +310,7 @@ void Apply(Renderer& r)
 {
     const RenderSettings& s = r.settings;
     r.g->core.SetQuality(static_cast<ngg::core::Quality>(s.quality > 2 ? 2 : s.quality));
+    if (s.ambientOcclusionOff) r.g->core.SetAmbientOcclusion(false);   // after the tier, which sets its own
     r.g->core.SetPreferRayTracedShadows(s.rayTracing != 0);
     r.g->scene.SetShadowsOn(s.shadows != 0);
     r.g->scene.SetModelLodScale(s.vegetationDetail >= kVegetationHigh     ? 3.0f

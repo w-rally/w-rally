@@ -62,7 +62,9 @@ namespace wrally::iface {
 //     again, every handle kept (see "DEVICE LOSS" below); RenderStats::deviceGeneration counts the new devices.
 // 25: RendererInput::reload (the client hands a scene's or texture's bytes again after a device loss) and keepCopies
 //     (the renderer keeps its own copy instead, for what the client cannot make again).
-constexpr uint32_t kRendererInterfaceVer = 25;
+// 26: RenderSettings::ambientOcclusionOff (AO off whatever the quality tier - the tier's grass, sharpening and the
+//     rest kept; before, the game's AO switch dropped the tier to low).
+constexpr uint32_t kRendererInterfaceVer = 26;
 
 struct Renderer;                     // the module's instance, opaque
 struct RendererEditApi;              // renderer_edit.h
@@ -334,6 +336,7 @@ struct RenderSettings {
     uint32_t   upscaler;          // kUpscaler*: what resolves the frame (none: the renderer's own TAA, native)
     uint32_t   denoiser;          // kDenoiser*: what denoises the ray-traced shadows and AO
     uint32_t   vegetationDetail;  // kVegetation*: how far trees and bushes keep their detailed LODs
+    uint32_t   ambientOcclusionOff; // 1: no ambient occlusion, the quality tier otherwise kept; 0: the tier's AO
 };
 
 // RenderSettings::upscaler
