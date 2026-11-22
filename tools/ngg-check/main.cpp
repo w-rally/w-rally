@@ -1219,8 +1219,14 @@ int main(int argc, char** argv)
         return 0;
     }
 
+    // --plants: each file is a stage as shipped - it must carry model trees (NGGD + NGGE) and grass (NGGF), and the
+    // renderer must load both.
+    bool plants = false;
     std::vector<std::string> files;
-    for (int i = 1; i < argc; ++i) files.push_back(argv[i]);
+    for (int i = 1; i < argc; ++i) {
+        if (!std::strcmp(argv[i], "--plants")) plants = true;
+        else files.push_back(argv[i]);
+    }
     if (files.empty()) {
         const ngg::SceneData s = MadeUp();
         std::vector<uint8_t> bytes;
@@ -1311,6 +1317,26 @@ int main(int argc, char** argv)
         std::printf("%s: v%u, %zu objects, %zu triangles, %zu textures, %zu weather presets: read, rewritten the same%s\n",
                     f.c_str(), s.version, s.objects.size(), s.indices.size() / 3, s.textures.size(), s.weather.size(),
                     gpu.error.empty() ? ", both loaded by the renderer" : "");
+        if (plants) {
+            if (s.models.models.empty() || s.placements.empty()) return Fail(f + ": no model trees (NGGD + NGGE)");
+            if (s.grass.empty()) return Fail(f + ": no grass (NGGF)");
+            std::printf("%s: %zu model(s), %zu placement(s), grass %zu bytes\n", f.c_str(), s.models.models.size(),
+                        s.placements.size(), s.grass.size());
+            if (gpu.error.empty()) {
+                if (gpu.log.find("scene: models - ") == std::string::npos)
+                    return Fail(f + ": the renderer did not load its models:\n" + gpu.log);
+                if (gpu.log.find("scene: grass") == std::string::npos)
+                    return Fail(f + ": the renderer did not load its grass:\n" + gpu.log);
+                size_t at = 0;
+                while (at < gpu.log.size()) {
+                    const size_t end = gpu.log.find('\n', at);
+                    const std::string line = gpu.log.substr(at, end == std::string::npos ? std::string::npos : end - at);
+                    if (line.find("scene: models") != std::string::npos || line.find("scene: grass") != std::string::npos)
+                        std::printf("renderer: %s\n", line.c_str());
+                    at = end == std::string::npos ? gpu.log.size() : end + 1;
+                }
+            }
+        }
     }
     std::printf("ngg-check: all good\n");
     return 0;

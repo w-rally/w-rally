@@ -31,11 +31,27 @@ set_tests_properties(physics-rbr-handshake PROPERTIES PASS_REGULAR_EXPRESSION
 set(WRALLY_TEST_RBR_DIR "" CACHE PATH "RBR folder for the golden replay test")
 set(WRALLY_TEST_NGG "" CACHE FILEPATH "stage 41's .ngg (drawn only)")
 set(WRALLY_TEST_GOLDEN "" CACHE FILEPATH "RBR's recording of stage 41 (a .phr)")
-if(EXISTS "${WRALLY_TEST_RBR_DIR}/Maps/track-41_M.trk" AND EXISTS "${WRALLY_TEST_NGG}" AND EXISTS "${WRALLY_TEST_GOLDEN}")
-    add_test(NAME golden-replay-41 COMMAND W-Rally ${WRALLY_TEST_RBR_DIR} ${WRALLY_TEST_NGG} --stage track-41_M --step 0.1
+# Two stage-41 files: WRALLY_TEST_NGG is the BARE stage (no model trees, no grass) that instancing-41, grass-41 and
+# editor-api-41 add their own placeholders to; WRALLY_TEST_STAGE_NGG is stage 41 AS SHIPPED (Wallaby's, with the model
+# trees and grass) - the golden replay draws it when set, and the stage-41 tests below check it.
+set(WRALLY_TEST_STAGE_NGG "" CACHE FILEPATH "stage 41's .ngg as shipped, with model trees and grass")
+# The tests on it draw in a light wind (NGG_WIND=<speed>,<gustiness>,<degrees>, module.cpp): calm air would hide what
+# only a swaying plant shows.
+set(WRALLY_TEST_STAGE_WIND "NGG_WIND=1,0.2,90")
+if(EXISTS "${WRALLY_TEST_STAGE_NGG}")
+    set(_golden_ngg ${WRALLY_TEST_STAGE_NGG})
+else()
+    set(_golden_ngg ${WRALLY_TEST_NGG})
+endif()
+if(EXISTS "${WRALLY_TEST_RBR_DIR}/Maps/track-41_M.trk" AND EXISTS "${_golden_ngg}" AND EXISTS "${WRALLY_TEST_GOLDEN}")
+    add_test(NAME golden-replay-41 COMMAND W-Rally ${WRALLY_TEST_RBR_DIR} ${_golden_ngg} --stage track-41_M --step 0.1
              --no-sound --overrides none --replay ${WRALLY_TEST_GOLDEN} --out ${CMAKE_BINARY_DIR}/tests-bin/golden-41.phr)
     set_tests_properties(golden-replay-41 PROPERTIES PASS_REGULAR_EXPRESSION "replay check: [0-9]+ poses, all bit-exact"
                          TIMEOUT 600)
+    if(EXISTS "${WRALLY_TEST_STAGE_NGG}")
+        # The shipped stage's trees and grass drawn in a light wind (the user's black-speck case, NGG design §2.6).
+        set_tests_properties(golden-replay-41 PROPERTIES ENVIRONMENT "${WRALLY_TEST_STAGE_WIND}")
+    endif()
 else()
     message(STATUS "golden-replay-41 left out: needs WRALLY_TEST_RBR_DIR, WRALLY_TEST_NGG and WRALLY_TEST_GOLDEN")
 endif()
@@ -111,6 +127,19 @@ if(EXISTS "${WRALLY_TEST_NGG}")
     set_tests_properties(device-lost-41 PROPERTIES PASS_REGULAR_EXPRESSION "editor-api-check: all good" TIMEOUT 300)
 else()
     message(STATUS "editor-api-41 and device-lost-41 left out: need WRALLY_TEST_NGG")
+endif()
+if(EXISTS "${WRALLY_TEST_STAGE_NGG}")
+    # Stage 41 as shipped: its model trees and grass read, rewritten the same and loaded by the renderer (ngg-check
+    # --plants refuses a file without them); then the device removal with them in the scene. Both in the light wind.
+    add_test(NAME stage-41 COMMAND ngg-check --plants ${WRALLY_TEST_STAGE_NGG})
+    set_tests_properties(stage-41 PROPERTIES TIMEOUT 300 ENVIRONMENT "${WRALLY_TEST_STAGE_WIND}" PASS_REGULAR_EXPRESSION
+        "[1-9][0-9]* model\\(s\\), [1-9][0-9]* placement\\(s\\), grass [1-9][0-9]* bytes.*renderer: .*scene: models - .*renderer: .*scene: grass grows on [1-9][0-9]* of.*ngg-check: all good")
+    add_test(NAME device-lost-stage-41 COMMAND editor-api-check ${WRALLY_BIN}/modules/renderer/WRenderer.dll
+             ${WRALLY_TEST_STAGE_NGG} --device-lost WORKING_DIRECTORY ${CMAKE_BINARY_DIR}/tests-bin)
+    set_tests_properties(device-lost-stage-41 PROPERTIES PASS_REGULAR_EXPRESSION "editor-api-check: all good" TIMEOUT 300
+                         ENVIRONMENT "${WRALLY_TEST_STAGE_WIND}")
+else()
+    message(STATUS "stage-41 and device-lost-stage-41 left out: need WRALLY_TEST_STAGE_NGG (stage 41 with trees and grass)")
 endif()
 
 # The net module's wrapper (game/src/net/net.cpp) against a running server: log in, a catalogue page, a content match,
