@@ -796,6 +796,7 @@ VSOut VSMain(VSIn i)
 // distance so that far grass is lit as the ground under it is.
 struct GrassIn { float4 a : GRASS0; uint4 b : GRASS1; uint vid : SV_VertexID; };
 
+static const float kGrassOwnMotion = 10.0;   // metres: blades nearer write their own (wind) motion
 uint GrassPcg(uint v)
 {
     const uint s = v * 747796405u + 2891336453u;
@@ -915,7 +916,11 @@ VSOut VSGrass(GrassIn i)
     o.plantShadow = 1.0;                   // grass: casts nothing
     o.fade = 0.0;
     o.tint = float3(1.0, 1.0, 1.0);
-    o.swayed = gWind.z > 0.0 && response > 0.0 ? 1u : 0u;
+    // Its own motion (a moving object's, NggMotion) only NEAR, where its sway is seen and its pixels are many. Farther
+    // the camera's reprojection, as the ground's: the denoisers never mix a moving object's pixels with static ones,
+    // so a thin far blade marked moving was averaged with itself alone - its one or two raw AO rays, no history - and
+    // in shade came out black (the user, 2026-11-22, with NGG_WIND=1,0.2,90).
+    o.swayed = gWind.z > 0.0 && response > 0.0 && dist < kGrassOwnMotion ? 1u : 0u;
     o.nearShadow = 0u;
     precise const float4 world = float4(pos + gWorldOffset, 1.0);
     precise const float4 clipPos = mul(mul(world, gView), gProj);

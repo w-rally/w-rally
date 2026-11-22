@@ -787,6 +787,13 @@ where the strip cards were, thinning under crowns) and the `NGGP` plants whose c
   depth. Where the two pipelines' compiles of `VSGrass` put a blade a hair apart, its pixels were never shaded and
   stayed black - specks of far blades 25-40 m off, from the first frames. Not seen in any replay or still here. Now
   GREATER_EQUAL as the rest of the foliage, and the position `precise`.
+- **Far grass is not a moving object** (2026-11-22, the user's black specks, which survived the EQUAL fix above): with
+  any wind every blade wrote its own motion (`NggMotion`, w = 1), and the denoisers never mix a moving object's
+  pixels with static ones - a thin far blade was filtered with itself alone, its raw rays and no history, and came out
+  black in specks 25-40 m off. Reproduced only with wind (`NGG_WIND=1,0.2,90`, the user's), on the user's own drive
+  replayed with its recorded timing: the specks' patches 5,424 black pixels, 3,699 after, 3,037 without wind. Now only
+  blades within 10 m (`kGrassOwnMotion`) write their own motion; farther ones reproject with the camera, as the
+  ground. `grass-41` does not cover it (its frames are calm and without ray tracing).
 - **Not done:** the field is drawn again whole every 4 m, not by strips; the editor has no grass window and no paint
   (Wallaby's step 4, an upload call on the editor table); the look is the user's to judge in the game.
 
