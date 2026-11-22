@@ -5,8 +5,16 @@
 //
 // usage: foliage-shot <WRenderer.dll> <stage.ngg> <out prefix> [--variant 41] [--eye x y z --at x y z]
 //                     [--size 1920 1080] [--settle 90] [--time 11.5] [--frames 0] [--quality 2] [--vegetation 1] [--taa]
+//                     [--wind 0.0333] [--upscale 0.5] [--seq 0]
 //   --eye/--at default: above the stage's start (NGGS of the variant), looking down the road.
 //   --frames n: then n more frames timed (median GPU frame, main pass, ray tracing), the camera still.
+//   --wind dt: the game's clock steps dt s a frame, so the wind sways the plants (the stage's own wind, preset 0);
+//              without it the clock stands and the plants with it. A stage without weather presets has no wind:
+//              NGG_WIND=6,0.4,90 gives one.
+//   --upscale s: FSR at render scale s (0.5 is the game's FSR PERFORMANCE); implies TAA's history.
+//   --seq n: after settling, n consecutive lit frames as <prefix>-seq-NN.png (the shadows in motion);
+//   --seq-view v: those frames in debug view v (7: the sun's visibility, no TAA).
+//   --move dx dy dz: the camera drives into the still view through the sequence, that far a frame.
 // Writes <prefix>-lit.png, <prefix>-vis.png and <prefix>-mask.png (the alpha-tested pixels, debug view 14).
 
 #include <windows.h>
@@ -137,9 +145,9 @@ int main(int argc, char** argv)
     }
     const char* variant = "41";
     bool eyeSet = false;
-    V3 eye{}, at{};
-    uint32_t W = 1920, H = 1080, settle = 90, frames = 0, quality = 2, vegetation = 1, taa = 0;
-    float hour = -1.0f;
+    V3 eye{}, at{}, move{};
+    uint32_t W = 1920, H = 1080, settle = 90, frames = 0, quality = 2, vegetation = 1, taa = 0, seq = 0, seqView = 0;
+    float hour = -1.0f, windDt = 0.0f, upscale = 0.0f;
     for (int i = 4; i < argc; ++i) {
         if (!std::strcmp(argv[i], "--variant") && i + 1 < argc) variant = argv[++i];
         else if (!std::strcmp(argv[i], "--eye") && i + 3 < argc)
@@ -153,6 +161,12 @@ int main(int argc, char** argv)
         else if (!std::strcmp(argv[i], "--quality") && i + 1 < argc) quality = atoi(argv[++i]);
         else if (!std::strcmp(argv[i], "--vegetation") && i + 1 < argc) vegetation = atoi(argv[++i]);
         else if (!std::strcmp(argv[i], "--taa")) taa = 1;
+        else if (!std::strcmp(argv[i], "--wind") && i + 1 < argc) windDt = (float)atof(argv[++i]);
+        else if (!std::strcmp(argv[i], "--upscale") && i + 1 < argc) upscale = (float)atof(argv[++i]), taa = 1;
+        else if (!std::strcmp(argv[i], "--seq") && i + 1 < argc) seq = atoi(argv[++i]);
+        else if (!std::strcmp(argv[i], "--seq-view") && i + 1 < argc) seqView = atoi(argv[++i]);
+        else if (!std::strcmp(argv[i], "--move") && i + 3 < argc)
+            move = {(float)atof(argv[i + 1]), (float)atof(argv[i + 2]), (float)atof(argv[i + 3])}, i += 3;
     }
     std::ifstream f(argv[2], std::ios::binary);
     const std::vector<char> ngg((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
@@ -201,8 +215,8 @@ int main(int argc, char** argv)
     in.settings.taa = taa;          // off: a still picture, the same every run, no history in the colour
     in.settings.autoExposure = 0;
     in.settings.shadows = 1;
-    in.settings.renderScale = 1.0f;
-    in.settings.upscaler = kUpscalerNone;
+    in.settings.renderScale = upscale > 0.0f ? upscale : 1.0f;
+    in.settings.upscaler = upscale > 0.0f ? kUpscalerFsr : kUpscalerNone;
     in.settings.denoiser = kDenoiserOurs;
     in.settings.vegetationDetail = vegetation;
     in.settings.vsync = 0;
@@ -217,6 +231,13 @@ int main(int argc, char** argv)
 
     FrameDesc fd{};
     fd.scene = scene;
+    if (api.weatherPresetCount(r, scene)) {
+        WeatherDesc w{};
+        char name[64] = {};
+        if (api.weatherPreset(r, scene, 0, &w, name, sizeof name) == Status::Ok)
+            std::printf("weather '%s': wind %.1f m/s towards %.0f deg, gusts %.2f\n", name, w.windSpeed,
+                        w.windDirectionDeg, w.gustiness);
+    }
     LookAtLH(fd.camera.view, eye, at, {0, 1, 0});
     PerspectiveFovLH(fd.camera.proj, 1.0f, float(W) / float(H), 0.3f, 30000.0f);
     fd.camera.nearZ = 0.3f, fd.camera.farZ = 30000.0f, fd.camera.fovY = 1.0f;
@@ -234,6 +255,7 @@ int main(int argc, char** argv)
         api.renderFrame(r, &fd);
         api.present(r);
         fd.camera.cut = 0;
+        fd.time += windDt;
         MSG m;
         while (PeekMessageW(&m, nullptr, 0, 0, PM_REMOVE)) DispatchMessageW(&m);
     };
@@ -248,6 +270,34 @@ int main(int argc, char** argv)
     api.captureFrame(r, (prefix + "-lit.png").c_str());
     frame();
     frame();
+    if (seq && seqView) {
+        api.setDebugView(r, seqView);
+        for (int i = 0; i < 4; ++i) frame();
+    }
+    // --move: the camera drives through the sequence (the settling was still), dx dy dz a frame; it starts that many
+    // frames back so the sequence ends where the still view was taken.
+    const bool moving = move.x != 0.0f || move.y != 0.0f || move.z != 0.0f;
+    if (seq && moving) {
+        const float back = -float(seq + 30);
+        eye = eye + move * back, at = at + move * back;
+        LookAtLH(fd.camera.view, eye, at, {0, 1, 0});
+        fd.camera.cut = 1;
+        for (int i = 0; i < 30; ++i) {   // 30 frames of driving before the first capture: the history as in a run
+            frame();
+            eye = eye + move, at = at + move;
+            LookAtLH(fd.camera.view, eye, at, {0, 1, 0});
+        }
+    }
+    for (uint32_t i = 0; i < seq; ++i) {
+        if (moving && i) {
+            eye = eye + move, at = at + move;
+            LookAtLH(fd.camera.view, eye, at, {0, 1, 0});
+        }
+        char name[32];
+        std::snprintf(name, sizeof name, "-seq-%02u.png", i);
+        api.captureFrame(r, (prefix + name).c_str());
+        frame();
+    }
     if (frames) {
         std::vector<float> fm, pm, rm;
         for (uint32_t i = 0; i < frames; ++i) {
