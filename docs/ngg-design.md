@@ -800,6 +800,16 @@ where the strip cards were, thinning under crowns) and the `NGGP` plants whose c
   camera, as the static world, and the denoisers and TAA mix it with its neighbours. On the user's windy drive: a bush's
   black pixels 735 -> 6, the whole drive's dark pixels 5,277 -> 4,149 (4,289 without wind). `instancing-41`'s wind
   checks (15 m/s) still pass.
+- **The car pushes grass aside** (2026-11-22, the user's option A; no state kept): `VSGrass` bends a blade away from
+  the car's box (`Scene::CarBox` - the reflection focus's objects, the body's axes: what the probe already used; now a
+  function, and in the camera's constant buffer as `gGrassCar`, with last frame's as `gGrassCarPrev` for the motion).
+  Fully within its footprint and fading out 0.45 m beyond it (`kGrassCarReach`), the blade leans over away from the
+  box's middle (across it underneath), up to 0.85 of its height, linearly from the root; under the floor it is
+  shortened to the floor's height, so none comes through the car. The lean grows the wind's height loss. As the car
+  leaves the blade stands up again at once. Physics untouched (grass is not in the `.col`). Checked on RBR's run at
+  41's first hairpin, where the car runs into the tall grass: before, blades stood up through its tail; after, the
+  grass round it lies away from it. Other cars (ghosts, multiplayer) would need their boxes passed too. Persisting
+  tracks (a trample map the spawn reads) are option B, not built.
 - **Not done:** the field is drawn again whole every 4 m, not by strips; the editor has no grass window and no paint
   (Wallaby's step 4, an upload call on the editor table); the look is the user's to judge in the game.
 

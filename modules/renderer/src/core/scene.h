@@ -937,6 +937,8 @@ private:
     // cards].
     Microsoft::WRL::ComPtr<ID3D12PipelineState> m_psoGrassPre[2], m_psoGrassMain[2][2];
     void UpdateGrassCards();
+    bool CarBox(float out[4][4]) const;
+    float m_grassCarNow[4][4] = {}, m_grassCarPrev[4][4] = {};   // the car the grass bends from, this frame and last
     void DrawGrass(ID3D12GraphicsCommandList* list, bool prepass, bool gbuf);
     const D3D12_INDEX_BUFFER_VIEW& StaticIbv() const { return m_grassCardsOff && m_ibGrass ? m_ibvGrass : m_ibv; }
     std::vector<MaterialSlot>                                 m_materials;

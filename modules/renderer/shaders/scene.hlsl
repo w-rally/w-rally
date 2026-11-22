@@ -118,6 +118,10 @@ cbuffer Camera : register(b0)
     // gain, y the crown's extinction for transmitted light as a share of the direct shadow's, z the sheen, w the
     // ambient a crown's centre keeps (0: the old rule, kFoliageInnerAo under ray-traced AO only).
     float4             gFoliageLook;
+    // The car as a box (Scene::CarBox) the grass bends away from (VSGrass): the centre (w 1 where there is one) and the
+    // axes, each with its half extent in w - this frame's, and last frame's for the bent blades' motion.
+    float4             gGrassCar[4];
+    float4             gGrassCarPrev[4];
 };
 
 // Cascaded shadow maps. A comparison sampler so the hardware does the depth
@@ -839,6 +843,42 @@ float3 GrassWind(float3 root, float h, float t, float response, float phase, flo
     return float3(off.x, 0.0, off.y);
 }
 
+// THE CAR pushing a blade aside (gGrassCar): how much (k, 1 under the car, fading to 0 kGrassCarReach outside its
+// footprint), which way along the ground (away from the box's middle, across it under the car), and the height the
+// blade may keep there (under the car's floor, flattened). Nothing persists: the blade springs back as the car leaves.
+static const float kGrassCarReach = 0.45;   // metres beyond the footprint where blades still lean away
+void GrassCar(float3 root, float h, float4 box[4], out float3 dir, out float k, out float keep)
+{
+    dir = float3(0.0, 0.0, 0.0);
+    k = 0.0;
+    keep = 1.0;
+    if (box[0].w < 0.5) return;
+    // Its up axis is whichever lies nearest the vertical (the model's own axes decide which), the other two across it.
+    const float ay0 = abs(box[1].y), ay1 = abs(box[2].y), ay2 = abs(box[3].y);
+    const uint up = ay0 >= ay1 && ay0 >= ay2 ? 1u : ay1 >= ay2 ? 2u : 3u;
+    const float4 U = box[up], A = box[up == 1u ? 2u : 1u], B = box[up == 3u ? 2u : 3u];
+    const float3 o = root - box[0].xyz;
+    const float lu = dot(o, U.xyz) * (U.y < 0.0 ? -1.0 : 1.0);   // + up
+    const float2 l = float2(dot(o, A.xyz), dot(o, B.xyz));
+    // Below its roof and not far under its floor (a blade on a bank below the road is not under the car).
+    if (lu > U.w || lu < -U.w - 1.5) return;
+    const float2 outside = max(abs(l) - float2(A.w, B.w), 0.0);
+    const float d = length(outside);
+    k = 1.0 - smoothstep(0.0, kGrassCarReach, d);
+    if (k <= 0.0) return;
+    // Away from the middle: outside the footprint from its nearest edge, under it across its shorter side.
+    const bool acrossA = A.w <= B.w;
+    const float2 away = d > 1e-4 ? float2(sign(l.x) * outside.x, sign(l.y) * outside.y) / d
+                                 : (acrossA ? float2(l.x >= 0.0 ? 1.0 : -1.0, 0.0) : float2(0.0, l.y >= 0.0 ? 1.0 : -1.0));
+    float3 w = A.xyz * away.x + B.xyz * away.y;
+    w.y = 0.0;
+    dir = dot(w, w) > 1e-8 ? normalize(w) : float3(1.0, 0.0, 0.0);
+    // Under the floor (the box's bottom over the root), flattened to it: never through the car.
+    const float floorY = box[0].y - abs(U.y) * U.w;
+    const float under = 1.0 - smoothstep(0.0, 0.05, d);
+    keep = lerp(1.0, saturate(max(floorY - root.y, 0.03) / max(h, 1e-3)), under);
+}
+
 VSOut VSGrass(GrassIn i)
 {
     VSOut o = (VSOut)0;
@@ -894,13 +934,25 @@ VSOut VSGrass(GrassIn i)
     // The wind, now and at the last frame's time (the motion target), and the height it costs a leaning blade.
     const float3 windNow = GrassWind(root, h, t, response, r3, gWindTime);
     const float3 windPrev = gWindPrevOn > 0.5 ? GrassWind(root, h, t, response, r3, gWindPrevTime) : windNow;
-    const float tipLean = length(GrassWind(root, h, 1.0, response, r3, gWindTime).xz);
-    const float drop = h > 1e-3 ? 1.0 - sqrt(saturate(1.0 - 0.5 * (tipLean / h) * (tipLean / h))) : 0.0;
+    const float3 windTip = GrassWind(root, h, 1.0, response, r3, gWindTime);
+    // The car (GrassCar): leaning the blade over away from it, now and last frame - a stiff blade bends low at the
+    // root, so its lean grows as t, not t^2 - and under its floor, shorter.
+    float3 carDir, carDirPrev;
+    float carK, carKPrev, keep, keepPrev;
+    GrassCar(root, h, gGrassCar, carDir, carK, keep);
+    GrassCar(root, h, gGrassCarPrev, carDirPrev, carKPrev, keepPrev);
+    const float3 carNow = carDir * (0.85 * h * carK * t);
+    const float3 carPrev = carDirPrev * (0.85 * h * carKPrev * t);
+    const float tipLean = min(length(windTip.xz + carDir.xz * (0.85 * h * carK)), 0.95 * h);
+    const float tipLeanPrev = min(length(windTip.xz + carDirPrev.xz * (0.85 * h * carKPrev)), 0.95 * h);
+    const float drop = h > 1e-3 ? 1.0 - sqrt(saturate(1.0 - (tipLean / h) * (tipLean / h))) : 0.0;
+    const float dropPrev = h > 1e-3 ? 1.0 - sqrt(saturate(1.0 - (tipLeanPrev / h) * (tipLeanPrev / h))) : 0.0;
     const float3 sink = float3(0.0, -h * t * drop, 0.0);
+    const float3 sinkPrev = float3(0.0, -h * t * dropPrev, 0.0);
     // `precise`: the prepass and the main pass compile this shader into different pipelines, and the main pass finds
     // the prepass's depth only if both compute the position to the bit.
-    precise const float3 pos = root + local + windNow + sink;
-    const float3 prev = root + local + windPrev + sink;
+    precise const float3 pos = root + float3(local.x, local.y * keep, local.z) + windNow + carNow + sink * keep;
+    const float3 prev = root + float3(local.x, local.y * keepPrev, local.z) + windPrev + carPrev + sinkPrev * keepPrev;
 
     // Near: the blade's own shape lights it (wrap, translucency); far: the ground's light, so the fade is not seen.
     const float near = 1.0 - smoothstep(8.0, 30.0, dist);
@@ -934,7 +986,7 @@ VSOut VSGrass(GrassIn i)
     // the camera's reprojection, as the ground's: the denoisers never mix a moving object's pixels with static ones,
     // so a thin far blade marked moving was averaged with itself alone - its one or two raw AO rays, no history - and
     // in shade came out black (the user, 2026-11-22, with NGG_WIND=1,0.2,90).
-    o.swayed = gWind.z > 0.0 && response > 0.0 && dist < kGrassOwnMotion ? 1u : 0u;
+    o.swayed = ((gWind.z > 0.0 && response > 0.0) || carK > 0.0 || carKPrev > 0.0) && dist < kGrassOwnMotion ? 1u : 0u;
     o.nearShadow = 0u;
     precise const float4 world = float4(pos + gWorldOffset, 1.0);
     precise const float4 clipPos = mul(mul(world, gView), gProj);

@@ -135,6 +135,8 @@ struct CameraCB
     float windTime, windPrevTime, windPrevOn, windPad;   // gWindTime, gWindPrevTime, gWindPrevOn, gFoliageMap
     float foliageParams[4];   // gFoliageParams: the sun's angular radius, kFoliageReach, the map's resolution, the turn
     float foliageLook[4];     // gFoliageLook (FoliageLook()): backlight lobe, its extinction, sheen, crown inner AO
+    float grassCar[4][4];     // gGrassCar: the car as a box (Scene::CarBox) the grass bends away from; w of [0] 1: there
+    float grassCarPrev[4][4]; // gGrassCarPrev: last frame's (the bent blades' motion)
 };
 // A model leaf's look (NGG design §2.6 "Foliage shading"), read once. Each term has its own switch for A/B; 0 turns
 // it off (the crown AO: 0 is the old rule - kFoliageInnerAo, and only under ray-traced AO).
@@ -5018,6 +5020,59 @@ void Scene::DrawSelection(ID3D12GraphicsCommandList* list, const float* viewProj
 // Called AFTER the caller has waited for the GPU, exactly like LogProbe.
 // --- GRASS (grass.h) ---------------------------------------------------------------------------------------------
 
+// The car - the reflection focus's objects (SetReflectionFocus) - as an oriented box: the axes of its biggest mesh (the
+// body), the extents over all of them. out[0] = centre (w 1), out[1..3] = the axes with their half extents in w. False
+// (out untouched) without a car.
+bool Scene::CarBox(float out[4][4]) const
+{
+    const DrawItem* body = nullptr;
+    float bodyVol = -1.0f;
+    for (uint32_t id : m_probeObjects)
+    {
+        if (id >= m_objects.size()) continue;
+        const DrawItem& o = m_objects[id];
+        const float v = (o.bmax0[0] - o.bmin0[0]) * (o.bmax0[1] - o.bmin0[1]) * (o.bmax0[2] - o.bmin0[2]);
+        if (v > bodyVol) bodyVol = v, body = &o;
+    }
+    if (!body) return false;
+    float axis[3][3], lo[3] = { 1e30f, 1e30f, 1e30f }, hi[3] = { -1e30f, -1e30f, -1e30f };
+    for (int a = 0; a < 3; ++a)
+    {
+        const float* r = body->xform + a * 4;
+        const float len = sqrtf(r[0] * r[0] + r[1] * r[1] + r[2] * r[2]);
+        for (int k = 0; k < 3; ++k) axis[a][k] = len > 1e-6f ? r[k] / len : (a == k ? 1.0f : 0.0f);
+    }
+    for (uint32_t id : m_probeObjects)
+    {
+        if (id >= m_objects.size()) continue;
+        const DrawItem& o = m_objects[id];
+        for (int c = 0; c < 8; ++c)
+        {
+            const float p[3] = { (c & 1) ? o.bmax[0] : o.bmin[0], (c & 2) ? o.bmax[1] : o.bmin[1],
+                                 (c & 4) ? o.bmax[2] : o.bmin[2] };
+            for (int a = 0; a < 3; ++a)
+            {
+                const float d = p[0] * axis[a][0] + p[1] * axis[a][1] + p[2] * axis[a][2];
+                lo[a] = (std::min)(lo[a], d);
+                hi[a] = (std::max)(hi[a], d);
+            }
+        }
+    }
+    for (int k = 0; k < 3; ++k)
+    {
+        float c = 0.0f;
+        for (int a = 0; a < 3; ++a) c += axis[a][k] * 0.5f * (lo[a] + hi[a]);
+        out[0][k] = c;
+    }
+    out[0][3] = 1.0f;
+    for (int a = 0; a < 3; ++a)
+    {
+        for (int k = 0; k < 3; ++k) out[1 + a][k] = axis[a][k];
+        out[1 + a][3] = 0.5f * (hi[a] - lo[a]);
+    }
+    return true;
+}
+
 void Scene::SetGrassReach(float metres)
 {
     m_grassReach = metres > 0.0f ? metres : 0.0f;
@@ -5504,6 +5559,19 @@ void Scene::RecordPass(ID3D12GraphicsCommandList* list, D3D12_CPU_DESCRIPTOR_HAN
         cb.foliageLook[1] = look.backlightK;
         cb.foliageLook[2] = look.sheen;
         cb.foliageLook[3] = look.crownAo;
+    }
+    // THE CAR for the grass (VSGrass bends the blades away from it): this frame's box, and last frame's for the motion.
+    // Once a frame, by whichever pass comes first.
+    {
+        if (firstPassOfFrame)
+        {
+            memcpy(m_grassCarPrev, m_grassCarNow, sizeof m_grassCarNow);
+            memset(m_grassCarNow, 0, sizeof m_grassCarNow);
+            if (GrassOn()) CarBox(m_grassCarNow);
+            if (m_grassCarNow[0][3] > 0.5f && m_grassCarPrev[0][3] < 0.5f) memcpy(m_grassCarPrev, m_grassCarNow, sizeof m_grassCarNow);
+        }
+        memcpy(cb.grassCar, m_grassCarNow, sizeof cb.grassCar);
+        memcpy(cb.grassCarPrev, m_grassCarPrev, sizeof cb.grassCarPrev);
     }
     ID3D12Device* dev = nullptr;
     list->GetDevice(IID_PPV_ARGS(&dev));
@@ -6007,56 +6075,8 @@ void Scene::RecordPass(ID3D12GraphicsCommandList* list, D3D12_CPU_DESCRIPTOR_HAN
         pcb.clusterParams[0] = (float)m_lights.Count();
         pcb.reflProbeOn = 0.0f;
         pcb.invScreen[0] = pcb.invScreen[1] = 1.0f / (float)ReflectionProbe::kFace;
-        // The car as a box (CarBoxVis): the axes of its biggest mesh (the body), the extents over all of them.
-        {
-            const DrawItem* body = nullptr;
-            float bodyVol = -1.0f;
-            for (uint32_t id : m_probeObjects)
-            {
-                if (id >= m_objects.size()) continue;
-                const DrawItem& o = m_objects[id];
-                const float v = (o.bmax0[0] - o.bmin0[0]) * (o.bmax0[1] - o.bmin0[1]) * (o.bmax0[2] - o.bmin0[2]);
-                if (v > bodyVol) bodyVol = v, body = &o;
-            }
-            if (body)
-            {
-                float axis[3][3], lo[3] = { 1e30f, 1e30f, 1e30f }, hi[3] = { -1e30f, -1e30f, -1e30f };
-                for (int a = 0; a < 3; ++a)
-                {
-                    const float* r = body->xform + a * 4;
-                    const float len = sqrtf(r[0] * r[0] + r[1] * r[1] + r[2] * r[2]);
-                    for (int k = 0; k < 3; ++k) axis[a][k] = len > 1e-6f ? r[k] / len : (a == k ? 1.0f : 0.0f);
-                }
-                for (uint32_t id : m_probeObjects)
-                {
-                    if (id >= m_objects.size()) continue;
-                    const DrawItem& o = m_objects[id];
-                    for (int c = 0; c < 8; ++c)
-                    {
-                        const float p[3] = { (c & 1) ? o.bmax[0] : o.bmin[0], (c & 2) ? o.bmax[1] : o.bmin[1],
-                                             (c & 4) ? o.bmax[2] : o.bmin[2] };
-                        for (int a = 0; a < 3; ++a)
-                        {
-                            const float d = p[0] * axis[a][0] + p[1] * axis[a][1] + p[2] * axis[a][2];
-                            lo[a] = (std::min)(lo[a], d);
-                            hi[a] = (std::max)(hi[a], d);
-                        }
-                    }
-                }
-                for (int k = 0; k < 3; ++k)
-                {
-                    float c = 0.0f;
-                    for (int a = 0; a < 3; ++a) c += axis[a][k] * 0.5f * (lo[a] + hi[a]);
-                    pcb.carBox[0][k] = c;
-                }
-                pcb.carBox[0][3] = 1.0f;
-                for (int a = 0; a < 3; ++a)
-                {
-                    for (int k = 0; k < 3; ++k) pcb.carBox[1 + a][k] = axis[a][k];
-                    pcb.carBox[1 + a][3] = 0.5f * (hi[a] - lo[a]);
-                }
-            }
-        }
+        // The car as a box (CarBoxVis).
+        CarBox(pcb.carBox);
         for (int k = 0; k < 3; ++k) pcb.camPos[k] = m_probeCentre[k];
         float fproj[16];
         ReflectionProbe::FaceProj(0.1f, 3000.0f, fproj);
