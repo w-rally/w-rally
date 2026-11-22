@@ -806,7 +806,10 @@ StageEnd RunStage(Shell& sh, const Options& given, bool fromMenu, std::string& e
     // end - how a renderer setting is judged (design §5.5), from a replay under --step. With it the main pass's and
     // the ray tracing's medians (passMs, rtMs), so a difference can be put where it is.
     const bool frameMsLog = std::getenv("PHYS_DRIVE_FRAMEMS") != nullptr;
-    std::vector<float> frameMsSeen, passMsSeen, rtMsSeen;
+    // With it, each frame's tick (where the slowest frames are) and its wall-clock time (CPU and GPU together: what the
+    // frame rate is, with vsync off).
+    std::vector<float> frameMsSeen, passMsSeen, rtMsSeen, wallMsSeen;
+    std::vector<uint32_t> frameTickSeen;
     double mixCheck = 0, title = 0;
     // The session on its own thread from here on (session/sim_thread.h): in lockstep with the frames under --step, so
     // those runs stay the same frame for frame.
@@ -853,6 +856,8 @@ StageEnd RunStage(Shell& sh, const Options& given, bool fromMenu, std::string& e
         QueryPerformanceCounter(&now);
         // --step: every frame advances the physics by exactly that, whatever the frame took.
         const double frame = o.fixedStep > 0.0 ? o.fixedStep : std::min(0.1, double(now.QuadPart - last.QuadPart) / double(freq.QuadPart));
+        if (frameMsLog && !paused && last.QuadPart)
+            wallMsSeen.push_back(float(1000.0 * double(now.QuadPart - last.QuadPart) / double(freq.QuadPart)));
         last = now;
         const bool focused = window.Focused() && menu == StageMenu::None;
         session::FrameInput in;
@@ -1254,6 +1259,7 @@ StageEnd RunStage(Shell& sh, const Options& given, bool fromMenu, std::string& e
                 frameMsSeen.push_back(st.frameMs);
                 passMsSeen.push_back(st.passMs);
                 rtMsSeen.push_back(st.rtMs);
+                frameTickSeen.push_back(snap.tick);
             }
         const bool timedShot = shotEvery && !paused && snap.tick >= shotTick + shotEvery;
         if (timedShot) shotTick = snap.tick;
@@ -1379,6 +1385,25 @@ StageEnd RunStage(Shell& sh, const Options& given, bool fromMenu, std::string& e
             return w[w.size() / 2];
         };
         std::printf("gpu parts: main pass median %.2f ms, ray tracing median %.2f ms\n", median(passMsSeen), median(rtMsSeen));
+        // The slow end - what a frame-rate target is about: the 95th and 99th percentiles and the slowest frame's tick.
+        auto tail = [](std::vector<float> w, double p) {
+            const size_t k = std::min(w.size() - 1, size_t(p * double(w.size())));
+            std::nth_element(w.begin(), w.begin() + k, w.end());
+            return w[k];
+        };
+        size_t worst = 30;
+        for (size_t i = 30; i < frameMsSeen.size(); ++i)
+            if (frameMsSeen[i] > frameMsSeen[worst]) worst = i;
+        std::vector<float> g(frameMsSeen.begin() + 30, frameMsSeen.end());
+        std::printf("gpu frame: p95 %.2f ms, p99 %.2f ms, slowest %.2f ms at tick %u\n", tail(g, 0.95), tail(g, 0.99),
+                    frameMsSeen[worst], frameTickSeen[worst]);
+        if (wallMsSeen.size() > 60) {
+            std::vector<float> w(wallMsSeen.begin() + 30, wallMsSeen.end());
+            double wsum = 0;
+            for (float ms : w) wsum += ms;
+            std::printf("wall frame (CPU + GPU, vsync off to mean it): mean %.2f ms (%.0f fps), median %.2f, p95 %.2f, p99 "
+                        "%.2f ms\n", wsum / w.size(), 1000.0 * w.size() / wsum, tail(w, 0.5), tail(w, 0.95), tail(w, 0.99));
+        }
     }
     window.SetTitle(L"W-Rally");
     return end;
