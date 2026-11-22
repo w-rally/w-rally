@@ -882,7 +882,9 @@ VSOut VSGrass(GrassIn i)
     const float tipLean = length(GrassWind(root, h, 1.0, response, r3, gWindTime).xz);
     const float drop = h > 1e-3 ? 1.0 - sqrt(saturate(1.0 - 0.5 * (tipLean / h) * (tipLean / h))) : 0.0;
     const float3 sink = float3(0.0, -h * t * drop, 0.0);
-    const float3 pos = root + local + windNow + sink;
+    // `precise`: the prepass and the main pass compile this shader into different pipelines, and the main pass finds
+    // the prepass's depth only if both compute the position to the bit.
+    precise const float3 pos = root + local + windNow + sink;
     const float3 prev = root + local + windPrev + sink;
 
     // Near: the blade's own shape lights it (wrap, translucency); far: the ground's light, so the fade is not seen.
@@ -915,8 +917,9 @@ VSOut VSGrass(GrassIn i)
     o.tint = float3(1.0, 1.0, 1.0);
     o.swayed = gWind.z > 0.0 && response > 0.0 ? 1u : 0u;
     o.nearShadow = 0u;
-    const float4 world = float4(pos + gWorldOffset, 1.0);
-    o.pos = mul(mul(world, gView), gProj);
+    precise const float4 world = float4(pos + gWorldOffset, 1.0);
+    precise const float4 clipPos = mul(mul(world, gView), gProj);
+    o.pos = clipPos;
     o.wpos = world.xyz;
     o.prevWpos = prev + gWorldOffset;
     return o;
@@ -1396,6 +1399,11 @@ float4 Shade(VSOut i, bool frontFace, out GBufOut g)
     // RBR's default, and an authored texture has no reason to share it.
     FadeClip(i.fade, i.pos.xy);
     clip(t0.a * i.col.a * gBaseColourFactor.a - AlphaCut(gPbrB.y, i.pos.xy));
+#endif
+#ifdef GRASS_CARD
+    // A grass card (VSGrass, far): its blades, as the prepass cut them - the main pass tests GREATER_EQUAL against the
+    // prepass's depth (as the rest of the foliage does), so the quad's empty part must be cut here too.
+    clip(GrassCardCoverage(i.uv0, i.uv1) - 0.5);
 #endif
 #ifdef BLEND
     // Glass (kMaterialBlend): the same alpha is COVERAGE - how much of the tint lies over what is behind. The output

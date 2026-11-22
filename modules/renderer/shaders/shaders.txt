@@ -29,6 +29,8 @@ scene.hlsl  PSPrepass         ps_6_0  -HV 2018 -DGRASS=1
 scene.hlsl  PSPrepass         ps_6_0  -HV 2018 -DGRASS=1 -DGRASS_CARD=1
 scene.hlsl  PSMain            ps_6_0  -HV 2018 -DALPHA_TEST=1 -DGRASS=1
 scene.hlsl  PSMain            ps_6_0  -HV 2018 -DALPHA_TEST=1 -DGBUF=1 -DGRASS=1
+scene.hlsl  PSMain            ps_6_0  -HV 2018 -DALPHA_TEST=1 -DGRASS=1 -DGRASS_CARD=1
+scene.hlsl  PSMain            ps_6_0  -HV 2018 -DALPHA_TEST=1 -DGBUF=1 -DGRASS=1 -DGRASS_CARD=1
 # ... and its field round the camera and the spawn (core/grass.cpp)
 grass.hlsl  VSField           vs_6_0  -HV 2018
 grass.hlsl  PSField           ps_6_0  -HV 2018

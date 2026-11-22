@@ -933,8 +933,9 @@ private:
     std::vector<uint8_t>     m_grassDropTri;
     uint32_t                 m_grassReplacedTris = 0;
     bool                     m_grassCardsOff = false;     // the grass is drawn and its cards are not
-    // The blades' pipelines (VSGrass): the prepass [blades, cards], the main pass [forward, deferred surface].
-    Microsoft::WRL::ComPtr<ID3D12PipelineState> m_psoGrassPre[2], m_psoGrassMain[2];
+    // The blades' pipelines (VSGrass): the prepass [blades, cards], the main pass [forward, deferred surface][blades,
+    // cards].
+    Microsoft::WRL::ComPtr<ID3D12PipelineState> m_psoGrassPre[2], m_psoGrassMain[2][2];
     void UpdateGrassCards();
     void DrawGrass(ID3D12GraphicsCommandList* list, bool prepass, bool gbuf);
     const D3D12_INDEX_BUFFER_VIEW& StaticIbv() const { return m_grassCardsOff && m_ibGrass ? m_ibvGrass : m_ibv; }

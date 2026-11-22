@@ -3684,8 +3684,8 @@ bool Scene::CreatePipelines(ID3D12Device* dev, DXGI_FORMAT rtvFormat, float mipB
     // shades exactly what it left: EQUAL to its depth, not written - so the cards need no test there. DXC only (the
     // runtime FXC fallback has no grass).
     for (auto& p : m_psoGrassPre) p.Reset();
-    for (auto& p : m_psoGrassMain) p.Reset();
-    ComPtr<ID3DBlob> vsGrass, psGrassPre, psGrassCard, psGrass, psGrassG;   // (out here: the batch reads their bytes)
+    for (auto& k : m_psoGrassMain) for (auto& p : k) p.Reset();
+    ComPtr<ID3DBlob> vsGrass, psGrassPre, psGrassCard, psGrass, psGrassG, psGrassC, psGrassCG;   // (the batch reads them)
     if (dxil)
     {
         vsGrass = compile("VSGrass", true, kOpaque);
@@ -3693,11 +3693,13 @@ bool Scene::CreatePipelines(ID3D12Device* dev, DXGI_FORMAT rtvFormat, float mipB
         psGrassCard = compile("PSPrepass", false, kOpaque, false, false, 2);
         psGrass = compile("PSMain", false, kAlphaTest, false, false, 1);
         psGrassG = m_deferredReady ? compile("PSMain", false, kAlphaTest, true, false, 1) : nullptr;
+        psGrassC = compile("PSMain", false, kAlphaTest, false, false, 2);
+        psGrassCG = m_deferredReady ? compile("PSMain", false, kAlphaTest, true, false, 2) : nullptr;
         static const D3D12_INPUT_ELEMENT_DESC grassLayout[] = {
             { "GRASS", 0, DXGI_FORMAT_R32G32B32A32_FLOAT, 1,  0, D3D12_INPUT_CLASSIFICATION_PER_INSTANCE_DATA, 1 },
             { "GRASS", 1, DXGI_FORMAT_R32G32B32A32_UINT,  1, 16, D3D12_INPUT_CLASSIFICATION_PER_INSTANCE_DATA, 1 },
         };
-        if (vsGrass && psGrassPre && psGrassCard && psGrass)
+        if (vsGrass && psGrassPre && psGrassCard && psGrass && psGrassC)
         {
             D3D12_GRAPHICS_PIPELINE_STATE_DESC gp = pso;
             gp.VS = { vsGrass->GetBufferPointer(), vsGrass->GetBufferSize() };
@@ -3713,17 +3715,23 @@ bool Scene::CreatePipelines(ID3D12Device* dev, DXGI_FORMAT rtvFormat, float mipB
             batch.Add(pre, &m_psoGrassPre[0], "scene: the grass's prepass PSO failed - no grass");
             pre.PS = { psGrassCard->GetBufferPointer(), psGrassCard->GetBufferSize() };
             batch.Add(pre, &m_psoGrassPre[1], "scene: the grass cards' prepass PSO failed - no grass");
+            // GREATER_EQUAL, not EQUAL, as the rest of the foliage over the prepass: EQUAL left every pixel whose depth
+            // the two pipelines' compiles put a hair apart unshaded - black blades in the game (2026-11-22).
             D3D12_GRAPHICS_PIPELINE_STATE_DESC mp = gp;
             mp.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ZERO;
-            mp.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_EQUAL;
+            mp.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_GREATER_EQUAL;
             mp.PS = { psGrass->GetBufferPointer(), psGrass->GetBufferSize() };
-            batch.Add(mp, &m_psoGrassMain[0], "scene: the grass's PSO failed - no grass");
-            if (psGrassG)
+            batch.Add(mp, &m_psoGrassMain[0][0], "scene: the grass's PSO failed - no grass");
+            mp.PS = { psGrassC->GetBufferPointer(), psGrassC->GetBufferSize() };
+            batch.Add(mp, &m_psoGrassMain[0][1], "scene: the grass cards' PSO failed - no grass");
+            if (psGrassG && psGrassCG)
             {
                 mp.NumRenderTargets = 3;
                 for (int k = 0; k < 2; ++k) mp.RTVFormats[1 + k] = kGbufFormats[k];
                 mp.PS = { psGrassG->GetBufferPointer(), psGrassG->GetBufferSize() };
-                batch.Add(mp, &m_psoGrassMain[1], "scene: the grass's deferred PSO failed - no grass under local lights");
+                batch.Add(mp, &m_psoGrassMain[1][0], "scene: the grass's deferred PSO failed - no grass under local lights");
+                mp.PS = { psGrassCG->GetBufferPointer(), psGrassCG->GetBufferSize() };
+                batch.Add(mp, &m_psoGrassMain[1][1], "scene: the grass cards' deferred PSO failed - no grass under local lights");
             }
         }
         else
@@ -5018,7 +5026,8 @@ void Scene::SetGrassReach(float metres)
 
 bool Scene::GrassOn() const
 {
-    return m_grassReach > 0.0f && m_grass.Loaded() && m_psoGrassPre[0] && m_psoGrassPre[1] && m_psoGrassMain[0];
+    return m_grassReach > 0.0f && m_grass.Loaded() && m_psoGrassPre[0] && m_psoGrassPre[1] && m_psoGrassMain[0][0] &&
+           m_psoGrassMain[0][1];
 }
 
 // The cards the grass replaces are drawn exactly while the grass is not (the contract: a stage never loses its
@@ -5052,8 +5061,9 @@ void Scene::RecordGrass(ID3D12GraphicsCommandList* list, const float* view, cons
 void Scene::DrawGrass(ID3D12GraphicsCommandList* list, bool prepass, bool gbuf)
 {
     if (!GrassOn() || !m_grass.Spawned() || !m_grass.Args() || !m_grass.CommandSignature()) return;
-    ID3D12PipelineState* main = gbuf ? m_psoGrassMain[1].Get() : m_psoGrassMain[0].Get();
-    if (!prepass && !main) return;
+    ID3D12PipelineState* main = m_psoGrassMain[gbuf ? 1 : 0][0].Get();
+    ID3D12PipelineState* mainCard = m_psoGrassMain[gbuf ? 1 : 0][1].Get();
+    if (!prepass && (!main || !mainCard)) return;
     const D3D12_VERTEX_BUFFER_VIEW iv = m_grass.InstanceView();
     list->IASetVertexBuffers(1, 1, &iv);
     list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
@@ -5080,7 +5090,9 @@ void Scene::DrawGrass(ID3D12GraphicsCommandList* list, bool prepass, bool gbuf)
     {
         m_grass.Stamp(list, 4);
         list->SetPipelineState(main);
-        list->ExecuteIndirect(sig, 3, args, 0, nullptr, 0);
+        list->ExecuteIndirect(sig, 2, args, 0, nullptr, 0);
+        list->SetPipelineState(mainCard);
+        list->ExecuteIndirect(sig, 1, args, 32, nullptr, 0);
         m_grass.Stamp(list, 5);
         m_grass.ResolveStamps(list);
     }

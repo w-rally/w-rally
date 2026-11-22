@@ -749,8 +749,8 @@ where the strip cards were, thinning under crowns) and the `NGGP` plants whose c
   arguments capped (`CSClamp`) - drawn with `ExecuteIndirect`.
 - **Drawn as the world is:** `VSGrass` (the instance stream's slot, triangle strips) in the prepass - depth, a normal
   mostly up as the ground's (so its rays and its AO are the ground's: a blade's own plane traced half its AO rays into
-  the ground), motion (`NggMotion`, the wind) - and in the main pass EQUAL to that depth (the cards need no test
-  there), `PSMain` with `ALPHA_TEST` and `GRASS`: the foliage path, its colour from the vertices, its wrap and
+  the ground), motion (`NggMotion`, the wind) - and in the main pass GREATER_EQUAL against that depth, the cards cut again
+  (`GRASS_CARD`), `PSMain` with `ALPHA_TEST` and `GRASS`: the foliage path, its colour from the vertices, its wrap and
   translucency faded out from 8 to 30 m so that far grass is lit as the ground under it is, and the fade is not seen.
   A blade is never narrower than 1.3 pixels at its distance (thinner ones flicker and the field reads thin).
 - **Its look:** the ground's colour at the root (stored as its square root, 8 bits), darker at the root and brighter at
@@ -783,6 +783,10 @@ where the strip cards were, thinning under crowns) and the `NGGP` plants whose c
   stretch is 0.1-0.2 ms over the 1.5 ms budget; medium is inside it everywhere.** Next levers if it matters: a
   cheaper main-pass path for far grass (it is lit as the ground already), fewer tall-patch blades, or the field
   scrolled by strips (it is ~0.08 ms now).
+- **EQUAL was wrong** (2026-11-22, the user, in the game): the main pass first took the grass EQUAL to the prepass's
+  depth. Where the two pipelines' compiles of `VSGrass` put a blade a hair apart, its pixels were never shaded and
+  stayed black - specks of far blades 25-40 m off, from the first frames. Not seen in any replay or still here. Now
+  GREATER_EQUAL as the rest of the foliage, and the position `precise`.
 - **Not done:** the field is drawn again whole every 4 m, not by strips; the editor has no grass window and no paint
   (Wallaby's step 4, an upload call on the editor table); the look is the user's to judge in the game.
 
