@@ -5,6 +5,7 @@
 
 #include <d3dcompiler.h>
 #include <string>
+#include <vector>
 #include <math.h>
 
 using Microsoft::WRL::ComPtr;
@@ -74,6 +75,8 @@ ComPtr<ID3D12Resource> MakeUpload(ID3D12Device* dev, const void* data, size_t by
 bool Environment::Create(ID3D12Device* dev)
 {
     if (!dev) return false;
+    m_cbs.Reset();   // (made again on this device at the first Record)
+    m_cbsMapped = nullptr;
 
     D3D12_DESCRIPTOR_RANGE range = {};
     range.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
@@ -361,10 +364,27 @@ void Environment::Record(ID3D12GraphicsCommandList* list, const SkyParams& p,
         list->SetGraphicsRootDescriptorTable(2, mh);
     }
 
-    // The constant buffers must outlive GPU execution; the frame is synchronous
-    // (see the note at the end of Scene::Record) so holding them to the next
-    // Record is enough. One per mip because srcTexel differs.
-    ComPtr<ID3D12Resource> cbs[kMips];
+    // The constants, one 256-byte slot per mip (srcTexel differs) and one for the irradiance, in a buffer made once
+    // and kept mapped. Rewriting it here is safe because the frame is synchronous (see the note at the end of
+    // Scene::Record): last frame's draws have finished reading it. Frames that overlap would need one per frame.
+    if (!m_cbs)
+    {
+        ComPtr<ID3D12Resource> made;
+        std::vector<uint8_t> zero((kMips + 1) * 256, 0);
+        made = MakeUpload(dev, zero.data(), zero.size());
+        void* p = nullptr;
+        D3D12_RANGE none = { 0, 0 };
+        if (made && SUCCEEDED(made->Map(0, &none, &p)))
+        {
+            m_cbs = made;
+            m_cbsMapped = static_cast<unsigned char*>(p);
+        }
+    }
+    if (!m_cbs) { dev->Release(); return; }
+    auto slot = [&](UINT k, const EnvCB& c) {
+        memcpy(m_cbsMapped + (size_t)k * 256, &c, sizeof(c));
+        return m_cbs->GetGPUVirtualAddress() + (UINT64)k * 256;
+    };
 
     for (UINT m = 0; m < kMips; ++m)
     {
@@ -392,8 +412,7 @@ void Environment::Record(ID3D12GraphicsCommandList* list, const SkyParams& p,
         const UINT srcSize = (m == 0) ? kSize : (kSize >> (m - 1));
         cb.srcTexel[0] = 1.0f / (float)srcSize;
         cb.srcTexel[1] = 1.0f / (float)srcSize;
-        cbs[m] = MakeUpload(dev, &cb, sizeof(cb));
-        if (!cbs[m]) break;
+        const D3D12_GPU_VIRTUAL_ADDRESS cbVa = slot(m, cb);
 
         D3D12_VIEWPORT vp = { 0.0f, 0.0f, (float)size, (float)size, 0.0f, 1.0f };
         D3D12_RECT sc = { 0, 0, (LONG)size, (LONG)size };
@@ -405,7 +424,7 @@ void Environment::Record(ID3D12GraphicsCommandList* list, const SkyParams& p,
         list->OMSetRenderTargets(1, &rtv, FALSE, nullptr);
 
         list->SetPipelineState((m == 0) ? m_psoSky.Get() : m_psoDown.Get());
-        list->SetGraphicsRootConstantBufferView(0, cbs[m]->GetGPUVirtualAddress());
+        list->SetGraphicsRootConstantBufferView(0, cbVa);
         if (m > 0)
         {
             D3D12_GPU_DESCRIPTOR_HANDLE sh = m_srvHeap->GetGPUDescriptorHandleForHeapStart();
@@ -436,8 +455,7 @@ void Environment::Record(ID3D12GraphicsCommandList* list, const SkyParams& p,
         list->ResourceBarrier(1, &ib);
 
         cb.srcTexel[0] = cb.srcTexel[1] = 1.0f / (float)kSize;
-        m_irrKeepAlive = MakeUpload(dev, &cb, sizeof(cb));
-        if (m_irrKeepAlive)
+        const D3D12_GPU_VIRTUAL_ADDRESS irrVa = slot(kMips, cb);
         {
             D3D12_VIEWPORT vp = { 0.0f, 0.0f, (float)kIrrSize, (float)kIrrSize, 0.0f, 1.0f };
             D3D12_RECT sc = { 0, 0, kIrrSize, kIrrSize };
@@ -446,7 +464,7 @@ void Environment::Record(ID3D12GraphicsCommandList* list, const SkyParams& p,
             D3D12_CPU_DESCRIPTOR_HANDLE rtv = m_irrRtvHeap->GetCPUDescriptorHandleForHeapStart();
             list->OMSetRenderTargets(1, &rtv, FALSE, nullptr);
             list->SetPipelineState(m_psoIrr.Get());
-            list->SetGraphicsRootConstantBufferView(0, m_irrKeepAlive->GetGPUVirtualAddress());
+            list->SetGraphicsRootConstantBufferView(0, irrVa);
             list->SetGraphicsRootDescriptorTable(1, m_srvHeap->GetGPUDescriptorHandleForHeapStart());
             list->DrawInstanced(3, 1, 0, 0);
         }
@@ -481,7 +499,6 @@ void Environment::Record(ID3D12GraphicsCommandList* list, const SkyParams& p,
     }
 
     dev->Release();
-    for (UINT m = 0; m < kMips; ++m) m_keepAlive[m] = cbs[m];
 }
 
 } // namespace core

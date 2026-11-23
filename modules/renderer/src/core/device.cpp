@@ -1,4 +1,5 @@
 #include "device.h"
+#include "frame_upload.h"
 #include "log.h"
 
 #include <dxgi1_6.h>
@@ -152,6 +153,7 @@ bool Device::Create(const LUID* luid, bool enableDebugLayer)
     Log("core: adapter %ls (%llu MB)", ad.Description,
         (unsigned long long)(ad.DedicatedVideoMemory / (1024 * 1024)));
 
+    ReleaseFrameUploads();   // (an old device's buffers would keep it alive)
     if (FAILED(D3D12CreateDevice(adapter.Get(), D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&device))))
     {
         Log("core: D3D12CreateDevice failed");
@@ -225,6 +227,7 @@ void Device::EndAndWait()
     ID3D12CommandList* lists[] = { list.Get() };
     queue->ExecuteCommandLists(1, lists);
     WaitForGpu();
+    ResetFrameUploads();   // the GPU has read every constant this frame placed in the ring
     CheckRemoved("after a submit");
 }
 
@@ -334,6 +337,7 @@ void Device::Destroy()
     // this a clean exit becomes a device-removed report in the log.
     if (queue && fence) WaitForGpu();
     if (fenceEvent) { CloseHandle(fenceEvent); fenceEvent = nullptr; }
+    ReleaseFrameUploads();
     list.Reset(); alloc.Reset(); fence.Reset(); queue.Reset(); device.Reset();
 }
 

@@ -1,4 +1,5 @@
 #include "aerial.h"
+#include "frame_upload.h"
 #include "log.h"
 #include "pipeline_cache.h"
 #include "shaders.h"
@@ -248,7 +249,7 @@ void AerialLut::Record(ID3D12GraphicsCommandList* list, const float* viewProj,
         cb.cloudCover = weather[0]; cb.fogBeta = weather[1];
         cb.fogHeight = weather[2];  cb.groundAlbedo = weather[3];
     }
-    ComPtr<ID3D12Resource> cbRes = MakeUpload(dev, &cb, sizeof(cb));
+    const D3D12_GPU_VIRTUAL_ADDRESS cbRes = FrameUpload(dev, &cb, sizeof(cb));   // the frame's ring (frame_upload.h)
 
     // The MS table in slot 2, rewritten each frame (a write, not an allocation).
     D3D12_CPU_DESCRIPTOR_HANDLE msh = m_uavHeap->GetCPUDescriptorHandleForHeapStart();
@@ -279,7 +280,7 @@ void AerialLut::Record(ID3D12GraphicsCommandList* list, const float* viewProj,
     list->SetDescriptorHeaps(1, heaps);
     list->SetComputeRootSignature(m_rootSig.Get());
     list->SetPipelineState(m_pso.Get());
-    list->SetComputeRootConstantBufferView(0, cbRes->GetGPUVirtualAddress());
+    list->SetComputeRootConstantBufferView(0, cbRes);
     list->SetComputeRootDescriptorTable(1, m_uavHeap->GetGPUDescriptorHandleForHeapStart());
     {
         D3D12_GPU_DESCRIPTOR_HANDLE mg = m_uavHeap->GetGPUDescriptorHandleForHeapStart();
@@ -292,7 +293,6 @@ void AerialLut::Record(ID3D12GraphicsCommandList* list, const float* viewProj,
         std::swap(t.Transition.StateBefore, t.Transition.StateAfter);
     list->ResourceBarrier(2, b);
 
-    m_keepAlive = cbRes;
 }
 
 } // namespace core

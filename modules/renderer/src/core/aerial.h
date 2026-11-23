@@ -84,7 +84,6 @@ private:
     UINT                                         m_stride = 0;
     // Must outlive GPU execution; the frame is synchronous (see the note at the
     // end of Scene::Record), so holding it until the next Record is enough.
-    Microsoft::WRL::ComPtr<ID3D12Resource>       m_keepAlive;
 };
 
 } // namespace core

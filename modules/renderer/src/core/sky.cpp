@@ -1,4 +1,5 @@
 #include "sky.h"
+#include "frame_upload.h"
 #include "log.h"
 #include "pipeline_cache.h"
 #include "shaders.h"
@@ -204,29 +205,10 @@ void Sky::Record(ID3D12GraphicsCommandList* list, D3D12_CPU_DESCRIPTOR_HANDLE rt
     list->GetDevice(IID_PPV_ARGS(&dev));
     if (!dev) return;
 
-    D3D12_HEAP_PROPERTIES heap = {};
-    heap.Type = D3D12_HEAP_TYPE_UPLOAD;
-    D3D12_RESOURCE_DESC desc = {};
-    desc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
-    desc.Width = sizeof(SkyCB);
-    desc.Height = 1;
-    desc.DepthOrArraySize = 1;
-    desc.MipLevels = 1;
-    desc.SampleDesc.Count = 1;
-    desc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
-
-    ComPtr<ID3D12Resource> cbRes;
-    HRESULT hr = dev->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &desc,
-                                              D3D12_RESOURCE_STATE_GENERIC_READ,
-                                              nullptr, IID_PPV_ARGS(&cbRes));
+    // The frame's ring (frame_upload.h): kept until the GPU has finished the frame.
+    const D3D12_GPU_VIRTUAL_ADDRESS cbRes = FrameUpload(dev, &cb, sizeof(cb));
     dev->Release();
-    if (FAILED(hr)) return;
-
-    void* mapped = nullptr;
-    D3D12_RANGE none = { 0, 0 };
-    if (FAILED(cbRes->Map(0, &none, &mapped))) return;
-    memcpy(mapped, &cb, sizeof(cb));
-    cbRes->Unmap(0, nullptr);
+    if (!cbRes) return;
 
     list->OMSetRenderTargets(1, &rtv, FALSE, nullptr);
 
@@ -237,14 +219,13 @@ void Sky::Record(ID3D12GraphicsCommandList* list, D3D12_CPU_DESCRIPTOR_HANDLE rt
 
     list->SetGraphicsRootSignature(m_rootSig.Get());
     list->SetPipelineState(m_pso.Get());
-    list->SetGraphicsRootConstantBufferView(0, cbRes->GetGPUVirtualAddress());
+    list->SetGraphicsRootConstantBufferView(0, cbRes);
     ID3D12DescriptorHeap* heaps[] = { m_srvHeap.Get() };
     list->SetDescriptorHeaps(1, heaps);
     list->SetGraphicsRootDescriptorTable(1, m_srvHeap->GetGPUDescriptorHandleForHeapStart());
     list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     list->DrawInstanced(3, 1, 0, 0);
 
-    m_frameCB = cbRes;   // outlive GPU execution; the frame loop waits
 }
 
 } // namespace core

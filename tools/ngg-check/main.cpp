@@ -732,7 +732,15 @@ std::string FoliageMapTrees(Gpu& gpu, const std::vector<uint8_t>& out, const ngg
         for (int v = 0; v < 2; ++v) {
             // Beyond the shadow, looking back at it and the tree.
             const float eye[3] = {shadow[0] + hx * views[v].back, shadow[1] + views[v].up, shadow[2] + hz * views[v].back};
-            for (int k = 0; k < 6; ++k) w.Frame(eye, shadow, views[v].fovY, 0.0f, 0.0f, 7, nullptr);   // (history settles)
+            // The history settles - and after RemoveAll the ray tracer's new BLASes, built off the frame on threads, are
+            // waited for: six frames are no fixed time (cheap frames finished them before the build had, 2026-11-23).
+            for (int k = 0; k < 6; ++k) w.Frame(eye, shadow, views[v].fovY, 0.0f, 0.0f, 7, nullptr);
+            for (int k = 0; k < 500 && !gpu.renderer.Stats().rtActive; ++k) {
+                Sleep(10);
+                w.Frame(eye, shadow, views[v].fovY, 0.0f, 0.0f, 7, nullptr);
+            }
+            if (gpu.renderer.Stats().rtActive)
+                for (int k = 0; k < 6; ++k) w.Frame(eye, shadow, views[v].fovY, 0.0f, 0.0f, 7, nullptr);   // (and settles on it)
             if (std::string e = w.Frame(eye, shadow, views[v].fovY, 0.0f, 0.0f, 7, pass ? &without[v] : &with[v]); !e.empty())
                 return e;
             if (!gpu.renderer.Stats().rtActive) return "ray tracing is not active: the foliage map is not checked";

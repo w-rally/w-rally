@@ -123,7 +123,6 @@ private:
 
     Microsoft::WRL::ComPtr<ID3D12RootSignature>  m_rootSig;
     Microsoft::WRL::ComPtr<ID3D12PipelineState>  m_pso;
-    Microsoft::WRL::ComPtr<ID3D12Resource>       m_frameCB;
     Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> m_srvHeap;   // the MS table
     AtmosphereMs m_ms;
     bool         m_msOn = true;
