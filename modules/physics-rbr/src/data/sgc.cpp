@@ -1,5 +1,6 @@
 #include "sgc.h"
 #include "files.h"
+#include "num/approx.h"
 #include "num/trig.h"
 #include "num/x87.h"
 
@@ -125,8 +126,8 @@ M4 Mul(const M4& a, const M4& b)
 }
 
 #define SH(a, b, i) _mm_shuffle_ps(a, b, i)
-// D3DXMatrixInverse (0x10155560: Intel's AP-928 cofactors, 1 / det by rcpss and one Newton step), transcribed
-// instruction for instruction. A singular matrix (det 0) is returned as it came.
+// D3DXMatrixInverse (0x10155560: Intel's AP-928 cofactors, 1 / det by rcpss - num/approx.h's table - and one Newton
+// step), transcribed instruction for instruction. A singular matrix (det 0) is returned as it came.
 M4 Inverse(const M4& m)
 {
     const float* f = reinterpret_cast<const float*>(m.r);
@@ -232,7 +233,7 @@ M4 Inverse(const M4& m)
     x2 = _mm_add_ps(x5, x6);
     if (_mm_cvtss_f32(x1) == 0.0f) return m;
     const __m128 det = x1;
-    __m128 r = _mm_rcp_ss(det);
+    __m128 r = _mm_move_ss(det, _mm_set_ss(num::RcpApprox(_mm_cvtss_f32(det))));   // rcpss (num/approx.h's table)
     x5 = r;
     r = _mm_mul_ss(r, r);
     __m128 d = _mm_mul_ss(det, r);
@@ -303,14 +304,17 @@ M4 NodeMatrix(const SgcCollisionNode& n)
 }
 
 // D3DXVec3TransformCoord (0x10156035): ((r0 x + r1 y) + (r2 z + r3)), divided by its w through rcpps and one Newton
-// step (the CPU's reciprocal estimate).
+// step (rcpps as num/approx.h's fixed table, the AMD CPU's estimate on every machine).
 void TransformCoord(const M4& m, const float v[3], float out[3])
 {
     const __m128 zr = _mm_add_ps(_mm_mul_ps(m.r[2], _mm_set1_ps(v[2])), m.r[3]);
     const __m128 yr = _mm_mul_ps(m.r[1], _mm_set1_ps(v[1]));
     __m128 s = _mm_mul_ps(m.r[0], _mm_set1_ps(v[0]));
     s = _mm_add_ps(_mm_add_ps(s, yr), zr);
-    const __m128 r = _mm_rcp_ps(s);
+    float lanes[4];
+    _mm_storeu_ps(lanes, s);
+    for (float& l : lanes) l = num::RcpApprox(l);   // rcpps lane by lane (num/approx.h's table)
+    const __m128 r = _mm_loadu_ps(lanes);
     const __m128 rwr = _mm_mul_ps(_mm_mul_ps(r, s), r);
     const __m128 inv = _mm_sub_ps(_mm_add_ps(r, r), rwr);
     s = _mm_mul_ps(s, _mm_shuffle_ps(inv, inv, 0xff));

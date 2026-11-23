@@ -29,4 +29,17 @@ uint32_t RsqrtApproxBits(uint32_t x);
 // Which CPU the table was captured on.
 const char* RsqrtApproxSource();
 
+// Bits of rcpss(x), and of each rcpps lane (the same on the CPUs measured). The car's collision meshes are built with
+// them (data/sgc.cpp: D3DX's matrix inverse and transform). A table of the top 12 mantissa bits captured on AMD Zen 4
+// (tables/rcp_table_amd.inc, tools/approx-table), rescaled by the exponent; +-0 and denormals -> +-inf, +-inf -> +-0,
+// NaN -> the same NaN quieted, a result below the normals -> +-0. Verified on its source CPU on all 2^32 inputs.
+// Intel's estimates differ (an i7-4790K's for 3 of 8 sample inputs), which made the golden replay, recorded on AMD,
+// fail there. The AMD table serves PHYS_RSQRT AMD and INTEL alike (no Intel capture yet); NATIVE uses the running
+// CPU's rcpss.
+uint32_t RcpApproxBits(uint32_t x);
+float RcpApprox(float x);
+
+// Which CPU the rcp table was captured on.
+const char* RcpApproxSource();
+
 } // namespace phys::num
