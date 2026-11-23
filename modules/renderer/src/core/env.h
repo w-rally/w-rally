@@ -110,7 +110,6 @@ private:
     Microsoft::WRL::ComPtr<ID3D12Resource>       m_irr;
     Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> m_irrRtvHeap;
     Microsoft::WRL::ComPtr<ID3D12Resource>       m_irrReadback;   // one texel, for IrradianceUp
-    Microsoft::WRL::ComPtr<ID3D12Resource>       m_irrKeepAlive;
     bool  m_irrPending = false;
     bool  m_irrUpValid = false;
     float m_irrUp[3] = {};
@@ -121,7 +120,11 @@ private:
     // synchronous (see the note at the end of Scene::Record), so holding them
     // until the next Record is enough - and this is exactly the thing that
     // breaks the moment frames overlap, so it is called out rather than hidden.
-    Microsoft::WRL::ComPtr<ID3D12Resource>       m_keepAlive[kMips];
+    // Made ONCE (kMips + 1 slots of 256 bytes: the mips', then the irradiance's) and kept mapped, rewritten each
+    // Record: a buffer created and released per constant per frame cost 6.7 ms of CPU a frame (dev laptop,
+    // 2026-11-23) - CreateCommittedResource is a driver call, not an allocation.
+    Microsoft::WRL::ComPtr<ID3D12Resource>       m_cbs;
+    unsigned char*                               m_cbsMapped = nullptr;
     UINT m_rtvStride = 0;
     UINT m_srvStride = 0;
 };

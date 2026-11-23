@@ -912,6 +912,7 @@ private:
     Microsoft::WRL::ComPtr<ID3D12Resource>                    m_dynVb, m_dynIb;
     // The queue the geometry is copied into GPU memory through (scene.cpp MakeGpuBuffer): LoadFromMemory's.
     Microsoft::WRL::ComPtr<ID3D12CommandQueue>                m_copyQueue;
+    int64_t                                                   m_passCpuStart = 0;   // NGG_CPU_TIMES (RecordPass)
     D3D12_VERTEX_BUFFER_VIEW                                  m_dynVbv = {};
     D3D12_INDEX_BUFFER_VIEW                                   m_dynIbv = {};
     bool                                                      m_dynDirty = false;
@@ -1120,7 +1121,6 @@ private:
     Microsoft::WRL::ComPtr<ID3D12PipelineState>  m_psoShadow;
     Microsoft::WRL::ComPtr<ID3D12PipelineState>  m_psoShadowAlpha;
     Microsoft::WRL::ComPtr<ID3D12PipelineState>  m_psoLocalShadow, m_psoLocalShadowAlpha;   // RenderLocalShadows
-    Microsoft::WRL::ComPtr<ID3D12Resource>       m_localShadowCB[4];
     ShadowMaps*              m_localShadows = nullptr;
     Microsoft::WRL::ComPtr<ID3D12Resource>       m_localFlag;      // the casters' kind, a slice per map
     Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> m_localFlagRtv;
@@ -1145,9 +1145,6 @@ private:
 
     // Kept alive until the GPU has consumed the frame; see the note at the end
     // of Scene::Record.
-    Microsoft::WRL::ComPtr<ID3D12Resource>       m_frameCB;
-    Microsoft::WRL::ComPtr<ID3D12Resource>       m_prepassCB;   // see RecordPass
-    Microsoft::WRL::ComPtr<ID3D12Resource>       m_shadowCB[ShadowMaps::kCascades];
 
     D3D12_VERTEX_BUFFER_VIEW m_vbv = {};
     D3D12_INDEX_BUFFER_VIEW  m_ibv = {};
@@ -1261,7 +1258,6 @@ private:
     int                      m_probeFacesDrawn = 0;
     UINT                     m_reflSrvSlot = 0;
     bool                     m_reflSrvReady = false;
-    std::vector<Microsoft::WRL::ComPtr<ID3D12Resource>> m_probeCBs;
     double                   m_probeMsSum = 0.0;   // its GPU time, summed for the log's mean
     int                      m_probeMsFrames = 0;
     UINT                     m_irrSrvSlot = 0;

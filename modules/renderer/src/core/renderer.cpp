@@ -289,6 +289,49 @@ void Renderer::RecordFrame(Device& dev, D3D12_CPU_DESCRIPTOR_HANDLE outRtv,
     PixFrame();
     ID3D12GraphicsCommandList* list = dev.list.Get();
     if (!list) return;
+    // NGG_CPU_TIMES: the CPU time each stage of the recording takes, means over 300 frames (where a frame's CPU goes;
+    // the frame is synchronous, so it adds to the GPU's).
+    static const bool cpuTimes = std::getenv("NGG_CPU_TIMES") != nullptr;
+    static const char* const kStage[] = { "grass", "foliage near", "RT current", "lights", "prepass", "visibility",
+                                          "foliage map", "sky", "scene pass", "post", "rest" };
+    constexpr int kStages = 11;
+    static double stageMs[kStages] = {};
+    static uint32_t stageFrames = 0;
+    auto clockNow = [] { LARGE_INTEGER t; QueryPerformanceCounter(&t); return t.QuadPart; };
+    static const double tickMs = [] { LARGE_INTEGER f; QueryPerformanceFrequency(&f); return 1000.0 / double(f.QuadPart); }();
+    int64_t stageAt = cpuTimes ? clockNow() : 0;
+    const int64_t frameAt = stageAt;
+    auto stage = [&](int k) {
+        if (!cpuTimes) return;
+        const int64_t t = clockNow();
+        stageMs[k] += double(t - stageAt) * tickMs;
+        stageAt = t;
+    };
+    struct StageReport {
+        const bool& on; double* ms; uint32_t& frames; const char* const* names; int64_t& at; const int64_t& start;
+        double tick; int64_t (*now)();
+        ~StageReport()
+        {
+            if (!on) return;
+            const int64_t t = now();
+            ms[10] += double(t - at) * tick;
+            if (++frames < 300) return;
+            char line[512];
+            int n = snprintf(line, sizeof line, "renderer: CPU per frame (mean of 300):");
+            double sum = 0;
+            for (int k = 0; k < 11; ++k)
+            {
+                n += snprintf(line + n, sizeof line - n, " %s %.2f,", names[k], ms[k] / frames);
+                sum += ms[k];
+                ms[k] = 0;
+            }
+            snprintf(line + n, sizeof line - n, " total %.2f ms", sum / frames);
+            Log("%s", line);
+            frames = 0;
+            (void)start;
+        }
+    } stageReport{ cpuTimes, stageMs, stageFrames, kStage, stageAt, frameAt, tickMs,
+                   [] { LARGE_INTEGER t; QueryPerformanceCounter(&t); return (int64_t)t.QuadPart; } };
 
     // `width` x `height` is the client's target, the OUTPUT; everything up to the upscaler (or the TAA) runs at the
     // RENDER size, which is the same without an upscaler.
@@ -378,18 +421,24 @@ void Renderer::RecordFrame(Device& dev, D3D12_CPU_DESCRIPTOR_HANDLE outRtv,
     {
         // THE GRASS's field and blades for this camera (grass.h), before the prepass draws them - and before the TLAS:
         // switching the grass on or off moves the cards it replaces in and out of the ray-traced world.
+        stage(10);
         m_scene.RecordGrass(list, view, proj);
+        stage(0);
         // The placements near the camera under the foliage map: they decide the TLAS (their shells' masks).
         if (m_rt.Ready()) m_scene.UpdateFoliageNear(view, proj, sky.sunDir, 0.00465f * sky.sunDiscSize);
+        stage(1);
         KeepRtCurrent(dev);
+        stage(2);
         // The local lights' clusters for this view (lights.h), before anything reads them: the ray tracer below, the
         // scene pass after it.
         m_scene.PrepareLights(list, view, proj, width, height);
+        stage(3);
 
         // DEPTH + NORMAL + MOTION PREPASS, whatever the shadow source: the main pass then shades each pixel once
         // (5.0e), the AO - traced or screen-space - reads its depth and normals, and TAA and the upscalers its
         // motion. It is drawn with the jitter set above, so the main pass's GREATER_EQUAL finds its depth exactly.
         const bool prepass = m_scene.RecordPrepass(list, view, proj, width, height);
+        stage(4);
         if (prepass) motion = m_scene.MotionBuffer();
 
         m_rtActive = m_preferRt && prepass && m_rt.HasScene() && m_rtValid && m_scene.ShadowsOn();
@@ -438,10 +487,13 @@ void Renderer::RecordFrame(Device& dev, D3D12_CPU_DESCRIPTOR_HANDLE outRtv,
         // Another source than last frame's (the denoiser switched): it starts from no history of its own.
         if (&source != m_lastSource && m_lastSource) source.ResetHistory();
         m_lastSource = &source;
+        stage(10);
         source.Record(dev, list, f, m_vis);
+        stage(5);
         // The near placements' leaves into the foliage map (the cascades' targets, idle on this path), which the main
         // pass multiplies into the traced sun.
         if (m_rtActive && m_scene.FoliageMapOn()) m_scene.RenderFoliageShadows(list, view);
+        stage(6);
 
         m_scene.SetShadowSource(m_vis.shadowSource);
         if (m_vis.sun)    m_scene.SetRtVisibility(m_vis.sun);
@@ -454,14 +506,17 @@ void Renderer::RecordFrame(Device& dev, D3D12_CPU_DESCRIPTOR_HANDLE outRtv,
 
     // Sky and scene draw into the HDR intermediate; PostFx puts the result in
     // the client's target at the end.
+    stage(10);
     const D3D12_CPU_DESCRIPTOR_HANDLE hdrRtv = m_post.Begin(list);
     if (m_skyOn && m_sky.Ready())
         m_sky.Record(list, hdrRtv, view, proj, width, height, sky);
     else
         list->ClearRenderTargetView(hdrRtv, PostFx::kHdrClear, 0, nullptr);
+    stage(7);
 
     if (m_scene.Ready())
         m_scene.Record(list, hdrRtv, view, proj, width, height);
+    stage(8);
 
     // DLSS Ray Reconstruction's guides, from the surface the main pass left (RrVisibility::RecordGuides).
     bool guides = false;
@@ -480,6 +535,7 @@ void Renderer::RecordFrame(Device& dev, D3D12_CPU_DESCRIPTOR_HANDLE outRtv,
                    m_vis.aoTaa, m_vis.aoTaaPrev,
                    // without the ray tracer, the local lights' moved-shadow mask in its place (Scene::LocalShadowMask)
                    m_vis.lightsTaa ? m_vis.lightsTaa : m_scene.LocalShadowMask(), m_scene.LastViewProj(), width, height);
+    stage(9);
 
     // The BLAS batches this frame queued (KeepRtCurrent): their threads allocate while the frame waits for the GPU.
     m_rt.StartBatches();

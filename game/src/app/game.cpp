@@ -810,6 +810,10 @@ StageEnd RunStage(Shell& sh, const Options& given, bool fromMenu, std::string& e
     // frame rate is, with vsync off).
     std::vector<float> frameMsSeen, passMsSeen, rtMsSeen, wallMsSeen;
     std::vector<uint32_t> frameTickSeen;
+    // And the frame's CPU phases, summed: waiting for the physics (lockstep under --step), RenderFrame (the renderer
+    // records and submits the frame, then waits for the GPU), Present.
+    double phaseMs[3] = {0.0, 0.0, 0.0};
+    uint32_t phaseFrames = 0;
     double mixCheck = 0, title = 0;
     // The session on its own thread from here on (session/sim_thread.h): in lockstep with the frames under --step, so
     // those runs stay the same frame for frame.
@@ -993,8 +997,12 @@ StageEnd RunStage(Shell& sh, const Options& given, bool fromMenu, std::string& e
         in.steer = focused ? (keys.Down(Action::SteerLeft) ? -1.0f : 0.0f) + (keys.Down(Action::SteerRight) ? 1.0f : 0.0f) : 0.0f;
         in.antiLagIdle = antiLagIdle;
         in.chaseDistance = chaseDistance;
+        LARGE_INTEGER phaseT0, phaseT1;
+        QueryPerformanceCounter(&phaseT0);
         simThread.Post(in);
         simThread.Latest(snap);
+        QueryPerformanceCounter(&phaseT1);
+        if (frameMsLog && !paused) phaseMs[0] += 1000.0 * double(phaseT1.QuadPart - phaseT0.QuadPart) / double(freq.QuadPart);
         // The brake lamps by the pedal the steps were given: the keys' live, a replay's recorded (each frame, the
         // lamps' glass and their light alike).
         lampSwitch.brake = snap.brake || (lampsForced && std::strstr(lampsEnv, "brake"));
@@ -1347,8 +1355,17 @@ StageEnd RunStage(Shell& sh, const Options& given, bool fromMenu, std::string& e
             fd.stageObjects = moved.data();
             fd.stageObjectCount = static_cast<uint32_t>(moved.size());
             fd.ui = uiList;
+            LARGE_INTEGER r0, r1, r2;
+            QueryPerformanceCounter(&r0);
             if (!renderer.RenderFrame(fd)) std::fprintf(stderr, "renderer: %s\n", renderer.Error().c_str());
+            QueryPerformanceCounter(&r1);
             renderer.Present();
+            QueryPerformanceCounter(&r2);
+            if (frameMsLog && !paused) {
+                phaseMs[1] += 1000.0 * double(r1.QuadPart - r0.QuadPart) / double(freq.QuadPart);
+                phaseMs[2] += 1000.0 * double(r2.QuadPart - r1.QuadPart) / double(freq.QuadPart);
+                ++phaseFrames;
+            }
         } else {
             Sleep(15);
         }
@@ -1397,6 +1414,13 @@ StageEnd RunStage(Shell& sh, const Options& given, bool fromMenu, std::string& e
         std::vector<float> g(frameMsSeen.begin() + 30, frameMsSeen.end());
         std::printf("gpu frame: p95 %.2f ms, p99 %.2f ms, slowest %.2f ms at tick %u\n", tail(g, 0.95), tail(g, 0.99),
                     frameMsSeen[worst], frameTickSeen[worst]);
+        if (phaseFrames) {
+            double gsum = 0;
+            for (float ms : frameMsSeen) gsum += ms;
+            const double n = phaseFrames, render = phaseMs[1] / n, gpu = gsum / double(frameMsSeen.size());
+            std::printf("cpu phases (means): physics wait %.2f ms, RenderFrame %.2f ms (of it ~%.2f ms GPU, ~%.2f ms the "
+                        "renderer's CPU), Present %.2f ms\n", phaseMs[0] / n, render, gpu, render - gpu, phaseMs[2] / n);
+        }
         if (wallMsSeen.size() > 60) {
             std::vector<float> w(wallMsSeen.begin() + 30, wallMsSeen.end());
             double wsum = 0;

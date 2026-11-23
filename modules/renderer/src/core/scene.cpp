@@ -1,4 +1,5 @@
 #include "scene.h"
+#include "frame_upload.h"
 #include "log.h"
 #include "pipeline_cache.h"
 #include "shaders.h"
@@ -1736,7 +1737,7 @@ void Scene::RenderShadows(ID3D12GraphicsCommandList* list,
         cb.proj[0] = cb.proj[5] = cb.proj[10] = cb.proj[15] = 1.0f;
         cb.bakedScale = m_bakedScale;
 
-        ComPtr<ID3D12Resource> cbRes = MakeUploadBuffer(dev, &cb, sizeof(cb));
+        const D3D12_GPU_VIRTUAL_ADDRESS cbRes = FrameUpload(dev, &cb, sizeof(cb));   // the frame's ring (frame_upload.h)
         if (!cbRes) continue;
 
         D3D12_CPU_DESCRIPTOR_HANDLE dsv = m_shadows->Dsv(c);
@@ -1746,7 +1747,7 @@ void Scene::RenderShadows(ID3D12GraphicsCommandList* list,
         list->RSSetScissorRects(1, &sc);
 
         list->SetGraphicsRootSignature(m_rootSig.Get());
-        list->SetGraphicsRootConstantBufferView(0, cbRes->GetGPUVirtualAddress());
+        list->SetGraphicsRootConstantBufferView(0, cbRes);
         if (m_probe) list->SetGraphicsRootUnorderedAccessView(2, m_probe->GetGPUVirtualAddress());
         if (m_rayQuery && m_reflTlas) list->SetGraphicsRootShaderResourceView(13, m_reflTlas);
         list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
@@ -1836,7 +1837,6 @@ void Scene::RenderShadows(ID3D12GraphicsCommandList* list,
             }
             list->IASetVertexBuffers(1, 1, &m_instIdentity);
         }
-        m_shadowCB[c] = cbRes;      // must outlive GPU execution
     }
     dev->Release();
 
@@ -1903,7 +1903,7 @@ void Scene::RenderFoliageShadows(ID3D12GraphicsCommandList* list, const float* v
         cb.windTime = cb.windPrevTime = m_windTime;
         cb.proj[0] = cb.proj[5] = cb.proj[10] = cb.proj[15] = 1.0f;
         cb.bakedScale = m_bakedScale;
-        ComPtr<ID3D12Resource> cbRes = MakeUploadBuffer(dev, &cb, sizeof(cb));
+        const D3D12_GPU_VIRTUAL_ADDRESS cbRes = FrameUpload(dev, &cb, sizeof(cb));   // the frame's ring (frame_upload.h)
         if (!cbRes) continue;
         D3D12_CPU_DESCRIPTOR_HANDLE dsv = m_shadows->Dsv(c);
         list->OMSetRenderTargets(0, nullptr, FALSE, &dsv);
@@ -1911,7 +1911,7 @@ void Scene::RenderFoliageShadows(ID3D12GraphicsCommandList* list, const float* v
         list->RSSetViewports(1, &vp);
         list->RSSetScissorRects(1, &sc);
         list->SetGraphicsRootSignature(m_rootSig.Get());
-        list->SetGraphicsRootConstantBufferView(0, cbRes->GetGPUVirtualAddress());
+        list->SetGraphicsRootConstantBufferView(0, cbRes);
         if (m_probe) list->SetGraphicsRootUnorderedAccessView(2, m_probe->GetGPUVirtualAddress());
         if (m_rayQuery && m_reflTlas) list->SetGraphicsRootShaderResourceView(13, m_reflTlas);
         list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
@@ -1966,7 +1966,6 @@ void Scene::RenderFoliageShadows(ID3D12GraphicsCommandList* list, const float* v
                 tris[c] += (uint64_t)(o.indexCount / 3) * d.instCount;
             }
         }
-        m_shadowCB[c] = cbRes;
     }
     dev->Release();
     m_shadows->ToShaderResource(list);
@@ -2083,7 +2082,7 @@ void Scene::RenderLocalShadows(ID3D12GraphicsCommandList* list, float aoShare)
         memcpy(cb.view, m_lights.ShadowViewProj(c), sizeof(cb.view));
         cb.proj[0] = cb.proj[5] = cb.proj[10] = cb.proj[15] = 1.0f;
         cb.bakedScale = m_bakedScale;
-        ComPtr<ID3D12Resource> cbRes = MakeUploadBuffer(dev, &cb, sizeof(cb));
+        const D3D12_GPU_VIRTUAL_ADDRESS cbRes = FrameUpload(dev, &cb, sizeof(cb));   // the frame's ring (frame_upload.h)
         if (!cbRes) continue;
 
         D3D12_CPU_DESCRIPTOR_HANDLE dsv = m_localShadows->Dsv((int)c);
@@ -2096,7 +2095,7 @@ void Scene::RenderLocalShadows(ID3D12GraphicsCommandList* list, float aoShare)
         list->RSSetViewports(1, &vp);
         list->RSSetScissorRects(1, &sc);
         list->SetGraphicsRootSignature(m_rootSig.Get());
-        list->SetGraphicsRootConstantBufferView(0, cbRes->GetGPUVirtualAddress());
+        list->SetGraphicsRootConstantBufferView(0, cbRes);
         if (m_probe) list->SetGraphicsRootUnorderedAccessView(2, m_probe->GetGPUVirtualAddress());
         if (m_rayQuery && m_reflTlas) list->SetGraphicsRootShaderResourceView(13, m_reflTlas);
         list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
@@ -2144,7 +2143,6 @@ void Scene::RenderLocalShadows(ID3D12GraphicsCommandList* list, float aoShare)
                          o.meshId ? m_dynVbv : m_vbv, o.meshId ? m_dynIbv : StaticIbv());
             list->DrawIndexedInstanced(o.indexCount, 1, o.firstIndex, o.baseVertex, 0);
         }
-        m_localShadowCB[c] = cbRes;   // must outlive GPU execution
         m_localShadowsDrawn = c + 1;
     }
     dev->Release();
@@ -4601,7 +4599,7 @@ bool Scene::SetOverlayLines(ID3D12Device* dev, uint32_t layer,
 
     // Replaced wholesale rather than patched. The frame loop is synchronous, so
     // the previous buffer cannot still be in flight; when frames start
-    // overlapping this needs the same lifetime treatment as m_frameCB.
+    // overlapping this needs the same lifetime treatment as the frame's constants (frame_upload.h).
     const size_t bytes = (size_t)count * sizeof(OverlayVertex);
     l.vb = MakeUploadBuffer(dev, verts, bytes);
     if (!l.vb) { l.count = 0; return false; }
@@ -5237,6 +5235,23 @@ void Scene::RecordPass(ID3D12GraphicsCommandList* list, D3D12_CPU_DESCRIPTOR_HAN
                        bool prepass)
 {
     if (!Ready()) return;
+    {
+        LARGE_INTEGER t;
+        QueryPerformanceCounter(&t);
+        m_passCpuStart = t.QuadPart;
+    }
+    // NGG_CPU_TIMES: the main pass's setup in pieces (logged with the pass's parts below).
+    static double setupMs[5] = {};
+    int64_t setupAt = m_passCpuStart;
+    auto mark = [&](int k) {
+        static const bool on = std::getenv("NGG_CPU_TIMES") != nullptr;
+        if (!on || prepass) return;
+        LARGE_INTEGER t, f;
+        QueryPerformanceCounter(&t);
+        QueryPerformanceFrequency(&f);
+        setupMs[k] += 1000.0 * double(t.QuadPart - setupAt) / double(f.QuadPart);
+        setupAt = t.QuadPart;
+    };
 
     // The constant buffer is re-uploaded every frame through a fresh upload
     // allocation. Wasteful, and fine at one draw per frame; a ring buffer comes
@@ -5533,15 +5548,18 @@ void Scene::RecordPass(ID3D12GraphicsCommandList* list, D3D12_CPU_DESCRIPTOR_HAN
     // pass only - the prepass writes depth and normals and reads no lighting.
     // The multiple-scattering table first: the environment and the aerial
     // table both integrate through it. A no-op unless the composition changed.
+    mark(0);
     if (!prepass)
         m_ms.Update(list, m_atmosphere.turbidity, m_atmosphere.groundAlbedo, m_msOn);
     if (!prepass && m_env && m_env->Ready())
         m_env->Record(list, m_atmosphere, &m_ms);
+    mark(1);
     // The probe's faces drawn last frame, into its chain (probe.h) - its own heap, so before the scene binds its own.
     const bool probing = !prepass && !m_probeObjects.empty() && m_reflProbe.Ready() && m_env && m_env->Ready();
     if (timed) list->EndQuery(m_timer.Get(), D3D12_QUERY_TYPE_TIMESTAMP, 4);
     if (probing && m_probeFacesDrawn > 0)
         m_reflProbe.Resolve(list, m_env->Texture());
+    mark(2);
     if (timed) list->EndQuery(m_timer.Get(), D3D12_QUERY_TYPE_TIMESTAMP, 5);
     cb.reflProbeOn = probing && m_probeFacesDrawn >= 6 ? 1.0f : 0.0f;
     cb.reflProbeMips = (float)ReflectionProbe::kOctMips;
@@ -5561,6 +5579,7 @@ void Scene::RecordPass(ID3D12GraphicsCommandList* list, D3D12_CPU_DESCRIPTOR_HAN
         m_aerialLut.Record(list, m_lastViewProj, cb.sunTowards,
                            cb.sunIntensity, cb.turbidity, cb.aerialMaxDist, &m_ms, weather);
     }
+    mark(3);
 
     if (timed) list->EndQuery(m_timer.Get(), D3D12_QUERY_TYPE_TIMESTAMP, 2);
 
@@ -5617,7 +5636,7 @@ void Scene::RecordPass(ID3D12GraphicsCommandList* list, D3D12_CPU_DESCRIPTOR_HAN
     }
     ID3D12Device* dev = nullptr;
     list->GetDevice(IID_PPV_ARGS(&dev));
-    ComPtr<ID3D12Resource> cbRes = MakeUploadBuffer(dev, &cb, sizeof(cb));
+    const D3D12_GPU_VIRTUAL_ADDRESS cbRes = FrameUpload(dev, &cb, sizeof(cb));   // the frame's ring (frame_upload.h)
     if (dev) dev->Release();
     if (!cbRes) return;
 
@@ -5709,7 +5728,7 @@ void Scene::RecordPass(ID3D12GraphicsCommandList* list, D3D12_CPU_DESCRIPTOR_HAN
 
     list->SetGraphicsRootSignature(m_rootSig.Get());
     list->SetPipelineState(prepass ? m_psoPrepass.Get() : m_pso.Get());
-    list->SetGraphicsRootConstantBufferView(0, cbRes->GetGPUVirtualAddress());
+    list->SetGraphicsRootConstantBufferView(0, cbRes);
     if (m_probe) list->SetGraphicsRootUnorderedAccessView(2, m_probe->GetGPUVirtualAddress());
     if (m_rayQuery && m_reflTlas) list->SetGraphicsRootShaderResourceView(13, m_reflTlas);
     list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
@@ -6011,7 +6030,6 @@ void Scene::RecordPass(ID3D12GraphicsCommandList* list, D3D12_CPU_DESCRIPTOR_HAN
             list->SetGraphicsRootDescriptorTable(
                 1, m_srvHeap->GetGPUDescriptorHandleForHeapStart());
         list->DrawIndexedInstanced(m_indexCount, 1, 0, 0, 0);
-        m_frameCB = cbRes;
         return;
     }
 
@@ -6095,6 +6113,28 @@ void Scene::RecordPass(ID3D12GraphicsCommandList* list, D3D12_CPU_DESCRIPTOR_HAN
     // Not drawn: the focus (the car), any model within kProbeSkip of the centre (its lamps, a passenger's helmet),
     // the glass. Two faces a frame (NGG_PROBE_FACES, 1..6), all six at first; resolved at the next frame's start.
     if (timed) list->EndQuery(m_timer.Get(), D3D12_QUERY_TYPE_TIMESTAMP, 6);
+    mark(4);
+    // NGG_CPU_TIMES: this pass's CPU in parts - the setup above, the probe's faces, the world's draws, the rest - and
+    // its draws (Renderer::RecordFrame logs the frame's stages).
+    static const bool cpuTimes = std::getenv("NGG_CPU_TIMES") != nullptr;
+    static double partMs[2][4] = {};
+    static uint32_t partDraws[2][2] = {}, partPasses[2] = {};
+    LARGE_INTEGER partAt;
+    if (cpuTimes) QueryPerformanceCounter(&partAt);
+    auto part = [&](int k) {
+        if (!cpuTimes) return;
+        LARGE_INTEGER t, f;
+        QueryPerformanceCounter(&t);
+        QueryPerformanceFrequency(&f);
+        partMs[prepass ? 1 : 0][k] += 1000.0 * double(t.QuadPart - partAt.QuadPart) / double(f.QuadPart);
+        partAt = t;
+    };
+    if (cpuTimes)
+    {
+        LARGE_INTEGER f;
+        QueryPerformanceFrequency(&f);
+        partMs[prepass ? 1 : 0][0] += 1000.0 * double(partAt.QuadPart - m_passCpuStart) / double(f.QuadPart);
+    }
     if (probing)
     {
         static const int perFrame = [] {
@@ -6127,7 +6167,6 @@ void Scene::RecordPass(ID3D12GraphicsCommandList* list, D3D12_CPU_DESCRIPTOR_HAN
         const D3D12_RECT psc = { 0, 0, (LONG)ReflectionProbe::kFace, (LONG)ReflectionProbe::kFace };
         list->RSSetViewports(1, &pvp);
         list->RSSetScissorRects(1, &psc);
-        m_probeCBs.clear();
         const int faces = m_probeFacesDrawn < 6 ? 6 : perFrame;
         for (int n = 0; n < faces; ++n)
         {
@@ -6140,10 +6179,9 @@ void Scene::RecordPass(ID3D12GraphicsCommandList* list, D3D12_CPU_DESCRIPTOR_HAN
             if (!Invert4x4(pcb.viewProjNoJitter, pcb.invViewProj)) memset(pcb.invViewProj, 0, sizeof(pcb.invViewProj));
             ID3D12Device* d = nullptr;
             list->GetDevice(IID_PPV_ARGS(&d));
-            ComPtr<ID3D12Resource> fcb = d ? MakeUploadBuffer(d, &pcb, sizeof(pcb)) : nullptr;
+            const D3D12_GPU_VIRTUAL_ADDRESS fcb = d ? FrameUpload(d, &pcb, sizeof(pcb)) : 0;
             if (d) d->Release();
             if (!fcb) break;
-            m_probeCBs.push_back(fcb);
             float fvp[16], fplanes[6][4];
             Mul4x4(pcb.view, fproj, fvp);
             ExtractPlanes(fvp, fplanes);
@@ -6151,7 +6189,7 @@ void Scene::RecordPass(ID3D12GraphicsCommandList* list, D3D12_CPU_DESCRIPTOR_HAN
             D3D12_CPU_DESCRIPTOR_HANDLE prtv, pdsv;
             m_reflProbe.BeginFace(list, face, prtv, pdsv);
             list->OMSetRenderTargets(1, &prtv, FALSE, &pdsv);
-            list->SetGraphicsRootConstantBufferView(0, fcb->GetGPUVirtualAddress());
+            list->SetGraphicsRootConstantBufferView(0, fcb);
             for (const DrawItem& o : m_objects)
             {
                 if (!o.visible || o.probeFocus || o.materialId >= m_materials.size()) continue;
@@ -6169,16 +6207,18 @@ void Scene::RecordPass(ID3D12GraphicsCommandList* list, D3D12_CPU_DESCRIPTOR_HAN
                 }
                 if (AabbOutside(fplanes, o.bmin, o.bmax)) continue;
                 draw(o, (matFlags & kMaterialAlphaTest) ? m_psoAlphaTest.Get() : m_pso.Get());
+                if (cpuTimes) ++partDraws[0][0];
             }
             m_reflProbe.EndFace(list, face);
             ++m_probeFacesDrawn;
         }
-        list->SetGraphicsRootConstantBufferView(0, cbRes->GetGPUVirtualAddress());
+        list->SetGraphicsRootConstantBufferView(0, cbRes);
         bindTargets();
         list->RSSetViewports(1, &vp);
         list->RSSetScissorRects(1, &sc);
     }
     if (timed) list->EndQuery(m_timer.Get(), D3D12_QUERY_TYPE_TIMESTAMP, 7);
+    part(1);
 
     // THE OPAQUE WORLD FRONT TO BACK - the solid first, the alpha-tested (foliage) after, each nearest first, by the
     // distance to the nearest point of the box (0 inside it: the terrain the camera stands on). What is drawn first
@@ -6266,6 +6306,8 @@ void Scene::RecordPass(ID3D12GraphicsCommandList* list, D3D12_CPU_DESCRIPTOR_HAN
         draw(o, want, refl, d.inst, d.instCount);
         if (d.inst) ++m_modelStatsBuild.draws;
     }
+    if (cpuTimes) partDraws[prepass ? 1 : 0][1] += (uint32_t)m_drawOrder.size();
+    part(2);
     // THE GRASS (grass.h), after the alpha-tested: its own pipelines and instances, so the draws after rebind theirs.
     if (GrassOn() && m_grass.Spawned() && (prepass || m_prepassThisFrame))
     {
@@ -6361,13 +6403,9 @@ void Scene::RecordPass(ID3D12GraphicsCommandList* list, D3D12_CPU_DESCRIPTOR_HAN
     if (prepass)
     {
         // The prepass is done; the main pass must not clear, and the counter
-        // below belongs to the frame, not to each pass of it.
-        //
-        // ITS OWN keep-alive slot. Parking it in m_frameCB let the main pass
-        // overwrite it before the GPU had read it, which is a page fault under
-        // a root CBV - the device hung, and every barrier error that followed
-        // was fallout from that one release.
-        m_prepassCB = cbRes;
+        // below belongs to the frame, not to each pass of it. (Its constants are
+        // the frame's ring's, frame_upload.h: each pass its own slot, kept until
+        // the GPU has finished the frame.)
         return;
     }
     m_prepassThisFrame = false;
@@ -6420,11 +6458,26 @@ void Scene::RecordPass(ID3D12GraphicsCommandList* list, D3D12_CPU_DESCRIPTOR_HAN
         m_timerPending = true;
     }
 
-    // The constant buffer must outlive GPU execution. The host waits for the
-    // GPU before signalling the frame complete (protocol v1 is synchronous), so
-    // holding it until then is enough - but this is exactly the kind of thing
-    // that breaks the moment frames overlap, so it is called out here.
-    m_frameCB = cbRes;
+    // The constant buffer lives in the frame's ring (frame_upload.h) until the GPU has finished this frame - which
+    // holds because the frame is synchronous; frames that overlap would need a ring per frame in flight.
+    part(3);
+    if (cpuTimes && ++partPasses[prepass ? 1 : 0] == 300)
+    {
+        const int p = prepass ? 1 : 0;
+        Log("scene: %s CPU (mean of 300): setup %.2f, probe faces %.2f (%u draws), world %.2f (%u draws), rest %.2f ms",
+            prepass ? "prepass" : "main pass", partMs[p][0] / 300, partMs[p][1] / 300, partDraws[p][0] / 300,
+            partMs[p][2] / 300, partDraws[p][1] / 300, partMs[p][3] / 300);
+        if (!prepass)
+        {
+            Log("scene: main pass setup CPU (mean of 300): camera and timers %.2f, environment %.2f, probe resolve %.2f, "
+                "aerial table %.2f, the rest (constants, targets, tables) %.2f ms", setupMs[0] / 300, setupMs[1] / 300,
+                setupMs[2] / 300, setupMs[3] / 300, setupMs[4] / 300);
+            for (double& v : setupMs) v = 0.0;
+        }
+        for (double& v : partMs[p]) v = 0.0;
+        partDraws[p][0] = partDraws[p][1] = 0;
+        partPasses[p] = 0;
+    }
 }
 
 // Decode every DDS in the NGGT chunk, upload them all on one command list, and
