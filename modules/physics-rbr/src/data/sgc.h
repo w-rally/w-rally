@@ -42,8 +42,9 @@ std::vector<SgcCollisionNode> ReadSgcCollision(const std::string& path);
 // in HedgeHog3D's order (0x101d7eb0: c_e_door_l 2, c_e_door_r 3, c_e_bonnet 4, c_e_exhaust 5, c_e_bumper_f 6,
 // c_e_bumper_b 7, c_e_wing 8). A vertex is the node's world transform applied as D3DX does on an SSE2 CPU
 // (D3DXMatrixMultiply 0x101552fa with the identity, D3DXVec3TransformCoord 0x10156035: the rows summed
-// ((r0 x + r1 y) + (r2 z + r3)) and divided by w through rcpps and one Newton step - the CPU's reciprocal estimate, so
-// the result is the CPU's), stored (x, z, y, 0). A face is {v0, v1, v2, 0, uv0, uv1, uv2}. Missing nodes are skipped.
+// ((r0 x + r1 y) + (r2 z + r3)) and divided by w through rcpps and one Newton step - rcpps as num/approx.h's fixed AMD
+// table, so the result is the same on every CPU), stored (x, z, y, 0). A face is {v0, v1, v2, 0, uv0, uv1, uv2}.
+// Missing nodes are skipped.
 std::vector<RecMesh> CarCollisionMeshes(const std::vector<SgcCollisionNode>& nodes);
 
 } // namespace phys::data

@@ -56,6 +56,11 @@ else()
     message(STATUS "golden-replay-41 left out: needs WRALLY_TEST_RBR_DIR, WRALLY_TEST_NGG and WRALLY_TEST_GOLDEN")
 endif()
 
+# The physics' rcpss table (num/approx.h, the car's collision meshes) against fixed results of its AMD source CPU - on
+# any CPU, as the golden replay needs the same bits everywhere.
+add_test(NAME rcp-table COMMAND approx-table --self-test)
+set_tests_properties(rcp-table PROPERTIES PASS_REGULAR_EXPRESSION "rcp table .*: 0 of [0-9]+ cases differ")
+
 # The sound through WAudio.dll against the audio library linked in, offline from the same records, bit for bit
 # (tools/audio-check): made-up records (no data needed), then the same with a mix away from the defaults (setCarMix).
 add_test(NAME audio-offline-synthetic COMMAND audio-check)

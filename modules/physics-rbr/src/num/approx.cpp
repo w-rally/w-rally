@@ -1,10 +1,8 @@
 #include "approx.h"
 
-#if defined(PHYS_RSQRT_NATIVE)
 #include <xmmintrin.h>
 
 #include <cstring>
-#endif
 
 // Which definition of rsqrtss: CMake option PHYS_RSQRT (AMD | INTEL | NATIVE), see approx.h.
 
@@ -26,6 +24,20 @@ const char* RsqrtApproxSource()
     return "native rsqrtss of the running CPU (NOT deterministic across CPU vendors)";
 }
 
+uint32_t RcpApproxBits(uint32_t x)
+{
+    float f;
+    std::memcpy(&f, &x, 4);
+    f = _mm_cvtss_f32(_mm_rcp_ss(_mm_set_ss(f)));
+    std::memcpy(&x, &f, 4);
+    return x;
+}
+
+const char* RcpApproxSource()
+{
+    return "native rcpss of the running CPU (NOT deterministic across CPU vendors)";
+}
+
 #else
 
 namespace {
@@ -36,6 +48,7 @@ namespace {
 #else
 #error "PHYS_RSQRT must select AMD, INTEL or NATIVE"
 #endif
+#include "tables/rcp_table_amd.inc"   // rcpss: AMD's under INTEL too (no Intel capture yet), see approx.h
 } // namespace
 
 uint32_t RsqrtApproxBits(uint32_t x)
@@ -64,6 +77,37 @@ const char* RsqrtApproxSource()
     return kRsqrtTableSource;
 }
 
+uint32_t RcpApproxBits(uint32_t x)
+{
+    const uint32_t exp = (x >> 23) & 0xff;
+    const uint32_t sign = x & 0x80000000u;
+    if (exp == 0xff) {
+        if (x & 0x007fffffu) return x | 0x00400000u;   // NaN: quieted, payload kept
+        return sign;                                    // +-inf: +-0
+    }
+    if (exp == 0) return sign | 0x7f800000u;           // +-0, denormals: +-inf
+
+    // Table at the reference exponent 127 ([1,2)), then x * 2^n -> r / 2^n; below the normals -> +-0.
+    const uint32_t ref = kRcpTable[(x & 0x007fffffu) >> (23 - kRcpTableBits)];
+    const int32_t re = static_cast<int32_t>((ref >> 23) & 0xff) - (static_cast<int32_t>(exp) - 127);
+    if (re <= 0) return sign;
+    return sign | (ref & 0x007fffffu) | (static_cast<uint32_t>(re) << 23);
+}
+
+const char* RcpApproxSource()
+{
+    return kRcpTableSource;
+}
+
 #endif
+
+float RcpApprox(float x)
+{
+    uint32_t b;
+    std::memcpy(&b, &x, 4);
+    b = RcpApproxBits(b);
+    std::memcpy(&x, &b, 4);
+    return x;
+}
 
 } // namespace phys::num
