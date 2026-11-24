@@ -2240,16 +2240,97 @@ void Scene::LoadClipWalls(ID3D12Device* dev, const uint8_t* chunk, size_t bytes)
         for (int k = 0; k < 3; ++k) pos[v * 3 + k] += m_variantOffset[k];
     const uint8_t* tris = chunk + sizeof(h) + (size_t)h.vertexCount * 12;
     const uint32_t bit = 1u << (m_variantIndex & 31u);
-    std::vector<uint32_t> idx;
-    uint32_t second = 0;
+    // The mesh's triangles first (drawn two-sided), then the second list's (back faces culled): RBR's RenderClipWalls,
+    // HedgeHog3D 0x10028ed0, draws the one, sets D3DRS_CULLMODE CCW, draws the other, and sets it back to NONE.
+    std::vector<uint32_t> idx, idxSecond;
     for (uint32_t t = 0; t < h.triangleCount; ++t)
     {
         ClipTriangle c;
         memcpy(&c, tris + (size_t)t * h.triangleSize, sizeof(c));
         if (!(c.variants & bit)) continue;
-        idx.insert(idx.end(), { c.v[0], c.v[1], c.v[2] });
-        second += (c.flags & kClipSecondList) ? 1u : 0u;
+        std::vector<uint32_t>& to = (c.flags & kClipSecondList) ? idxSecond : idx;
+        to.insert(to.end(), { c.v[0], c.v[1], c.v[2] });
     }
+    const uint32_t second = (uint32_t)idxSecond.size() / 3;
+    // The culling's polygons: each triangle, merged with a neighbour sharing an edge in its plane when the two make a
+    // convex quad (RBR's walls are quads of two triangles). Within each list: the lists cull differently.
+    m_clipPolys.clear();
+    m_clipCull = [] { const char* e = std::getenv("NGG_CLIP_CULL"); return !(e && e[0] == '0'); }();
+    for (int list = 0; list < 2; ++list)
+    {
+        const std::vector<uint32_t>& t = list ? idxSecond : idx;
+        const size_t n = t.size() / 3;
+        std::vector<char> used(n, 0);
+        auto P = [&](uint32_t i, int k) { return pos[(size_t)i * 3 + k]; };
+        auto planeOf = [&](uint32_t a, uint32_t b, uint32_t c, float out[4]) {
+            float u[3], w[3];
+            for (int k = 0; k < 3; ++k) u[k] = P(b, k) - P(a, k), w[k] = P(c, k) - P(a, k);
+            float nn[3] = { u[1] * w[2] - u[2] * w[1], u[2] * w[0] - u[0] * w[2], u[0] * w[1] - u[1] * w[0] };
+            const float l = std::sqrt(nn[0] * nn[0] + nn[1] * nn[1] + nn[2] * nn[2]);
+            if (l < 1e-6f) return false;
+            for (int k = 0; k < 3; ++k) out[k] = nn[k] / l;
+            out[3] = -(out[0] * P(a, 0) + out[1] * P(a, 1) + out[2] * P(a, 2));
+            return true;
+        };
+        for (size_t i = 0; i < n; ++i)
+        {
+            if (used[i]) continue;
+            ClipPoly q = {};
+            q.oneSided = list == 1;
+            if (!planeOf(t[i * 3], t[i * 3 + 1], t[i * 3 + 2], q.plane)) continue;
+            used[i] = 1;
+            uint32_t cyc[4] = { t[i * 3], t[i * 3 + 1], t[i * 3 + 2], 0 };
+            int cn = 3;
+            for (size_t j = i + 1; j < n && cn == 3; ++j)
+            {
+                if (used[j]) continue;
+                float pj[4];
+                if (!planeOf(t[j * 3], t[j * 3 + 1], t[j * 3 + 2], pj)) continue;
+                if (pj[0] * q.plane[0] + pj[1] * q.plane[1] + pj[2] * q.plane[2] < 0.9999f ||
+                    std::fabs(pj[3] - q.plane[3]) > 0.01f)
+                    continue;
+                // A shared edge (e, e+1) of the triangle's cycle, and j's third vertex: inserted between them.
+                for (int e = 0; e < 3 && cn == 3; ++e)
+                {
+                    const uint32_t a = cyc[e], b = cyc[(e + 1) % 3];
+                    int hasA = -1, hasB = -1;
+                    for (int k = 0; k < 3; ++k)
+                    {
+                        if (t[j * 3 + k] == a) hasA = k;
+                        if (t[j * 3 + k] == b) hasB = k;
+                    }
+                    if (hasA < 0 || hasB < 0) continue;
+                    const uint32_t d = t[j * 3 + (3 - hasA - hasB)];
+                    uint32_t c4[4];
+                    for (int k = 0, m = 0; k < 3; ++k)
+                    {
+                        c4[m++] = cyc[(e + 1 + k) % 3];   // b, c, a ... then d between a and b
+                        if (k == 2) c4[m++] = d;
+                    }
+                    // Convex: every corner turns the same way as the plane's normal.
+                    bool convex = true;
+                    for (int k = 0; k < 4 && convex; ++k)
+                    {
+                        float u[3], w[3];
+                        for (int x = 0; x < 3; ++x)
+                            u[x] = P(c4[(k + 1) % 4], x) - P(c4[k], x), w[x] = P(c4[(k + 2) % 4], x) - P(c4[(k + 1) % 4], x);
+                        const float cr[3] = { u[1] * w[2] - u[2] * w[1], u[2] * w[0] - u[0] * w[2], u[0] * w[1] - u[1] * w[0] };
+                        convex = cr[0] * q.plane[0] + cr[1] * q.plane[1] + cr[2] * q.plane[2] > 0.0f;
+                    }
+                    if (!convex) continue;
+                    for (int k = 0; k < 4; ++k) cyc[k] = c4[k];
+                    cn = 4;
+                    used[j] = 1;
+                }
+            }
+            q.n = cn;
+            for (int k = 0; k < cn; ++k)
+                for (int x = 0; x < 3; ++x) q.v[k][x] = P(cyc[k], x);
+            m_clipPolys.push_back(q);
+        }
+    }
+    m_clipSecondFirst = (uint32_t)idx.size();
+    idx.insert(idx.end(), idxSecond.begin(), idxSecond.end());
     const uint8_t* back = tris + (size_t)h.triangleCount * h.triangleSize;
     for (uint32_t k = 0; k < h.backdropCount; ++k)
     {
@@ -2268,18 +2349,87 @@ void Scene::LoadClipWalls(ID3D12Device* dev, const uint8_t* chunk, size_t bytes)
     m_clipVbv = { m_clipVb->GetGPUVirtualAddress(), (UINT)(pos.size() * 4), 12 };
     m_clipIbv = { m_clipIb->GetGPUVirtualAddress(), (UINT)(idx.size() * 4), DXGI_FORMAT_R32_UINT };
     m_clipIndexCount = (uint32_t)idx.size();
-    Log("scene: %u clip wall triangle(s) (%u of RBR's second list), %u backdrop object(s)%s", m_clipIndexCount / 3,
-        second, h.backdropCount, m_clipOn ? "" : " - off (NGG_CLIP_WALLS=0)");
+    Log("scene: %u clip wall triangle(s) (%u of RBR's second list), %u backdrop object(s), %zu culling polygon(s)%s",
+        m_clipIndexCount / 3, second, h.backdropCount, m_clipPolys.size(),
+        !m_clipOn ? " - off (NGG_CLIP_WALLS=0)" : !m_clipCull ? " - not culling objects (NGG_CLIP_CULL=0)" : "");
 }
 
 // The walls into the depth (and their "no surface" into the bound targets): 0 the prepass, 1 the main pass forward,
 // 2 with the surface's targets. Leaves the static geometry unbound: the caller's draws rebind it.
 void Scene::DrawClipWalls(ID3D12GraphicsCommandList* list, int which)
 {
-    list->SetPipelineState(m_psoClip[which].Get());
     list->IASetVertexBuffers(0, 1, &m_clipVbv);
     list->IASetIndexBuffer(&m_clipIbv);
-    list->DrawIndexedInstanced(m_clipIndexCount, 1, 0, 0, 0);
+    if (m_clipSecondFirst)
+    {
+        list->SetPipelineState(m_psoClip[which][0].Get());
+        list->DrawIndexedInstanced(m_clipSecondFirst, 1, 0, 0, 0);
+    }
+    if (m_clipIndexCount > m_clipSecondFirst)
+    {
+        list->SetPipelineState(m_psoClip[which][1].Get());
+        list->DrawIndexedInstanced(m_clipIndexCount - m_clipSecondFirst, 1, m_clipSecondFirst, 0, 0);
+    }
+}
+
+// This frame's volumes the walls hide from the camera at `cam`: per polygon the camera faces (both sides of the mesh's,
+// the front of the second list's - what RBR's culling leaves drawn), the space beyond its plane inside the planes
+// through the camera and its edges. A convex region: a box with all eight corners in it is hidden whole.
+void Scene::BuildClipVolumes(const float cam[3])
+{
+    m_clipVolumes.clear();
+    for (const ClipPoly& q : m_clipPolys)
+    {
+        const float s = q.plane[0] * cam[0] + q.plane[1] * cam[1] + q.plane[2] * cam[2] + q.plane[3];
+        if (std::fabs(s) < 0.05f || (q.oneSided && s <= 0.0f)) continue;   // edge on, or its back (culled)
+        ClipVolume v = {};
+        const float sg = s > 0.0f ? -1.0f : 1.0f;   // beyond the wall: the side the camera is not on
+        for (int k = 0; k < 4; ++k) v.p[0][k] = sg * q.plane[k];
+        v.n = 1;
+        float ctr[3] = {};
+        for (int i = 0; i < q.n; ++i)
+            for (int k = 0; k < 3; ++k) ctr[k] += q.v[i][k] / (float)q.n;
+        bool ok = true;
+        for (int i = 0; i < q.n && ok; ++i)
+        {
+            const float* a = q.v[i];
+            const float* b = q.v[(i + 1) % q.n];
+            float u[3], w[3];
+            for (int k = 0; k < 3; ++k) u[k] = a[k] - cam[k], w[k] = b[k] - cam[k];
+            float nn[3] = { u[1] * w[2] - u[2] * w[1], u[2] * w[0] - u[0] * w[2], u[0] * w[1] - u[1] * w[0] };
+            const float l = std::sqrt(nn[0] * nn[0] + nn[1] * nn[1] + nn[2] * nn[2]);
+            if (l < 1e-6f) { ok = false; break; }
+            float d = -(nn[0] * cam[0] + nn[1] * cam[1] + nn[2] * cam[2]);
+            // Inside: the polygon's centre's side.
+            if (nn[0] * ctr[0] + nn[1] * ctr[1] + nn[2] * ctr[2] + d < 0.0f)
+                for (int k = 0; k < 3; ++k) nn[k] = -nn[k];
+            d = -(nn[0] * cam[0] + nn[1] * cam[1] + nn[2] * cam[2]);
+            for (int k = 0; k < 3; ++k) v.p[v.n][k] = nn[k] / l;
+            v.p[v.n][3] = d / l;
+            ++v.n;
+        }
+        if (ok) m_clipVolumes.push_back(v);
+    }
+}
+
+// A box wholly inside one wall's hidden volume (the box in every plane's inside, with its extent).
+bool Scene::ClipHidden(const float* bmin, const float* bmax) const
+{
+    float c[3], e[3];
+    for (int k = 0; k < 3; ++k) c[k] = 0.5f * (bmin[k] + bmax[k]), e[k] = 0.5f * (bmax[k] - bmin[k]);
+    for (const ClipVolume& v : m_clipVolumes)
+    {
+        bool inside = true;
+        for (int i = 0; i < v.n && inside; ++i)
+        {
+            const float* p = v.p[i];
+            const float dist = p[0] * c[0] + p[1] * c[1] + p[2] * c[2] + p[3];
+            const float r = std::fabs(p[0]) * e[0] + std::fabs(p[1]) * e[1] + std::fabs(p[2]) * e[2];
+            inside = dist - r > 0.0f;
+        }
+        if (inside) return true;
+    }
+    return false;
 }
 
 // After a pass: the far plane's depth (reverse-Z 0) where the prepass left no geometry (normal w = 0), so what reads
@@ -2547,6 +2697,9 @@ void Scene::ResetScene()
     m_clipVbv = {};
     m_clipIbv = {};
     m_clipIndexCount = 0;
+    m_clipSecondFirst = 0;
+    m_clipPolys.clear();
+    m_clipVolumes.clear();
     ++m_rtGeneration;              // every mesh key from the previous stage is dead
 }
 
@@ -3754,11 +3907,13 @@ bool Scene::CreatePipelines(ID3D12Device* dev, DXGI_FORMAT rtvFormat, float mipB
         m_deferredReady = true;   // provisionally: settled by the pipelines made (after Run)
     }
 
-    // THE CLIP WALLS (NGGC, DrawClipWalls): position-only, two-sided as RBR drew them, depth written GREATER_EQUAL. [0] the prepass's three targets, the normal's
+    // THE CLIP WALLS (NGGC, DrawClipWalls): position-only, depth written GREATER_EQUAL; [k][0] the mesh's, two-sided,
+    // [k][1] RBR's second list's, back faces culled (D3D's clockwise fronts, as the one-sided world's m_psoCulled) -
+    // as RBR's RenderClipWalls draws them. [0] the prepass's three targets, the normal's
     // w = 0 written; [1] the main pass forward, colour masked off; [2] with the surface's targets, kind 0 written into
     // the first of them. And their removal (ClipFix): a full-screen triangle writing the far plane's depth, ALWAYS.
     // Not fatal: without them no wall is drawn.
-    for (ComPtr<ID3D12PipelineState>& p : m_psoClip) p.Reset();
+    for (auto& pair : m_psoClip) for (ComPtr<ID3D12PipelineState>& p : pair) p.Reset();
     m_psoClipFix.Reset();
     m_clipOn = [] { const char* e = std::getenv("NGG_CLIP_WALLS"); return !(e && e[0] == '0'); }();
     vsClip = compile("VSClipWall", true, kOpaque);
@@ -3792,33 +3947,36 @@ bool Scene::CreatePipelines(ID3D12Device* dev, DXGI_FORMAT rtvFormat, float mipB
         D3D12_GRAPHICS_PIPELINE_STATE_DESC cp = pso;
         cp.InputLayout = { clipLayout, _countof(clipLayout) };
         cp.VS = { vsClip->GetBufferPointer(), vsClip->GetBufferSize() };
-        // TWO-SIDED, as RBR drew them: on Joux Verte's replay, culled either way they left floating forest edges that the
-        // unculled walls hide, and nothing else changed (design §4.1a). NGG_CLIP_WALLS=back / front cull them, to look.
+        // The mesh's: NGG_CLIP_WALLS=back / front cull them, to look (design §4.1a).
         const char* cw = std::getenv("NGG_CLIP_WALLS");
-        cp.RasterizerState.CullMode = cw && cw[0] == 'b' ? D3D12_CULL_MODE_BACK : cw && cw[0] == 'f' ? D3D12_CULL_MODE_FRONT
-                                                                                                  : D3D12_CULL_MODE_NONE;
+        const D3D12_CULL_MODE meshCull = cw && cw[0] == 'b' ? D3D12_CULL_MODE_BACK : cw && cw[0] == 'f' ? D3D12_CULL_MODE_FRONT
+                                                                                                    : D3D12_CULL_MODE_NONE;
         cp.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_GREATER_EQUAL;
         cp.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ALL;
         cp.BlendState.IndependentBlendEnable = TRUE;
-        D3D12_GRAPHICS_PIPELINE_STATE_DESC c0 = cp;
-        c0.PS = { psClipPre->GetBufferPointer(), psClipPre->GetBufferSize() };
-        c0.NumRenderTargets = 3;
-        c0.RTVFormats[0] = kNormalFormat;
-        c0.RTVFormats[1] = kMotionFormat;
-        c0.RTVFormats[2] = kPlantFormat;
-        batch.Add(c0, &m_psoClip[0], "scene: the clip walls' prepass PSO failed - no clip walls");
-        D3D12_GRAPHICS_PIPELINE_STATE_DESC c1 = cp;
-        c1.PS = { psClipMain->GetBufferPointer(), psClipMain->GetBufferSize() };
-        c1.NumRenderTargets = 1;
-        for (D3D12_RENDER_TARGET_BLEND_DESC& b : c1.BlendState.RenderTarget) b.RenderTargetWriteMask = 0;
-        batch.Add(c1, &m_psoClip[1], "scene: the clip walls' PSO failed - no clip walls");
-        if (m_deferredReady)
+        for (int k = 0; k < 2; ++k)
         {
-            D3D12_GRAPHICS_PIPELINE_STATE_DESC c2 = c1;
-            c2.NumRenderTargets = 3;
-            for (int k = 0; k < 2; ++k) c2.RTVFormats[1 + k] = kGbufFormats[k];
-            c2.BlendState.RenderTarget[1].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
-            batch.Add(c2, &m_psoClip[2], "scene: the clip walls' PSO over the surface's targets failed - no clip walls");
+            cp.RasterizerState.CullMode = k ? D3D12_CULL_MODE_BACK : meshCull;
+            D3D12_GRAPHICS_PIPELINE_STATE_DESC c0 = cp;
+            c0.PS = { psClipPre->GetBufferPointer(), psClipPre->GetBufferSize() };
+            c0.NumRenderTargets = 3;
+            c0.RTVFormats[0] = kNormalFormat;
+            c0.RTVFormats[1] = kMotionFormat;
+            c0.RTVFormats[2] = kPlantFormat;
+            batch.Add(c0, &m_psoClip[0][k], "scene: the clip walls' prepass PSO failed - no clip walls");
+            D3D12_GRAPHICS_PIPELINE_STATE_DESC c1 = cp;
+            c1.PS = { psClipMain->GetBufferPointer(), psClipMain->GetBufferSize() };
+            c1.NumRenderTargets = 1;
+            for (D3D12_RENDER_TARGET_BLEND_DESC& rt : c1.BlendState.RenderTarget) rt.RenderTargetWriteMask = 0;
+            batch.Add(c1, &m_psoClip[1][k], "scene: the clip walls' PSO failed - no clip walls");
+            if (m_deferredReady)
+            {
+                D3D12_GRAPHICS_PIPELINE_STATE_DESC c2 = c1;
+                c2.NumRenderTargets = 3;
+                for (int g = 0; g < 2; ++g) c2.RTVFormats[1 + g] = kGbufFormats[g];
+                c2.BlendState.RenderTarget[1].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+                batch.Add(c2, &m_psoClip[2][k], "scene: the clip walls' PSO over the surface's targets failed - no clip walls");
+            }
         }
         D3D12_GRAPHICS_PIPELINE_STATE_DESC fp = pso;
         fp.pRootSignature = m_clipFixRootSig.Get();
@@ -6424,12 +6582,21 @@ void Scene::RecordPass(ID3D12GraphicsCommandList* list, D3D12_CPU_DESCRIPTOR_HAN
     // tracing) that is the main pass's overdraw, with one the prepass's; the main pass after a prepass shades each
     // pixel once whatever the order. The stage's file order was arbitrary.
     m_drawOrder.clear();
+    // The clip walls' hidden volumes, made by the pass that comes first (the second one has the same camera). Only
+    // where the walls are drawn this pass - a culled object's pixels must be the walls' anyway.
+    const bool clipCulling = m_clipCull && m_clipOn && m_clipIndexCount && m_psoClip[0][0] && m_psoClip[0][1] &&
+                             m_psoClip[1][0] && m_psoClip[1][1] && m_psoClipFix && m_clipFixHeap &&
+                             (prepass || m_prepassThisFrame) && (!gbuf || (m_psoClip[2][0] && m_psoClip[2][1]));
+    if (clipCulling && (prepass || !m_prepassThisFrame)) BuildClipVolumes(camPos);
+    uint32_t clipCulled = 0;
     for (const DrawItem& o : m_objects)
     {
         if (!o.visible) continue;              // editor hide; see SetObjectVisible
         if (o.materialId >= m_materials.size())
             continue;
         if (m_cull && AabbOutside(planes, o.bmin, o.bmax)) { ++culled; continue; }
+        // Wholly behind a clip wall (ClipHidden): RBR's walls hide it, so it is not drawn at all.
+        if (clipCulling && !o.clipBackdrop && ClipHidden(o.bmin, o.bmax)) { ++clipCulled; continue; }
         ++drawn;
 
         const uint32_t matFlags = m_materials[o.materialId].flags & (o.measuredSolid ? ~kMaterialAlphaTest : ~0u);
@@ -6473,8 +6640,9 @@ void Scene::RecordPass(ID3D12GraphicsCommandList* list, D3D12_CPU_DESCRIPTOR_HAN
     // THE CLIP WALLS (NGGC, design §2.8): as RBR drew them - after its far scenery (the backdrop), before the rest, so
     // what lies behind one fails the test. In both passes (the main pass's GREATER_EQUAL would otherwise draw what the
     // prepass's walls kept out), and only after a prepass this frame: ClipFix reads the prepass's normal target.
-    const bool clipping = m_clipOn && m_clipIndexCount && m_psoClip[0] && m_psoClip[1] && m_psoClipFix &&
-                          m_clipFixHeap && (prepass || m_prepassThisFrame) && (!gbuf || m_psoClip[2]);
+    const bool clipping = m_clipOn && m_clipIndexCount && m_psoClip[0][0] && m_psoClip[0][1] && m_psoClip[1][0] &&
+                          m_psoClip[1][1] && m_psoClipFix && m_clipFixHeap && (prepass || m_prepassThisFrame) &&
+                          (!gbuf || (m_psoClip[2][0] && m_psoClip[2][1]));
     auto backdropOf = [](const DrawOrder& d) { return !d.inst && d.item->clipBackdrop; };
     auto drawOrdered = [&](const DrawOrder& d) {
         const DrawItem& o = *d.item;
@@ -6644,8 +6812,9 @@ void Scene::RecordPass(ID3D12GraphicsCommandList* list, D3D12_CPU_DESCRIPTOR_HAN
         ++m_geomRevision;
     }
 
+    m_clipCulledLast = clipCulled;
     if ((m_recordCount % 300) == 0)
-        Log("scene: %u objects drawn, %u culled", drawn, culled);
+        Log("scene: %u objects drawn, %u culled, %u behind clip walls", drawn, culled, clipCulled);
     if ((m_recordCount % 300) == 0 && GrassOn())
         Log("scene: grass to %.0f m - %u + %u blades, %u cards%s", m_grassReach, m_grass.Count(0), m_grass.Count(1),
             m_grass.Count(2), m_grass.Dropped() ? " (some dropped: over the caps)" : "");

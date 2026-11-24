@@ -777,16 +777,16 @@ inline const char* CheckGrassChunk(const uint8_t* p, size_t n, uint32_t textureC
 // ---------------------------------------------------------------------------
 // 'NGGC' - CLIP WALLS (NGG design §2.8 "Clip walls"). RBR's .lbs block (1,4), which Wallaby called "clipping
 // planes": vertical quads tens to hundreds of metres tall, standing between a stage's hairpin legs and along its
-// edges. RBR (HedgeHog3D's COcclusionGeometry) draws them depth-only after the far scenery and before the stage,
-// two-sided: everything behind a wall is hidden - the far scenery and the sky show there. Stage authors relied on it to hide unfinished terrain (holes, hill backs, geometry ending
+// edges. RBR (HedgeHog3D's RenderClipWalls) draws them depth-only after the far scenery and before the stage: everything
+// behind a wall is hidden - the far scenery and the sky show there. Stage authors relied on it to hide unfinished terrain (holes, hill backs, geometry ending
 // in mid-air). OPTIONAL: a file without it hides nothing.
 //
 // Layout: ClipChunkHeader, then float xyz[vertexCount], then triangleCount ClipTriangle of `triangleSize` bytes (a
 // longer record keeps the prefix a reader knows), then uint32 backdrop[backdropCount]: the objects (NGGO indices) RBR
 // drew BEFORE the walls - its far scenery, block (1,3) - which a wall never hides. Named here rather than by layer: the
 // producers' scenery layer (2) also holds the vegetation block's solids (houses, rocks), which RBR drew after the walls.
-// Positions in the main variant's frame (a variant's offset moves them with the world). Winding as the file's (the
-// walls are drawn two-sided; kept so a later reader can tell the sides apart).
+// Positions in the main variant's frame (a variant's offset moves them with the world). Winding as the file's: the
+// mesh's triangles are drawn two-sided, the second list's (kClipSecondList) one-sided.
 // ---------------------------------------------------------------------------
 #pragma pack(push, 4)
 struct ClipChunkHeader
@@ -807,8 +807,9 @@ struct ClipTriangle
 #pragma pack(pop)
 
 constexpr uint32_t kClipVersion = 1;
-// From the block's SECOND triangle list (the 6-byte records before its mesh): RBR keeps two occluders, and what tells
-// the second one apart is not known yet; the renderer treats both alike. Kept so the data is not lost.
+// From the block's SECOND triangle list (the 6-byte records before its mesh): ONE-SIDED. RBR's RenderClipWalls (HedgeHog3D
+// 0x10028ed0) draws the mesh's triangles unculled, then these with D3DRS_CULLMODE CCW: they hide only from their front,
+// the side their (b-a) x (c-a) normal points at (clockwise on screen from there).
 constexpr uint32_t kClipSecondList = 1;
 
 static_assert(sizeof(ClipChunkHeader) == 32, "ClipChunkHeader layout - keep Wallaby's NggWriter in step");

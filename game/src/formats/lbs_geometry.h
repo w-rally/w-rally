@@ -69,7 +69,7 @@ struct LbsPlaced {
 struct LbsClipWalls {
     std::vector<float> positions;          // 3 a vertex
     std::vector<uint16_t> triangles;       // the mesh's triangle list
-    std::vector<uint16_t> secondTriangles; // the block's first list, the 6-byte records: what sets it apart is unknown
+    std::vector<uint16_t> secondTriangles; // the block's first list, the 6-byte records: drawn one-sided (ngg_format.h)
     bool Empty() const { return triangles.empty() && secondTriangles.empty(); }
 };
 
