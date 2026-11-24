@@ -1284,6 +1284,10 @@ stage): culled back faces hid nothing anywhere; culled front faces hid the fores
 slab over the road - and two others), and nothing that belongs in the picture. HedgeHog's state block sets a field
 to 1, which reads as `D3DCULL_NONE`.
 
+**Cost** (RTX 5070 Ti, 2560x1600 medium, `frameMs` mean, two rounds each, on/off): Joux Verte (136 triangles)
+2.34/2.28 and 2.33/2.27 ms, stage 41 (92) 2.37/2.35 and 2.38/2.34 ms - the two passes' walls and the two full-screen
+fixes, about 0.06 ms; p95 moves by the same. Nothing is saved yet: the hidden objects are still drawn (§11, 17a).
+
 **Not clipped:** the sun's cascades and the ray tracer keep the whole world (a camera-dependent shadow would flicker;
 what is behind a wall is real terrain, and its shadow on what is in front is right); the cube probe's faces (the
 car's reflection) draw the hidden geometry. The far scenery loses its depth where a wall stands in front of it (it
@@ -2683,7 +2687,7 @@ glass, and VR behind `kRendererCapVr`.
 | 14 | **The legacy `.lbs` import, finished** | no de-atlas (road seams stay on imported stages), no weld in the importer (the renderer's fallback welds), no variants, no `NGGS`, no cache. The planned order is a hand-finished server `.ngg` before the import (§2.1) | the stage server |
 | 15 | **Instanced models, the rest** | not in the lamps' shadow maps or the car's reflection probe. A model's own `kMaterialBlend` is drawn opaque. One RT LOD only (no per-LOD BLAS), no billboard normal map. The wind: ray tracing static (its shadows stand still under moving leaves with RT on) beyond 60 m; nearer, the foliage map's shadows sway with the drawn leaves | nothing; phase 2 of the wind if it shows |
 | 16 | **GPU culling of placements** (`ExecuteIndirect`) | the CPU cull takes 0.03 ms (camera) and 0.34 ms (with cascades) at 3.7k placements, so it is not worth it yet. Measure again at ~25k (bushes, grass) | bush and grass placements |
-| 17a | **Clip walls: culling whole objects** | the walls (§4.1a) reject pixels only, before their shader; the objects wholly behind them are still drawn (vertices, prepass rasterisation). A Hi-Z of the walls, or rays from the camera against their ~100 quads per object box, would cull them as RBR's visibility did. Also open: the second list's purpose; the cube probe's faces without the walls | measured worth it |
+| 17a | **Clip walls: culling whole objects** | the walls (§4.1a, +0.06 ms on the RTX) reject pixels only, before their shader; the objects wholly behind them are still drawn (vertices, prepass rasterisation). A Hi-Z of the walls, or rays from the camera against their ~100 quads per object box, would cull them as RBR's visibility did. Also open: the second list's purpose; the cube probe's faces without the walls | measured worth it |
 | 17 | **Finer culling of stage objects** | every pass frustum-culls per object, but stage objects are large: stage 41 culls 299 of 2,987. Converter-chosen bounds and grouping, distance culling and occlusion culling are open | the converters |
 | 18 | **PBR maps for stages** | roughness, metallic, normal and emissive are read but fall back to white, so stage surfaces are uniform rough dielectrics. Generating maps from albedo is converter work. The catch: RBR textures carry baked shading, which generated normals would read as geometry | converter (Wallaby), importer |
 | 19 | **Mip chains and the single-stage flag from the converters** | the renderer generates missing mip chains at load (§2.7; 203 ms / +7 MB on track-108) and measures single-stage materials. Both fallbacks stand down once the converters write the data | BC encoder in the converter |

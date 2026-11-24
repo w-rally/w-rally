@@ -246,7 +246,7 @@ endif()
 if(EXISTS "${WRALLY_TEST_RBR_DIR}/Maps/track-42_M.lbs")
     add_test(NAME legacy-import-clip-42 COMMAND ngg-check --lbs ${WRALLY_TEST_RBR_DIR}/Maps/track-42_M.lbs)
     set_tests_properties(legacy-import-clip-42 PROPERTIES PASS_REGULAR_EXPRESSION
-        "imported track-42_M.lbs: .* 136 clip wall triangles.*renderer: .*scene: 136 clip wall triangle\(s\) \(12 of RBR's second list\), [1-9][0-9]* backdrop object.*ngg-check: all good")
+        "imported track-42_M.lbs: .* 136 clip wall triangles.*renderer: .*scene: 136 clip wall triangle[(]s[)] [(]12 of RBR's second list[)], [1-9][0-9]* backdrop object.*ngg-check: all good")
 endif()
 # Its weathers on a map under 10: TrackSettings.ini writes it "04", so a "4" prefix would find none.
 if(EXISTS "${WRALLY_TEST_RBR_DIR}/Maps/track-4_E.lbs")
