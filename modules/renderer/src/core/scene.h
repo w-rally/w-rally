@@ -845,6 +845,8 @@ private:
         // a plant. From the geometry and the texture, so it survives a
         // material edit as measuredSingleStage does.
         bool     measuredSolid = false;
+        // The far scenery RBR drew before its clip walls (NGGC's backdrop): drawn before them, never hidden by one.
+        bool     clipBackdrop = false;
         // Culling bounds, in world space AFTER the transform. The untransformed
         // pair is kept alongside because moving an object has to recompute these
         // from the original, not from the last result -- accumulating would drift
@@ -991,6 +993,21 @@ private:
     bool m_gbufWanted = false, m_gbufWritten = false;
     Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> m_gbufRtvHeap;
     Microsoft::WRL::ComPtr<ID3D12PipelineState>  m_psoG, m_psoAlphaTestG, m_psoCulledG[2][2], m_psoDeferred;
+    // THE CLIP WALLS (NGGC, design §2.8): RBR's depth-only occluders, the walls of the drawn variant moved by its offset
+    // (positions only, 32-bit indices). [0] the prepass's (normal w = 0), [1] the main pass's forward, [2] with the
+    // surface's targets (kind 0); the full-screen removal of their depth after each pass (PSClipFix: its own root
+    // signature, the normal target's SRV in its own heap). NGG_CLIP_WALLS=0 turns them off.
+    Microsoft::WRL::ComPtr<ID3D12Resource>       m_clipVb, m_clipIb;
+    D3D12_VERTEX_BUFFER_VIEW                     m_clipVbv = {};
+    D3D12_INDEX_BUFFER_VIEW                      m_clipIbv = {};
+    uint32_t                                     m_clipIndexCount = 0;
+    bool                                         m_clipOn = true;
+    Microsoft::WRL::ComPtr<ID3D12PipelineState>  m_psoClip[3], m_psoClipFix;
+    Microsoft::WRL::ComPtr<ID3D12RootSignature>  m_clipFixRootSig;
+    Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> m_clipFixHeap;
+    void LoadClipWalls(ID3D12Device* dev, const uint8_t* chunk, size_t bytes);
+    void DrawClipWalls(ID3D12GraphicsCommandList* list, int which);
+    void ClipFix(ID3D12GraphicsCommandList* list, D3D12_CPU_DESCRIPTOR_HANDLE dsv);
     // The reflection focus's opaque draws with their own reflection rays (ReflOpen, shader model 6.5): [forward,
     // deferred][cull none, back, front]. Only these carry the ray query - in every pipeline, its state cost the whole
     // main pass ~1 ms on the development GPU.

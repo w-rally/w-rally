@@ -241,6 +241,13 @@ if(EXISTS "${WRALLY_TEST_RBR_DIR}/Maps/track-41_M.lbs")
     set_tests_properties(legacy-import-41 PROPERTIES PASS_REGULAR_EXPRESSION
         "weather: 7 presets from TrackSettings.ini, default 41M_crisp_clear .*imported track-41_M.lbs: .* 304744 triangles, .*\(0 missing\).*ngg-check: all good")
 endif()
+# The clip walls (NGGC, NGG design §2.8): Joux Verte's block (1,4) - its 124 triangles and the 12 of the second list -
+# imported, read back and loaded by the renderer, with its scenery block's objects as the backdrop.
+if(EXISTS "${WRALLY_TEST_RBR_DIR}/Maps/track-42_M.lbs")
+    add_test(NAME legacy-import-clip-42 COMMAND ngg-check --lbs ${WRALLY_TEST_RBR_DIR}/Maps/track-42_M.lbs)
+    set_tests_properties(legacy-import-clip-42 PROPERTIES PASS_REGULAR_EXPRESSION
+        "imported track-42_M.lbs: .* 136 clip wall triangles.*renderer: .*scene: 136 clip wall triangle\(s\) \(12 of RBR's second list\), [1-9][0-9]* backdrop object.*ngg-check: all good")
+endif()
 # Its weathers on a map under 10: TrackSettings.ini writes it "04", so a "4" prefix would find none.
 if(EXISTS "${WRALLY_TEST_RBR_DIR}/Maps/track-4_E.lbs")
     add_test(NAME legacy-import-weather-4 COMMAND ngg-check --lbs ${WRALLY_TEST_RBR_DIR}/Maps/track-4_E.lbs)

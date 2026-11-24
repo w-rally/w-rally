@@ -774,4 +774,74 @@ inline const char* CheckGrassChunk(const uint8_t* p, size_t n, uint32_t textureC
     return nullptr;
 }
 
+// ---------------------------------------------------------------------------
+// 'NGGC' - CLIP WALLS (NGG design §2.8 "Clip walls"). RBR's .lbs block (1,4), which Wallaby called "clipping
+// planes": vertical quads tens to hundreds of metres tall, standing between a stage's hairpin legs and along its
+// edges. RBR (HedgeHog3D's COcclusionGeometry) draws them depth-only after the far scenery and before the stage,
+// two-sided: everything behind a wall is hidden - the far scenery and the sky show there. Stage authors relied on it to hide unfinished terrain (holes, hill backs, geometry ending
+// in mid-air). OPTIONAL: a file without it hides nothing.
+//
+// Layout: ClipChunkHeader, then float xyz[vertexCount], then triangleCount ClipTriangle of `triangleSize` bytes (a
+// longer record keeps the prefix a reader knows), then uint32 backdrop[backdropCount]: the objects (NGGO indices) RBR
+// drew BEFORE the walls - its far scenery, block (1,3) - which a wall never hides. Named here rather than by layer: the
+// producers' scenery layer (2) also holds the vegetation block's solids (houses, rocks), which RBR drew after the walls.
+// Positions in the main variant's frame (a variant's offset moves them with the world). Winding as the file's (the
+// walls are drawn two-sided; kept so a later reader can tell the sides apart).
+// ---------------------------------------------------------------------------
+#pragma pack(push, 4)
+struct ClipChunkHeader
+{
+    uint32_t version;                     // kClipVersion
+    uint32_t vertexCount;
+    uint32_t triangleCount;
+    uint32_t triangleSize;                // sizeof(ClipTriangle) = 20
+    uint32_t backdropCount;               // objects never hidden (the far scenery)
+    uint32_t reserved[3];                 // 0
+};
+struct ClipTriangle
+{
+    uint32_t v[3];                        // into the chunk's vertices
+    uint32_t flags;                       // kClipSecondList
+    uint32_t variants;                    // bit v: a wall in stage variant v (NGGR); 0xFFFFFFFF in every one
+};
+#pragma pack(pop)
+
+constexpr uint32_t kClipVersion = 1;
+// From the block's SECOND triangle list (the 6-byte records before its mesh): RBR keeps two occluders, and what tells
+// the second one apart is not known yet; the renderer treats both alike. Kept so the data is not lost.
+constexpr uint32_t kClipSecondList = 1;
+
+static_assert(sizeof(ClipChunkHeader) == 32, "ClipChunkHeader layout - keep Wallaby's NggWriter in step");
+static_assert(sizeof(ClipTriangle) == 20,    "ClipTriangle layout - keep Wallaby's NggWriter in step");
+
+inline uint32_t ChunkClipWalls()   { return FourCC('N','G','G','C'); }
+
+// The reader's rules: null if the chunk holds together, else which rule it breaks. A refused chunk hides nothing.
+// `objectCount` is NGGO's. Shared by the renderer's loader and the format library, so they agree.
+inline const char* CheckClipChunk(const uint8_t* p, size_t n, uint32_t objectCount)
+{
+    if (!p || n < sizeof(ClipChunkHeader)) return "shorter than its header";
+    ClipChunkHeader h;
+    for (size_t i = 0; i < sizeof h; ++i) reinterpret_cast<uint8_t*>(&h)[i] = p[i];
+    if (h.version != kClipVersion) return "an unknown version";
+    if (h.triangleSize < sizeof(ClipTriangle)) return "a triangle record smaller than this reader's";
+    const uint64_t tris = sizeof h + (uint64_t)h.vertexCount * 12u;
+    const uint64_t backdrop = tris + (uint64_t)h.triangleCount * h.triangleSize;
+    if (backdrop + (uint64_t)h.backdropCount * 4u > n) return "its records run past the chunk";
+    for (uint32_t i = 0; i < h.triangleCount; ++i)
+    {
+        ClipTriangle t;
+        for (size_t b = 0; b < sizeof t; ++b) reinterpret_cast<uint8_t*>(&t)[b] = p[tris + (uint64_t)i * h.triangleSize + b];
+        if (t.v[0] >= h.vertexCount || t.v[1] >= h.vertexCount || t.v[2] >= h.vertexCount)
+            return "a triangle names a vertex past the chunk's";
+    }
+    for (uint32_t i = 0; i < h.backdropCount; ++i)
+    {
+        uint32_t o;
+        for (size_t b = 0; b < 4; ++b) reinterpret_cast<uint8_t*>(&o)[b] = p[backdrop + (uint64_t)i * 4u + b];
+        if (o >= objectCount) return "a backdrop object past NGGO";
+    }
+    return nullptr;
+}
+
 } // namespace ngg

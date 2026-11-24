@@ -2220,6 +2220,92 @@ void Scene::Bounds(float* outMin3, float* outMax3) const
     for (int i = 0; i < 3; ++i) { outMin3[i] = m_bboxMin[i]; outMax3[i] = m_bboxMax[i]; }
 }
 
+// The clip walls (NGGC; ngg_format.h, design §2.8): the triangles of the drawn variant, its offset applied, as one
+// small position-only mesh in GPU memory; the backdrop's objects marked. A chunk that does not hold together hides
+// nothing (CheckClipChunk, the format library's rules).
+void Scene::LoadClipWalls(ID3D12Device* dev, const uint8_t* chunk, size_t bytes)
+{
+    for (DrawItem& o : m_objects) o.clipBackdrop = false;
+    if (!chunk) return;
+    if (const char* e = CheckClipChunk(chunk, bytes, (uint32_t)m_objects.size()))
+    {
+        Log("scene: NGGC (clip walls) %s - none drawn", e);
+        return;
+    }
+    ClipChunkHeader h;
+    memcpy(&h, chunk, sizeof(h));
+    std::vector<float> pos((size_t)h.vertexCount * 3);
+    if (h.vertexCount) memcpy(pos.data(), chunk + sizeof(h), pos.size() * 4);
+    for (size_t v = 0; v < h.vertexCount; ++v)
+        for (int k = 0; k < 3; ++k) pos[v * 3 + k] += m_variantOffset[k];
+    const uint8_t* tris = chunk + sizeof(h) + (size_t)h.vertexCount * 12;
+    const uint32_t bit = 1u << (m_variantIndex & 31u);
+    std::vector<uint32_t> idx;
+    uint32_t second = 0;
+    for (uint32_t t = 0; t < h.triangleCount; ++t)
+    {
+        ClipTriangle c;
+        memcpy(&c, tris + (size_t)t * h.triangleSize, sizeof(c));
+        if (!(c.variants & bit)) continue;
+        idx.insert(idx.end(), { c.v[0], c.v[1], c.v[2] });
+        second += (c.flags & kClipSecondList) ? 1u : 0u;
+    }
+    const uint8_t* back = tris + (size_t)h.triangleCount * h.triangleSize;
+    for (uint32_t k = 0; k < h.backdropCount; ++k)
+    {
+        uint32_t o;
+        memcpy(&o, back + (size_t)k * 4, 4);
+        m_objects[o].clipBackdrop = true;
+    }
+    if (idx.empty() || pos.empty())
+    {
+        Log("scene: NGGC: no clip walls in variant %s", m_variant.c_str());
+        return;
+    }
+    m_clipVb = MakeGpuBuffer(dev, m_copyQueue.Get(), pos.data(), pos.size() * 4);
+    m_clipIb = MakeGpuBuffer(dev, m_copyQueue.Get(), idx.data(), idx.size() * 4);
+    if (!m_clipVb || !m_clipIb) { Log("scene: NGGC: upload failed - no clip walls"); m_clipVb.Reset(); m_clipIb.Reset(); return; }
+    m_clipVbv = { m_clipVb->GetGPUVirtualAddress(), (UINT)(pos.size() * 4), 12 };
+    m_clipIbv = { m_clipIb->GetGPUVirtualAddress(), (UINT)(idx.size() * 4), DXGI_FORMAT_R32_UINT };
+    m_clipIndexCount = (uint32_t)idx.size();
+    Log("scene: %u clip wall triangle(s) (%u of RBR's second list), %u backdrop object(s)%s", m_clipIndexCount / 3,
+        second, h.backdropCount, m_clipOn ? "" : " - off (NGG_CLIP_WALLS=0)");
+}
+
+// The walls into the depth (and their "no surface" into the bound targets): 0 the prepass, 1 the main pass forward,
+// 2 with the surface's targets. Leaves the static geometry unbound: the caller's draws rebind it.
+void Scene::DrawClipWalls(ID3D12GraphicsCommandList* list, int which)
+{
+    list->SetPipelineState(m_psoClip[which].Get());
+    list->IASetVertexBuffers(0, 1, &m_clipVbv);
+    list->IASetIndexBuffer(&m_clipIbv);
+    list->DrawIndexedInstanced(m_clipIndexCount, 1, 0, 0, 0);
+}
+
+// After a pass: the far plane's depth (reverse-Z 0) where the prepass left no geometry (normal w = 0), so what reads
+// the depth next - the rays, the AO, the sky's aerial, TAA, the upscalers - finds no wall. The normal target is a
+// shader resource for the one draw. Leaves the pass's root signature, heaps and pipeline unbound.
+void Scene::ClipFix(ID3D12GraphicsCommandList* list, D3D12_CPU_DESCRIPTOR_HANDLE dsv)
+{
+    D3D12_RESOURCE_BARRIER b = {};
+    b.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+    b.Transition.pResource = m_normal.Get();
+    b.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+    b.Transition.StateBefore = D3D12_RESOURCE_STATE_RENDER_TARGET;
+    b.Transition.StateAfter = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+    list->OMSetRenderTargets(0, nullptr, FALSE, &dsv);   // (the prepass has the normal target bound)
+    list->ResourceBarrier(1, &b);
+    list->SetGraphicsRootSignature(m_clipFixRootSig.Get());
+    ID3D12DescriptorHeap* heaps[] = { m_clipFixHeap.Get() };
+    list->SetDescriptorHeaps(1, heaps);
+    list->SetGraphicsRootDescriptorTable(0, m_clipFixHeap->GetGPUDescriptorHandleForHeapStart());
+    list->SetPipelineState(m_psoClipFix.Get());
+    list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    list->DrawInstanced(3, 1, 0, 0);
+    std::swap(b.Transition.StateBefore, b.Transition.StateAfter);
+    list->ResourceBarrier(1, &b);
+}
+
 bool Scene::CreateDepth(ID3D12Device* dev, UINT width, UINT height)
 {
     D3D12_HEAP_PROPERTIES heap = {};
@@ -2336,6 +2422,25 @@ bool Scene::CreateDepth(ID3D12Device* dev, UINT width, UINT height)
     dev->CreateRenderTargetView(m_plantTarget.Get(), nullptr, rtvs);
     rtvs.ptr += m_prepassRtvStride;
     dev->CreateRenderTargetView(m_glassMotion.Get(), nullptr, rtvs);   // (bound alone, for the glass: RecordPass)
+    // The clip walls' depth removal reads the normal target (ClipFix): its SRV in a heap of its own.
+    if (!m_clipFixHeap)
+    {
+        D3D12_DESCRIPTOR_HEAP_DESC hd = {};
+        hd.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
+        hd.NumDescriptors = 1;
+        hd.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+        if (FAILED(dev->CreateDescriptorHeap(&hd, IID_PPV_ARGS(&m_clipFixHeap))))
+            m_clipFixHeap.Reset();
+    }
+    if (m_clipFixHeap)
+    {
+        D3D12_SHADER_RESOURCE_VIEW_DESC sd = {};
+        sd.Format = kNormalFormat;
+        sd.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+        sd.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        sd.Texture2D.MipLevels = 1;
+        dev->CreateShaderResourceView(m_normal.Get(), &sd, m_clipFixHeap->GetCPUDescriptorHandleForHeapStart());
+    }
 
     // The deferred local lights' surface (kGbufFormats), and the depth's READ-ONLY view: in that pass and the glass
     // after it the depth is read (and tested) while bound, so no writes.
@@ -2437,6 +2542,11 @@ void Scene::ResetScene()
     m_grassDropTri.clear();
     m_grassReplacedTris = 0;
     m_grassCardsOff = false;
+    m_clipVb.Reset();
+    m_clipIb.Reset();
+    m_clipVbv = {};
+    m_clipIbv = {};
+    m_clipIndexCount = 0;
     ++m_rtGeneration;              // every mesh key from the previous stage is dead
 }
 
@@ -2593,6 +2703,7 @@ bool Scene::LoadFromMemory(ID3D12Device* dev, ID3D12CommandQueue* queue,
     const uint8_t* modelLib = nullptr; size_t modelLibBytes = 0;
     const uint8_t* placed = nullptr;   size_t placedBytes = 0;
     const uint8_t* grass = nullptr;    size_t grassBytes = 0;
+    const uint8_t* clipWalls = nullptr; size_t clipBytes = 0;
 
     size_t off = sizeof(FileHeader);
     for (uint32_t i = 0; i < fh->chunkCount; ++i)
@@ -2635,6 +2746,8 @@ bool Scene::LoadFromMemory(ID3D12Device* dev, ID3D12CommandQueue* queue,
         { placed = payload; placedBytes = ch->byteSize; }
         else if (ch->fourcc == ChunkGrass())
         { grass = payload; grassBytes = ch->byteSize; }
+        else if (ch->fourcc == ChunkClipWalls())
+        { clipWalls = payload; clipBytes = ch->byteSize; }
         // Unknown chunks are skipped on purpose - that is what makes the format
         // forward-compatible.
 
@@ -2761,6 +2874,9 @@ bool Scene::LoadFromMemory(ID3D12Device* dev, ID3D12CommandQueue* queue,
     }
 
     ApplyVariant(variants, variantBytes, masks, maskBytes, aliases, aliasBytes);
+    // The clip walls (NGGC) of the drawn variant, in its frame; their backdrop marked on the file's objects (all of
+    // m_objects so far: the models join after).
+    LoadClipWalls(dev, clipWalls, clipBytes);
 
     // The instanced models and their placements (NGGD / NGGE): their materials join the table, their meshes the
     // dynamic pool. The plants they replace leave the static geometry below, once the plant table is read.
@@ -3357,6 +3473,7 @@ bool Scene::CreatePipelines(ID3D12Device* dev, DXGI_FORMAT rtvFormat, float mipB
     ComPtr<ID3DBlob> psFlag, psFlagAlpha;                                            // the local lights' maps
     ComPtr<ID3DBlob> psGlassMotion;
     ComPtr<ID3DBlob> psG, psAlphaG, vsFull, psDeferred;                              // the deferred local lights
+    ComPtr<ID3DBlob> vsClip, psClipPre, psClipMain, psClipFix;                       // the clip walls (NGGC)
     auto compileAll = [&]() {
         vs = compile("VSMain", true, kOpaque);
         ps = compile("PSMain", false, kOpaque);
@@ -3636,6 +3753,87 @@ bool Scene::CreatePipelines(ID3D12Device* dev, DXGI_FORMAT rtvFormat, float mipB
         batch.Add(dp, &m_psoDeferred);
         m_deferredReady = true;   // provisionally: settled by the pipelines made (after Run)
     }
+
+    // THE CLIP WALLS (NGGC, DrawClipWalls): position-only, two-sided as RBR drew them, depth written GREATER_EQUAL. [0] the prepass's three targets, the normal's
+    // w = 0 written; [1] the main pass forward, colour masked off; [2] with the surface's targets, kind 0 written into
+    // the first of them. And their removal (ClipFix): a full-screen triangle writing the far plane's depth, ALWAYS.
+    // Not fatal: without them no wall is drawn.
+    for (ComPtr<ID3D12PipelineState>& p : m_psoClip) p.Reset();
+    m_psoClipFix.Reset();
+    m_clipOn = [] { const char* e = std::getenv("NGG_CLIP_WALLS"); return !(e && e[0] == '0'); }();
+    vsClip = compile("VSClipWall", true, kOpaque);
+    psClipPre = compile("PSClipWallPrepass", false, kOpaque);
+    psClipMain = compile("PSClipWallMain", false, kOpaque);
+    psClipFix = compile("PSClipFix", false, kOpaque);
+    if (!m_clipFixRootSig)
+    {
+        D3D12_DESCRIPTOR_RANGE range = {};
+        range.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+        range.NumDescriptors = 1;
+        range.BaseShaderRegister = 0;
+        range.RegisterSpace = 9;
+        D3D12_ROOT_PARAMETER rp = {};
+        rp.ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+        rp.DescriptorTable.NumDescriptorRanges = 1;
+        rp.DescriptorTable.pDescriptorRanges = &range;
+        rp.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+        D3D12_ROOT_SIGNATURE_DESC crs = {};
+        crs.NumParameters = 1;
+        crs.pParameters = &rp;
+        ComPtr<ID3DBlob> csig, cerr;
+        if (SUCCEEDED(D3D12SerializeRootSignature(&crs, D3D_ROOT_SIGNATURE_VERSION_1, &csig, &cerr)))
+            CreateRootSignature(dev, 0, csig->GetBufferPointer(), csig->GetBufferSize(), IID_PPV_ARGS(&m_clipFixRootSig));
+    }
+    static const D3D12_INPUT_ELEMENT_DESC clipLayout[] = {
+        { "POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 0, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
+    };
+    if (vsClip && psClipPre && psClipMain && psClipFix && m_clipFixRootSig)
+    {
+        D3D12_GRAPHICS_PIPELINE_STATE_DESC cp = pso;
+        cp.InputLayout = { clipLayout, _countof(clipLayout) };
+        cp.VS = { vsClip->GetBufferPointer(), vsClip->GetBufferSize() };
+        // TWO-SIDED, as RBR drew them: on Joux Verte's replay, culled either way they left floating forest edges that the
+        // unculled walls hide, and nothing else changed (design §4.1a). NGG_CLIP_WALLS=back / front cull them, to look.
+        const char* cw = std::getenv("NGG_CLIP_WALLS");
+        cp.RasterizerState.CullMode = cw && cw[0] == 'b' ? D3D12_CULL_MODE_BACK : cw && cw[0] == 'f' ? D3D12_CULL_MODE_FRONT
+                                                                                                  : D3D12_CULL_MODE_NONE;
+        cp.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_GREATER_EQUAL;
+        cp.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ALL;
+        cp.BlendState.IndependentBlendEnable = TRUE;
+        D3D12_GRAPHICS_PIPELINE_STATE_DESC c0 = cp;
+        c0.PS = { psClipPre->GetBufferPointer(), psClipPre->GetBufferSize() };
+        c0.NumRenderTargets = 3;
+        c0.RTVFormats[0] = kNormalFormat;
+        c0.RTVFormats[1] = kMotionFormat;
+        c0.RTVFormats[2] = kPlantFormat;
+        batch.Add(c0, &m_psoClip[0], "scene: the clip walls' prepass PSO failed - no clip walls");
+        D3D12_GRAPHICS_PIPELINE_STATE_DESC c1 = cp;
+        c1.PS = { psClipMain->GetBufferPointer(), psClipMain->GetBufferSize() };
+        c1.NumRenderTargets = 1;
+        for (D3D12_RENDER_TARGET_BLEND_DESC& b : c1.BlendState.RenderTarget) b.RenderTargetWriteMask = 0;
+        batch.Add(c1, &m_psoClip[1], "scene: the clip walls' PSO failed - no clip walls");
+        if (m_deferredReady)
+        {
+            D3D12_GRAPHICS_PIPELINE_STATE_DESC c2 = c1;
+            c2.NumRenderTargets = 3;
+            for (int k = 0; k < 2; ++k) c2.RTVFormats[1 + k] = kGbufFormats[k];
+            c2.BlendState.RenderTarget[1].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+            batch.Add(c2, &m_psoClip[2], "scene: the clip walls' PSO over the surface's targets failed - no clip walls");
+        }
+        D3D12_GRAPHICS_PIPELINE_STATE_DESC fp = pso;
+        fp.pRootSignature = m_clipFixRootSig.Get();
+        fp.InputLayout = { nullptr, 0 };
+        fp.VS = { vsFull->GetBufferPointer(), vsFull->GetBufferSize() };
+        fp.PS = { psClipFix->GetBufferPointer(), psClipFix->GetBufferSize() };
+        fp.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
+        fp.NumRenderTargets = 0;
+        for (DXGI_FORMAT& f : fp.RTVFormats) f = DXGI_FORMAT_UNKNOWN;
+        fp.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_ALWAYS;
+        fp.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ALL;
+        batch.Add(fp, &m_psoClipFix, "scene: the clip walls' depth removal PSO failed - no clip walls");
+    }
+    else
+        Log("scene: the clip walls' shaders failed - no clip walls");
 
     // The reflection focus's opaque pipelines with its reflection rays (m_psoRefl, ReflOpen): forward and deferred,
     // two-sided, back- and front-culled - as m_pso / m_psoCulled and m_psoG / m_psoCulledG are.
@@ -6272,8 +6470,13 @@ void Scene::RecordPass(ID3D12GraphicsCommandList* list, D3D12_CPU_DESCRIPTOR_HAN
     std::sort(m_drawOrder.begin(), m_drawOrder.end(), [](const DrawOrder& a, const DrawOrder& b) {
         return a.alphaTest != b.alphaTest ? b.alphaTest : a.d2 < b.d2;
     });
-    for (const DrawOrder& d : m_drawOrder)
-    {
+    // THE CLIP WALLS (NGGC, design §2.8): as RBR drew them - after its far scenery (the backdrop), before the rest, so
+    // what lies behind one fails the test. In both passes (the main pass's GREATER_EQUAL would otherwise draw what the
+    // prepass's walls kept out), and only after a prepass this frame: ClipFix reads the prepass's normal target.
+    const bool clipping = m_clipOn && m_clipIndexCount && m_psoClip[0] && m_psoClip[1] && m_psoClipFix &&
+                          m_clipFixHeap && (prepass || m_prepassThisFrame) && (!gbuf || m_psoClip[2]);
+    auto backdropOf = [](const DrawOrder& d) { return !d.inst && d.item->clipBackdrop; };
+    auto drawOrdered = [&](const DrawOrder& d) {
         const DrawItem& o = *d.item;
         const uint32_t matFlags = m_materials[o.materialId].flags;
         const bool wantAlphaTest = d.alphaTest;
@@ -6305,7 +6508,17 @@ void Scene::RecordPass(ID3D12GraphicsCommandList* list, D3D12_CPU_DESCRIPTOR_HAN
         }
         draw(o, want, refl, d.inst, d.instCount);
         if (d.inst) ++m_modelStatsBuild.draws;
+    };
+    if (clipping)
+    {
+        for (const DrawOrder& d : m_drawOrder)
+            if (backdropOf(d)) drawOrdered(d);
+        DrawClipWalls(list, prepass ? 0 : gbuf ? 2 : 1);
+        bound = nullptr;     // the walls' pipeline and buffers: the next draw rebinds
+        geomState = -1;
     }
+    for (const DrawOrder& d : m_drawOrder)
+        if (!clipping || !backdropOf(d)) drawOrdered(d);
     if (cpuTimes) partDraws[prepass ? 1 : 0][1] += (uint32_t)m_drawOrder.size();
     part(2);
     // THE GRASS (grass.h), after the alpha-tested: its own pipelines and instances, so the draws after rebind theirs.
@@ -6399,6 +6612,10 @@ void Scene::RecordPass(ID3D12GraphicsCommandList* list, D3D12_CPU_DESCRIPTOR_HAN
             std::swap(b.Transition.StateBefore, b.Transition.StateAfter);
         list->ResourceBarrier(3, deferredBarriers);
     }
+
+    // The walls' depth taken away again (ClipFix): after the prepass for the rays, the AO and the main pass's far
+    // scenery; after the main pass for TAA, the upscalers and the editor's overlay.
+    if (clipping) ClipFix(list, dsv);
 
     if (prepass)
     {

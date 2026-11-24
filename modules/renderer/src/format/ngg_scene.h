@@ -77,10 +77,13 @@ struct SceneData {
     std::vector<Placement> placements;       // NGGE; empty: none
     std::vector<uint8_t> grass;              // NGGF's payload as it is (empty: none); checked on read and write
                                              // (ngg_format.h CheckGrassChunk)
+    std::vector<float> clipVertices;         // NGGC: xyz a vertex; with clipTriangles empty: none
+    std::vector<ClipTriangle> clipTriangles; // NGGC's triangles (ngg_format.h CheckClipChunk)
+    std::vector<uint32_t> clipBackdrop;      // NGGC: the objects drawn before the walls, never hidden
 };
 
 // The scene as .ngg bytes. Returns "" or what is inconsistent (an index past the vertices, an object past the
-// indices or with no material, keys not one per object, a texture slot past the textures, a model library or a
+// indices or with no material, keys not one per object, a texture slot past the textures, a clip wall past its vertices, a model library or a
 // placement that does not hold together - CheckModels, CheckPlacements), and then writes nothing.
 std::string Write(const SceneData& s, std::vector<uint8_t>& out);
 

@@ -20,6 +20,11 @@ scene.hlsl  PSMain            ps_6_0  -HV 2018 -DGBUF=1
 scene.hlsl  PSMain            ps_6_0  -HV 2018 -DALPHA_TEST=1 -DGBUF=1
 scene.hlsl  VSFullscreen      vs_6_0  -HV 2018
 scene.hlsl  PSDeferredLights  ps_6_0  -HV 2018
+# the clip walls (RBR's depth-only occluders, NGGC) and their depth's removal after each pass
+scene.hlsl  VSClipWall        vs_6_0  -HV 2018
+scene.hlsl  PSClipWallPrepass ps_6_0  -HV 2018
+scene.hlsl  PSClipWallMain    ps_6_0  -HV 2018
+scene.hlsl  PSClipFix         ps_6_0  -HV 2018
 # the reflection focus's reflection rays (RayQuery)
 scene.hlsl  PSMain            ps_6_5  -HV 2018 -DNGG_REFL_RAY=1
 scene.hlsl  PSMain            ps_6_5  -HV 2018 -DGBUF=1 -DNGG_REFL_RAY=1

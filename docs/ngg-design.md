@@ -286,6 +286,7 @@ and loader in step; `ngg-producer-wallaby` does the same for a Wallaby file.
 | `NGGD` | model library (§2.6) | no | `kModelVersion` 3 (reads 1-3) |
 | `NGGE` | placements, `Placement` 40 B | no | `kPlacementVersion` 1, `recordSize` >= 40 |
 | `NGGF` | grass (§2.6 "Grass"): `GrassChunkHeader` 48 B, `GrassType` 64 B, `GrassMask` 16 B, `GrassTile` 16 B, replaced plants, texels | no | `kGrassVersion` 1, `recordSize`s >= the reader's |
+| `NGGC` | clip walls (§2.8): `ClipChunkHeader` 32 B, xyz vertices, `ClipTriangle` 20 B (indices, flags, variant mask), the backdrop's object indices | no | `kClipVersion` 1, `triangleSize` >= 20 |
 
 **Textures are embedded, not referenced, so a stage is one file and one hash** (§2.8). **Records grow by
 appending:** a reader takes min(`recordSize`, its own size) over defaults and skips a longer tail; a chunk
@@ -862,9 +863,21 @@ stage 1 only blends in the atlas average.
   patches over the road if drawn).
 - **Vegetation block (1,1) is not only plants:** walls, rocks, houses, people and cars sit there under the same
   flags; only the texture's alpha tells a solid from a card (§2.7).
-- **RBR's own visibility data is not used:** block (2,10)'s ground boxes are `(origin, size)`, one per ground region
-  (158 on Joux Verte), ~10x coarser than our objects; block (1,4), named "clipping planes" in Wallaby, is not planes.
-  Per-object bounds are computed at load instead.
+- **RBR's ground boxes are not used:** block (2,10)'s are `(origin, size)`, one per ground region (158 on Joux Verte),
+  ~10x coarser than our objects. Per-object bounds are computed at load instead.
+- **Clip walls, block (1,4)** ("clipping planes" in Wallaby; `NGGC`). Not planes: `u32 n`, `n` x `u16[3]` (a second
+  triangle list into the mesh's vertices), then a type-3 mesh (positions only). Vertical quads 100-1400 m long and
+  200-400 m tall, between a stage's hairpin legs and along its edges; 126 of the stock maps have one (2-462
+  triangles), 13 a second list (Joux Verte: 124 + 12). **RBR draws them depth-only** (HedgeHog3D's
+  `NHedgehog::COcclusionGeometry`, vtable 0x101b1e4c, draw 0x10074ad0: world transform, no textures, position-only
+  FVF, its own state block, one `DrawIndexedPrimitive`) after the far scenery (block (1,3)) and before everything else,
+  two-sided: whatever lies behind a wall is hidden, the far scenery and the sky show there. The exe only has a debug
+  toggle (`CPC_DebugSettings:SetDrawClipWalls`). Stage authors relied on it to hide unfinished terrain - holes, hill
+  backs, forest edges ending in mid-air (Joux Verte at 2.7 km, the left side). W-Rally does the same (§4.1a); what
+  the second list is for (RBR keeps a second occluder that gets a matrix every frame, renderer +0x1f8) is not known,
+  and it is drawn alike (`kClipSecondList` keeps it apart). The producers name the far scenery's objects (the
+  chunk's backdrop: the legacy importer's and Wallaby's (1,3) objects), because layer 2 also holds the vegetation
+  block's solids, which RBR drew after the walls.
 - **Normals in RBR files were never used for shading** (no `dcl_normal` in its shaders) and are split per face; the
   importer takes them as they are (face normals where the layout has none) and the renderer welds.
 - **Protected stages** (geometry block version 88/89, ciphertext) are never imported, not even in part
@@ -1252,6 +1265,29 @@ wants the surface, not the paint); `w` marks a plant's card, whose normal is the
   Far scenery (`kLayerFarScenery`) is neither traced nor shadowed.
 - Quality tiers (`Renderer::Tier`): low = RT sun only, no AO; medium = AO, 1 RT ray, XeGTAO medium; high = AO,
   2 RT rays, XeGTAO high.
+
+### 4.1a Clip walls
+
+RBR's depth-only occluders (§2.8, `NGGC`), drawn as RBR drew them: in **both** passes the backdrop (the chunk's far
+scenery objects) first, then the walls (`VSClipWall`, position-only, depth `GREATER_EQUAL`, **two-sided**), then the
+rest - what lies behind a wall fails the depth test before its pixel shader. The walls leave no surface: in the
+prepass they write the normal target's `w = 0` (no geometry), in the main pass with the surface's targets kind 0 (the
+deferred lights skip the pixel). After each pass `ClipFix`, one full-screen triangle, writes the far plane's depth
+(reverse-Z 0) wherever the prepass's normal says no geometry: the rays, the AO, the aerial perspective, TAA, the
+upscalers and the editor's overlay find the sky or the far scenery there, never a wall. The main pass needs the walls
+again because its `GREATER_EQUAL` would otherwise draw what the prepass kept out where `ClipFix` cleared the depth.
+Only after a prepass this frame (the fix reads its normal target). `NGG_CLIP_WALLS=0` turns them off.
+
+**Two-sided, by the picture** (2026-11-24, the user's Joux Verte run replayed, a shot every 800 ticks through the
+stage): culled back faces hid nothing anywhere; culled front faces hid the forest hanging in mid-air at 2.7 km
+(the user's report) and nothing else; unculled they hid that and four more floating forest edges (36 s, 1:27 - a
+slab over the road - and two others), and nothing that belongs in the picture. HedgeHog's state block sets a field
+to 1, which reads as `D3DCULL_NONE`.
+
+**Not clipped:** the sun's cascades and the ray tracer keep the whole world (a camera-dependent shadow would flicker;
+what is behind a wall is real terrain, and its shadow on what is in front is right); the cube probe's faces (the
+car's reflection) draw the hidden geometry. The far scenery loses its depth where a wall stands in front of it (it
+is kilometres away: TAA reprojects it as the sky).
 
 ### 4.2 Acceleration structures
 
@@ -2575,6 +2611,7 @@ All read once, at start-up or first use; development only unless noted.
 | `NGG_LIGHT_MODE=<n>` | 0 baked, 1 dynamic | `module.cpp` |
 | `NGG_LEGACY_PROFILE=<n>` | legacy cards' lighting: 0 off, 1 A (bake), 2 B (bake as occlusion, the game's default for an imported `.lbs`) | `module.cpp`, `game.cpp` |
 | `NGG_AO_RAYS=<n>` | RT AO rays per pixel over the tier | `module.cpp` |
+| `NGG_CLIP_WALLS=0\|back\|front` | the clip walls (§4.1a) off; their back / front faces culled (they are drawn two-sided, as RBR did) | `scene.cpp` |
 | `NGG_AO_SOURCE=screen` | a ray-traced frame takes XeGTAO's AO | `module.cpp` |
 | `NGG_GTAO_QUALITY=0..3`, `_RADIUS=<m>`, `_NORMALS=prepass\|depth`, `_THIN=0..0.7`, `_DENOISE=1..3` | XeGTAO knobs over the tier | `module.cpp` |
 | `NGG_RT_NO_HISTORY=1` | RT sun denoiser without history: the unbiased reference for ghosting | `rt.cpp` |
@@ -2646,6 +2683,7 @@ glass, and VR behind `kRendererCapVr`.
 | 14 | **The legacy `.lbs` import, finished** | no de-atlas (road seams stay on imported stages), no weld in the importer (the renderer's fallback welds), no variants, no `NGGS`, no cache. The planned order is a hand-finished server `.ngg` before the import (§2.1) | the stage server |
 | 15 | **Instanced models, the rest** | not in the lamps' shadow maps or the car's reflection probe. A model's own `kMaterialBlend` is drawn opaque. One RT LOD only (no per-LOD BLAS), no billboard normal map. The wind: ray tracing static (its shadows stand still under moving leaves with RT on) beyond 60 m; nearer, the foliage map's shadows sway with the drawn leaves | nothing; phase 2 of the wind if it shows |
 | 16 | **GPU culling of placements** (`ExecuteIndirect`) | the CPU cull takes 0.03 ms (camera) and 0.34 ms (with cascades) at 3.7k placements, so it is not worth it yet. Measure again at ~25k (bushes, grass) | bush and grass placements |
+| 17a | **Clip walls: culling whole objects** | the walls (§4.1a) reject pixels only, before their shader; the objects wholly behind them are still drawn (vertices, prepass rasterisation). A Hi-Z of the walls, or rays from the camera against their ~100 quads per object box, would cull them as RBR's visibility did. Also open: the second list's purpose; the cube probe's faces without the walls | measured worth it |
 | 17 | **Finer culling of stage objects** | every pass frustum-culls per object, but stage objects are large: stage 41 culls 299 of 2,987. Converter-chosen bounds and grouping, distance culling and occlusion culling are open | the converters |
 | 18 | **PBR maps for stages** | roughness, metallic, normal and emissive are read but fall back to white, so stage surfaces are uniform rough dielectrics. Generating maps from albedo is converter work. The catch: RBR textures carry baked shading, which generated normals would read as geometry | converter (Wallaby), importer |
 | 19 | **Mip chains and the single-stage flag from the converters** | the renderer generates missing mip chains at load (§2.7; 203 ms / +7 MB on track-108) and measures single-stage materials. Both fallbacks stand down once the converters write the data | BC encoder in the converter |
