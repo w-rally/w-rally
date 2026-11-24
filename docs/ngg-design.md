@@ -1299,7 +1299,10 @@ its edges. An object whose box lies wholly in one volume is skipped in both pass
 instanced models yet). Exact, not a heuristic: its pixels would all fail the depth test against that wall. Joux
 Verte's replay: the 30 shots are the same with and without it (0 pixels differ), and up to 2,926 of ~3,500 objects
 a frame go (looking along a valley); on the development iGPU the GPU frame 51.2 -> 48.1 ms, the renderer's CPU
-10.5 -> 10.2 ms (CULL_RTX). `NGG_CLIP_CULL=0` draws them (pixels only).
+10.5 -> 10.2 ms. On the RTX 5070 Ti (2560x1600 medium, GPU frame mean / p95, two rounds): Joux Verte walls off
+2.28 / 2.60, pixels only 2.33 / 2.66, culled 2.28 / 2.51 - the walls' cost won back and p95 below off's (677
+objects culled a frame on average, up to 2,926, against 174 drawn), renderer CPU 2.66 -> 2.60 ms; stage 41, with
+next to nothing behind its walls, 2.34 / 2.38 / 2.37. `NGG_CLIP_CULL=0` draws them (pixels only).
 
 **Not clipped:** the sun's cascades and the ray tracer keep the whole world (a camera-dependent shadow would flicker;
 what is behind a wall is real terrain, and its shadow on what is in front is right); the cube probe's faces (the
