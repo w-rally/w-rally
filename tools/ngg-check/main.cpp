@@ -91,6 +91,8 @@ std::string Compare(const ngg::SceneData& a, const ngg::SceneData& b)
         !SameVec(a.models.vertices, b.models.vertices) || !SameVec(a.models.indices, b.models.indices))
         return "the model library";
     if (!SameVec(a.placements, b.placements)) return "the placements";
+    if (a.clipVertices != b.clipVertices || !SameVec(a.clipTriangles, b.clipTriangles) || a.clipBackdrop != b.clipBackdrop)
+        return "the clip walls (NGGC)";
     for (size_t k = 0; k < a.variantSpawns.size() && k < b.variantSpawns.size(); ++k)
         if (std::memcmp(&a.variantSpawns[k], &b.variantSpawns[k], sizeof(ngg::SpawnPoint))) return "a stage variant's car start";
     return "";
@@ -155,6 +157,11 @@ ngg::SceneData MadeUp()
     }
     s.hasSpawn = true;
     s.spawn = {{1, 2, 3}, {0, 0, 1}};
+    // A clip wall (NGGC): a quad, its second triangle from RBR's second list and in the main variant only; the ground
+    // object the backdrop drawn before it.
+    s.clipVertices = {0, 0, 5, 0, 30, 5, 20, 0, 5, 20, 30, 5};
+    s.clipTriangles = {{{0, 1, 2}, 0, 0xFFFFFFFFu}, {{3, 2, 1}, ngg::kClipSecondList, 1u}};
+    s.clipBackdrop = {0};
     ngg::WeatherRecord w{};
     std::snprintf(w.name, sizeof w.name, "41M_crisp_clear");
     w.sunDirection[1] = -1, w.sunIntensity = 22, w.turbidity = 2, w.exposure = 1;
@@ -1153,6 +1160,11 @@ int main(int argc, char** argv)
         ngg::SceneData s;
         if (std::string e = ngg::Read(imp.ngg.data(), imp.ngg.size(), s); !e.empty()) return Fail("the import read back: " + e);
         if (std::string e = load(imp.ngg, s); !e.empty()) return Fail(lbs + ": " + e);
+        // The renderer's word on the clip walls (NGGC), when it loaded them.
+        for (size_t at = gpu.log.find("clip wall"); at != std::string::npos; at = std::string::npos) {
+            const size_t from = gpu.log.rfind('\n', at), to = gpu.log.find('\n', at);
+            std::printf("renderer: %s\n", gpu.log.substr(from == std::string::npos ? 0 : from + 1, to - (from == std::string::npos ? 0 : from + 1)).c_str());
+        }
         if (const std::string out = Arg(argc, argv, "--out"); !out.empty()) {
             std::ofstream(out, std::ios::binary).write(reinterpret_cast<const char*>(imp.ngg.data()), std::streamsize(imp.ngg.size()));
             std::printf("written %s (%zu bytes)\n", out.c_str(), imp.ngg.size());
@@ -1248,6 +1260,37 @@ int main(int argc, char** argv)
             return Fail("the made-up scene: the renderer did not count its wind model");
         if (gpu.error.empty() && (gpu.preset0.windDirectionDeg != 90.0f || gpu.preset0.windSpeed != 6.0f || gpu.preset0.gustiness != 0.4f))
             return Fail("the made-up scene: the renderer's weather preset lost its wind");
+        if (gpu.error.empty() &&
+            gpu.log.find("scene: 2 clip wall triangle(s) (1 of RBR's second list), 1 backdrop object(s)") == std::string::npos)
+            return Fail("the made-up scene: the renderer did not load its clip walls:\n" + gpu.log);
+        // A clip wall naming a vertex past the chunk's, and a backdrop object past NGGO: refused by both readers (the
+        // renderer loads the scene and draws no walls).
+        for (int rule = 0; rule < 2; ++rule) {
+            ngg::SceneData bad = s;
+            std::vector<uint8_t> good;
+            if (std::string e = ngg::Write(bad, good); !e.empty()) return Fail("clip walls: " + e);
+            std::vector<uint8_t> p(sizeof(ngg::ClipChunkHeader));
+            const ngg::ClipChunkHeader ch{ngg::kClipVersion, 4, 2, sizeof(ngg::ClipTriangle), 1, {}};
+            std::memcpy(p.data(), &ch, sizeof ch);
+            auto put = [&](const void* d, size_t n) { p.insert(p.end(), (const uint8_t*)d, (const uint8_t*)d + n); };
+            put(bad.clipVertices.data(), bad.clipVertices.size() * 4);
+            std::vector<ngg::ClipTriangle> t = bad.clipTriangles;
+            if (rule == 0) t[1].v[2] = 4;
+            put(t.data(), t.size() * sizeof(ngg::ClipTriangle));
+            const uint32_t back = rule == 1 ? uint32_t(bad.objects.size()) : 0u;
+            put(&back, 4);
+            const std::vector<uint8_t> broken = WithChunk(good, ngg::ChunkClipWalls(), p);
+            ngg::SceneData out;
+            if (ngg::Read(broken.data(), broken.size(), out).find("NGGC") == std::string::npos)
+                return Fail(std::string("clip walls: the format library read ") + (rule ? "a backdrop object past NGGO" : "a vertex past the chunk's"));
+            if (gpu.error.empty()) {
+                bad.clipVertices.clear(), bad.clipTriangles.clear(), bad.clipBackdrop.clear();
+                if (std::string e = gpu.Load(broken, bad); !e.empty()) return Fail("clip walls refused: " + e);
+                if (gpu.log.find("scene: NGGC (clip walls)") == std::string::npos)
+                    return Fail("clip walls: the renderer took a broken chunk:\n" + gpu.log);
+            }
+        }
+        std::printf("the made-up scene's clip walls (NGGC): round-trip, reach the renderer; a broken chunk refused by both readers\n");
         std::printf("the made-up scene's wind: its model's (NGGD version %u) and its weather's (%.0f deg, %.0f m/s, gustiness "
                     "%.1f) round-trip and reach the renderer\n", ngg::kModelVersion, gpu.preset0.windDirectionDeg,
                     gpu.preset0.windSpeed, gpu.preset0.gustiness);

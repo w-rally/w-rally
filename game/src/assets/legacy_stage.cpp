@@ -457,13 +457,27 @@ std::string ImportLegacyStage(const std::string& lbsPath, int surface, LegacyImp
     }
     // Scenery (world space) and the movable objects (each placement its own geometry, keyed): alpha-tested only where
     // the texture has alpha to test.
+    // The scenery block's objects are the far scenery RBR draws before its clip walls (NGGC's backdrop).
+    std::vector<uint32_t> backdrop;
     for (const auto& [layer, list] : {std::make_pair(kScenery, &g.scenery), std::make_pair(kMovable, &g.movable)})
         for (const LbsPlaced& p : *list) {
             const uint32_t flags = ngg::kMaterialTwoSided | (b.HasAlpha(p.texture) ? ngg::kMaterialAlphaTest : 0);
             b.Object(layer, b.Material(p.texture, p.texture, flags), b.Mesh(p.mesh, p.placed ? p.transform : nullptr),
                      static_cast<uint32_t>(p.mesh.indices.size()), p.placed ? p.instanceId : -1);
+            if (list == &g.scenery) backdrop.push_back(static_cast<uint32_t>(b.scene.objects.size() - 1));
         }
     b.Finish();
+    // The clip walls (1,4) as they are: RBR's depth-only occluders (NGGC), both triangle lists, in every variant.
+    if (!g.clipWalls.Empty()) {
+        b.scene.clipVertices = g.clipWalls.positions;
+        auto add = [&](const std::vector<uint16_t>& list, uint32_t flags) {
+            for (size_t k = 0; k + 2 < list.size(); k += 3)
+                b.scene.clipTriangles.push_back({{list[k], list[k + 1], list[k + 2]}, flags, 0xFFFFFFFFu});
+        };
+        add(g.clipWalls.triangles, 0);
+        add(g.clipWalls.secondTriangles, ngg::kClipSecondList);
+        b.scene.clipBackdrop = backdrop;
+    }
     b.scene.flags |= ngg::kSceneFlagLegacyImport;   // (the renderer's legacy profile for its cards)
     // The stage's weathers, TrackSettings.ini's sections of its map translated (assets/legacy_weather.h), so the menu's
     // or --weather's choice is drawn: the sky, the fog, the clouds.
@@ -471,12 +485,14 @@ std::string ImportLegacyStage(const std::string& lbsPath, int surface, LegacyImp
 
     if (const std::string e = ngg::Write(b.scene, out.ngg); !e.empty()) return lbsPath + ": the .ngg: " + e;
     const ngg::SceneData& s = b.scene;
-    char line[320];
+    char line[448];
     std::snprintf(line, sizeof line,
                   "imported %s: %zu ground regions, %zu vegetation (%zu solid), %zu scenery, %zu movable meshes -> %zu objects, %zu "
-                  "triangles, %zu materials, %zu textures (%zu missing), %zu hidden ground chunks left out, baked scale %.2f\n",
+                  "triangles, %zu materials, %zu textures (%zu missing), %zu hidden ground chunks left out, %zu clip wall triangles, "
+                  "baked scale %.2f\n",
                   lbs.filename().string().c_str(), g.ground.size(), g.vegetation.size(), solids, g.scenery.size(), g.movable.size(),
-                  s.objects.size(), s.indices.size() / 3, s.materials.size(), s.textures.size(), b.missing, hidden, s.bakedScale);
+                  s.objects.size(), s.indices.size() / 3, s.materials.size(), s.textures.size(), b.missing, hidden,
+                  s.clipTriangles.size(), s.bakedScale);
     out.log += line;
     for (const std::string& n : g.notes) out.log += n + "\n";
     return "";

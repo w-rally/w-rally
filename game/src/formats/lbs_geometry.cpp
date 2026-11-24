@@ -8,10 +8,10 @@ namespace wrally::formats {
 
 namespace {
 
-// The geometry blocks, as type * 100 + subtype: ground, vegetation, scenery, movable.
+// The geometry blocks, as type * 100 + subtype: ground, vegetation, scenery, clip walls, movable.
 bool IsGeometry(uint32_t kind)
 {
-    return kind == 100 || kind == 101 || kind == 103 || kind == 106;
+    return kind == 100 || kind == 101 || kind == 103 || kind == 104 || kind == 106;
 }
 
 // Versions 88 and 89: an encrypted block (a protected stage's).
@@ -231,6 +231,26 @@ void Scenery(Cursor& c, LbsGeometry& g)
     }
 }
 
+// (1,4): u32 n, n x u16[3] - a second triangle list into the mesh's vertices - then a type-3 mesh (positions only).
+void ClipWalls(Cursor& c, LbsGeometry& g)
+{
+    const uint32_t n = c.U32();
+    if (uint64_t(n) * 6 > c.n - c.at) c.Fail("the second triangle list runs past the block");
+    std::vector<uint16_t> second(size_t(n) * 3);
+    if (n) std::memcpy(second.data(), c.d + c.at, size_t(n) * 6);
+    c.at += size_t(n) * 6;
+    LbsMesh m = c.Mesh(3);
+    if (m.Empty()) {
+        if (n) c.Fail("a second triangle list without vertices");
+        return;
+    }
+    for (uint16_t i : second)
+        if (i >= m.VertexCount()) c.Fail("a second-list index " + std::to_string(i) + " is past the mesh's vertices");
+    g.clipWalls.positions = std::move(m.positions);
+    g.clipWalls.triangles = std::move(m.indices);
+    g.clipWalls.secondTriangles = std::move(second);
+}
+
 void Movable(Cursor& c, LbsGeometry& g)
 {
     for (uint32_t objects = c.U32(), o = 0; o < objects; ++o) {
@@ -291,6 +311,7 @@ LbsGeometry ReadLbsGeometry(const std::vector<uint8_t>& file)
             break;
         case 101: c.what = "(1,1) vegetation", Vegetation(c, g), c.Done(); break;
         case 103: c.what = "(1,3) scenery", Scenery(c, g), c.Done(); break;
+        case 104: c.what = "(1,4) clip walls", ClipWalls(c, g), c.Done(); break;
         case 106: c.what = "(1,6) movable", Movable(c, g), c.Done(); break;
         default: break;   // (gameplay and the rest: not geometry)
         }

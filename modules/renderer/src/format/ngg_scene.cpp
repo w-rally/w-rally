@@ -187,13 +187,22 @@ std::string Write(const SceneData& s, std::vector<uint8_t>& out)
         !e.empty())
         return e;
 
+    if (s.clipVertices.size() % 3) return "clip wall vertices are not xyz";
+    for (const ClipTriangle& t : s.clipTriangles)
+        for (uint32_t v : t.v)
+            if (v >= s.clipVertices.size() / 3) return "a clip wall triangle is past its vertices";
+    for (uint32_t o : s.clipBackdrop)
+        if (o >= s.objects.size()) return "a clip wall backdrop object is past the objects";
+    if (!s.clipBackdrop.empty() && s.clipTriangles.empty()) return "a clip wall backdrop without walls";
+
     std::vector<uint8_t> o;
     const bool spawn = s.hasSpawn;
     const uint32_t chunks = 6 + (spawn ? 1 : 0) + (s.weather.empty() ? 0 : 1) + (s.objectKeys.empty() ? 0 : 1) +
                             (s.tagNames.empty() ? 0 : 1) + (s.plants.empty() ? 0 : 1) +
                             (s.variants.empty() ? 0 : 1) + (s.variantMasks.empty() ? 0 : 1) +
                             (s.variantAliases.empty() ? 0 : 1) + (s.models.empty() ? 0 : 1) +
-                            (s.placements.empty() ? 0 : 1) + (s.grass.empty() ? 0 : 1);
+                            (s.placements.empty() ? 0 : 1) + (s.grass.empty() ? 0 : 1) +
+                            (s.clipTriangles.empty() ? 0 : 1);
     const FileHeader fh{kMagic, kFormatCurrent, chunks, 0};
     Put(o, &fh, sizeof fh);
 
@@ -302,6 +311,17 @@ std::string Write(const SceneData& s, std::vector<uint8_t>& out)
         Chunk(o, ChunkPlacements(), p);
     }
     if (!s.grass.empty()) Chunk(o, ChunkGrass(), s.grass);
+    if (!s.clipTriangles.empty()) {
+        p.clear();
+        const ClipChunkHeader cc{kClipVersion, static_cast<uint32_t>(s.clipVertices.size() / 3),
+                                 static_cast<uint32_t>(s.clipTriangles.size()), sizeof(ClipTriangle),
+                                 static_cast<uint32_t>(s.clipBackdrop.size()), {}};
+        Put(p, &cc, sizeof cc);
+        Put(p, s.clipVertices.data(), s.clipVertices.size() * 4);
+        Put(p, s.clipTriangles.data(), s.clipTriangles.size() * sizeof(ClipTriangle));
+        Put(p, s.clipBackdrop.data(), s.clipBackdrop.size() * 4);
+        Chunk(o, ChunkClipWalls(), p);
+    }
     out.swap(o);
     return "";
 }
@@ -471,6 +491,21 @@ std::string Read(const void* bytes, size_t n, SceneData& out)
                 std::memcpy(&out.placements[k], d + sizeof ph + size_t(k) * ph.recordSize, sizeof(Placement));
         } else if (f == ChunkGrass()) {
             out.grass.assign(d, d + size);   // checked below, once NGGT and NGGP are read
+        } else if (f == ChunkClipWalls()) {
+            if (const char* e = CheckClipChunk(d, size, ~0u)) return std::string("NGGC: ") + e;   // (objects: below)
+            ClipChunkHeader cc;
+            std::memcpy(&cc, d, sizeof cc);
+            out.clipVertices.resize(size_t(cc.vertexCount) * 3);
+            if (cc.vertexCount) std::memcpy(out.clipVertices.data(), d + sizeof cc, size_t(cc.vertexCount) * 12);
+            out.clipTriangles.resize(cc.triangleCount);
+            for (uint32_t k = 0; k < cc.triangleCount; ++k)
+                std::memcpy(&out.clipTriangles[k], d + sizeof cc + size_t(cc.vertexCount) * 12 + size_t(k) * cc.triangleSize,
+                            sizeof(ClipTriangle));
+            out.clipBackdrop.resize(cc.backdropCount);
+            if (cc.backdropCount)
+                std::memcpy(out.clipBackdrop.data(),
+                            d + sizeof cc + size_t(cc.vertexCount) * 12 + size_t(cc.triangleCount) * cc.triangleSize,
+                            size_t(cc.backdropCount) * 4);
         }
         // (an unknown chunk is skipped: that is what keeps the format open)
     }
@@ -482,6 +517,8 @@ std::string Read(const void* bytes, size_t n, SceneData& out)
     out.bakedScale = h.bakedScale;
     if (!out.objectKeys.empty() && out.objectKeys.size() != out.objects.size()) return "NGGK is not one key per object";
     if (!out.variantMasks.empty() && out.variantMasks.size() != out.objects.size()) return "NGGQ is not one mask per object";
+    for (uint32_t o : out.clipBackdrop)
+        if (o >= out.objects.size()) return "NGGC: a backdrop object past NGGO";
     if (std::string e = CheckModels(out.models, out.textures.size()); !e.empty()) return "NGGD: " + e;
     if (!out.placements.empty() && out.models.empty()) return "NGGE without NGGD";
     if (std::string e = CheckPlacements(out.placements, out.models.models.size(), out.plants.empty() ? 0u : PlantCount(out.plants));

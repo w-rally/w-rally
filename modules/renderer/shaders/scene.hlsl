@@ -2295,3 +2295,41 @@ DeferredOut PSDeferredLights(float4 pos : SV_Position)
     }
     return o;
 }
+
+// THE CLIP WALLS (NGG design §2.8 "Clip walls"; ngg_format.h NGGC): RBR's depth-only occluders. Drawn after the far
+// scenery and before the world, in the prepass and the main pass, two-sided, so what lies behind a wall fails the depth
+// test as in RBR. They leave no surface: in the prepass the normal target's w = 0
+// (no geometry), in the main pass with the surface's targets kind 0 - and PSClipFix then takes their depth away, so the
+// sky, the AO, the rays and TAA find the sky (or the far scenery) there, not a wall.
+float4 VSClipWall(float3 p : POSITION) : SV_Position
+{
+    precise const float4 world = float4(p + gWorldOffset, 1.0);
+    return mul(mul(world, gView), gProj);
+}
+struct ClipPrepassOut { float4 normal : SV_Target0; float4 motion : SV_Target1; uint plant : SV_Target2; };
+ClipPrepassOut PSClipWallPrepass()
+{
+    ClipPrepassOut o;
+    o.normal = 0.0;   // w = 0: no geometry here (PSClipFix)
+    o.motion = 0.0;
+    o.plant = 0u;
+    return o;
+}
+// The main pass: target 0 (the HDR colour) masked off; with the surface's targets, kind 0 in the first.
+struct ClipMainOut { float4 c : SV_Target0; float4 n : SV_Target1; float4 a : SV_Target2; };
+ClipMainOut PSClipWallMain()
+{
+    ClipMainOut o;
+    o.c = 0.0;
+    o.n = 0.0;
+    o.a = 0.0;
+    return o;
+}
+// The full-screen pass after each of the two: depth to the far plane (reverse-Z 0) where the prepass left no geometry
+// (normal w = 0) - where a wall stands in front of nothing but the far scenery or the sky.
+Texture2D<float4> gClipNormal : register(t0, space9);
+float PSClipFix(float4 pos : SV_Position) : SV_Depth
+{
+    if (gClipNormal.Load(int3(pos.xy, 0)).w != 0.0) discard;
+    return 0.0;
+}

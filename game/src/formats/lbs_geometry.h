@@ -11,6 +11,8 @@
 //   (1,1)  vegetation      u32 regions; per region an i32 (0: empty), two lists of items: an attribute record, i32,
 //                          a mesh, a 24-byte box
 //   (1,3)  scenery         cstr group; u32 n, then n x {f32 point[3], attribute record, mesh} - in world space
+//   (1,4)  clip walls      u32 n, n x u16[3] (a second triangle list into the mesh's vertices), a type-3 mesh: RBR's
+//                          depth-only occluders (Wallaby's "clipping planes"; NGG design §2.8, ngg_format.h NGGC)
 //   (1,6)  movable         u32 n objects: cstr name, u8, i32 subs x {20-byte attributes, mesh}, u32 placements x
 //                          {i32 instance id (the .trk solid's), f32 m[16] (row vectors, translation in row 3)}
 // A mesh: u32 index count (type 3: a face count), u16 indices, for types 7 and 9 a byte (2: a second index block
@@ -63,10 +65,19 @@ struct LbsPlaced {
     int32_t instanceId = -1;           // movable: the .trk collision instance's id (the physics' solid)
 };
 
+// Block (1,4): vertical quads RBR draws depth-only before the stage, hiding what is behind them (seen from their front).
+struct LbsClipWalls {
+    std::vector<float> positions;          // 3 a vertex
+    std::vector<uint16_t> triangles;       // the mesh's triangle list
+    std::vector<uint16_t> secondTriangles; // the block's first list, the 6-byte records: drawn one-sided (ngg_format.h)
+    bool Empty() const { return triangles.empty() && secondTriangles.empty(); }
+};
+
 struct LbsGeometry {
     std::vector<std::string> textureNames;
     std::vector<LbsGroundRegion> ground;
     std::vector<LbsPlaced> vegetation, scenery, movable;
+    LbsClipWalls clipWalls;
     std::vector<std::string> notes;    // blocks left out and why (a ground of another version)
 };
 
