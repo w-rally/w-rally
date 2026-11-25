@@ -441,6 +441,9 @@ std::string ImportLegacyStage(const std::string& lbsPath, int surface, LegacyImp
             b.Object(kTerrain, b.Material(ch.texture1, ch.texture2, 0), first[ch.submesh] + ch.firstIndex, ch.faceCount * 3, -1);
         }
     }
+    // Every object material takes its vertex colour's hue as paint (kMaterialVertexTint, NGG design §2.8): RBR's
+    // object bake is grey light, and the colour in it is the spectators' clothes, cars, signs. Never the ground's.
+    constexpr uint32_t kTint = ngg::kMaterialVertexTint;
     // Vegetation: alpha-tested, two-sided, one texture (both slots the same: the blend a no-op).
     // Each object's connected pieces its plants (Builder::Plants). The block's solids - walls, rocks, houses, which
     // sample only opaque texels (Builder::Solid) - are scenery: not alpha-tested, not plants, not lit as foliage.
@@ -448,11 +451,11 @@ std::string ImportLegacyStage(const std::string& lbsPath, int surface, LegacyImp
     for (const LbsPlaced& p : g.vegetation) {
         const uint32_t first = b.Mesh(p.mesh, nullptr), count = static_cast<uint32_t>(p.mesh.indices.size());
         if (b.Solid(p.mesh, p.texture)) {
-            b.Object(kScenery, b.Material(p.texture, -1, ngg::kMaterialTwoSided), first, count, -1);   // (one layer: uv1 is not theirs)
+            b.Object(kScenery, b.Material(p.texture, -1, ngg::kMaterialTwoSided | kTint), first, count, -1);   // (one layer: uv1 is not theirs)
             ++solids;
             continue;
         }
-        b.Object(kVegetation, b.Material(p.texture, p.texture, ngg::kMaterialAlphaTest | ngg::kMaterialTwoSided), first, count, -1);
+        b.Object(kVegetation, b.Material(p.texture, p.texture, ngg::kMaterialAlphaTest | ngg::kMaterialTwoSided | kTint), first, count, -1);
         b.Plants(static_cast<uint32_t>(b.scene.objects.size() - 1));
     }
     // Scenery (world space) and the movable objects (each placement its own geometry, keyed): alpha-tested only where
@@ -461,7 +464,7 @@ std::string ImportLegacyStage(const std::string& lbsPath, int surface, LegacyImp
     std::vector<uint32_t> backdrop;
     for (const auto& [layer, list] : {std::make_pair(kScenery, &g.scenery), std::make_pair(kMovable, &g.movable)})
         for (const LbsPlaced& p : *list) {
-            const uint32_t flags = ngg::kMaterialTwoSided | (b.HasAlpha(p.texture) ? ngg::kMaterialAlphaTest : 0);
+            const uint32_t flags = ngg::kMaterialTwoSided | kTint | (b.HasAlpha(p.texture) ? ngg::kMaterialAlphaTest : 0);
             b.Object(layer, b.Material(p.texture, p.texture, flags), b.Mesh(p.mesh, p.placed ? p.transform : nullptr),
                      static_cast<uint32_t>(p.mesh.indices.size()), p.placed ? p.instanceId : -1);
             if (list == &g.scenery) backdrop.push_back(static_cast<uint32_t>(b.scene.objects.size() - 1));

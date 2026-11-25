@@ -130,6 +130,13 @@ const uint32_t kMaterialTwoSided  = 1u << 1;   // no back-face culling
 // casts no shadow and is not in the ray-traced scene (NGG design §5.3).
 const uint32_t kMaterialBlend     = 1u << 3;
 // 1u << 4 is kMaterialFoliage, with the instanced models below.
+// VERTEX TINT: the vertex colour's HUE is albedo, its brightness baked light (NGG design §2.8). RBR draws an object as
+// texture x vertex colour, and its objects' bake is grey: the colour that is there is paint - the spectators' shirts
+// and trousers over the grey people atlas, cars, signs. The shader multiplies the albedo by rgb / max(rgb) (decoded to
+// linear), which is 1 on a grey vertex, so the light stays discarded. The producers set it on RBR's object materials
+// (vegetation, scenery, movable), never on the ground, whose bake is light only. An old reader ignores the bit (grey
+// spectators); no version change.
+const uint32_t kMaterialVertexTint = 1u << 5;
 
 // 'NGGM' - materials. METALLIC-ROUGHNESS, v3.
 //
@@ -159,7 +166,8 @@ const uint32_t kMaterialBlend     = 1u << 3;
 // And one thing is deliberately NOT here: the baked vertex colour. It stays in
 // the vertex data (design §2.8) as the A/B reference against vanilla, not as a
 // material property, because it is a record of one particular sun on one
-// particular day.
+// particular day. Only its hue is read, and only on a kMaterialVertexTint
+// material: there it is paint, not light.
 struct Material
 {
     // Texture slots, all indices into NGGT, all kNoTexture when unused.

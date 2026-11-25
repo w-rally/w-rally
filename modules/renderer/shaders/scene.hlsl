@@ -142,6 +142,8 @@ cbuffer Camera : register(b0)
 // Scene::Load ties the two together, because a shader constant that silently
 // drifts from the format's flag would turn every object mesh single-stage or
 // none of them, with no error either way.
+// kMaterialVertexTint (ngg_format.h): the vertex colour's hue is albedo (an RBR object's paint), its brightness light.
+#define NGG_MAT_VERTEX_TINT  32u
 #define NGG_MAT_SINGLE_STAGE 256u
 #define NGG_MAT_NORMAL_MAP   512u
 // An instanced model's material (Scene::kDrawModel), and its alpha edge dithered (kDrawHashedAlpha: foliage).
@@ -1590,6 +1592,16 @@ float4 Shade(VSOut i, bool frontFace, out GBufOut g)
     }
     else
     {
+        // An RBR object's paint (kMaterialVertexTint): RBR drew it as texture x vertex colour, the colour baked light
+        // (grey) times paint - the spectators' shirts over the grey people atlas. The hue, rgb / max(rgb), is the
+        // paint: 1 on a grey vertex, so the light stays discarded. Display-referred, so decoded as sRGB (RBR's product
+        // was in that space: a power law splits over it). Faded out below 16/255, where 8 bits carry no hue.
+        if (gMatFlags & NGG_MAT_VERTEX_TINT)
+        {
+            const float peak = max(max(i.col.r, i.col.g), i.col.b);
+            const float3 hue = i.col.rgb / max(peak, 1e-4);
+            albedo *= lerp(float3(1.0, 1.0, 1.0), pow(saturate(hue), 2.2), saturate(peak * (255.0 / 16.0)));
+        }
         float3 N = normalize(i.nrm);
 
         // Normals are per-vertex from the LBS, with a face-accumulated fallback
