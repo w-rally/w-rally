@@ -1160,6 +1160,19 @@ int main(int argc, char** argv)
         ngg::SceneData s;
         if (std::string e = ngg::Read(imp.ngg.data(), imp.ngg.size(), s); !e.empty()) return Fail("the import read back: " + e);
         if (std::string e = load(imp.ngg, s); !e.empty()) return Fail(lbs + ": " + e);
+        // The vertex tint (kMaterialVertexTint, NGG design §2.8): on every object's material, never the ground's (layer
+        // 0), whose vertex colour is light only.
+        {
+            size_t objects = 0, tinted = 0;
+            for (const ngg::Object& o : s.objects) {
+                if (o.materialId >= s.materials.size()) continue;
+                const bool tint = (s.materials[o.materialId].flags & ngg::kMaterialVertexTint) != 0;
+                if (o.layerId == 0 && tint) return Fail(lbs + ": a ground object's material takes the vertex tint");
+                if (o.layerId != 0) ++objects, tinted += tint;
+            }
+            if (tinted != objects) return Fail(lbs + ": " + std::to_string(objects - tinted) + " object(s) without the vertex tint");
+            std::printf("vertex tint: all %zu object(s), no ground\n", objects);
+        }
         // The renderer's word on the clip walls (NGGC), when it loaded them.
         for (size_t at = gpu.log.find("clip wall"); at != std::string::npos; at = std::string::npos) {
             const size_t from = gpu.log.rfind('\n', at), to = gpu.log.find('\n', at);

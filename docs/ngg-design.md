@@ -17,7 +17,7 @@ RBR plugin: a d3d9 proxy, a 64-bit host process, IPC, resource tagging. That his
 | decision | consequence |
 |---|---|
 | **The renderer knows nothing about RBR** | RBR content reaches it as `.ngg` bytes or as models through the interface. The importers (Wallaby, the game's `.lbs` import) own every RBR fact (§2, §1.3) |
-| **No baked lighting** | RBR's vertex colours and shadow textures are discarded. All light is computed: physical sky, sun and local lights, ray-traced or raster visibility (§3, §4, §5) |
+| **No baked lighting** | RBR's vertex colours and shadow textures are discarded as light. All light is computed: physical sky, sun and local lights, ray-traced or raster visibility (§3, §4, §5). An object's vertex HUE is paint and is kept (§2.8) |
 | **Ray tracing first, raster as the fallback** | inline RayQuery (DXR 1.1, SM 6.5) gives sun shadows, AO and local-light shadows. Without it, cascades + XeGTAO + spot shadow maps fill the same slots (§4.1) |
 | **Physical units** | the sky, sun and lamps are in physical radiometric units, and auto exposure meters the result. There are no per-scene fudge factors (§3.5) |
 | **One frame for every client** | `core::Renderer::RecordFrame` owns pass order and correctness for the game, the Garage and the editor (§1.4) |
@@ -322,6 +322,12 @@ baseColourFactor[4]  roughness  metallic  normalScale  occlusionStrength  emissi
 - **Kept from RBR because measured, not inherited:** `detail` blended by vertex alpha (live on 25-100 % of ground
   area on both test tracks; it hides chunk seams), and `baseColour.a` as coverage on alpha-tested geometry. The baked
   vertex colour stays in the vertex as the A/B reference, not as a material property.
+- **`kMaterialVertexTint` (bit 5): the vertex colour's hue is albedo.** On such a material the lit path multiplies the
+  albedo by `rgb / max(rgb)`, sRGB-decoded (RBR's product was display-referred; a power law splits over it), faded
+  out below 16/255 where 8 bits carry no hue. A grey vertex gives 1, so the bake's light stays discarded. Both
+  producers set it on RBR's object materials (vegetation, scenery, movable; not glTF items, which bring their own
+  flags), never on the ground's - by layer, the converter's knowledge, not a renderer guess (§2.8). An old reader
+  ignores the bit, so no version change; an old file draws its spectators grey until reconverted.
 - **Derived at load, never stored:** `kDrawSingleStage` when `detail == kNoTexture` (the shader then never reads
   uv1), `kDrawNormalMap` when `normal` is filled. The normal map is gated on that flag, not on the sample: the
   white fallback decodes to (1,1,1), and no single fallback is neutral for every slot.
@@ -848,6 +854,13 @@ stage 1 only blends in the atlas average.
 
 - **Vertex colour is two quantities:** RGB = baked light at the editor's scale (§2.2 `bakedScale`), A = the ground's
   blend weight, or coverage on objects. RBR's actual blend weight is `tex1.a * vertexAlpha`.
+- **On objects the RGB is also paint.** RBR draws an object as texture x vertex colour (`RLSingleTexture`), and the
+  spectators are a grey people atlas (`ObjectTexturePlateOpaque`, block (1,1)) coloured per vertex: shirts, trousers,
+  caps red, blue, green. Measured over the stock `Maps/*_M.lbs` (2026-11-25): the objects' bake is grey (median chroma
+  0 on every stage; the mean hue within 6 % of white, track-68 (a small map) 16 %); up to 8 % of object vertices carry
+  a hue (people, cars, signs, banners). So the hue is kept as albedo (`kMaterialVertexTint`,
+  §2.3) and the brightness, the light, discarded. It is static data in the file, not a colour RBR picks at run time;
+  the animated spectators of block (2,14) (`.lbs` script objects) are not drawn by W-Rally yet.
 - **Baked lighting is discarded for light**, together with RBR's baked shadow and specular maps, fog and in-scatter:
   the sun, the sky, RT shadows and AO replace them. What is owed to the original is geometry, UVs, texture assignment
   and the blend weight. A difference from vanilla that traces to a missing bake is out of scope; one that traces to

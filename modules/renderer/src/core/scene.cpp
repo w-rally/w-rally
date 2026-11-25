@@ -73,6 +73,8 @@ namespace {
 // literal cannot include a header. This is the only thing stopping the two from
 // drifting - and a drift here would turn every object mesh single-stage or none
 // of them, silently either way.
+static_assert(kMaterialVertexTint == 32u,
+              "NGG_MAT_VERTEX_TINT in the scene shader disagrees with kMaterialVertexTint");
 static_assert(Scene::kDrawSingleStage == 256u,
               "NGG_MAT_SINGLE_STAGE in the scene shader disagrees with kDrawSingleStage");
 static_assert(Scene::kDrawNormalMap == 512u,

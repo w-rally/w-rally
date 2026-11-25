@@ -239,7 +239,7 @@ endif()
 if(EXISTS "${WRALLY_TEST_RBR_DIR}/Maps/track-41_M.lbs")
     add_test(NAME legacy-import-41 COMMAND ngg-check --lbs ${WRALLY_TEST_RBR_DIR}/Maps/track-41_M.lbs)
     set_tests_properties(legacy-import-41 PROPERTIES PASS_REGULAR_EXPRESSION
-        "weather: 7 presets from TrackSettings.ini, default 41M_crisp_clear .*imported track-41_M.lbs: .* 304744 triangles, .*\(0 missing\).*ngg-check: all good")
+        "weather: 7 presets from TrackSettings.ini, default 41M_crisp_clear .*imported track-41_M.lbs: .* 304744 triangles, .*\(0 missing\).*vertex tint: all [1-9][0-9]* object[(]s[)], no ground.*ngg-check: all good")
 endif()
 # The clip walls (NGGC, NGG design §2.8): Joux Verte's block (1,4) - its 124 triangles and the 12 of the second list -
 # imported, read back and loaded by the renderer, with its scenery block's objects as the backdrop.
