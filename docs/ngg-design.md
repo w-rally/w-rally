@@ -2704,9 +2704,9 @@ glass, and VR behind `kRendererCapVr`.
 | # | item | state / why | blocked on |
 |---|---|---|---|
 | 8 | **A third visibility provider: NRD (SIGMA/REBLUR) or DLSS Ray Reconstruction** | NRD built (§4.10): SIGMA for the sun and the lamps; REBLUR's AO failed the ghost behind the car and is off by default. DLSS RR prototyped (§4.11): passes the ghost behind the car. Open: REBLUR's history rules against ours; RR's Garage exposure, its glass/haze guides, presets | the user's look at RR |
-| 9 | **Ray-traced foliage cost** | instanced trees add +2.2 ms with opaque RT and +7.2 ms alpha-tested (§2.6), since any-hit runs through the needle tiers. Done: a ray-tracing-only LOD (`kModelLodRayOnly`, §2.6); near the camera (60 m) the sun shadow from the drawn LOD through the foliage map instead of the shell (§2.6, 2026-11-20: +0.5 ms, leaf-exact). Open: the 60 m switch judged while driving; the map pass under a dense canopy (fill-bound, ~5 ms there after the view cull, §2.6); distant placements opaque or out of the TLAS, one submesh per shell | a look while driving |
-| 10 | **Cascades: penumbra and cross-fade** | the non-RT sun shadow is hard-edged (no PCSS) and switches between cascades with no blend | nothing |
-| 11 | **Cheaper distant cascades** | cascade 3 covers kilometres and changes slowly: update it every 2nd-3rd frame. 2048² for 0.7 m texels is wasted bandwidth | nothing |
+| 9 | **Ray-traced foliage cost** | instanced trees add +2.2 ms with opaque RT and +7.2 ms alpha-tested (§2.6), since any-hit runs through the needle tiers. Done: a ray-tracing-only LOD (`kModelLodRayOnly`, §2.6); near the camera (60 m) the sun shadow from the drawn LOD through the foliage map instead of the shell (§2.6, 2026-11-20: +0.5 ms, leaf-exact). Open: the 60 m switch judged while driving; the map pass under a dense canopy (fill-bound, ~5 ms there after the view cull, §2.6); distant placements opaque or out of the TLAS (the RT detail setting, #40), one submesh per shell | a look while driving |
+| 10 | **Cascades: penumbra and cross-fade** | the non-RT sun shadow is hard-edged (no PCSS) and switches between cascades with no blend. Planned as the Shadow quality setting's high step (#37) | nothing |
+| 11 | **Cheaper distant cascades** | cascade 3 covers kilometres and changes slowly: update it every 2nd-3rd frame. 2048² for 0.7 m texels is wasted bandwidth. Planned as the Shadow quality setting's low step (#37) | nothing |
 | 12 | **Re-measure RT vs the raster path in W-Rally** | the "cascades cost more than RT" number is from the plugin (§4.9). Env, aerial and multiple scattering were last timed before the probe and weather were added | nothing |
 | 13 | **Debug view 12 on the RT path** | it compares RT with the cascade map, but `RenderShadows` is not called on the RT path, so it may read a stale map. Unverified | nothing |
 
@@ -2724,7 +2724,7 @@ glass, and VR behind `kRendererCapVr`.
 | 20 | **`NGGS` and the variant spawn points** | written by the converters, read by nobody: the car starts from the physics' data | a use for them |
 | 21 | **RBR animated objects** (`.dls`) | drawn static. `NativeSim::Open` refuses animation objects | physics side |
 | 22 | **Native gameplay chunks in `.ngg`** | collision, surfaces, fences, drive line, splits and pacenotes into the `.ngg` ([design.md decision 10](design.md)); generated stages after that (§9) | the game running end to end |
-| 23 | **Texture streaming above the VRAM budget** | not built: every texture is resident | a stage that needs it |
+| 23 | **Texture streaming above the VRAM budget** | not built: every texture is resident. The Texture quality setting (#38) is the interim answer | a stage that needs it |
 | 24 | **`.ngg` content protection** | deliberately deferred; no envelope field yet (§2.9) | competition use |
 
 **Lighting, weather, night**
@@ -2751,6 +2751,31 @@ glass, and VR behind `kRendererCapVr`.
 | # | item | state / why | blocked on |
 |---|---|---|---|
 | 35 | **Trampled grass, wheel tracks and particles, together** (the user, 2026-11-22) | grass is pushed aside by the car's box while it is there and springs back at once (§2.6 "Grass", option A); nothing persists. Option B - a trample map round the camera, world-anchored and scrolled with it (not redrawn: it holds history), the wheels and the body drawn into it every frame, fading back over seconds, read by the grass spawn into each blade's bend (the blade shader cannot read textures: the scene's root signature is full) - is about 0.1 ms. The user wants it built WITH the other persistent ground marks and the particles ([design.md §3.2](design.md): dust, gravel, spray, skid marks, decals): wheel tracks on the road and in the grass and the dust they throw come from the same contact data (which wheel touches what surface, where, how fast) and the same world-anchored maps, so one design for all of them. Also: other cars' boxes (ghosts, multiplayer) for option A meanwhile | the particle / ground-mark design |
+
+**User settings** (plan, 2026-11-26: a console game's per-feature settings table checked against what we have)
+
+Today the player has a Quality tier (§1.5: AO and its rays, XeGTAO, sharpen, grass reach and density as one set),
+ray tracing, shadows, TAA, upscaling, vegetation detail (§2.6), denoiser and vsync. The plan adds rows where the
+renderer already has the knob, so each one is mostly plumbing. **One batch, one interface version:** per row a
+`RenderSettings` field (renderer.h, version bump), `Apply` in `module.cpp`, the game's `settings.h` / `settings.cpp`
+key in `W-Rally.ini`, a Settings row in `menus.cpp`, a `PHYS_DRIVE_*` override for A/B, and §1.5's table. A row
+moved out of the tier keeps the tier's value as its default, so the Quality tier still means what it meant.
+
+| # | item | state / why | blocked on |
+|---|---|---|---|
+| 36 | **Grass row** (off / near / medium / far) | grass reach and density are inside the tier today (`QualityTier::grassReach`, `grassDensity`: low none, medium 30 m, high 50 m). A row of its own: off, 30 m, 50 m, 80 m, density with it. `NGG_GRASS` / `NGG_GRASS_DENSITY` stay over it. Small | nothing |
+| 37 | **Shadow quality row** (low / medium / high), the non-RT path | the cascades are 2048² fixed at `Create` (`NGG_FOLIAGE_RES` is A/B only) and the lamps' maps 1024². The row sets 1024 / 2048 / 4096 and 512 / 1024 / 2048, recreating the maps on change. Low also updates cascade 3 every 3rd frame (#11); high gets the penumbra and the cascade cross-fade (#10). On the RT path it sets only the near foliage map's resolution (#9). Small, plus #10/#11 if taken with it | nothing |
+| 38 | **Texture quality row** (low / medium / high) | every texture is resident (#23). Low drops the top mip of textures from 1024 up at load, medium of 2048 up, high keeps all: ~4x less VRAM on the big ones for 2-4 GB cards. Stage, models and the car alike; a change reloads the scene's textures (the device-lost journal already re-supplies them, §10.6). An interim answer to #23, not streaming | nothing |
+| 39 | **Spectators row** (off / some / all) | thin the spectators out by a stable hash per object. Needs to know which objects are spectators: an object kind from the converters, never a renderer guess (RBR's vegetation block also holds people, cars, houses, fences). Small once tagged | a `spectator` kind from Wallaby and the importer |
+| 40 | **Ray-tracing detail row** (low / medium / high) | the RT structure's cost is now the plants (#9). The row sets how far placements go into the TLAS and how: low - plants beyond ~80 m out, the rest opaque; medium - out beyond ~200 m, alpha-tested only within 60 m (today's foliage-map range); high - alpha-tested further, out beyond ~400 m. Takes #9's open "distant placements opaque or out of the TLAS". Distances to be measured on the RTX machine (GPU frame ms) and judged by eye while driving. Medium | #9's look while driving |
+| 41 | **Motion blur** (off / low / high), new feature | the TAA's motion vectors are already there (§3.7). Camera and per-object blur at a shutter scale (0, 0.5, 1), after TAA or the upscaler, the car itself excluded or clamped so the driver's view stays sharp. Suits the feel of speed. Medium | nothing |
+| 42 | **Detail rows for features not built yet** | particles (dust, gravel, spray, #35): particle count and render resolution (half-res particles) once they exist; volumetric light (beams in dust and haze, #28; fog in the scattering table, #26): a quality row then; one-bounce RT diffuse GI: large, only after #12's re-measure says the budget is there | those features |
+
+Not relevant to us: tessellation, hair, weapons, water, vehicle HD texture counts (one car on the stage), traffic and
+pedestrian AI. Physics quality can never be a setting: the physics is bit-exact.
+
+Suggested order: #36-#38 together (one session, one version bump), then #40 on the RTX machine, then #41; #39 when
+the converters tag spectators.
 
 **Housekeeping**
 
