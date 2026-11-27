@@ -324,7 +324,14 @@ private:
     // index buffers by address, and the shader reads the rest per hit.
     Microsoft::WRL::ComPtr<ID3D12Resource>       m_ibAlpha, m_triMaterial, m_materials;
     Microsoft::WRL::ComPtr<ID3D12Resource>       m_triPlant;
-    Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> m_heap;       // see kSlot* in rt.cpp
+    // The descriptors (see kSlot* in rt.cpp) are WRITTEN into m_heap, a CPU-only mirror, wherever they change, and
+    // Publish copies it whole into this frame slot's half of m_gpuHeap (shader visible, two halves - device.h) before
+    // the frame binds it: a frame in flight keeps reading its own half. GpuBase: this slot's half.
+    Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> m_heap;
+    Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> m_gpuHeap;
+    UINT                                         m_heapCount = 0;
+    void Publish(ID3D12Device* dev);
+    D3D12_GPU_DESCRIPTOR_HANDLE GpuBase() const;
     UINT   m_vertexStride = 0;
     SlotTimer                                    m_timestamps;   // 5 a frame (slot_timer.h)
     bool                                         m_countersPending[2] = {};   // a frame slot's counters copied

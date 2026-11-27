@@ -1,4 +1,5 @@
 #include "gtao.h"
+#include "frame_upload.h"
 #include "log.h"
 #include "pipeline_cache.h"
 #include "shaders.h"
@@ -132,7 +133,7 @@ bool Gtao::Create(ID3D12Device* dev, ID3D12CommandQueue* queue)
 
     D3D12_DESCRIPTOR_HEAP_DESC hd = {};
     hd.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
-    hd.NumDescriptors = kTables * kTable;
+    hd.NumDescriptors = 2 * kTables * kTable;   // the tables once per frame slot (device.h): Record rewrites two a frame
     hd.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
     if (FAILED(dev->CreateDescriptorHeap(&hd, IID_PPV_ARGS(&m_heap)))) return false;
     m_stride = dev->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
@@ -160,8 +161,11 @@ bool Gtao::CreateTargets(ID3D12Device* dev, UINT width, UINT height)
     m_width = width;
     m_height = height;
 
-    // The tables. Every slot written; the unused ones with null views of their declared types.
+    // The tables, in both frame slots' halves. Every slot written; the unused ones with null views of their declared
+    // types.
+    for (UINT half = 0; half < 2; ++half) {
     D3D12_CPU_DESCRIPTOR_HANDLE base = m_heap->GetCPUDescriptorHandleForHeapStart();
+    base.ptr += (SIZE_T)half * kTables * kTable * m_stride;
     auto slot = [&](UINT pass, UINT k) { D3D12_CPU_DESCRIPTOR_HANDLE h = base; h.ptr += (SIZE_T)(pass * kTable + k) * m_stride; return h; };
     auto srv = [&](ID3D12Resource* r, DXGI_FORMAT f, UINT mips, D3D12_CPU_DESCRIPTOR_HANDLE h) {
         D3D12_SHADER_RESOURCE_VIEW_DESC d = {};
@@ -197,6 +201,7 @@ bool Gtao::CreateTargets(ID3D12Device* dev, UINT width, UINT height)
     denoise(kPassLastFromB, m_aoTermB.Get(), m_out.Get());
     denoise(kPassAtoB, m_aoTerm.Get(), m_aoTermB.Get());
     denoise(kPassBtoA, m_aoTermB.Get(), m_aoTerm.Get());
+    }
     return true;
 }
 
@@ -251,8 +256,10 @@ void Gtao::Record(ID3D12GraphicsCommandList* list, ID3D12Resource* depth, ID3D12
         for (int c = 0; c < 3; ++c) cb.viewRow[r][c] = view[r * 4 + c];
     ++m_frame;
 
-    // This frame's depth and normal into the tables.
+    // This frame's depth and normal into this frame slot's tables (a frame in flight reads its own).
+    const UINT slotBase = FrameSlot() * kTables * kTable;
     D3D12_CPU_DESCRIPTOR_HANDLE cpu = m_heap->GetCPUDescriptorHandleForHeapStart();
+    cpu.ptr += (SIZE_T)slotBase * m_stride;
     {
         D3D12_SHADER_RESOURCE_VIEW_DESC d = {};
         d.Format = DXGI_FORMAT_R32_FLOAT;
@@ -269,7 +276,7 @@ void Gtao::Record(ID3D12GraphicsCommandList* list, ID3D12Resource* depth, ID3D12
     }
     auto table = [&](UINT pass) {
         D3D12_GPU_DESCRIPTOR_HANDLE g = m_heap->GetGPUDescriptorHandleForHeapStart();
-        g.ptr += (UINT64)(pass * kTable) * m_stride;
+        g.ptr += (UINT64)(slotBase + pass * kTable) * m_stride;
         return g;
     };
 

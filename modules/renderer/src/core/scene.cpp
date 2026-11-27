@@ -6063,7 +6063,7 @@ void Scene::RecordPass(ID3D12GraphicsCommandList* list, D3D12_CPU_DESCRIPTOR_HAN
         // Same shape again for the RT visibility. Rewritten whenever the
         // resource changes (a resize recreates it), and bound to slot 0 when
         // there is none so the table is never invalid.
-        if (m_rtVis && !m_rtSrvReady)
+        if (m_rtVis && !m_rtSrvReady[FrameSlot()])
         {
             ID3D12Device* d = nullptr;
             list->GetDevice(IID_PPV_ARGS(&d));
@@ -6077,10 +6077,10 @@ void Scene::RecordPass(ID3D12GraphicsCommandList* list, D3D12_CPU_DESCRIPTOR_HAN
                 sd.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
                 sd.Texture2D.MipLevels = 1;
                 D3D12_CPU_DESCRIPTOR_HANDLE dest = m_srvHeap->GetCPUDescriptorHandleForHeapStart();
-                dest.ptr += (SIZE_T)m_rtSrvSlot * m_srvStride;
+                dest.ptr += (SIZE_T)RtSrvSlot() * m_srvStride;
                 d->CreateShaderResourceView(m_rtVis, &sd, dest);
                 d->Release();
-                m_rtSrvReady = true;
+                m_rtSrvReady[FrameSlot()] = true;
                 // Rewritten every frame on purpose (SetRtVisibility: a pointer is not an identity), and the
                 // texture is one of the denoiser's two histories, alternating - so neither "every write" nor
                 // "a new pointer" is news. Said once per size and format (creation, a resize): said every frame
@@ -6088,7 +6088,7 @@ void Scene::RecordPass(ID3D12GraphicsCommandList* list, D3D12_CPU_DESCRIPTOR_HAN
                 const D3D12_RESOURCE_DESC rd = m_rtVis->GetDesc();
                 if (rd.Width != m_rtSrvLoggedW || rd.Height != m_rtSrvLoggedH || rd.Format != m_rtSrvLoggedFormat)
                 {
-                    Log("scene: RT visibility SRV created in heap slot %u (%llux%u)", m_rtSrvSlot,
+                    Log("scene: RT visibility SRV created in heap slot %u (%llux%u)", RtSrvSlot(),
                         (unsigned long long)rd.Width, rd.Height);
                     m_rtSrvLoggedW = rd.Width;
                     m_rtSrvLoggedH = rd.Height;
@@ -6097,13 +6097,13 @@ void Scene::RecordPass(ID3D12GraphicsCommandList* list, D3D12_CPU_DESCRIPTOR_HAN
             }
         }
         D3D12_GPU_DESCRIPTOR_HANDLE rh = m_srvHeap->GetGPUDescriptorHandleForHeapStart();
-        rh.ptr += (UINT64)(m_rtSrvReady ? m_rtSrvSlot : 0) * m_srvStride;
+        rh.ptr += (UINT64)(m_rtSrvReady[FrameSlot()] ? RtSrvSlot() : 0) * m_srvStride;
         list->SetGraphicsRootDescriptorTable(6, rh);
 
         // The AO term, same handling. The pointer ping-pongs between two
         // histories every frame, so the descriptor is rewritten every frame -
         // a write, not an allocation - and the CB flag tests the resource.
-        if (m_rtAo && !m_aoSrvReady)
+        if (m_rtAo && !m_aoSrvReady[FrameSlot()])
         {
             ID3D12Device* d = nullptr;
             list->GetDevice(IID_PPV_ARGS(&d));
@@ -6115,14 +6115,14 @@ void Scene::RecordPass(ID3D12GraphicsCommandList* list, D3D12_CPU_DESCRIPTOR_HAN
                 sd.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
                 sd.Texture2D.MipLevels = 1;
                 D3D12_CPU_DESCRIPTOR_HANDLE dest = m_srvHeap->GetCPUDescriptorHandleForHeapStart();
-                dest.ptr += (SIZE_T)m_aoSrvSlot * m_srvStride;
+                dest.ptr += (SIZE_T)AoSrvSlot() * m_srvStride;
                 d->CreateShaderResourceView(m_rtAo, &sd, dest);
                 d->Release();
-                m_aoSrvReady = true;
+                m_aoSrvReady[FrameSlot()] = true;
             }
         }
         D3D12_GPU_DESCRIPTOR_HANDLE ah = m_srvHeap->GetGPUDescriptorHandleForHeapStart();
-        ah.ptr += (UINT64)(m_aoSrvReady ? m_aoSrvSlot : 0) * m_srvStride;
+        ah.ptr += (UINT64)(m_aoSrvReady[FrameSlot()] ? AoSrvSlot() : 0) * m_srvStride;
         list->SetGraphicsRootDescriptorTable(7, ah);
 
         // The local lights' four descriptors, rewritten every frame (four writes): the buffers are fixed, but the
@@ -6134,7 +6134,7 @@ void Scene::RecordPass(ID3D12GraphicsCommandList* list, D3D12_CPU_DESCRIPTOR_HAN
             if (d)
             {
                 D3D12_CPU_DESCRIPTOR_HANDLE at = m_srvHeap->GetCPUDescriptorHandleForHeapStart();
-                at.ptr += (SIZE_T)m_lightSrvSlot * m_srvStride;
+                at.ptr += (SIZE_T)LightSrvSlot() * m_srvStride;
                 if (m_lightsReady)
                     m_lights.WriteSrvs(d, at, m_srvStride);
                 else
@@ -6206,7 +6206,7 @@ void Scene::RecordPass(ID3D12GraphicsCommandList* list, D3D12_CPU_DESCRIPTOR_HAN
                 d->Release();
             }
             D3D12_GPU_DESCRIPTOR_HANDLE lh = m_srvHeap->GetGPUDescriptorHandleForHeapStart();
-            lh.ptr += (UINT64)m_lightSrvSlot * m_srvStride;
+            lh.ptr += (UINT64)LightSrvSlot() * m_srvStride;
             list->SetGraphicsRootDescriptorTable(11, lh);
         }
 
@@ -6972,7 +6972,8 @@ bool Scene::RebuildSrvHeap(ID3D12Device* dev)
     // cannot live in a heap of its own.
     // +2: the shadow cascade array and the label font both share this heap,
     // because only one CBV/SRV/UAV heap can be bound at a time.
-    hd.NumDescriptors = (UINT)(pairs * kMaterialSrvCount + 20);
+    hd.NumDescriptors = (UINT)(pairs * kMaterialSrvCount + 20 + 12);   // +12: the per-frame ones' second slot copy
+    m_dynSrvBase = (UINT)(pairs * kMaterialSrvCount + 20);
     m_shadowSrvSlot = (UINT)(pairs * kMaterialSrvCount);
     m_fontSrvSlot = (UINT)(pairs * kMaterialSrvCount + 1);
     m_envSrvSlot  = (UINT)(pairs * kMaterialSrvCount + 2);
@@ -6985,6 +6986,7 @@ bool Scene::RebuildSrvHeap(ID3D12Device* dev)
                                                                  // the local lights' shadow maps, their mask)
     m_reflSrvSlot   = (UINT)(pairs * kMaterialSrvCount + 19);
     hd.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+    DeferRelease(m_srvHeap.Get());   // a frame in flight may still read the old one (device.h)
     if (FAILED(dev->CreateDescriptorHeap(&hd, IID_PPV_ARGS(&m_srvHeap))))
     {
         Log("scene: SRV heap creation failed");
@@ -6997,8 +6999,8 @@ bool Scene::RebuildSrvHeap(ID3D12Device* dev)
     // as "everything is in shadow" rather than as any kind of error.
     m_shadowSrvReady = false;
     m_envSrvReady = false;
-    m_rtSrvReady = false;
-    m_aoSrvReady = false;
+    m_rtSrvReady[0] = m_rtSrvReady[1] = false;
+    m_aoSrvReady[0] = m_aoSrvReady[1] = false;
     m_aerialSrvReady = false;
     m_irrSrvReady = false;
     m_msSrvReady = false;

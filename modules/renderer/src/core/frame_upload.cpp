@@ -133,9 +133,11 @@ void BeginFrameSlot(uint32_t slot, uint32_t slots)
 uint32_t FrameSlot() { return TheRing().current; }
 uint32_t FrameSlots() { return TheRing().count; }
 
-void ReleaseDeferred()
+void ReleaseDeferred(bool keepCurrent)
 {
-    for (Slot& s : TheRing().slots) s.deferred.clear();
+    Ring& r = TheRing();
+    for (uint32_t k = 0; k < kSlots; ++k)
+        if (!keepCurrent || k != r.current) r.slots[k].deferred.clear();
 }
 
 void ReleaseFrameUploads()

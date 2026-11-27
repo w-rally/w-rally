@@ -238,11 +238,13 @@ bool Device::BeginFrame()
     }
     BeginFrameSlot(slot, frames);
     if (FAILED(frameAlloc[slot]->Reset())) { CheckRemoved("at BeginFrame"); return false; }
-    return SUCCEEDED(list->Reset(frameAlloc[slot].Get(), nullptr));
+    recording = SUCCEEDED(list->Reset(frameAlloc[slot].Get(), nullptr));
+    return recording;
 }
 
 void Device::EndFrame()
 {
+    recording = false;
     list->Close();
     ID3D12CommandList* lists[] = { list.Get() };
     queue->ExecuteCommandLists(1, lists);
@@ -370,7 +372,9 @@ void Device::WaitForGpu()
         fence->SetEventOnCompletion(v, fenceEvent);
         WaitForSingleObject(fenceEvent, INFINITE);
     }
-    ReleaseDeferred();   // the GPU is idle: nothing a frame deferred is in use any more
+    // The GPU is idle: nothing a submitted frame deferred is in use any more (a frame still being recorded may name
+    // what it deferred in its open list: kept).
+    ReleaseDeferred(recording);
 }
 
 void Device::Destroy()

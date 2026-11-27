@@ -35,6 +35,7 @@ struct Device
     uint32_t frames = 1;                // frames in flight (NGG_FRAMES), read at Create
     uint32_t slot = 0;                  // the frame being recorded's slot
     uint64_t frameNumber = 0;           // frames begun
+    bool     recording = false;         // between BeginFrame and EndFrame
     UINT64   slotFence[kMaxFrames] = {};   // the fence value each slot's last frame signals
     Microsoft::WRL::ComPtr<ID3D12Fence>               fence;
     Microsoft::WRL::ComPtr<ID3D12InfoQueue>           infoQueue;

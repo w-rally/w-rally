@@ -247,16 +247,18 @@ struct NrdVisibility::Impl
 
     ~Impl() { if (instance) nrd::DestroyInstance(*instance); }
 
+    // Every view is written each frame, into this frame slot's half of the heap (device.h: a frame in flight reads
+    // its own half).
     D3D12_CPU_DESCRIPTOR_HANDLE Cpu(UINT slot) const
     {
         D3D12_CPU_DESCRIPTOR_HANDLE h = heap->GetCPUDescriptorHandleForHeapStart();
-        h.ptr += (SIZE_T)slot * stride;
+        h.ptr += (SIZE_T)(FrameSlot() * kHeapSize + slot) * stride;
         return h;
     }
     D3D12_GPU_DESCRIPTOR_HANDLE Gpu(UINT slot) const
     {
         D3D12_GPU_DESCRIPTOR_HANDLE h = heap->GetGPUDescriptorHandleForHeapStart();
-        h.ptr += (UINT64)slot * stride;
+        h.ptr += (UINT64)(FrameSlot() * kHeapSize + slot) * stride;
         return h;
     }
     void Srv(ID3D12Device* dev, ID3D12Resource* r, DXGI_FORMAT f, UINT slot) const
@@ -588,7 +590,7 @@ bool NrdVisibility::Create(Device& dev)
 
     D3D12_DESCRIPTOR_HEAP_DESC hd = {};
     hd.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
-    hd.NumDescriptors = kHeapSize;
+    hd.NumDescriptors = 2 * kHeapSize;   // a half per frame slot
     hd.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
     if (FAILED(device->CreateDescriptorHeap(&hd, IID_PPV_ARGS(&p->heap)))) return false;
     p->stride = device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);

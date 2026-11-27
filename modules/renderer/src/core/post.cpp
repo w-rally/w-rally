@@ -507,7 +507,7 @@ bool PostFx::OnResize(ID3D12Device* dev, UINT width, UINT height, UINT outputWid
     {
         D3D12_DESCRIPTOR_HEAP_DESC hd = {};
         hd.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
-        hd.NumDescriptors = kGroupCount * kGroupSize;
+        hd.NumDescriptors = 2 * kGroupCount * kGroupSize;   // the groups once per frame slot (device.h): Resolve rewrites seven a frame
         hd.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
         if (FAILED(dev->CreateDescriptorHeap(&hd, IID_PPV_ARGS(&m_srvHeap)))) return false;
         m_srvStride = dev->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
@@ -528,9 +528,11 @@ bool PostFx::OnResize(ID3D12Device* dev, UINT width, UINT height, UINT outputWid
     sd.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
     sd.Texture2D.MipLevels = 1;
 
+    // Both frame slots' halves.
+    for (int half = 0; half < 2; ++half) {
     auto slot = [&](int group, int index) {
         D3D12_CPU_DESCRIPTOR_HANDLE h = m_srvHeap->GetCPUDescriptorHandleForHeapStart();
-        h.ptr += (SIZE_T)(group * kGroupSize + index) * m_srvStride;
+        h.ptr += (SIZE_T)(half * kGroupCount * kGroupSize + group * kGroupSize + index) * m_srvStride;
         return h;
     };
     // TAA reading history 0 / history 1.
@@ -557,6 +559,7 @@ bool PostFx::OnResize(ID3D12Device* dev, UINT width, UINT height, UINT outputWid
         dev->CreateRenderTargetView(m_settled[0].Get(), nullptr, srtv);
         srtv.ptr += m_rtvStride;
         dev->CreateRenderTargetView(m_settled[1].Get(), nullptr, srtv);
+    }
     }
 
     // The upscaler's targets, and the upscaler sized to them.
@@ -589,8 +592,13 @@ bool PostFx::OnResize(ID3D12Device* dev, UINT width, UINT height, UINT outputWid
             dev->CreateRenderTargetView(m_upMotion.Get(), nullptr, rtv);
             rtv.ptr += m_rtvStride;
             dev->CreateRenderTargetView(m_upReactive.Get(), nullptr, rtv);
-            dev->CreateShaderResourceView(m_upOutput.Get(), &sd, slot(kGroupToneUp, 0));
-            dev->CreateShaderResourceView(m_upOutput.Get(), &sd, slot(kGroupToneUp, 1));
+            for (int half = 0; half < 2; ++half)   // both frame slots' halves
+                for (int index = 0; index < 2; ++index)
+                {
+                    D3D12_CPU_DESCRIPTOR_HANDLE h = m_srvHeap->GetCPUDescriptorHandleForHeapStart();
+                    h.ptr += (SIZE_T)(half * kGroupCount * kGroupSize + kGroupToneUp * kGroupSize + index) * m_srvStride;
+                    dev->CreateShaderResourceView(m_upOutput.Get(), &sd, h);
+                }
             m_upReady = m_upscaler->Resize(dev, width, height, outputWidth, outputHeight);
             m_upPhases = m_upReady ? m_upscaler->JitterPhases(width, outputWidth) : 8;
         }
@@ -765,6 +773,8 @@ void PostFx::Resolve(ID3D12GraphicsCommandList* list,
 
     const int writeIndex = (int)(m_frame & 1);   // history written this frame
     const int readIndex  = writeIndex ^ 1;       // history written last frame
+    // This frame slot's half of the groups (OnResize wrote the fixed views into both; a frame in flight reads its own).
+    const UINT slotBase = FrameSlot() * kGroupCount * kGroupSize;
 
     // Depth SRV into every group that reads it. R32_FLOAT over the scene's
     // R32_TYPELESS - see Scene::CreateDepth, which had to stop using D32_FLOAT
@@ -780,7 +790,7 @@ void PostFx::Resolve(ID3D12GraphicsCommandList* list,
         for (int g = 0; g < kGroupCount; ++g)
         {
             D3D12_CPU_DESCRIPTOR_HANDLE h = m_srvHeap->GetCPUDescriptorHandleForHeapStart();
-            h.ptr += (SIZE_T)(g * kGroupSize + 2) * m_srvStride;
+            h.ptr += (SIZE_T)(slotBase + g * kGroupSize + 2) * m_srvStride;
             dev->CreateShaderResourceView(depth, &dd, h);
         }
         haveDepth = true;
@@ -796,7 +806,7 @@ void PostFx::Resolve(ID3D12GraphicsCommandList* list,
         for (int g = 0; g < kGroupCount; ++g)
         {
             D3D12_CPU_DESCRIPTOR_HANDLE h = m_srvHeap->GetCPUDescriptorHandleForHeapStart();
-            h.ptr += (SIZE_T)(g * kGroupSize + 3) * m_srvStride;
+            h.ptr += (SIZE_T)(slotBase + g * kGroupSize + 3) * m_srvStride;
             dev->CreateShaderResourceView(motion, &md, h);
             h.ptr += m_srvStride;
             dev->CreateShaderResourceView(rtShadow, &md, h);   // RGBA16F as well
@@ -841,7 +851,7 @@ void PostFx::Resolve(ID3D12GraphicsCommandList* list,
 
     auto gpuGroup = [&](int group) {
         D3D12_GPU_DESCRIPTOR_HANDLE h = m_srvHeap->GetGPUDescriptorHandleForHeapStart();
-        h.ptr += (UINT64)(group * kGroupSize) * m_srvStride;
+        h.ptr += (UINT64)(slotBase + group * kGroupSize) * m_srvStride;
         return h;
     };
 

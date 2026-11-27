@@ -76,8 +76,6 @@ ComPtr<ID3D12Resource> MakeUpload(ID3D12Device* dev, const void* data, size_t by
 bool Environment::Create(ID3D12Device* dev)
 {
     if (!dev) return false;
-    m_cbs.Reset();   // (made again on this device at the first Record)
-    m_cbsMapped = nullptr;
 
     D3D12_DESCRIPTOR_RANGE range = {};
     range.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
@@ -190,7 +188,7 @@ bool Environment::Create(ID3D12Device* dev)
     m_rtvStride = dev->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
 
     hd.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
-    hd.NumDescriptors = kMips + 1;          // + the multiple-scattering table
+    hd.NumDescriptors = kMips + 2;          // + the multiple-scattering table, one per frame slot (device.h)
     hd.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
     if (FAILED(dev->CreateDescriptorHeap(&hd, IID_PPV_ARGS(&m_srvHeap)))) return false;
     m_srvStride = dev->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
@@ -298,7 +296,7 @@ void Environment::Record(ID3D12GraphicsCommandList* list, const SkyParams& p,
     // that has since been recreated. Null SRV (= single scattering) without one.
     {
         D3D12_CPU_DESCRIPTOR_HANDLE h = m_srvHeap->GetCPUDescriptorHandleForHeapStart();
-        h.ptr += (SIZE_T)kMips * m_srvStride;
+        h.ptr += (SIZE_T)(kMips + FrameSlot()) * m_srvStride;   // this frame slot's (a frame in flight reads its own)
         if (ms && ms->Ready())
             ms->CreateSrv(dev, h);
         else
@@ -362,31 +360,14 @@ void Environment::Record(ID3D12GraphicsCommandList* list, const SkyParams& p,
     list->SetDescriptorHeaps(1, heaps);
     {
         D3D12_GPU_DESCRIPTOR_HANDLE mh = m_srvHeap->GetGPUDescriptorHandleForHeapStart();
-        mh.ptr += (UINT64)kMips * m_srvStride;
+        mh.ptr += (UINT64)(kMips + FrameSlot()) * m_srvStride;
         list->SetGraphicsRootDescriptorTable(2, mh);
     }
 
-    // The constants, one 256-byte slot per mip (srcTexel differs) and one for the irradiance, in a buffer made once
-    // and kept mapped. Rewriting it here is safe because the frame is synchronous (see the note at the end of
-    // Scene::Record): last frame's draws have finished reading it. Frames that overlap would need one per frame.
-    if (!m_cbs)
-    {
-        ComPtr<ID3D12Resource> made;
-        std::vector<uint8_t> zero((kMips + 1) * 256, 0);
-        made = MakeUpload(dev, zero.data(), zero.size());
-        void* p = nullptr;
-        D3D12_RANGE none = { 0, 0 };
-        if (made && SUCCEEDED(made->Map(0, &none, &p)))
-        {
-            m_cbs = made;
-            m_cbsMapped = static_cast<unsigned char*>(p);
-        }
-    }
-    if (!m_cbs) { dev->Release(); return; }
-    auto slot = [&](UINT k, const EnvCB& c) {
-        memcpy(m_cbsMapped + (size_t)k * 256, &c, sizeof(c));
-        return m_cbs->GetGPUVirtualAddress() + (UINT64)k * 256;
-    };
+    // The constants, one per mip (srcTexel differs) and one for the irradiance, in the frame's ring (frame_upload.h:
+    // made once, a ring per frame slot). A buffer created and released per constant per frame cost 6.7 ms of CPU a
+    // frame (dev laptop, 2026-11-23) - CreateCommittedResource is a driver call, not an allocation.
+    auto slot = [&](UINT, const EnvCB& c) { return FrameUpload(dev, &c, sizeof(c)); };
 
     for (UINT m = 0; m < kMips; ++m)
     {

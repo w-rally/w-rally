@@ -336,7 +336,14 @@ void Renderer::RecordFrame(Device& dev, D3D12_CPU_DESCRIPTOR_HANDLE outRtv,
 
     // `width` x `height` is the client's target, the OUTPUT; everything up to the upscaler (or the TAA) runs at the
     // RENDER size, which is the same without an upscaler.
-    if (width != m_width || height != m_height) OnResize(dev, width, height);
+    // A new size: the targets are made again, here and by every pass that follows them (GTAO, the ray tracer, NRD,
+    // RR at the render size) - with frames in flight (device.h) the last frame may still be drawing with the old
+    // ones, so the GPU is waited for first. A resize is rare; a frame's stall is nothing.
+    if (width != m_width || height != m_height)
+    {
+        if (dev.frames > 1) dev.WaitForGpu();
+        OnResize(dev, width, height);
+    }
     width = m_renderWidth;
     height = m_renderHeight;
     // The camera's planes and field of view, for the upscaler's depth (a conventional D3D projection: q = f/(f-n) at

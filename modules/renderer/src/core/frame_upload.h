@@ -34,8 +34,9 @@ void BeginFrameSlot(uint32_t slot, uint32_t slots);
 uint32_t FrameSlot();    // the slot being recorded
 uint32_t FrameSlots();   // frames in flight
 
-// The GPU is idle (Device::WaitForGpu): everything deferred, of every slot, released.
-void ReleaseDeferred();
+// The GPU is idle (Device::WaitForGpu): everything deferred released - of every slot, or of every slot but the one
+// being recorded (`keepCurrent`: its open list may still name what it deferred).
+void ReleaseDeferred(bool keepCurrent = false);
 
 // Everything released (Device::Destroy, and before a device is made): nothing of an old device may outlive it - a
 // removed device kept alive by one buffer makes D3D12CreateDevice fail on its adapter.

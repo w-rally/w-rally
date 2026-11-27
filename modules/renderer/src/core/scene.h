@@ -29,6 +29,7 @@
 #include "../format/ngg_format.h"   // for the file's Vertex layout
 #include "sky.h"                    // SkyParams, shared with the sky pass
 #include "slot_timer.h"
+#include "frame_upload.h"
 #include "shadow.h"
 #include "env.h"
 #include "grass.h"
@@ -322,8 +323,8 @@ public:
     // read the FREED texture's memory. A page fault, then a GPU hang (TDR),
     // caught by DRED on the first object move (design §10.5). Two descriptor
     // writes a frame cost nothing; a pointer is not an identity.
-    void SetRtVisibility(ID3D12Resource* tex) { m_rtVis = tex; m_rtSrvReady = false; }
-    void ClearRtVisibility() { m_rtVis = nullptr; m_rtSrvReady = false; }
+    void SetRtVisibility(ID3D12Resource* tex) { m_rtVis = tex; m_rtSrvReady[0] = m_rtSrvReady[1] = false; }
+    void ClearRtVisibility() { m_rtVis = nullptr; m_rtSrvReady[0] = m_rtSrvReady[1] = false; }
 
     // This frame's ray-traced ambient occlusion (rt.h, denoised), applied to
     // the ambient terms. Null when there is none; SetAmbientOcclusion toggles
@@ -333,9 +334,9 @@ public:
     {
         m_rtAo = tex;
         m_rtAoView = view;
-        m_aoSrvReady = false;
+        m_aoSrvReady[0] = m_aoSrvReady[1] = false;
     }
-    void ClearRtAo() { m_rtAo = nullptr; m_aoSrvReady = false; }
+    void ClearRtAo() { m_rtAo = nullptr; m_aoSrvReady[0] = m_aoSrvReady[1] = false; }
 
     // LOCAL LIGHTS (lights.h, design §5.5): this frame's lights, their clusters for this view (before the ray
     // tracer reads them), and the ray tracer's denoised shadowed fraction of their light (Rt::FilteredLights; none:
@@ -1259,7 +1260,7 @@ private:
     ID3D12Resource*          m_rtAo = nullptr;
     DXGI_FORMAT              m_rtAoView = DXGI_FORMAT_UNKNOWN;
     UINT                     m_aoSrvSlot = 0;
-    bool                     m_aoSrvReady = false;
+    bool                     m_aoSrvReady[2] = {};   // per frame slot (AoSrvSlot)
     // The froxel aerial-perspective table: two SRVs (in-scatter, transmittance)
     // in consecutive slots. Fixed-size volumes, so written once per heap.
     AerialLut                m_aerialLut;
@@ -1273,7 +1274,13 @@ private:
     bool                     m_aerialSrvReady = false;
     bool                     m_aoOn = true;
     UINT                     m_rtSrvSlot = 0;
-    bool                     m_rtSrvReady = false;
+    bool                     m_rtSrvReady[2] = {};   // per frame slot (RtSrvSlot)
+    // The descriptors a frame rewrites (the RT visibility, the AO, the lights' ten) have a second copy per frame
+    // slot (device.h) after the heap's fixed ones, from m_dynSrvBase: a frame in flight keeps reading its own.
+    UINT                     m_dynSrvBase = 0;
+    UINT RtSrvSlot() const    { return FrameSlot() ? m_dynSrvBase : m_rtSrvSlot; }
+    UINT AoSrvSlot() const    { return FrameSlot() ? m_dynSrvBase + 1 : m_aoSrvSlot; }
+    UINT LightSrvSlot() const { return FrameSlot() ? m_dynSrvBase + 2 : m_lightSrvSlot; }   // and the next nine
     UINT64                   m_rtSrvLoggedW = 0;        // the size and format the log last reported (the log only)
     UINT                     m_rtSrvLoggedH = 0;
     DXGI_FORMAT              m_rtSrvLoggedFormat = DXGI_FORMAT_UNKNOWN;

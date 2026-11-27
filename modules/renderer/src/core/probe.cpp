@@ -1,4 +1,5 @@
 #include "probe.h"
+#include "frame_upload.h"
 #include "log.h"
 #include "pipeline_cache.h"
 #include "shaders.h"
@@ -81,7 +82,7 @@ bool ReflectionProbe::Create(ID3D12Device* dev)
     hd.Type = D3D12_DESCRIPTOR_HEAP_TYPE_DSV;
     if (FAILED(dev->CreateDescriptorHeap(&hd, IID_PPV_ARGS(&m_dsvHeap)))) return false;
     hd.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
-    hd.NumDescriptors = 2 + 2 * kOctMips;
+    hd.NumDescriptors = 2 + 2 * kOctMips + 2;   // + frame slot 1's {faces, env} (device.h; Resolve rewrites env)
     hd.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
     if (FAILED(dev->CreateDescriptorHeap(&hd, IID_PPV_ARGS(&m_heap)))) return false;
     m_rtvStride = dev->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
@@ -116,6 +117,11 @@ bool ReflectionProbe::Create(ID3D12Device* dev)
     sd.Texture2DArray.MipLevels = 1;
     sd.Texture2DArray.ArraySize = 6;
     dev->CreateShaderResourceView(m_faces.Get(), &sd, h);
+    {
+        D3D12_CPU_DESCRIPTOR_HANDLE h1 = h;   // and frame slot 1's copy of the faces
+        h1.ptr += (SIZE_T)(2 + 2 * kOctMips) * m_srvStride;
+        dev->CreateShaderResourceView(m_faces.Get(), &sd, h1);
+    }
     for (UINT m = 0; m < kOctMips; ++m)
         for (UINT k = 0; k < 2; ++k)
         {
@@ -218,8 +224,11 @@ void ReflectionProbe::EndFace(ID3D12GraphicsCommandList* list, int face)
 void ReflectionProbe::Resolve(ID3D12GraphicsCommandList* list, ID3D12Resource* env)
 {
     if (!Ready() || !env) return;
+    // This frame slot's {faces, env} table: slot 0's at the start, slot 1's after the mips (a frame in flight reads its
+    // own, device.h).
+    const UINT table = FrameSlot() ? 2 + 2 * kOctMips : 0;
     D3D12_CPU_DESCRIPTOR_HANDLE eh = m_heap->GetCPUDescriptorHandleForHeapStart();
-    eh.ptr += m_srvStride;
+    eh.ptr += (SIZE_T)(table + 1) * m_srvStride;
     D3D12_SHADER_RESOURCE_VIEW_DESC sd = {};
     sd.Format = env->GetDesc().Format;
     sd.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
@@ -239,7 +248,9 @@ void ReflectionProbe::Resolve(ID3D12GraphicsCommandList* list, ID3D12Resource* e
     list->SetDescriptorHeaps(1, heaps);
     list->SetComputeRootSignature(m_rootSig.Get());
     const D3D12_GPU_DESCRIPTOR_HANDLE g = m_heap->GetGPUDescriptorHandleForHeapStart();
-    list->SetComputeRootDescriptorTable(1, g);
+    D3D12_GPU_DESCRIPTOR_HANDLE tg = g;
+    tg.ptr += (UINT64)table * m_srvStride;
+    list->SetComputeRootDescriptorTable(1, tg);
     D3D12_RESOURCE_BARRIER uav = {};
     uav.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
     uav.UAV.pResource = m_oct.Get();

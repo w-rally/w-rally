@@ -890,9 +890,17 @@ bool Rt::Rebuild(Device& dev, ID3D12GraphicsCommandList* list, const Scene::RtSh
     D3D12_DESCRIPTOR_HEAP_DESC hd = {};
     hd.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
     hd.NumDescriptors = kSlotTextures + (UINT)(shared.textures.empty() ? 1 : shared.textures.size());
-    hd.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+    hd.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_NONE;   // the CPU-only mirror: written here and wherever a view changes
     m_heap.Reset();
     if (FAILED(dev.device->CreateDescriptorHeap(&hd, IID_PPV_ARGS(&m_heap)))) return false;
+    m_heapCount = hd.NumDescriptors;
+    // What the shaders read: a half per frame slot, filled from the mirror by Publish. The old one may still be read
+    // by a frame in flight (device.h).
+    DeferRelease(m_gpuHeap.Get());
+    m_gpuHeap.Reset();
+    hd.NumDescriptors = 2 * m_heapCount;
+    hd.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+    if (FAILED(dev.device->CreateDescriptorHeap(&hd, IID_PPV_ARGS(&m_gpuHeap)))) { m_heap.Reset(); return false; }
     // The outputs' views live in the heap: into the new one, with the targets and their histories kept (a new mesh
     // used to drop every history on the screen). Without targets yet, the first Trace makes them.
     if (!m_result || !WriteTargetViews(dev.device.Get())) m_width = m_height = 0;
@@ -1337,16 +1345,19 @@ void Rt::Trace(Device& dev, ID3D12GraphicsCommandList* list, ID3D12Resource* dep
     list->ResourceBarrier(1, &toUav);
 
 
-    ID3D12DescriptorHeap* heaps[] = { m_heap.Get() };
+    // Every view of this frame written (above, and earlier in the frame: the TLAS, the instances, the pool): into
+    // this frame slot's half, which is what the frame binds.
+    Publish(dev.device.Get());
+    ID3D12DescriptorHeap* heaps[] = { m_gpuHeap.Get() };
     list->SetDescriptorHeaps(1, heaps);
     list->SetComputeRootSignature(m_rootSig.Get());
     list->SetPipelineState(m_pso.Get());
     auto gpuSlot = [&](UINT slot) {
-        D3D12_GPU_DESCRIPTOR_HANDLE h = m_heap->GetGPUDescriptorHandleForHeapStart();
+        D3D12_GPU_DESCRIPTOR_HANDLE h = GpuBase();
         h.ptr += (UINT64)slot * m_stride;
         return h;
     };
-    list->SetComputeRootDescriptorTable(0, m_heap->GetGPUDescriptorHandleForHeapStart());
+    list->SetComputeRootDescriptorTable(0, GpuBase());
     list->SetComputeRootDescriptorTable(1, gpuSlot(kSlotOut));
     list->SetComputeRoot32BitConstants(2, sizeof(TraceCB) / 4, &cb, 0);
     // THE NRD PATH (SetNrdInputs): the variants that also write NRD's inputs, and none of our denoisers below.
@@ -1537,7 +1548,7 @@ void Rt::Denoise(ID3D12GraphicsCommandList* list, const DenoiseCB& base, ID3D12R
     dc.valid = (base.valid > 0.5f && histValid) ? 1.0f : 0.0f;
 
     auto gpu = [&](UINT slot) {
-        D3D12_GPU_DESCRIPTOR_HANDLE h = m_heap->GetGPUDescriptorHandleForHeapStart();
+        D3D12_GPU_DESCRIPTOR_HANDLE h = GpuBase();   // this frame slot's half (Publish)
         h.ptr += (UINT64)slot * m_stride;
         return h;
     };
@@ -1578,7 +1589,7 @@ void Rt::Widen(ID3D12GraphicsCommandList* list, const DenoiseCB& dc,
     list->ResourceBarrier(wideState == D3D12_RESOURCE_STATE_UNORDERED_ACCESS ? 1 : 2, pre);
 
     auto gpu = [&](UINT slot) {
-        D3D12_GPU_DESCRIPTOR_HANDLE h = m_heap->GetGPUDescriptorHandleForHeapStart();
+        D3D12_GPU_DESCRIPTOR_HANDLE h = GpuBase();   // this frame slot's half (Publish)
         h.ptr += (UINT64)slot * m_stride;
         return h;
     };
@@ -1627,6 +1638,22 @@ void Rt::ReadStats()
         m_lightsMs  = t[3] >= t[2] ? k * (double)(t[3] - t[2]) : 0.0;
         m_denoiseMs = t[4] >= t[3] ? k * (double)(t[4] - t[3]) : 0.0;
     }
+}
+
+void Rt::Publish(ID3D12Device* dev)
+{
+    if (!dev || !m_heap || !m_gpuHeap) return;
+    D3D12_CPU_DESCRIPTOR_HANDLE dst = m_gpuHeap->GetCPUDescriptorHandleForHeapStart();
+    dst.ptr += (SIZE_T)FrameSlot() * m_heapCount * m_stride;
+    dev->CopyDescriptorsSimple(m_heapCount, dst, m_heap->GetCPUDescriptorHandleForHeapStart(),
+                               D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+}
+
+D3D12_GPU_DESCRIPTOR_HANDLE Rt::GpuBase() const
+{
+    D3D12_GPU_DESCRIPTOR_HANDLE h = m_gpuHeap->GetGPUDescriptorHandleForHeapStart();
+    h.ptr += (UINT64)FrameSlot() * m_heapCount * m_stride;
+    return h;
 }
 
 } // namespace core

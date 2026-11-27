@@ -116,15 +116,6 @@ private:
     Microsoft::WRL::ComPtr<ID3D12Resource>       m_tex;
     Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> m_rtvHeap;   // one per mip
     Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> m_srvHeap;   // one per SOURCE mip
-    // The per-mip constant buffers must outlive GPU execution. The frame is
-    // synchronous (see the note at the end of Scene::Record), so holding them
-    // until the next Record is enough - and this is exactly the thing that
-    // breaks the moment frames overlap, so it is called out rather than hidden.
-    // Made ONCE (kMips + 1 slots of 256 bytes: the mips', then the irradiance's) and kept mapped, rewritten each
-    // Record: a buffer created and released per constant per frame cost 6.7 ms of CPU a frame (dev laptop,
-    // 2026-11-23) - CreateCommittedResource is a driver call, not an allocation.
-    Microsoft::WRL::ComPtr<ID3D12Resource>       m_cbs;
-    unsigned char*                               m_cbsMapped = nullptr;
     UINT m_rtvStride = 0;
     UINT m_srvStride = 0;
 };
