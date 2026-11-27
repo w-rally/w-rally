@@ -184,7 +184,7 @@ bool AerialLut::Create(ID3D12Device* dev)
 
     D3D12_DESCRIPTOR_HEAP_DESC hd = {};
     hd.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
-    hd.NumDescriptors = 3;
+    hd.NumDescriptors = 4;   // u0, u1, the MS table's SRV - one per frame slot (device.h)
     hd.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
     if (FAILED(dev->CreateDescriptorHeap(&hd, IID_PPV_ARGS(&m_uavHeap))))
     {
@@ -253,7 +253,7 @@ void AerialLut::Record(ID3D12GraphicsCommandList* list, const float* viewProj,
 
     // The MS table in slot 2, rewritten each frame (a write, not an allocation).
     D3D12_CPU_DESCRIPTOR_HANDLE msh = m_uavHeap->GetCPUDescriptorHandleForHeapStart();
-    msh.ptr += 2 * (SIZE_T)m_stride;
+    msh.ptr += (2 + FrameSlot()) * (SIZE_T)m_stride;   // this frame slot's (a frame in flight reads its own)
     if (ms && ms->Ready())
         ms->CreateSrv(dev, msh);
     else
@@ -284,7 +284,7 @@ void AerialLut::Record(ID3D12GraphicsCommandList* list, const float* viewProj,
     list->SetComputeRootDescriptorTable(1, m_uavHeap->GetGPUDescriptorHandleForHeapStart());
     {
         D3D12_GPU_DESCRIPTOR_HANDLE mg = m_uavHeap->GetGPUDescriptorHandleForHeapStart();
-        mg.ptr += 2 * (UINT64)m_stride;
+        mg.ptr += (2 + FrameSlot()) * (UINT64)m_stride;
         list->SetComputeRootDescriptorTable(2, mg);
     }
     list->Dispatch((kWidth + 7) / 8, (kHeight + 7) / 8, kSlices);

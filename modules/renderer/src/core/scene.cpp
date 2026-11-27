@@ -1703,21 +1703,11 @@ void Scene::RenderShadows(ID3D12GraphicsCommandList* list,
     D3D12_VIEWPORT vp = { 0.0f, 0.0f, (float)res, (float)res, 0.0f, 1.0f };
     D3D12_RECT sc = { 0, 0, (LONG)res, (LONG)res };
 
-    // Last call's time (the frame is synchronous), then open this one.
-    const bool timed = m_shadowTimer && m_shadowTimerReadback && m_timerHz;
-    if (timed && m_shadowTimerPending)
-    {
-        UINT64* t = nullptr;
-        D3D12_RANGE r = { 0, 2 * sizeof(UINT64) };
-        if (SUCCEEDED(m_shadowTimerReadback->Map(0, &r, reinterpret_cast<void**>(&t))))
-        {
-            if (t[1] >= t[0]) m_shadowMapMs = 1000.0 * double(t[1] - t[0]) / double(m_timerHz);
-            D3D12_RANGE none = { 0, 0 };
-            m_shadowTimerReadback->Unmap(0, &none);
-        }
-        m_shadowTimerPending = false;
-    }
-    if (timed) list->EndQuery(m_shadowTimer.Get(), D3D12_QUERY_TYPE_TIMESTAMP, 0);
+    // This slot's last time (slot_timer.h), then open this one.
+    const bool timed = m_shadowTimer.Ready() && m_timerHz;
+    if (UINT64 t[2]; timed && m_shadowTimer.Take(t) && t[1] >= t[0])
+        m_shadowMapMs = 1000.0 * double(t[1] - t[0]) / double(m_timerHz);
+    if (timed) m_shadowTimer.Stamp(list, 0);
 
     // The camera, for the models' LODs (a cascade draws the one the camera sees) and their billboards, which face
     // the sun here: the "camera" of the shadow constants is put far off towards it (VSMain's billboard turn).
@@ -1846,10 +1836,8 @@ void Scene::RenderShadows(ID3D12GraphicsCommandList* list,
 
     if (timed)
     {
-        list->EndQuery(m_shadowTimer.Get(), D3D12_QUERY_TYPE_TIMESTAMP, 1);
-        list->ResolveQueryData(m_shadowTimer.Get(), D3D12_QUERY_TYPE_TIMESTAMP, 0, 2,
-                               m_shadowTimerReadback.Get(), 0);
-        m_shadowTimerPending = true;
+        m_shadowTimer.Stamp(list, 1);
+        m_shadowTimer.Resolve(list, 0, 2);
     }
 }
 
@@ -1863,20 +1851,11 @@ void Scene::RenderFoliageShadows(ID3D12GraphicsCommandList* list, const float* v
     ID3D12Device* dev = nullptr;
     list->GetDevice(IID_PPV_ARGS(&dev));
     if (!dev) return;
-    const bool timed = m_shadowTimer && m_shadowTimerReadback && m_timerHz;
-    if (timed && m_shadowTimerPending)
-    {
-        UINT64* t = nullptr;
-        D3D12_RANGE r = { 0, 2 * sizeof(UINT64) };
-        if (SUCCEEDED(m_shadowTimerReadback->Map(0, &r, reinterpret_cast<void**>(&t))))
-        {
-            if (t[1] >= t[0]) m_foliageMapMs = 1000.0 * double(t[1] - t[0]) / double(m_timerHz);
-            D3D12_RANGE none = { 0, 0 };
-            m_shadowTimerReadback->Unmap(0, &none);
-        }
-        m_shadowTimerPending = false;
-    }
-    if (timed) list->EndQuery(m_shadowTimer.Get(), D3D12_QUERY_TYPE_TIMESTAMP, 0);
+    // Its own timer (the cascades' path times RenderShadows): this slot's last time, then open this one.
+    const bool timed = m_foliageTimer.Ready() && m_timerHz;
+    if (UINT64 t[2]; timed && m_foliageTimer.Take(t) && t[1] >= t[0])
+        m_foliageMapMs = 1000.0 * double(t[1] - t[0]) / double(m_timerHz);
+    if (timed) m_foliageTimer.Stamp(list, 0);
     m_shadows->ToDepthWrite(list);
     const UINT res = m_shadows->Resolution();
     D3D12_VIEWPORT vp = { 0.0f, 0.0f, (float)res, (float)res, 0.0f, 1.0f };
@@ -1980,9 +1959,8 @@ void Scene::RenderFoliageShadows(ID3D12GraphicsCommandList* list, const float* v
             m_foliageMapMs, draws[0], tris[0] / 1000.0, draws[1], tris[1] / 1000.0);
     if (timed)
     {
-        list->EndQuery(m_shadowTimer.Get(), D3D12_QUERY_TYPE_TIMESTAMP, 1);
-        list->ResolveQueryData(m_shadowTimer.Get(), D3D12_QUERY_TYPE_TIMESTAMP, 0, 2, m_shadowTimerReadback.Get(), 0);
-        m_shadowTimerPending = true;
+        m_foliageTimer.Stamp(list, 1);
+        m_foliageTimer.Resolve(list, 0, 2);
     }
 }
 
@@ -2002,22 +1980,14 @@ void Scene::RenderLocalShadows(ID3D12GraphicsCommandList* list, float aoShare)
     list->GetDevice(IID_PPV_ARGS(&dev));
     if (!dev) return;
 
-    const bool timed = m_localShadowTimer && m_localShadowTimerReadback && m_timerHz;
-    if (timed && m_localShadowTimerPending)
+    const bool timed = m_localShadowTimer.Ready() && m_timerHz;
+    if (UINT64 t[2]; timed && m_localShadowTimer.Take(t))
     {
-        UINT64* t = nullptr;
-        D3D12_RANGE r = { 0, 2 * sizeof(UINT64) };
-        if (SUCCEEDED(m_localShadowTimerReadback->Map(0, &r, reinterpret_cast<void**>(&t))))
-        {
-            if (t[1] >= t[0]) m_localShadowMs = 1000.0 * double(t[1] - t[0]) / double(m_timerHz);
-            D3D12_RANGE none = { 0, 0 };
-            m_localShadowTimerReadback->Unmap(0, &none);
-        }
-        m_localShadowTimerPending = false;
+        if (t[1] >= t[0]) m_localShadowMs = 1000.0 * double(t[1] - t[0]) / double(m_timerHz);
         static uint32_t calls = 0;
         if ((calls++ % 120) == 0) Log("scene: local-light shadow maps: %u, %.2f ms", m_lights.ShadowCount(), m_localShadowMs);
     }
-    if (timed) list->EndQuery(m_localShadowTimer.Get(), D3D12_QUERY_TYPE_TIMESTAMP, 0);
+    if (timed) m_localShadowTimer.Stamp(list, 0);
 
     const UINT res = m_localShadows->Resolution();
     // The casters' kind (PSShadowFlag), a slice beside each map: made at the maps' size the first time.
@@ -2152,10 +2122,8 @@ void Scene::RenderLocalShadows(ID3D12GraphicsCommandList* list, float aoShare)
     flagTo(false);
     if (timed)
     {
-        list->EndQuery(m_localShadowTimer.Get(), D3D12_QUERY_TYPE_TIMESTAMP, 1);
-        list->ResolveQueryData(m_localShadowTimer.Get(), D3D12_QUERY_TYPE_TIMESTAMP, 0, 2,
-                               m_localShadowTimerReadback.Get(), 0);
-        m_localShadowTimerPending = true;
+        m_localShadowTimer.Stamp(list, 1);
+        m_localShadowTimer.Resolve(list, 0, 2);
     }
 }
 
@@ -3254,75 +3222,18 @@ bool Scene::LoadFromMemory(ID3D12Device* dev, ID3D12CommandQueue* queue,
     Log("scene: baked colour scale %.3f", m_bakedScale);
     CreateProbe(dev);
 
-    // Main-pass GPU timer: [0] start, [1] after env, [2] after aerial, [3] end.
-    if (!m_timer)
+    // The GPU timers (slot_timer.h: a set per frame slot). The main pass's: [0] start, [1] after env, [2] after
+    // aerial, [3] end, [4] [5] round the probe's resolve, [6] [7] round its faces. Then the cascades (RT vs shadow
+    // maps on the same view is the comparison design §4.9 is decided by), the foliage map and the local lights' maps.
+    if (!m_timer.Ready())
     {
-        D3D12_QUERY_HEAP_DESC qh = {};
-        qh.Type = D3D12_QUERY_HEAP_TYPE_TIMESTAMP;
-        qh.Count = 8;   // and [4] [5] round the probe's resolve, [6] [7] round its faces
-        if (SUCCEEDED(dev->CreateQueryHeap(&qh, IID_PPV_ARGS(&m_timer))))
+        if (!queue || FAILED(queue->GetTimestampFrequency(&m_timerHz))) m_timerHz = 0;
+        if (m_timerHz && m_timer.Create(dev, 8))
         {
-            D3D12_HEAP_PROPERTIES hp = {};
-            hp.Type = D3D12_HEAP_TYPE_READBACK;
-            D3D12_RESOURCE_DESC rd = {};
-            rd.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
-            rd.Width = 8 * sizeof(UINT64);
-            rd.Height = 1;
-            rd.DepthOrArraySize = 1;
-            rd.MipLevels = 1;
-            rd.SampleDesc.Count = 1;
-            rd.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
-            if (FAILED(dev->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &rd,
-                                                    D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
-                                                    IID_PPV_ARGS(&m_timerReadback))) ||
-                !queue || FAILED(queue->GetTimestampFrequency(&m_timerHz)))
-                m_timer.Reset();
+            m_shadowTimer.Create(dev, 2);
+            m_foliageTimer.Create(dev, 2);
+            m_localShadowTimer.Create(dev, 2);
         }
-    }
-    // And the cascades, timed on their own: RT vs shadow maps on the same view
-    // is the comparison design §4.9 is decided by.
-    if (!m_shadowTimer && m_timer)
-    {
-        D3D12_QUERY_HEAP_DESC qh = {};
-        qh.Type = D3D12_QUERY_HEAP_TYPE_TIMESTAMP;
-        qh.Count = 2;
-        D3D12_HEAP_PROPERTIES hp = {};
-        hp.Type = D3D12_HEAP_TYPE_READBACK;
-        D3D12_RESOURCE_DESC rd = {};
-        rd.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
-        rd.Width = 2 * sizeof(UINT64);
-        rd.Height = 1;
-        rd.DepthOrArraySize = 1;
-        rd.MipLevels = 1;
-        rd.SampleDesc.Count = 1;
-        rd.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
-        if (FAILED(dev->CreateQueryHeap(&qh, IID_PPV_ARGS(&m_shadowTimer))) ||
-            FAILED(dev->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &rd,
-                                                D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
-                                                IID_PPV_ARGS(&m_shadowTimerReadback))))
-            m_shadowTimer.Reset();
-    }
-    // And the local lights' maps (RenderLocalShadows), the same way.
-    if (!m_localShadowTimer && m_timer)
-    {
-        D3D12_QUERY_HEAP_DESC qh = {};
-        qh.Type = D3D12_QUERY_HEAP_TYPE_TIMESTAMP;
-        qh.Count = 2;
-        D3D12_HEAP_PROPERTIES hp = {};
-        hp.Type = D3D12_HEAP_TYPE_READBACK;
-        D3D12_RESOURCE_DESC rd = {};
-        rd.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
-        rd.Width = 2 * sizeof(UINT64);
-        rd.Height = 1;
-        rd.DepthOrArraySize = 1;
-        rd.MipLevels = 1;
-        rd.SampleDesc.Count = 1;
-        rd.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
-        if (FAILED(dev->CreateQueryHeap(&qh, IID_PPV_ARGS(&m_localShadowTimer))) ||
-            FAILED(dev->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &rd,
-                                                D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
-                                                IID_PPV_ARGS(&m_localShadowTimerReadback))))
-            m_localShadowTimer.Reset();
     }
 
     if (!UploadTextures(dev, queue, texs, texBytes))
@@ -4451,6 +4362,9 @@ bool Scene::UploadDynamic(ID3D12Device* dev)
     const size_t vBytes = m_dynVerts.size() * sizeof(::ngg::Vertex);
     const size_t iBytes = m_dynIndices.size() * sizeof(uint32_t);
 
+    // The old pool may still be drawn by a frame in flight (device.h): released once that frame has run.
+    DeferRelease(m_dynVb.Get());
+    DeferRelease(m_dynIb.Get());
     m_dynVb = MakeGpuBuffer(dev, m_copyQueue.Get(), m_dynVerts.data(), vBytes);
     m_dynIb = MakeGpuBuffer(dev, m_copyQueue.Get(), m_dynIndices.data(), iBytes);
     if (!m_dynVb || !m_dynIb) { Log("scene: dynamic pool upload failed"); return false; }
@@ -5554,7 +5468,6 @@ void Scene::DrawGrass(ID3D12GraphicsCommandList* list, bool prepass, bool gbuf)
 
 void Scene::ReadOverlayStats()
 {
-    m_grass.ReadStats();
     if (!m_selCountReadback) return;
     if (m_selection.empty() && OverlayVertexCount() == 0 && LabelGlyphCount() == 0)
         return;                                                     // already zeroed
@@ -5864,18 +5777,14 @@ void Scene::RecordPass(ID3D12GraphicsCommandList* list, D3D12_CPU_DESCRIPTOR_HAN
     cb.localShadowParams[2] = (cb.lightsOn > 0.5f && !m_rtLights) ? m_localAoShare : 0.0f;
     if (!Invert4x4(m_lastViewProjJittered, cb.invViewProj)) memset(cb.invViewProj, 0, sizeof(cb.invViewProj));
 
-    // Last frame's timings. The frame is synchronous (see the note at the end
-    // of this function), so last frame's queries have certainly resolved.
+    // This slot's last timings (slot_timer.h: the frame BeginFrame waited for).
     // [0] pass start, [1] after the environment, [2] after the aerial fill,
     // [3] end - one timestamp per stage, because a stage recorded before the
     // first timestamp of another silently bills its time to that one (which is
     // how the environment's cost once appeared as "aerial fill").
-    const bool timed = !prepass && m_timer && m_timerReadback && m_timerHz;
-    if (timed && m_timerPending)
+    const bool timed = !prepass && m_timer.Ready() && m_timerHz;
+    if (UINT64 t[8]; timed && m_timer.Take(t))
     {
-        UINT64* t = nullptr;
-        D3D12_RANGE r = { 0, 8 * sizeof(UINT64) };
-        if (SUCCEEDED(m_timerReadback->Map(0, &r, reinterpret_cast<void**>(&t))))
         {
             if (t[3] >= t[2] && t[2] >= t[1] && t[1] >= t[0])
             {
@@ -5895,12 +5804,9 @@ void Scene::RecordPass(ID3D12GraphicsCommandList* list, D3D12_CPU_DESCRIPTOR_HAN
                     m_probeMsFrames = 0;
                 }
             }
-            D3D12_RANGE none = { 0, 0 };
-            m_timerReadback->Unmap(0, &none);
         }
-        m_timerPending = false;
     }
-    if (timed) list->EndQuery(m_timer.Get(), D3D12_QUERY_TYPE_TIMESTAMP, 0);
+    if (timed) m_timer.Stamp(list, 0);
 
     // The environment for THIS frame's sun, before anything samples it. Main
     // pass only - the prepass writes depth and normals and reads no lighting.
@@ -5914,15 +5820,15 @@ void Scene::RecordPass(ID3D12GraphicsCommandList* list, D3D12_CPU_DESCRIPTOR_HAN
     mark(1);
     // The probe's faces drawn last frame, into its chain (probe.h) - its own heap, so before the scene binds its own.
     const bool probing = !prepass && !m_probeObjects.empty() && m_reflProbe.Ready() && m_env && m_env->Ready();
-    if (timed) list->EndQuery(m_timer.Get(), D3D12_QUERY_TYPE_TIMESTAMP, 4);
+    if (timed) m_timer.Stamp(list, 4);
     if (probing && m_probeFacesDrawn > 0)
         m_reflProbe.Resolve(list, m_env->Texture());
     mark(2);
-    if (timed) list->EndQuery(m_timer.Get(), D3D12_QUERY_TYPE_TIMESTAMP, 5);
+    if (timed) m_timer.Stamp(list, 5);
     cb.reflProbeOn = probing && m_probeFacesDrawn >= 6 ? 1.0f : 0.0f;
     cb.reflProbeMips = (float)ReflectionProbe::kOctMips;
 
-    if (timed) list->EndQuery(m_timer.Get(), D3D12_QUERY_TYPE_TIMESTAMP, 1);
+    if (timed) m_timer.Stamp(list, 1);
 
     const bool aerialTable = m_aerial && !m_aerialMarch && m_aerialLut.Ready();
     cb.aerialLut = aerialTable ? 1.0f : 0.0f;
@@ -5939,7 +5845,7 @@ void Scene::RecordPass(ID3D12GraphicsCommandList* list, D3D12_CPU_DESCRIPTOR_HAN
     }
     mark(3);
 
-    if (timed) list->EndQuery(m_timer.Get(), D3D12_QUERY_TYPE_TIMESTAMP, 2);
+    if (timed) m_timer.Stamp(list, 2);
 
     // Camera forward, from the view matrix's third column.
     cb.camFwd[0] = view[2]; cb.camFwd[1] = view[6]; cb.camFwd[2] = view[10];
@@ -6160,7 +6066,7 @@ void Scene::RecordPass(ID3D12GraphicsCommandList* list, D3D12_CPU_DESCRIPTOR_HAN
         // Same shape again for the RT visibility. Rewritten whenever the
         // resource changes (a resize recreates it), and bound to slot 0 when
         // there is none so the table is never invalid.
-        if (m_rtVis && !m_rtSrvReady)
+        if (m_rtVis && !m_rtSrvReady[FrameSlot()])
         {
             ID3D12Device* d = nullptr;
             list->GetDevice(IID_PPV_ARGS(&d));
@@ -6174,10 +6080,10 @@ void Scene::RecordPass(ID3D12GraphicsCommandList* list, D3D12_CPU_DESCRIPTOR_HAN
                 sd.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
                 sd.Texture2D.MipLevels = 1;
                 D3D12_CPU_DESCRIPTOR_HANDLE dest = m_srvHeap->GetCPUDescriptorHandleForHeapStart();
-                dest.ptr += (SIZE_T)m_rtSrvSlot * m_srvStride;
+                dest.ptr += (SIZE_T)RtSrvSlot() * m_srvStride;
                 d->CreateShaderResourceView(m_rtVis, &sd, dest);
                 d->Release();
-                m_rtSrvReady = true;
+                m_rtSrvReady[FrameSlot()] = true;
                 // Rewritten every frame on purpose (SetRtVisibility: a pointer is not an identity), and the
                 // texture is one of the denoiser's two histories, alternating - so neither "every write" nor
                 // "a new pointer" is news. Said once per size and format (creation, a resize): said every frame
@@ -6185,7 +6091,7 @@ void Scene::RecordPass(ID3D12GraphicsCommandList* list, D3D12_CPU_DESCRIPTOR_HAN
                 const D3D12_RESOURCE_DESC rd = m_rtVis->GetDesc();
                 if (rd.Width != m_rtSrvLoggedW || rd.Height != m_rtSrvLoggedH || rd.Format != m_rtSrvLoggedFormat)
                 {
-                    Log("scene: RT visibility SRV created in heap slot %u (%llux%u)", m_rtSrvSlot,
+                    Log("scene: RT visibility SRV created in heap slot %u (%llux%u)", RtSrvSlot(),
                         (unsigned long long)rd.Width, rd.Height);
                     m_rtSrvLoggedW = rd.Width;
                     m_rtSrvLoggedH = rd.Height;
@@ -6194,13 +6100,13 @@ void Scene::RecordPass(ID3D12GraphicsCommandList* list, D3D12_CPU_DESCRIPTOR_HAN
             }
         }
         D3D12_GPU_DESCRIPTOR_HANDLE rh = m_srvHeap->GetGPUDescriptorHandleForHeapStart();
-        rh.ptr += (UINT64)(m_rtSrvReady ? m_rtSrvSlot : 0) * m_srvStride;
+        rh.ptr += (UINT64)(m_rtSrvReady[FrameSlot()] ? RtSrvSlot() : 0) * m_srvStride;
         list->SetGraphicsRootDescriptorTable(6, rh);
 
         // The AO term, same handling. The pointer ping-pongs between two
         // histories every frame, so the descriptor is rewritten every frame -
         // a write, not an allocation - and the CB flag tests the resource.
-        if (m_rtAo && !m_aoSrvReady)
+        if (m_rtAo && !m_aoSrvReady[FrameSlot()])
         {
             ID3D12Device* d = nullptr;
             list->GetDevice(IID_PPV_ARGS(&d));
@@ -6212,14 +6118,14 @@ void Scene::RecordPass(ID3D12GraphicsCommandList* list, D3D12_CPU_DESCRIPTOR_HAN
                 sd.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
                 sd.Texture2D.MipLevels = 1;
                 D3D12_CPU_DESCRIPTOR_HANDLE dest = m_srvHeap->GetCPUDescriptorHandleForHeapStart();
-                dest.ptr += (SIZE_T)m_aoSrvSlot * m_srvStride;
+                dest.ptr += (SIZE_T)AoSrvSlot() * m_srvStride;
                 d->CreateShaderResourceView(m_rtAo, &sd, dest);
                 d->Release();
-                m_aoSrvReady = true;
+                m_aoSrvReady[FrameSlot()] = true;
             }
         }
         D3D12_GPU_DESCRIPTOR_HANDLE ah = m_srvHeap->GetGPUDescriptorHandleForHeapStart();
-        ah.ptr += (UINT64)(m_aoSrvReady ? m_aoSrvSlot : 0) * m_srvStride;
+        ah.ptr += (UINT64)(m_aoSrvReady[FrameSlot()] ? AoSrvSlot() : 0) * m_srvStride;
         list->SetGraphicsRootDescriptorTable(7, ah);
 
         // The local lights' four descriptors, rewritten every frame (four writes): the buffers are fixed, but the
@@ -6231,7 +6137,7 @@ void Scene::RecordPass(ID3D12GraphicsCommandList* list, D3D12_CPU_DESCRIPTOR_HAN
             if (d)
             {
                 D3D12_CPU_DESCRIPTOR_HANDLE at = m_srvHeap->GetCPUDescriptorHandleForHeapStart();
-                at.ptr += (SIZE_T)m_lightSrvSlot * m_srvStride;
+                at.ptr += (SIZE_T)LightSrvSlot() * m_srvStride;
                 if (m_lightsReady)
                     m_lights.WriteSrvs(d, at, m_srvStride);
                 else
@@ -6303,7 +6209,7 @@ void Scene::RecordPass(ID3D12GraphicsCommandList* list, D3D12_CPU_DESCRIPTOR_HAN
                 d->Release();
             }
             D3D12_GPU_DESCRIPTOR_HANDLE lh = m_srvHeap->GetGPUDescriptorHandleForHeapStart();
-            lh.ptr += (UINT64)m_lightSrvSlot * m_srvStride;
+            lh.ptr += (UINT64)LightSrvSlot() * m_srvStride;
             list->SetGraphicsRootDescriptorTable(11, lh);
         }
 
@@ -6470,7 +6376,7 @@ void Scene::RecordPass(ID3D12GraphicsCommandList* list, D3D12_CPU_DESCRIPTOR_HAN
     // lights' clusters (it takes every light, unshadowed), the aerial table (the probe marches its air). The cascades where they are drawn this frame.
     // Not drawn: the focus (the car), any model within kProbeSkip of the centre (its lamps, a passenger's helmet),
     // the glass. Two faces a frame (NGG_PROBE_FACES, 1..6), all six at first; resolved at the next frame's start.
-    if (timed) list->EndQuery(m_timer.Get(), D3D12_QUERY_TYPE_TIMESTAMP, 6);
+    if (timed) m_timer.Stamp(list, 6);
     mark(4);
     // NGG_CPU_TIMES: this pass's CPU in parts - the setup above, the probe's faces, the world's draws, the rest - and
     // its draws (Renderer::RecordFrame logs the frame's stages).
@@ -6575,7 +6481,7 @@ void Scene::RecordPass(ID3D12GraphicsCommandList* list, D3D12_CPU_DESCRIPTOR_HAN
         list->RSSetViewports(1, &vp);
         list->RSSetScissorRects(1, &sc);
     }
-    if (timed) list->EndQuery(m_timer.Get(), D3D12_QUERY_TYPE_TIMESTAMP, 7);
+    if (timed) m_timer.Stamp(list, 7);
     part(1);
 
     // THE OPAQUE WORLD FRONT TO BACK - the solid first, the alpha-tested (foliage) after, each nearest first, by the
@@ -6840,10 +6746,8 @@ void Scene::RecordPass(ID3D12GraphicsCommandList* list, D3D12_CPU_DESCRIPTOR_HAN
 
     if (timed)
     {
-        list->EndQuery(m_timer.Get(), D3D12_QUERY_TYPE_TIMESTAMP, 3);
-        list->ResolveQueryData(m_timer.Get(), D3D12_QUERY_TYPE_TIMESTAMP, 0, 8,
-                               m_timerReadback.Get(), 0);
-        m_timerPending = true;
+        m_timer.Stamp(list, 3);
+        m_timer.Resolve(list, 0, 8);
     }
 
     // The constant buffer lives in the frame's ring (frame_upload.h) until the GPU has finished this frame - which
@@ -7071,7 +6975,8 @@ bool Scene::RebuildSrvHeap(ID3D12Device* dev)
     // cannot live in a heap of its own.
     // +2: the shadow cascade array and the label font both share this heap,
     // because only one CBV/SRV/UAV heap can be bound at a time.
-    hd.NumDescriptors = (UINT)(pairs * kMaterialSrvCount + 20);
+    hd.NumDescriptors = (UINT)(pairs * kMaterialSrvCount + 20 + 12);   // +12: the per-frame ones' second slot copy
+    m_dynSrvBase = (UINT)(pairs * kMaterialSrvCount + 20);
     m_shadowSrvSlot = (UINT)(pairs * kMaterialSrvCount);
     m_fontSrvSlot = (UINT)(pairs * kMaterialSrvCount + 1);
     m_envSrvSlot  = (UINT)(pairs * kMaterialSrvCount + 2);
@@ -7084,6 +6989,7 @@ bool Scene::RebuildSrvHeap(ID3D12Device* dev)
                                                                  // the local lights' shadow maps, their mask)
     m_reflSrvSlot   = (UINT)(pairs * kMaterialSrvCount + 19);
     hd.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+    DeferRelease(m_srvHeap.Get());   // a frame in flight may still read the old one (device.h)
     if (FAILED(dev->CreateDescriptorHeap(&hd, IID_PPV_ARGS(&m_srvHeap))))
     {
         Log("scene: SRV heap creation failed");
@@ -7096,8 +7002,8 @@ bool Scene::RebuildSrvHeap(ID3D12Device* dev)
     // as "everything is in shadow" rather than as any kind of error.
     m_shadowSrvReady = false;
     m_envSrvReady = false;
-    m_rtSrvReady = false;
-    m_aoSrvReady = false;
+    m_rtSrvReady[0] = m_rtSrvReady[1] = false;
+    m_aoSrvReady[0] = m_aoSrvReady[1] = false;
     m_aerialSrvReady = false;
     m_irrSrvReady = false;
     m_msSrvReady = false;

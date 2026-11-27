@@ -1,4 +1,5 @@
 #include "lights.h"
+#include "frame_upload.h"
 #include "log.h"
 
 #include <algorithm>
@@ -58,11 +59,11 @@ ComPtr<ID3D12Resource> MakeLocal(ID3D12Device* dev, UINT64 bytes)
 bool Lights::Create(ID3D12Device* dev)
 {
     if (!dev) return false;
-    // Persistently mapped upload buffers, rewritten each frame: the frame loop waits for the GPU at its end (as the
-    // scene's own per-frame constants rely on), so last frame's contents are read before this frame's are written.
-    m_lightBuf = MakeUpload(dev, sizeof(GpuLight) * kMaxLights);
-    m_clusterBuf = MakeUpload(dev, sizeof(uint32_t) * 2 * kClusters);
-    m_indexBuf = MakeUpload(dev, sizeof(uint32_t) * kMaxIndices);
+    // Persistently mapped upload buffers, rewritten each frame - a half per frame slot (device.h), so the frame the
+    // GPU still runs copies from its half while the next frame writes the other.
+    m_lightBuf = MakeUpload(dev, 2 * sizeof(GpuLight) * kMaxLights);
+    m_clusterBuf = MakeUpload(dev, 2 * sizeof(uint32_t) * 2 * kClusters);
+    m_indexBuf = MakeUpload(dev, 2 * sizeof(uint32_t) * kMaxIndices);
     // ... and their GPU-local copies, which is what the shaders read: the upload heap is CPU-visible memory the GPU
     // reads slowly and barely caches (on the development GPU, an APU, it measured the same - design §5.5).
     m_lightGpu = MakeLocal(dev, sizeof(GpuLight) * kMaxLights);
@@ -70,11 +71,12 @@ bool Lights::Create(ID3D12Device* dev)
     m_indexGpu = MakeLocal(dev, sizeof(uint32_t) * kMaxIndices);
     if (!m_lightBuf || !m_clusterBuf || !m_indexBuf || !m_lightGpu || !m_clusterGpu || !m_indexGpu) return false;
     D3D12_RANGE none = { 0, 0 };
-    if (FAILED(m_lightBuf->Map(0, &none, reinterpret_cast<void**>(&m_lightMap))) ||
-        FAILED(m_clusterBuf->Map(0, &none, reinterpret_cast<void**>(&m_clusterMap))) ||
-        FAILED(m_indexBuf->Map(0, &none, reinterpret_cast<void**>(&m_indexMap))))
+    if (FAILED(m_lightBuf->Map(0, &none, reinterpret_cast<void**>(&m_lightBase))) ||
+        FAILED(m_clusterBuf->Map(0, &none, reinterpret_cast<void**>(&m_clusterBase))) ||
+        FAILED(m_indexBuf->Map(0, &none, reinterpret_cast<void**>(&m_indexBase))))
         return false;
-    std::memset(m_clusterMap, 0, sizeof(uint32_t) * 2 * kClusters);
+    std::memset(m_clusterBase, 0, 2 * sizeof(uint32_t) * 2 * kClusters);
+    m_lightMap = m_lightBase, m_clusterMap = m_clusterBase, m_indexMap = m_indexBase;
     return true;
 }
 
@@ -82,7 +84,12 @@ bool Lights::Build(ID3D12GraphicsCommandList* list, const float* view, const flo
                    uint32_t height)
 {
     m_active = false;
-    if (!m_lightMap || !view || !proj || !width || !height) return false;
+    if (!m_lightBase || !view || !proj || !width || !height) return false;
+    // This frame slot's halves (its last frame's copy has run: Device::BeginFrame).
+    m_slot = FrameSlot();
+    m_lightMap = m_lightBase + (size_t)m_slot * kMaxLights;
+    m_clusterMap = m_clusterBase + (size_t)m_slot * 2 * kClusters;
+    m_indexMap = m_indexBase + (size_t)m_slot * kMaxIndices;
 
     // The camera, from the view matrix (row vectors: v = p R + t): its forward axis is R's third column, and its
     // position -t R^T.
@@ -411,9 +418,13 @@ bool Lights::Build(ID3D12GraphicsCommandList* list, const float* view, const flo
 
     // To the GPU-local copies, on the frame's list, ahead of the ray tracer and the scene pass that read them.
     if (!list) return false;
-    list->CopyBufferRegion(m_lightGpu.Get(), 0, m_lightBuf.Get(), 0, sizeof(GpuLight) * live);
-    list->CopyBufferRegion(m_clusterGpu.Get(), 0, m_clusterBuf.Get(), 0, sizeof(uint32_t) * 2 * kClusters);
-    if (total) list->CopyBufferRegion(m_indexGpu.Get(), 0, m_indexBuf.Get(), 0, sizeof(uint32_t) * total);
+    list->CopyBufferRegion(m_lightGpu.Get(), 0, m_lightBuf.Get(), (UINT64)m_slot * sizeof(GpuLight) * kMaxLights,
+                           sizeof(GpuLight) * live);
+    list->CopyBufferRegion(m_clusterGpu.Get(), 0, m_clusterBuf.Get(), (UINT64)m_slot * sizeof(uint32_t) * 2 * kClusters,
+                           sizeof(uint32_t) * 2 * kClusters);
+    if (total)
+        list->CopyBufferRegion(m_indexGpu.Get(), 0, m_indexBuf.Get(), (UINT64)m_slot * sizeof(uint32_t) * kMaxIndices,
+                               sizeof(uint32_t) * total);
     D3D12_RESOURCE_BARRIER b[3] = {};
     ID3D12Resource* bufs[3] = { m_lightGpu.Get(), m_clusterGpu.Get(), m_indexGpu.Get() };
     for (int k = 0; k < 3; ++k) {

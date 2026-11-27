@@ -127,9 +127,15 @@ private:
     std::vector<LightDesc> m_lights;
     Microsoft::WRL::ComPtr<ID3D12Resource> m_lightBuf, m_clusterBuf, m_indexBuf;   // upload heap, persistently mapped
     Microsoft::WRL::ComPtr<ID3D12Resource> m_lightGpu, m_clusterGpu, m_indexGpu;   // GPU-local: what is read
+    // The upload buffers hold a half per frame slot (device.h): the frame's copy reads its half on the GPU while the
+    // next frame writes the other. The *Map pointers are the current slot's half (Build).
+    GpuLight* m_lightBase = nullptr;
+    uint32_t* m_clusterBase = nullptr;
+    uint32_t* m_indexBase = nullptr;
     GpuLight* m_lightMap = nullptr;
     uint32_t* m_clusterMap = nullptr;
     uint32_t* m_indexMap = nullptr;
+    uint32_t  m_slot = 0;
     float     m_tileW = 1.0f, m_tileH = 1.0f;
     float     m_camPos[3] = {}, m_camFwd[3] = { 0.0f, 0.0f, 1.0f };
     struct ClusterSphere { float c[3], r; };          // view space

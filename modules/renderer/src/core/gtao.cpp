@@ -1,4 +1,5 @@
 #include "gtao.h"
+#include "frame_upload.h"
 #include "log.h"
 #include "pipeline_cache.h"
 #include "shaders.h"
@@ -132,28 +133,12 @@ bool Gtao::Create(ID3D12Device* dev, ID3D12CommandQueue* queue)
 
     D3D12_DESCRIPTOR_HEAP_DESC hd = {};
     hd.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
-    hd.NumDescriptors = kTables * kTable;
+    hd.NumDescriptors = 2 * kTables * kTable;   // the tables once per frame slot (device.h): Record rewrites two a frame
     hd.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
     if (FAILED(dev->CreateDescriptorHeap(&hd, IID_PPV_ARGS(&m_heap)))) return false;
     m_stride = dev->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
 
-    D3D12_QUERY_HEAP_DESC qh = {};
-    qh.Type = D3D12_QUERY_HEAP_TYPE_TIMESTAMP;
-    qh.Count = 2;
-    D3D12_HEAP_PROPERTIES rp = {};
-    rp.Type = D3D12_HEAP_TYPE_READBACK;
-    D3D12_RESOURCE_DESC rd = {};
-    rd.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
-    rd.Width = 2 * sizeof(UINT64);
-    rd.Height = 1;
-    rd.DepthOrArraySize = 1;
-    rd.MipLevels = 1;
-    rd.SampleDesc.Count = 1;
-    rd.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
-    if (!queue || FAILED(queue->GetTimestampFrequency(&m_timerHz)) ||
-        FAILED(dev->CreateQueryHeap(&qh, IID_PPV_ARGS(&m_timer))) ||
-        FAILED(dev->CreateCommittedResource(&rp, D3D12_HEAP_FLAG_NONE, &rd, D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
-                                            IID_PPV_ARGS(&m_timerReadback))))
+    if (!queue || FAILED(queue->GetTimestampFrequency(&m_timerHz)) || !m_timer.Create(dev, 2))
         m_timer.Reset();
     Log("gtao: XeGTAO ready (FP32 depths)");
     return true;
@@ -176,8 +161,11 @@ bool Gtao::CreateTargets(ID3D12Device* dev, UINT width, UINT height)
     m_width = width;
     m_height = height;
 
-    // The tables. Every slot written; the unused ones with null views of their declared types.
+    // The tables, in both frame slots' halves. Every slot written; the unused ones with null views of their declared
+    // types.
+    for (UINT half = 0; half < 2; ++half) {
     D3D12_CPU_DESCRIPTOR_HANDLE base = m_heap->GetCPUDescriptorHandleForHeapStart();
+    base.ptr += (SIZE_T)half * kTables * kTable * m_stride;
     auto slot = [&](UINT pass, UINT k) { D3D12_CPU_DESCRIPTOR_HANDLE h = base; h.ptr += (SIZE_T)(pass * kTable + k) * m_stride; return h; };
     auto srv = [&](ID3D12Resource* r, DXGI_FORMAT f, UINT mips, D3D12_CPU_DESCRIPTOR_HANDLE h) {
         D3D12_SHADER_RESOURCE_VIEW_DESC d = {};
@@ -213,6 +201,7 @@ bool Gtao::CreateTargets(ID3D12Device* dev, UINT width, UINT height)
     denoise(kPassLastFromB, m_aoTermB.Get(), m_out.Get());
     denoise(kPassAtoB, m_aoTerm.Get(), m_aoTermB.Get());
     denoise(kPassBtoA, m_aoTermB.Get(), m_aoTerm.Get());
+    }
     return true;
 }
 
@@ -244,19 +233,9 @@ void Gtao::Record(ID3D12GraphicsCommandList* list, ID3D12Resource* depth, ID3D12
     if (!main) return;
     if ((width != m_width || height != m_height) && !CreateTargets(dev.Get(), width, height)) return;
 
-    if (m_timer && m_timerPending)
-    {
-        UINT64* t = nullptr;
-        D3D12_RANGE r = { 0, 2 * sizeof(UINT64) };
-        if (SUCCEEDED(m_timerReadback->Map(0, &r, reinterpret_cast<void**>(&t))))
-        {
-            if (t[1] >= t[0] && m_timerHz) m_ms = double(t[1] - t[0]) * 1000.0 / double(m_timerHz);
-            D3D12_RANGE none = { 0, 0 };
-            m_timerReadback->Unmap(0, &none);
-        }
-        m_timerPending = false;
-    }
-    if (m_timer) list->EndQuery(m_timer.Get(), D3D12_QUERY_TYPE_TIMESTAMP, 0);
+    // This frame slot's last time (slot_timer.h), then open this one.
+    if (UINT64 t[2]; m_timer.Take(t) && t[1] >= t[0] && m_timerHz) m_ms = double(t[1] - t[0]) * 1000.0 / double(m_timerHz);
+    m_timer.Stamp(list, 0);
 
     // The constants. XeGTAO's from the REVERSE-Z projection the depth was written with (Scene: col2 = col3 - col2),
     // then its view-space reconstruction shifted by the jitter: a surface at view x/z = t lands at NDC t/tanX + jx,
@@ -277,8 +256,10 @@ void Gtao::Record(ID3D12GraphicsCommandList* list, ID3D12Resource* depth, ID3D12
         for (int c = 0; c < 3; ++c) cb.viewRow[r][c] = view[r * 4 + c];
     ++m_frame;
 
-    // This frame's depth and normal into the tables.
+    // This frame's depth and normal into this frame slot's tables (a frame in flight reads its own).
+    const UINT slotBase = FrameSlot() * kTables * kTable;
     D3D12_CPU_DESCRIPTOR_HANDLE cpu = m_heap->GetCPUDescriptorHandleForHeapStart();
+    cpu.ptr += (SIZE_T)slotBase * m_stride;
     {
         D3D12_SHADER_RESOURCE_VIEW_DESC d = {};
         d.Format = DXGI_FORMAT_R32_FLOAT;
@@ -295,7 +276,7 @@ void Gtao::Record(ID3D12GraphicsCommandList* list, ID3D12Resource* depth, ID3D12
     }
     auto table = [&](UINT pass) {
         D3D12_GPU_DESCRIPTOR_HANDLE g = m_heap->GetGPUDescriptorHandleForHeapStart();
-        g.ptr += (UINT64)(pass * kTable) * m_stride;
+        g.ptr += (UINT64)(slotBase + pass * kTable) * m_stride;
         return g;
     };
 
@@ -362,12 +343,8 @@ void Gtao::Record(ID3D12GraphicsCommandList* list, ID3D12Resource* depth, ID3D12
     };
     list->ResourceBarrier(6, post);
 
-    if (m_timer)
-    {
-        list->EndQuery(m_timer.Get(), D3D12_QUERY_TYPE_TIMESTAMP, 1);
-        list->ResolveQueryData(m_timer.Get(), D3D12_QUERY_TYPE_TIMESTAMP, 0, 2, m_timerReadback.Get(), 0);
-        m_timerPending = true;
-    }
+    m_timer.Stamp(list, 1);
+    m_timer.Resolve(list, 0, 2);
 }
 
 } // namespace core

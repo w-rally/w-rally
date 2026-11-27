@@ -117,6 +117,14 @@ bool Device::Create(const LUID* luid, bool enableDebugLayer)
         {
             dbg->EnableDebugLayer();
             Log("core: D3D12 debug layer enabled");
+            // NGG_GPU_VALIDATION=1: and GPU-based validation (resource states and descriptors as the GPU meets them;
+            // very slow - for hunting a hazard, e.g. with frames in flight).
+            ComPtr<ID3D12Debug1> dbg1;
+            if (const char* g = std::getenv("NGG_GPU_VALIDATION"); g && g[0] == '1' && SUCCEEDED(dbg.As(&dbg1)))
+            {
+                dbg1->SetEnableGPUBasedValidation(TRUE);
+                Log("core: GPU-based validation enabled (NGG_GPU_VALIDATION)");
+            }
         }
         else
         {
@@ -202,6 +210,19 @@ bool Device::Create(const LUID* luid, bool enableDebugLayer)
     if (FAILED(device->CreateCommandQueue(&qd, IID_PPV_ARGS(&queue)))) return false;
     if (FAILED(device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT,
                                               IID_PPV_ARGS(&alloc)))) return false;
+    // Frames in flight: two (the default) overlap the CPU's recording with the GPU's previous frame (see device.h);
+    // NGG_FRAMES=1 is the synchronous fallback.
+    frames = 2;
+    if (const char* e = std::getenv("NGG_FRAMES")) frames = atoi(e) == 1 ? 1u : 2u;
+    for (uint32_t k = 0; k < kMaxFrames; ++k)
+    {
+        if (FAILED(device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&frameAlloc[k]))))
+            return false;
+        slotFence[k] = 0;
+    }
+    slot = 0;
+    frameNumber = 0;
+    Log("core: %u frame(s) in flight%s", frames, std::getenv("NGG_FRAMES") ? " (NGG_FRAMES)" : "");
     if (FAILED(device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, alloc.Get(),
                                          nullptr, IID_PPV_ARGS(&list)))) return false;
     list->Close();
@@ -215,8 +236,40 @@ bool Device::Create(const LUID* luid, bool enableDebugLayer)
     return fenceEvent != nullptr;
 }
 
+bool Device::BeginFrame()
+{
+    slot = (uint32_t)(frameNumber++ % frames);
+    // The frame that last used this slot has finished: its allocator, its constants and what it deferred are free.
+    if (fence->GetCompletedValue() < slotFence[slot])
+    {
+        fence->SetEventOnCompletion(slotFence[slot], fenceEvent);
+        WaitForSingleObject(fenceEvent, INFINITE);
+    }
+    BeginFrameSlot(slot, frames);
+    if (FAILED(frameAlloc[slot]->Reset())) { CheckRemoved("at BeginFrame"); return false; }
+    recording = SUCCEEDED(list->Reset(frameAlloc[slot].Get(), nullptr));
+    return recording;
+}
+
+void Device::EndFrame()
+{
+    recording = false;
+    list->Close();
+    ID3D12CommandList* lists[] = { list.Get() };
+    queue->ExecuteCommandLists(1, lists);
+    slotFence[slot] = ++fenceValue;
+    queue->Signal(fence.Get(), slotFence[slot]);
+    if (frames == 1 && fence->GetCompletedValue() < slotFence[slot])
+    {
+        fence->SetEventOnCompletion(slotFence[slot], fenceEvent);
+        WaitForSingleObject(fenceEvent, INFINITE);
+    }
+    CheckRemoved("after a submit");
+}
+
 bool Device::Begin()
 {
+    // Its allocator is free: every EndAndWait waited for it.
     if (FAILED(alloc->Reset())) { CheckRemoved("at Begin"); return false; }
     return SUCCEEDED(list->Reset(alloc.Get(), nullptr));
 }
@@ -227,7 +280,6 @@ void Device::EndAndWait()
     ID3D12CommandList* lists[] = { list.Get() };
     queue->ExecuteCommandLists(1, lists);
     WaitForGpu();
-    ResetFrameUploads();   // the GPU has read every constant this frame placed in the ring
     CheckRemoved("after a submit");
 }
 
@@ -329,6 +381,9 @@ void Device::WaitForGpu()
         fence->SetEventOnCompletion(v, fenceEvent);
         WaitForSingleObject(fenceEvent, INFINITE);
     }
+    // The GPU is idle: nothing a submitted frame deferred is in use any more (a frame still being recorded may name
+    // what it deferred in its open list: kept).
+    ReleaseDeferred(recording);
 }
 
 void Device::Destroy()

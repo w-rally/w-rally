@@ -1,4 +1,5 @@
 #include "env.h"
+#include "frame_upload.h"
 #include "log.h"
 #include "pipeline_cache.h"
 #include "shaders.h"
@@ -75,8 +76,6 @@ ComPtr<ID3D12Resource> MakeUpload(ID3D12Device* dev, const void* data, size_t by
 bool Environment::Create(ID3D12Device* dev)
 {
     if (!dev) return false;
-    m_cbs.Reset();   // (made again on this device at the first Record)
-    m_cbsMapped = nullptr;
 
     D3D12_DESCRIPTOR_RANGE range = {};
     range.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
@@ -189,7 +188,7 @@ bool Environment::Create(ID3D12Device* dev)
     m_rtvStride = dev->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
 
     hd.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
-    hd.NumDescriptors = kMips + 1;          // + the multiple-scattering table
+    hd.NumDescriptors = kMips + 2;          // + the multiple-scattering table, one per frame slot (device.h)
     hd.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
     if (FAILED(dev->CreateDescriptorHeap(&hd, IID_PPV_ARGS(&m_srvHeap)))) return false;
     m_srvStride = dev->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
@@ -244,7 +243,7 @@ bool Environment::Create(ID3D12Device* dev)
         rb.Type = D3D12_HEAP_TYPE_READBACK;
         D3D12_RESOURCE_DESC bd = {};
         bd.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
-        bd.Width = 256;
+        bd.Width = 2 * 512;   // a 512-aligned placement per frame slot
         bd.Height = 1;
         bd.DepthOrArraySize = 1;
         bd.MipLevels = 1;
@@ -297,7 +296,7 @@ void Environment::Record(ID3D12GraphicsCommandList* list, const SkyParams& p,
     // that has since been recreated. Null SRV (= single scattering) without one.
     {
         D3D12_CPU_DESCRIPTOR_HANDLE h = m_srvHeap->GetCPUDescriptorHandleForHeapStart();
-        h.ptr += (SIZE_T)kMips * m_srvStride;
+        h.ptr += (SIZE_T)(kMips + FrameSlot()) * m_srvStride;   // this frame slot's (a frame in flight reads its own)
         if (ms && ms->Ready())
             ms->CreateSrv(dev, h);
         else
@@ -311,13 +310,14 @@ void Environment::Record(ID3D12GraphicsCommandList* list, const SkyParams& p,
         }
     }
 
-    // Last frame's upward irradiance (diagnostics). The frame is synchronous.
-    if (m_irrPending && m_irrReadback)
+    // This frame slot's last upward irradiance (diagnostics; Device::BeginFrame waited for its frame).
+    if (const uint32_t is = FrameSlot(); m_irrPending[is] && m_irrReadback)
     {
         const uint16_t* h = nullptr;
-        D3D12_RANGE r = { 0, 8 };
+        D3D12_RANGE r = { (SIZE_T)is * 512, (SIZE_T)is * 512 + 8 };
         if (SUCCEEDED(m_irrReadback->Map(0, &r, (void**)&h)))
         {
+            h += is * 256;
             auto half = [](uint16_t v) {
                 const uint32_t s = (v >> 15) & 1, e = (v >> 10) & 31, m = v & 1023;
                 float f = (e == 0) ? ldexpf((float)m, -24)
@@ -329,7 +329,7 @@ void Environment::Record(ID3D12GraphicsCommandList* list, const SkyParams& p,
             m_irrReadback->Unmap(0, &none);
             m_irrUpValid = true;
         }
-        m_irrPending = false;
+        m_irrPending[is] = false;
     }
 
     EnvCB cb = {};
@@ -360,31 +360,14 @@ void Environment::Record(ID3D12GraphicsCommandList* list, const SkyParams& p,
     list->SetDescriptorHeaps(1, heaps);
     {
         D3D12_GPU_DESCRIPTOR_HANDLE mh = m_srvHeap->GetGPUDescriptorHandleForHeapStart();
-        mh.ptr += (UINT64)kMips * m_srvStride;
+        mh.ptr += (UINT64)(kMips + FrameSlot()) * m_srvStride;
         list->SetGraphicsRootDescriptorTable(2, mh);
     }
 
-    // The constants, one 256-byte slot per mip (srcTexel differs) and one for the irradiance, in a buffer made once
-    // and kept mapped. Rewriting it here is safe because the frame is synchronous (see the note at the end of
-    // Scene::Record): last frame's draws have finished reading it. Frames that overlap would need one per frame.
-    if (!m_cbs)
-    {
-        ComPtr<ID3D12Resource> made;
-        std::vector<uint8_t> zero((kMips + 1) * 256, 0);
-        made = MakeUpload(dev, zero.data(), zero.size());
-        void* p = nullptr;
-        D3D12_RANGE none = { 0, 0 };
-        if (made && SUCCEEDED(made->Map(0, &none, &p)))
-        {
-            m_cbs = made;
-            m_cbsMapped = static_cast<unsigned char*>(p);
-        }
-    }
-    if (!m_cbs) { dev->Release(); return; }
-    auto slot = [&](UINT k, const EnvCB& c) {
-        memcpy(m_cbsMapped + (size_t)k * 256, &c, sizeof(c));
-        return m_cbs->GetGPUVirtualAddress() + (UINT64)k * 256;
-    };
+    // The constants, one per mip (srcTexel differs) and one for the irradiance, in the frame's ring (frame_upload.h:
+    // made once, a ring per frame slot). A buffer created and released per constant per frame cost 6.7 ms of CPU a
+    // frame (dev laptop, 2026-11-23) - CreateCommittedResource is a driver call, not an allocation.
+    auto slot = [&](UINT, const EnvCB& c) { return FrameUpload(dev, &c, sizeof(c)); };
 
     for (UINT m = 0; m < kMips; ++m)
     {
@@ -481,6 +464,7 @@ void Environment::Record(ID3D12GraphicsCommandList* list, const SkyParams& p,
             D3D12_TEXTURE_COPY_LOCATION dst = {}, srcLoc = {};
             dst.pResource = m_irrReadback.Get();
             dst.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+            dst.PlacedFootprint.Offset = (UINT64)FrameSlot() * 512;
             dst.PlacedFootprint.Footprint.Format = kEnvFormat;
             dst.PlacedFootprint.Footprint.Width = 1;
             dst.PlacedFootprint.Footprint.Height = 1;
@@ -491,7 +475,7 @@ void Environment::Record(ID3D12GraphicsCommandList* list, const SkyParams& p,
             srcLoc.SubresourceIndex = 0;
             D3D12_BOX box = { kIrrSize / 2, kIrrSize / 2, 0, kIrrSize / 2 + 1, kIrrSize / 2 + 1, 1 };
             list->CopyTextureRegion(&dst, 0, 0, 0, &srcLoc, &box);
-            m_irrPending = true;
+            m_irrPending[FrameSlot()] = true;
         }
         ib.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_SOURCE;
         ib.Transition.StateAfter  = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;

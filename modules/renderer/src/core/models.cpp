@@ -6,6 +6,7 @@
 // batches and draw each batch's submeshes with DrawIndexedInstanced, the stream bound to input slot 1.
 // ---------------------------------------------------------------------------
 #include "scene.h"
+#include "frame_upload.h"
 #include "log.h"
 
 #include <DirectXPackedVector.h>
@@ -38,7 +39,6 @@ const uint32_t kInstNearMap = 1u << 3;
 // wind.py's amplitudes (shaders/wind.hlsli): a branch tip's sway and a leaf's flutter at weight 1 and 10 m/s.
 const float kWindBranchM = 0.25f, kWindFlutterM = 0.025f;
 // Records the stream starts with: the identity plus a stage's worth of trees in every view.
-const size_t kInstInitial = 64 * 1024;
 
 // The most a wind model's point leaves its rest position, for its culling box: wind.py's max_lean (the main bend at its
 // peak and a branch tip's sway) plus a leaf's flutter, at the capped wind (Scene::kWindMaxSpeed, gustiness 1) - fixed
@@ -537,42 +537,12 @@ bool Scene::RemovePlacements(const uint32_t* indices, uint32_t count)
 
 bool Scene::InstanceAlloc(ID3D12Device* dev, size_t records, uint8_t*& cpu, D3D12_GPU_VIRTUAL_ADDRESS& gpu)
 {
-    const size_t bytes = records * sizeof(InstanceRec);
-    if (!m_instBuf || m_instUsed + bytes > m_instCap)
-    {
-        if (!dev) return false;
-        size_t cap = (std::max)(m_instCap * 2, kInstInitial * sizeof(InstanceRec));
-        while (cap < bytes) cap *= 2;
-        D3D12_HEAP_PROPERTIES heap = {};
-        heap.Type = D3D12_HEAP_TYPE_UPLOAD;
-        D3D12_RESOURCE_DESC desc = {};
-        desc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
-        desc.Width = cap;
-        desc.Height = 1;
-        desc.DepthOrArraySize = 1;
-        desc.MipLevels = 1;
-        desc.SampleDesc.Count = 1;
-        desc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
-        ComPtr<ID3D12Resource> buf;
-        void* mapped = nullptr;
-        D3D12_RANGE none = { 0, 0 };
-        if (FAILED(dev->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &desc, D3D12_RESOURCE_STATE_GENERIC_READ, nullptr,
-                                                IID_PPV_ARGS(&buf))) ||
-            FAILED(buf->Map(0, &none, &mapped)))
-        {
-            Log("scene: the instance stream (%zu bytes) could not be created", cap);
-            return false;
-        }
-        // The old one may still be read by this frame's draws: kept until the next BeginFrame.
-        if (m_instBuf) m_instRetired.push_back(m_instBuf);
-        m_instBuf = buf;
-        m_instMapped = static_cast<uint8_t*>(mapped);
-        m_instCap = cap;
-        m_instUsed = 0;
-    }
-    cpu = m_instMapped + m_instUsed;
-    gpu = m_instBuf->GetGPUVirtualAddress() + m_instUsed;
-    m_instUsed += bytes;
+    // From the frame's ring (frame_upload.h): its slot's chunks are free again once that slot's last frame has run,
+    // so a frame in flight keeps reading its own instances while the next frame writes its.
+    void* p = nullptr;
+    gpu = FrameAlloc(dev, records * sizeof(InstanceRec), 64, &p);
+    if (!gpu) { Log("scene: the instance stream (%zu record(s)) could not be allocated", records); return false; }
+    cpu = static_cast<uint8_t*>(p);
     return true;
 }
 
@@ -594,9 +564,7 @@ void Scene::EnsureInstanceStream(ID3D12Device* dev)
 
 void Scene::BeginFrame(ID3D12Device* dev)
 {
-    // The last frame has run (the frame is synchronous): its stream is free again, the retired buffers too.
-    m_instRetired.clear();
-    m_instUsed = 0;
+    // The instances come from the frame's ring (InstanceAlloc), started over for this slot by Device::BeginFrame.
     m_instIdentity = {};
     m_mainBatchesValid = false;
     if (m_dynDirty && dev) UploadDynamic(dev);

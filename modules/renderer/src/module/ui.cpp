@@ -1,5 +1,6 @@
 #include "module/ui.h"
 
+#include "core/frame_upload.h"
 #include "core/pipeline_cache.h"
 #include "core/shaders.h"
 
@@ -202,7 +203,11 @@ bool UiPass::Make(ngg::core::Device& dev, const void* rgba, uint32_t width, uint
 
 void UiPass::ReleaseTexture(uint32_t slot)
 {
-    if (slot > 0 && slot < m_textures.size()) m_textures[slot].Reset();   // (the GPU is idle between frames)
+    // A frame in flight may still draw it (device.h): released once the frame being recorded has run.
+    if (slot > 0 && slot < m_textures.size() && m_textures[slot]) {
+        ngg::core::DeferRelease(m_textures[slot].Get());
+        m_textures[slot].Reset();
+    }
 }
 
 bool UiPass::UpdateTexture(ngg::core::Device& dev, uint32_t slot, const void* rgba, std::string& error)
@@ -245,18 +250,13 @@ bool UiPass::UpdateTexture(ngg::core::Device& dev, uint32_t slot, const void* rg
 
 bool UiPass::Upload(ngg::core::Device& dev, const iface::UiDrawList& ui)
 {
+    // The frame's ring (frame_upload.h: a ring per frame slot): the frame in flight draws its own while this one writes.
     const uint64_t vb = uint64_t(ui.vertexCount) * sizeof(iface::UiVertex), ib = uint64_t(ui.indexCount) * 4;
-    if (vb + ib > m_bufferBytes) {
-        m_bufferBytes = std::max<uint64_t>((vb + ib) * 3 / 2, 1u << 20);
-        m_buffer = UploadBuffer(dev.device.Get(), m_bufferBytes);
-        if (!m_buffer) return m_bufferBytes = 0, false;
-    }
-    uint8_t* p = nullptr;
-    const D3D12_RANGE none = {0, 0};
-    if (FAILED(m_buffer->Map(0, &none, reinterpret_cast<void**>(&p)))) return false;
+    void* p = nullptr;
+    m_bufferVa = ngg::core::FrameAlloc(dev.device.Get(), size_t(vb + ib), 256, &p);
+    if (!m_bufferVa) return false;
     std::memcpy(p, ui.vertices, vb);
-    std::memcpy(p + vb, ui.indices, ib);
-    m_buffer->Unmap(0, nullptr);
+    std::memcpy(static_cast<uint8_t*>(p) + vb, ui.indices, ib);
     return true;
 }
 
@@ -267,8 +267,8 @@ void UiPass::Record(ngg::core::Device& dev, D3D12_CPU_DESCRIPTOR_HANDLE rtv, uin
     if (!m_pso || !Upload(dev, ui)) return;
     ID3D12GraphicsCommandList* list = dev.list.Get();
     const uint64_t vb = uint64_t(ui.vertexCount) * sizeof(iface::UiVertex);
-    D3D12_VERTEX_BUFFER_VIEW vbv = {m_buffer->GetGPUVirtualAddress(), static_cast<UINT>(vb), sizeof(iface::UiVertex)};
-    D3D12_INDEX_BUFFER_VIEW ibv = {m_buffer->GetGPUVirtualAddress() + vb, ui.indexCount * 4u, DXGI_FORMAT_R32_UINT};
+    D3D12_VERTEX_BUFFER_VIEW vbv = {m_bufferVa, static_cast<UINT>(vb), sizeof(iface::UiVertex)};
+    D3D12_INDEX_BUFFER_VIEW ibv = {m_bufferVa + vb, ui.indexCount * 4u, DXGI_FORMAT_R32_UINT};
     const D3D12_VIEWPORT vp = {0, 0, float(width), float(height), 0, 1};
     const float screen[4] = {2.0f / float(width), -2.0f / float(height), -1.0f, 1.0f};
 

@@ -72,7 +72,9 @@ material cutoff, alpha sampled at fixed LOD 2) at no measurable cost.
 
 | file | holds |
 |---|---|
-| `src/core/device.*` | `Device`: D3D12 device, queue, ONE allocator + list + fence, synchronous `Begin`/`EndAndWait`; DRED, `CheckRemoved`, debug-layer message drain, `NGG_PIX` |
+| `src/core/device.*` | `Device`: D3D12 device, queue, one list + fence; frame slots (`BeginFrame`/`EndFrame`, an allocator and fence value per slot, `NGG_FRAMES`) and the immediate path (`Begin`/`EndAndWait`); DRED, `CheckRemoved`, debug-layer message drain, `NGG_PIX` |
+| `src/core/frame_upload.*` | per-slot upload ring: `FrameUpload` (constants), `FrameAlloc` (a frame's CPU-written buffers), `DeferRelease` (freed when the slot's frame has run) |
+| `src/core/slot_timer.*` | `SlotTimer`: GPU timestamps with one query set and readback range per frame slot |
 | `src/core/renderer.*` | `core::Renderer`: the frame (`RecordFrame`), quality tiers, upscaler choice and render size, `KeepRtCurrent` (BVH follows the scene), whole-frame GPU timer |
 | `src/core/scene.*` | `Scene`: `.ngg` load (`Load`, `LoadFromMemory`, variants), materials, the 41 scene pipelines, prepass + main pass (`RecordPass`), cascades and local-light shadow maps' draws, deferred local lights, glass, cube-probe faces, editor overlays / labels / selection, pixel probe, debug and light modes, RT input description |
 | `src/core/textures.inl` | DDS loading for the NGGT chunk (BC1/BC2, BC4/5/7 behind a DX10 header) - included by `scene.cpp` |
@@ -120,9 +122,17 @@ The ABI the game sees (`include/wrally/iface/renderer.h`, `renderer_edit.h`) is 
   shadow-ray bias.
 - **The client owns** its window, input, overlays and presentation; **the renderer owns** order and correctness from
   "here is a camera" to "the tonemapped image is in your target". Settings are the client's; the pass order is not.
-- **The frame is synchronous:** one list, `EndAndWait` at the end of every frame. Readbacks (timers, probe, overlay
-  stats, exposure) are therefore last frame's and are read after the wait. Frame overlap needs per-frame allocators
-  and a constant ring; it comes with the change that needs it.
+- **Two frames in flight** (default; `NGG_FRAMES=1` is the synchronous fallback): the CPU records frame N+1 while the
+  GPU runs frame N. `Device::BeginFrame` waits only for the frame that last used its slot (N-1). So **what a frame
+  hands the GPU lives per slot:** constants and CPU-written buffers come from `FrameUpload`/`FrameAlloc`; a buffer
+  replaced or freed during a frame goes to `DeferRelease`; GPU timers are `SlotTimer`s; readbacks (exposure,
+  irradiance, RT counters, grass args, NRD) have a range per slot and are read at the start of the slot's next
+  recording, two frames late; descriptors a frame rewrites have a copy per slot (the RT heap is a CPU-only mirror
+  `Publish`ed into the slot's half). Table calls between frames that replace GPU state (loads, models, textures,
+  editor overlays, settings) wait for the GPU first (`Settle`, module.cpp), as does a render-size change. Something
+  that must read this frame's result (the pixel probe, overlay stats, a capture) asks for a finished frame
+  (`Scene::WantsFinishedFrame`) and waits. RTX 5070 Ti, 1440p high native, shipped stage, real time: 97 -> 153 fps
+  (p95 11.7 -> 8.4 ms), the GPU frame unchanged; the frame is now GPU-bound.
 - **Never key a descriptor on a resource pointer.** A recreated texture can land at the freed one's address; the
   RT visibility / AO descriptors are rewritten on every set (`Scene::SetRtVisibility`, `SetRtAo`).
 - **GPU work the frame depends on goes into the frame's own list**, ahead of its readers (the TLAS: built before the
@@ -155,8 +165,8 @@ opens the list, sets sky time, and records. The order is the code's:
 
 After step 12 the frame starts the threads of the BLAS batches step 5 queued (`Rt::StartBatches`), so their
 allocations overlap the frame's wait for the GPU (4.2). Then the module draws the editor overlay (only at native render size: it depth-tests against the render-size depth),
-the UI pass, the optional capture copy, `EndAndWait`, `DrainMessages`, `CheckRemoved` (a removal: the frame is lost,
-10.6), the probe / overlay readbacks. `present` is a separate call (`vsync` from the settings).
+the UI pass, the optional capture copy, `EndFrame` (submit; with `NGG_FRAMES=1` also the wait), `DrainMessages`,
+`CheckRemoved` (a removal: the frame is lost, 10.6), the probe / overlay readbacks (after a wait for that frame, 1.3). `present` is a separate call (`vsync` from the settings).
 
 **Upscaling:** everything up to step 12 runs at the render size (`RenderWidth/Height`); the materials' mip bias is
 `log2(render/output)`. When the render size has at most half the output's pixels, AO traces twice the tier's rays
@@ -2285,7 +2295,7 @@ keeps producing "looks right in the editor, wrong in the game" bugs.
   [`renderer_edit.h`](../include/wrally/iface/renderer_edit.h). The edit table has its own version (now 2), so
   editor additions do not move the game's interface. The rules are as in `renderer.h`: one thread, POD, pack 4,
   nothing thrown across. Edits take effect from the next `renderFrame`. Readouts describe the last frame, which is
-  complete when `renderFrame` returns (synchronous).
+  complete when the GPU has run it (the readouts that need it wait for it, 1.3).
 - **The `.ngg` is the runtime format, not the editing format.** Wallaby authors in its own model and exports `.ngg`.
   **The renderer never loads glTF or any other editing format:** to show the truth it would have to repeat the
   converter's passes (normal welding, shading overrides, de-atlasing), which would make two content pipelines instead
@@ -2509,7 +2519,7 @@ switches (`K` RT, `L` shadows, `O` AO, `T` TAA), RT breakdown or the fallback re
 
 Rule from the readout's history: **when an instrument reports "nothing happened", check that it is connected**
 before believing it - readbacks are valid only after the GPU wait (`Scene::LogProbe`, `ReadOverlayStats` run after
-`EndAndWait`).
+`WaitForGpu`; with frames in flight the module waits for it when the scene asks, 1.3).
 
 ### 10.3 Debug views, light modes, the pixel probe
 
@@ -2553,8 +2563,8 @@ A TDR, a driver update or crash, a GPU reset or an unplugged adapter removes the
 inside WRenderer; the client's handles stay valid, and all it does is hand the big bytes over again when asked**
 (`module.cpp`, "device loss"; `renderer.h`, "DEVICE LOSS"; interfaces 24 and 25).
 
-- **Detected** where D3D12 says so: `CheckRemoved` after every submit of the frame's list (`EndAndWait`: the frame,
-  the uploads) and at the end of `renderFrame`, a failed `Begin`, `present`'s `DXGI_ERROR_DEVICE_REMOVED` / `_RESET`,
+- **Detected** where D3D12 says so: `CheckRemoved` after every submit (`EndFrame`: the frame; `EndAndWait`: the
+  uploads) and at the end of `renderFrame`, a failed `Begin`, `present`'s `DXGI_ERROR_DEVICE_REMOVED` / `_RESET`,
   and `GetDeviceRemovedReason` at the start of every table call that needs the device (`NeedDevice`). DRED's record
   is logged once, as before (10.5). The frame it happens in is lost: `renderFrame` and `present` return `Ok`, nothing
   is shown, a capture asked for is taken from the next frame. `RenderStats` keeps the sun's elevation (the game lights
@@ -2671,6 +2681,11 @@ All read once, at start-up or first use; development only unless noted.
 | `NGG_DLSS_RR_PRESET=<D..F>` | force a DLSS Ray Reconstruction preset (default: the SDK's) | `dlss.cpp` |
 | `NGG_RR_BIAS=1` | RR's bias-current-colour mask also takes the moved-object mask (4.11; off: it ghosted slightly more) | `rr_visibility.cpp` |
 | `NGG_RR_GUIDES=nospec\|white` | RR's guides A/B: no specular albedo / white albedos | `rr_visibility.cpp` |
+| `NGG_FRAMES=1\|2` | frames in flight (default 2); 1 is the synchronous frame, for A/B and as a fallback (1.3) | `device.cpp` |
+| `NGG_GPU_VALIDATION=1` | with the debug layer: GPU-based validation (slow; resource states and descriptors as the GPU uses them) | `device.cpp` |
+| `NGG_CPU_TIMES` | the CPU time of each stage of `RecordFrame`, means over 300 frames | `renderer.cpp`, `scene.cpp` |
+| `NGG_MODEL_LODS` | log each instanced model's LODs at load: distance and triangles | `models.cpp` |
+| `NGG_FOLIAGE_SPLIT=<m>[,<m>]` | the sun cascades' split distances over the computed ones (A/B) | `shadow.cpp` |
 | `NGG_DEBUG_LAYER=1` | the D3D12 debug layer (needs the Graphics Tools feature); the game's `--debug-layer` / `PHYS_DRIVE_DEBUG_LAYER` set it through `kRendererDebugLayer` (10.5) | `module.cpp` |
 | `NGG_TEST_DEVICE_REMOVED=<frame>[,...]` | the device removed in that `renderFrame` (`ID3D12Device5::RemoveDevice`), to test the recovery (10.6); read when the renderer is made | `module.cpp` |
 | `NGG_DENOISER=nrd\|ours` | the RT path's denoiser over the settings (4.10) | `module.cpp` |

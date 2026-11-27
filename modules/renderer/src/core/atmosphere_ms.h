@@ -86,6 +86,7 @@ private:
     float m_groundAlbedo = -1.0f;
     bool  m_enabled = false;
     bool  m_probePending = false;
+    unsigned m_probeSlot = 0;   // the frame slot whose frame copied it
     bool  m_probeValid = false;
     float m_probe[3] = {};
 };

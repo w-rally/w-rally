@@ -1,4 +1,5 @@
 #include "renderer.h"
+#include "frame_upload.h"
 #include "log.h"
 #include "pipeline_cache.h"
 #include "shaders.h"
@@ -290,7 +291,7 @@ void Renderer::RecordFrame(Device& dev, D3D12_CPU_DESCRIPTOR_HANDLE outRtv,
     ID3D12GraphicsCommandList* list = dev.list.Get();
     if (!list) return;
     // NGG_CPU_TIMES: the CPU time each stage of the recording takes, means over 300 frames (where a frame's CPU goes;
-    // the frame is synchronous, so it adds to the GPU's).
+    // with NGG_FRAMES=1 it adds to the GPU's; with frames in flight it overlaps the GPU's previous frame).
     static const bool cpuTimes = std::getenv("NGG_CPU_TIMES") != nullptr;
     static const char* const kStage[] = { "grass", "foliage near", "RT current", "lights", "prepass", "visibility",
                                           "foliage map", "sky", "scene pass", "post", "rest" };
@@ -335,7 +336,14 @@ void Renderer::RecordFrame(Device& dev, D3D12_CPU_DESCRIPTOR_HANDLE outRtv,
 
     // `width` x `height` is the client's target, the OUTPUT; everything up to the upscaler (or the TAA) runs at the
     // RENDER size, which is the same without an upscaler.
-    if (width != m_width || height != m_height) OnResize(dev, width, height);
+    // A new size: the targets are made again, here and by every pass that follows them (GTAO, the ray tracer, NRD,
+    // RR at the render size) - with frames in flight (device.h) the last frame may still be drawing with the old
+    // ones, so the GPU is waited for first. A resize is rare; a frame's stall is nothing.
+    if (width != m_width || height != m_height)
+    {
+        if (dev.frames > 1) dev.WaitForGpu();
+        OnResize(dev, width, height);
+    }
     width = m_renderWidth;
     height = m_renderHeight;
     // The camera's planes and field of view, for the upscaler's depth (a conventional D3D projection: q = f/(f-n) at
@@ -346,17 +354,19 @@ void Renderer::RecordFrame(Device& dev, D3D12_CPU_DESCRIPTOR_HANDLE outRtv,
         m_post.SetCamera(zNear, proj[10] * zNear / (proj[10] - 1.0f), 2.0f * atanf(1.0f / proj[5]));
     }
 
-    // The whole frame's GPU time (LastFrameMs): last frame's, read now - the frame is synchronous, so it resolved.
+    // The whole frame's GPU time (LastFrameMs): this slot's last frame's, read now - BeginFrame waited for it
+    // (the last frame with one frame in flight, the one before with two). A pair of timestamps per slot.
+    const uint32_t ts = FrameSlot();
     if (!m_frameTimer && dev.device && dev.queue && SUCCEEDED(dev.queue->GetTimestampFrequency(&m_frameHz)))
     {
         D3D12_QUERY_HEAP_DESC qh = {};
         qh.Type = D3D12_QUERY_HEAP_TYPE_TIMESTAMP;
-        qh.Count = 2;
+        qh.Count = 2 * Device::kMaxFrames;
         D3D12_HEAP_PROPERTIES hp = {};
         hp.Type = D3D12_HEAP_TYPE_READBACK;
         D3D12_RESOURCE_DESC rd = {};
         rd.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
-        rd.Width = 2 * sizeof(UINT64);
+        rd.Width = 2 * Device::kMaxFrames * sizeof(UINT64);
         rd.Height = 1;
         rd.DepthOrArraySize = 1;
         rd.MipLevels = 1;
@@ -367,19 +377,20 @@ void Renderer::RecordFrame(Device& dev, D3D12_CPU_DESCRIPTOR_HANDLE outRtv,
                                                        nullptr, IID_PPV_ARGS(&m_frameReadback))))
             m_frameTimer.Reset();
     }
-    if (m_frameTimer && m_framePending)
+    if (m_frameTimer && m_framePending[ts])
     {
         UINT64* t = nullptr;
-        D3D12_RANGE r = { 0, 2 * sizeof(UINT64) };
+        D3D12_RANGE r = { ts * 2 * sizeof(UINT64), (ts + 1) * 2 * sizeof(UINT64) };
         if (SUCCEEDED(m_frameReadback->Map(0, &r, reinterpret_cast<void**>(&t))))
         {
-            if (t[1] >= t[0]) m_frameMs = double(t[1] - t[0]) * 1000.0 / double(m_frameHz);
+            const UINT64* p = t + 2 * ts;
+            if (p[1] >= p[0]) m_frameMs = double(p[1] - p[0]) * 1000.0 / double(m_frameHz);
             D3D12_RANGE none = { 0, 0 };
             m_frameReadback->Unmap(0, &none);
         }
-        m_framePending = false;
+        m_framePending[ts] = false;
     }
-    if (m_frameTimer) list->EndQuery(m_frameTimer.Get(), D3D12_QUERY_TYPE_TIMESTAMP, 0);
+    if (m_frameTimer) list->EndQuery(m_frameTimer.Get(), D3D12_QUERY_TYPE_TIMESTAMP, 2 * ts);
 
     // Which tonemap this frame gets is a rule, not a free choice: the debug
     // views carry FALSE COLOUR, not radiance, and a curve would change the very
@@ -542,9 +553,10 @@ void Renderer::RecordFrame(Device& dev, D3D12_CPU_DESCRIPTOR_HANDLE outRtv,
 
     if (m_frameTimer)
     {
-        list->EndQuery(m_frameTimer.Get(), D3D12_QUERY_TYPE_TIMESTAMP, 1);
-        list->ResolveQueryData(m_frameTimer.Get(), D3D12_QUERY_TYPE_TIMESTAMP, 0, 2, m_frameReadback.Get(), 0);
-        m_framePending = true;
+        list->EndQuery(m_frameTimer.Get(), D3D12_QUERY_TYPE_TIMESTAMP, 2 * ts + 1);
+        list->ResolveQueryData(m_frameTimer.Get(), D3D12_QUERY_TYPE_TIMESTAMP, 2 * ts, 2, m_frameReadback.Get(),
+                               2 * ts * sizeof(UINT64));
+        m_framePending[ts] = true;
     }
 }
 

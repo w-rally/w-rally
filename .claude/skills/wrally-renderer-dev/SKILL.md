@@ -38,8 +38,12 @@ PIX/resize/GPU timer -> tonemap curve -> atmosphere -> **jitter** -> `Scene::Beg
 land, TLAS build into the frame's list) -> `PrepareLights` -> **prepass** (depth, normal, motion, plant) -> RT or
 cascades chosen -> `VisibilityProvider::Record` (sun vis + AO + local-light shadows) -> HDR + sky -> main pass (env,
 probe, aerial, opaque, models, deferred lights, glass) -> resolve (upscaler or TAA, meter, tonemap) -> end timer.
-Then `Rt::StartBatches`, editor overlay, UI pass, capture, `EndAndWait`, `CheckRemoved`, readbacks.
-The frame is synchronous: readbacks are last frame's and valid only after the wait.
+Then `Rt::StartBatches`, editor overlay, UI pass, capture, `EndFrame`, `CheckRemoved`, readbacks.
+**Two frames in flight** (default; `NGG_FRAMES=1` = synchronous): anything a frame hands the GPU lives per slot -
+constants/CPU buffers via `FrameUpload`/`FrameAlloc`, freed or replaced resources via `DeferRelease`, timers as
+`SlotTimer`, readbacks per slot range (read two frames late), rewritten descriptors per slot. Table calls between
+frames that replace GPU state call `Settle` (module.cpp). Check a change with `NGG_FRAMES=1` vs default and
+`NGG_DEBUG_LAYER=1 NGG_GPU_VALIDATION=1`.
 
 Visibility provider (§4.1): RT when `m_preferRt && prepass && m_rt.HasScene() && m_rtValid && ShadowsOn()`; else
 cascades. `RenderSettings::denoiser` picks NRD over ours; `UpscalerKind::DlssRr` forces `RrVisibility` (raw traces).
@@ -130,8 +134,7 @@ Model commit: `fd7a231` (NGGC clip walls) - 13 files.
 - Read once: `static const char* const e = std::getenv("NGG_X");` in the file that uses it, or in module.cpp
   `ApplyEnvironment` (re-applied after device loss). Log what it changed.
 - Add a row to ngg-design §10.8: `| NGG_X=<values> | effect | file.cpp |`. Check none is missing:
-  `grep -rhoE '"NGG_[A-Z0-9_]+"' modules/renderer/src game/src | sort -u` vs §10.8 (in 2026-11: `NGG_CPU_TIMES`,
-  `NGG_FOLIAGE_SPLIT`, `NGG_MODEL_LODS` undocumented).
+  `grep -rhoE '"NGG_[A-Z0-9_]+"' modules/renderer/src game/src | sort -u` vs §10.8.
 - A game switch is `PHYS_DRIVE_*` in `game.cpp` + `options.h` comment + ngg-design §10.1 table.
 - A debug view: `kDebugModeNames` (scene.cpp, count static_asserted) + the shader branch + §10.3 list.
 

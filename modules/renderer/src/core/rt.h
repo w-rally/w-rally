@@ -23,6 +23,7 @@
 #include <memory>
 #include <mutex>
 #include <vector>
+#include "slot_timer.h"
 
 #include <windows.h>
 #include <d3d12.h>
@@ -132,8 +133,8 @@ public:
     // that for its long still history (rt_denoise.hlsl's STILL).
     void ResetHistory() { m_histValid = m_aoHistValid = m_lightHistValid = false; }
 
-    // Filled by ReadStats after the caller has waited for the GPU - the same
-    // contract as Scene::LogProbe and ReadOverlayStats, and for the same reason.
+    // This frame slot's last trace's times and counters (device.h: a frame or two old with frames in flight), read
+    // at the start of Trace, where that frame has certainly run; the getters return them.
     void ReadStats();
     double  LastMs() const     { return m_lastMs; }       // shadow + AO + local-light traces
     double  LightsMs() const   { return m_lightsMs; }     // the local lights' trace alone
@@ -269,7 +270,13 @@ private:
     std::vector<uint64_t>                        m_publishedKeys;
     std::vector<uint64_t>                        m_failedKeys;   // a batch that failed: counted as building (IsBuilding)
     bool WriteTargetViews(ID3D12Device* device);
-    Microsoft::WRL::ComPtr<ID3D12Resource>       m_tlas, m_scratch, m_instances, m_instInfo;
+    Microsoft::WRL::ComPtr<ID3D12Resource>       m_tlas, m_scratch;
+    // The TLAS's instance table and the shaders' per-instance info: upload buffers, mapped for good, one per frame
+    // slot (device.h) - the frame in flight reads its own while the next writes its. m_instances/m_instInfo are the
+    // current slot's (UpdateInstances).
+    Microsoft::WRL::ComPtr<ID3D12Resource>       m_instancesSlot[2], m_instInfoSlot[2];
+    void*                                        m_instancesSlotMapped[2] = {}, *m_instInfoSlotMapped[2] = {};
+    Microsoft::WRL::ComPtr<ID3D12Resource>       m_instances, m_instInfo;
     void*                                        m_instancesMapped = nullptr;   // (upload, mapped for good)
     void*                                        m_instInfoMapped = nullptr;
     ID3D12Resource*                              m_staticVb = nullptr;
@@ -317,10 +324,17 @@ private:
     // index buffers by address, and the shader reads the rest per hit.
     Microsoft::WRL::ComPtr<ID3D12Resource>       m_ibAlpha, m_triMaterial, m_materials;
     Microsoft::WRL::ComPtr<ID3D12Resource>       m_triPlant;
-    Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> m_heap;       // see kSlot* in rt.cpp
+    // The descriptors (see kSlot* in rt.cpp) are WRITTEN into m_heap, a CPU-only mirror, wherever they change, and
+    // Publish copies it whole into this frame slot's half of m_gpuHeap (shader visible, two halves - device.h) before
+    // the frame binds it: a frame in flight keeps reading its own half. GpuBase: this slot's half.
+    Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> m_heap;
+    Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> m_gpuHeap;
+    UINT                                         m_heapCount = 0;
+    void Publish(ID3D12Device* dev);
+    D3D12_GPU_DESCRIPTOR_HANDLE GpuBase() const;
     UINT   m_vertexStride = 0;
-    Microsoft::WRL::ComPtr<ID3D12QueryHeap>      m_timestamps;
-    Microsoft::WRL::ComPtr<ID3D12Resource>       m_timestampReadback;
+    SlotTimer                                    m_timestamps;   // 5 a frame (slot_timer.h)
+    bool                                         m_countersPending[2] = {};   // a frame slot's counters copied
     UINT   m_stride = 0;
     UINT   m_width = 0, m_height = 0;
     UINT64 m_timestampHz = 0;

@@ -3,8 +3,8 @@
 // straight onto the back buffer after the frame, alpha-blended, scissored per command. Its textures are its own
 // (createTextureRgba: font atlases, generated images), in a shader-visible heap of its own; slot 0 is white.
 //
-// The renderer is synchronous (Device::EndAndWait every frame), so one upload buffer for the vertices and indices is
-// enough: the GPU is done with last frame's before this frame writes it.
+// The vertices and indices go into the frame's ring (frame_upload.h), a ring per frame slot (device.h), so a frame in
+// flight draws its own while the next one writes.
 
 #include <d3d12.h>
 #include <stdint.h>
@@ -55,8 +55,7 @@ private:
     std::vector<Microsoft::WRL::ComPtr<ID3D12Resource>> m_textures;   // by slot; [0] white
     Microsoft::WRL::ComPtr<ID3D12Resource> m_update;                  // UpdateTexture's upload buffer (kept: every frame)
     uint64_t m_updateBytes = 0;
-    Microsoft::WRL::ComPtr<ID3D12Resource> m_buffer;                  // upload heap: vertices, then indices
-    uint64_t m_bufferBytes = 0;
+    D3D12_GPU_VIRTUAL_ADDRESS m_bufferVa = 0;                          // this frame's vertices, then indices (the ring)
 };
 
 } // namespace wrally::render

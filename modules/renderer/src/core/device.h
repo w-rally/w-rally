@@ -4,11 +4,15 @@
 // Used by every client of ngg-core - the game and the editor (design §8)
 // through WRenderer. Nothing in ngg-core knows about the game.
 //
-// Deliberately one allocator and one list: the renderer is synchronous (it
-// waits for the GPU at the end of every frame), which is a real limitation but
-// an honest one. Frame overlapping needs per-frame allocators and a ring
-// allocator for constants, and that change belongs with the change that makes
-// it necessary - not scattered here in anticipation.
+// FRAMES IN FLIGHT (NGG_FRAMES=1|2, default 2): the frame's list is recorded
+// on its slot's allocator (BeginFrame/EndFrame). With one, EndFrame waits for
+// the GPU as the renderer always did; with two, the CPU records frame N+1
+// while the GPU runs frame N, and BeginFrame waits only for the frame that
+// last used its slot (N-1). What a frame hands the GPU must then live per
+// slot: constants (frame_upload.h FrameUpload), buffers it frees
+// (DeferRelease), readbacks, descriptors it rewrites - NGG design §1.4.
+// Begin/EndAndWait are the IMMEDIATE path (a texture upload, a capture): their
+// own allocator, submitted and waited for at once.
 // ---------------------------------------------------------------------------
 #pragma once
 
@@ -24,8 +28,15 @@ struct Device
 {
     Microsoft::WRL::ComPtr<ID3D12Device>              device;
     Microsoft::WRL::ComPtr<ID3D12CommandQueue>        queue;
-    Microsoft::WRL::ComPtr<ID3D12CommandAllocator>    alloc;
+    static constexpr uint32_t kMaxFrames = 2;
+    Microsoft::WRL::ComPtr<ID3D12CommandAllocator>    alloc;                    // the immediate path's
+    Microsoft::WRL::ComPtr<ID3D12CommandAllocator>    frameAlloc[kMaxFrames];   // a frame slot's each
     Microsoft::WRL::ComPtr<ID3D12GraphicsCommandList> list;
+    uint32_t frames = 2;                // frames in flight (NGG_FRAMES, default 2), read at Create
+    uint32_t slot = 0;                  // the frame being recorded's slot
+    uint64_t frameNumber = 0;           // frames begun
+    bool     recording = false;         // between BeginFrame and EndFrame
+    UINT64   slotFence[kMaxFrames] = {};   // the fence value each slot's last frame signals
     Microsoft::WRL::ComPtr<ID3D12Fence>               fence;
     Microsoft::WRL::ComPtr<ID3D12InfoQueue>           infoQueue;
 
@@ -46,9 +57,17 @@ struct Device
     // this wrong fails at OpenSharedHandle, far from the cause.
     bool Create(const LUID* luid, bool enableDebugLayer = false);
 
-    // Begin/End wrap the one command list. End submits and blocks until the GPU
-    // is done, because the caller's target may be handed straight to another
-    // process the moment we return.
+    // A FRAME: BeginFrame waits for the frame that last used the next slot,
+    // starts that slot's constants and releases what it deferred
+    // (frame_upload.h), and opens the list on its allocator. EndFrame submits;
+    // with one frame in flight it also waits for the GPU.
+    bool BeginFrame();
+    void EndFrame();
+
+    // IMMEDIATE work outside a frame (a texture's upload, a capture): the list
+    // on its own allocator; EndAndWait submits and blocks until the GPU is done
+    // - with everything before it - because the caller may hand the target
+    // straight to another process the moment we return.
     bool Begin();
     void EndAndWait();
 

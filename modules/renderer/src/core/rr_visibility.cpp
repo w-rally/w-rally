@@ -1,4 +1,5 @@
 #include "rr_visibility.h"
+#include "frame_upload.h"
 #include "log.h"
 #include "pipeline_cache.h"
 #include "shaders.h"
@@ -112,7 +113,7 @@ bool RrVisibility::Create(Device& dev)
     }
     D3D12_DESCRIPTOR_HEAP_DESC hd = {};
     hd.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
-    hd.NumDescriptors = 2 * kSet;
+    hd.NumDescriptors = 2 * 2 * kSet;   // both sets once per frame slot (device.h): both are rewritten every frame
     hd.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
     if (!decode || !guides || FAILED(device->CreateDescriptorHeap(&hd, IID_PPV_ARGS(&m_heap))))
     {
@@ -202,7 +203,7 @@ void RrVisibility::Record(Device& dev, ID3D12GraphicsCommandList* list, const Vi
 
     auto at = [&](UINT slot) {
         D3D12_CPU_DESCRIPTOR_HANDLE h = m_heap->GetCPUDescriptorHandleForHeapStart();
-        h.ptr += (SIZE_T)slot * m_stride;
+        h.ptr += (SIZE_T)(FrameSlot() * 2 * kSet + slot) * m_stride;   // this frame slot's set
         return h;
     };
     auto srv = [&](ID3D12Resource* r, DXGI_FORMAT f2, UINT slot) {
@@ -231,7 +232,11 @@ void RrVisibility::Record(Device& dev, ID3D12GraphicsCommandList* list, const Vi
     list->SetDescriptorHeaps(1, heaps);
     list->SetComputeRootSignature(m_root.Get());
     list->SetPipelineState(m_decode.Get());
-    list->SetComputeRootDescriptorTable(0, m_heap->GetGPUDescriptorHandleForHeapStart());
+    {
+        D3D12_GPU_DESCRIPTOR_HANDLE g = m_heap->GetGPUDescriptorHandleForHeapStart();
+        g.ptr += (UINT64)FrameSlot() * 2 * kSet * m_stride;
+        list->SetComputeRootDescriptorTable(0, g);
+    }
     list->SetComputeRoot32BitConstants(1, sizeof(RrCB) / 4, &cb, 0);
     list->Dispatch((f.width + 7) / 8, (f.height + 7) / 8, 1);
 
@@ -309,7 +314,7 @@ bool RrVisibility::RecordGuides(Device& dev, ID3D12GraphicsCommandList* list, ID
 
     auto at = [&](UINT slot) {
         D3D12_CPU_DESCRIPTOR_HANDLE h = m_heap->GetCPUDescriptorHandleForHeapStart();
-        h.ptr += (SIZE_T)(kSet + slot) * m_stride;
+        h.ptr += (SIZE_T)(FrameSlot() * 2 * kSet + kSet + slot) * m_stride;
         return h;
     };
     auto srv = [&](ID3D12Resource* r, DXGI_FORMAT f2, UINT slot) {
@@ -343,7 +348,7 @@ bool RrVisibility::RecordGuides(Device& dev, ID3D12GraphicsCommandList* list, ID
     list->SetComputeRootSignature(m_root.Get());
     list->SetPipelineState(m_guides.Get());
     D3D12_GPU_DESCRIPTOR_HANDLE g = m_heap->GetGPUDescriptorHandleForHeapStart();
-    g.ptr += (UINT64)kSet * m_stride;
+    g.ptr += (UINT64)(FrameSlot() * 2 * kSet + kSet) * m_stride;
     list->SetComputeRootDescriptorTable(0, g);
     list->SetComputeRoot32BitConstants(1, sizeof(RrCB) / 4, &cb, 0);
     list->Dispatch((width + 7) / 8, (height + 7) / 8, 1);

@@ -28,6 +28,8 @@
 
 #include "../format/ngg_format.h"   // for the file's Vertex layout
 #include "sky.h"                    // SkyParams, shared with the sky pass
+#include "slot_timer.h"
+#include "frame_upload.h"
 #include "shadow.h"
 #include "env.h"
 #include "grass.h"
@@ -252,6 +254,13 @@ public:
     // exercise. Complements a real shader debugger (RenderDoc) rather than
     // replacing it - this one needs no capture and knows our term names.
     void SetProbe(int x, int y) { m_probeX = x; m_probeY = y; m_probeOn = true; }
+    // The editor's readbacks after a frame (LogProbe, ReadOverlayStats) want that frame finished: with frames in
+    // flight the module waits for the GPU while one of them has something to read (a probe armed, a selection or
+    // overlays drawn) - editor work, never the game's frame.
+    bool WantsFinishedFrame() const
+    {
+        return m_probeOn || !m_selection.empty() || OverlayVertexCount() != 0 || LabelGlyphCount() != 0;
+    }
     void LogProbe();
 
     // Cascaded shadows. The Scene owns the geometry, so it does the drawing;
@@ -314,8 +323,8 @@ public:
     // read the FREED texture's memory. A page fault, then a GPU hang (TDR),
     // caught by DRED on the first object move (design §10.5). Two descriptor
     // writes a frame cost nothing; a pointer is not an identity.
-    void SetRtVisibility(ID3D12Resource* tex) { m_rtVis = tex; m_rtSrvReady = false; }
-    void ClearRtVisibility() { m_rtVis = nullptr; m_rtSrvReady = false; }
+    void SetRtVisibility(ID3D12Resource* tex) { m_rtVis = tex; m_rtSrvReady[0] = m_rtSrvReady[1] = false; }
+    void ClearRtVisibility() { m_rtVis = nullptr; m_rtSrvReady[0] = m_rtSrvReady[1] = false; }
 
     // This frame's ray-traced ambient occlusion (rt.h, denoised), applied to
     // the ambient terms. Null when there is none; SetAmbientOcclusion toggles
@@ -325,9 +334,9 @@ public:
     {
         m_rtAo = tex;
         m_rtAoView = view;
-        m_aoSrvReady = false;
+        m_aoSrvReady[0] = m_aoSrvReady[1] = false;
     }
-    void ClearRtAo() { m_rtAo = nullptr; m_aoSrvReady = false; }
+    void ClearRtAo() { m_rtAo = nullptr; m_aoSrvReady[0] = m_aoSrvReady[1] = false; }
 
     // LOCAL LIGHTS (lights.h, design §5.5): this frame's lights, their clusters for this view (before the ray
     // tracer reads them), and the ray tracer's denoised shadowed fraction of their light (Rt::FilteredLights; none:
@@ -1091,10 +1100,6 @@ private:
     uint64_t                 m_modelFrame = 0;
     // The instance stream: an upload buffer written as views are culled; the frame's first record (offset 0) is the
     // identity every non-instanced draw uses. Grown by a new buffer (the old kept to the frame's end).
-    Microsoft::WRL::ComPtr<ID3D12Resource>              m_instBuf;
-    std::vector<Microsoft::WRL::ComPtr<ID3D12Resource>> m_instRetired;
-    uint8_t*                 m_instMapped = nullptr;
-    size_t                   m_instCap = 0, m_instUsed = 0;
     D3D12_VERTEX_BUFFER_VIEW m_instIdentity = {};
     std::vector<ModelBatch>  m_mainBatches;              // the camera's, culled by the prepass (or the main pass)
     bool                     m_mainBatchesValid = false;
@@ -1165,9 +1170,7 @@ private:
     uint32_t                 m_localShadowsDrawn = 0;
     float                    m_localAoShare = 0.0f;
     double                   m_localShadowMs = 0.0;
-    Microsoft::WRL::ComPtr<ID3D12QueryHeap> m_localShadowTimer;
-    Microsoft::WRL::ComPtr<ID3D12Resource>  m_localShadowTimerReadback;
-    bool                     m_localShadowTimerPending = false;
+    SlotTimer                m_localShadowTimer;   // 2 timestamps round RenderLocalShadows
     Microsoft::WRL::ComPtr<ID3D12Resource>       m_vb;
     Microsoft::WRL::ComPtr<ID3D12Resource>       m_ib;
     Microsoft::WRL::ComPtr<ID3D12Resource>       m_depth;
@@ -1257,7 +1260,7 @@ private:
     ID3D12Resource*          m_rtAo = nullptr;
     DXGI_FORMAT              m_rtAoView = DXGI_FORMAT_UNKNOWN;
     UINT                     m_aoSrvSlot = 0;
-    bool                     m_aoSrvReady = false;
+    bool                     m_aoSrvReady[2] = {};   // per frame slot (AoSrvSlot)
     // The froxel aerial-perspective table: two SRVs (in-scatter, transmittance)
     // in consecutive slots. Fixed-size volumes, so written once per heap.
     AerialLut                m_aerialLut;
@@ -1271,7 +1274,13 @@ private:
     bool                     m_aerialSrvReady = false;
     bool                     m_aoOn = true;
     UINT                     m_rtSrvSlot = 0;
-    bool                     m_rtSrvReady = false;
+    bool                     m_rtSrvReady[2] = {};   // per frame slot (RtSrvSlot)
+    // The descriptors a frame rewrites (the RT visibility, the AO, the lights' ten) have a second copy per frame
+    // slot (device.h) after the heap's fixed ones, from m_dynSrvBase: a frame in flight keeps reading its own.
+    UINT                     m_dynSrvBase = 0;
+    UINT RtSrvSlot() const    { return FrameSlot() ? m_dynSrvBase : m_rtSrvSlot; }
+    UINT AoSrvSlot() const    { return FrameSlot() ? m_dynSrvBase + 1 : m_aoSrvSlot; }
+    UINT LightSrvSlot() const { return FrameSlot() ? m_dynSrvBase + 2 : m_lightSrvSlot; }   // and the next nine
     UINT64                   m_rtSrvLoggedW = 0;        // the size and format the log last reported (the log only)
     UINT                     m_rtSrvLoggedH = 0;
     DXGI_FORMAT              m_rtSrvLoggedFormat = DXGI_FORMAT_UNKNOWN;
@@ -1334,16 +1343,13 @@ private:
     bool                     m_aerialMarch = false;
     int                      m_mipFallback = 2;
 
-    Microsoft::WRL::ComPtr<ID3D12QueryHeap> m_timer;          // 4 timestamps
-    Microsoft::WRL::ComPtr<ID3D12Resource>  m_timerReadback;
+    SlotTimer                m_timer;              // the main pass's 8 timestamps (slot_timer.h: a set per frame slot)
     UINT64                   m_timerHz = 0;
-    bool                     m_timerPending = false;
     double                   m_passMs = 0.0;
     double                   m_aerialMs = 0.0;
     double                   m_envMs = 0.0;
-    Microsoft::WRL::ComPtr<ID3D12QueryHeap> m_shadowTimer;    // 2 timestamps around RenderShadows
-    Microsoft::WRL::ComPtr<ID3D12Resource>  m_shadowTimerReadback;
-    bool                     m_shadowTimerPending = false;
+    SlotTimer                m_shadowTimer;        // 2 timestamps round RenderShadows
+    SlotTimer                m_foliageTimer;       // 2 timestamps round RenderFoliageShadows
     double                   m_shadowMapMs = 0.0;
     // Dynamic by default now that shadows are real. Mode 0 stays as the A/B
     // reference against RBR's own look, not as a fallback.

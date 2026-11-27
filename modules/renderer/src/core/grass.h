@@ -23,6 +23,8 @@
 #include <string>
 #include <vector>
 
+#include "slot_timer.h"
+
 namespace ngg {
 namespace core {
 
@@ -84,8 +86,8 @@ public:
     D3D12_VERTEX_BUFFER_VIEW InstanceView() const;
     ID3D12CommandSignature* CommandSignature() const { return m_cmdSig.Get(); }
 
-    // Last frame's instance count per LOD (after the GPU wait: the frame is synchronous), and how many the caps
-    // dropped. Read by ReadStats.
+    // The instance count per LOD and how many the caps dropped, as this frame slot's last frame found them (a frame
+    // or two old with frames in flight, device.h). Read by ReadStats at the start of Update.
     void ReadStats();
     uint32_t Count(uint32_t lod) const { return lod < kLods ? m_counts[lod] : 0; }
     uint32_t Dropped() const { return m_dropped; }
@@ -132,11 +134,9 @@ private:
     bool     m_fieldValid = false;
     int32_t  m_fieldX = 0, m_fieldZ = 0;       // the clipmap's centre, in texels of the world
     uint32_t m_counts[kLods] = {}, m_dropped = 0;
-    bool     m_readbackPending = false;
-    Microsoft::WRL::ComPtr<ID3D12QueryHeap> m_timer;
-    Microsoft::WRL::ComPtr<ID3D12Resource>  m_timerReadback;
+    bool     m_readbackPending[2] = {};        // a frame slot's counts copied, not yet read (Device::kMaxFrames)
+    SlotTimer m_timer;                         // 6 timestamps a frame (slot_timer.h)
     UINT64   m_timerHz = 0;
-    bool     m_timerPending = false;
     uint32_t m_stamped = 0;                    // slots stamped this frame (bits)
     double   m_msSum[3] = {}, m_bladeSum = 0.0;
     uint32_t m_msFrames = 0;
