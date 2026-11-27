@@ -117,6 +117,14 @@ bool Device::Create(const LUID* luid, bool enableDebugLayer)
         {
             dbg->EnableDebugLayer();
             Log("core: D3D12 debug layer enabled");
+            // NGG_GPU_VALIDATION=1: and GPU-based validation (resource states and descriptors as the GPU meets them;
+            // very slow - for hunting a hazard, e.g. with frames in flight).
+            ComPtr<ID3D12Debug1> dbg1;
+            if (const char* g = std::getenv("NGG_GPU_VALIDATION"); g && g[0] == '1' && SUCCEEDED(dbg.As(&dbg1)))
+            {
+                dbg1->SetEnableGPUBasedValidation(TRUE);
+                Log("core: GPU-based validation enabled (NGG_GPU_VALIDATION)");
+            }
         }
         else
         {
