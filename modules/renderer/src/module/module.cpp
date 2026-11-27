@@ -995,7 +995,10 @@ Status WRALLY_CALL RenderFrame(Renderer* r, const FrameDesc* f)
     // After a device removal: a new device, the scene and everything made in it again, before this frame (§10.6).
     if (const Status d = NeedDevice(r); d != Status::Ok) return d;
     if (!r->g->sc.swap) return r->Fail(Status::ErrDevice, "renderFrame: no swap chain");
-    r->g->sc.WaitForTurn();   // (the one place the frame waits for the display: SwapChain::latency)
+    // The one place the frame waits for the display (SwapChain::latency). Only with vsync: without it a windowed flip
+    // swap chain that cannot tear hands the object back at the compositor's rate, which capped the loop at the refresh
+    // (the tests 3-7x slower); the frames in flight's own fences pace it then.
+    if (r->settings.vsync) r->g->sc.WaitForTurn();
     ++r->frames;
     const bool world = !(f->flags & kFrameNoWorld) && f->scene == 1 && r->sceneLoaded;
     if (world) {
