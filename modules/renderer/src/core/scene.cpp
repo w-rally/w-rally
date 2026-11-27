@@ -5015,7 +5015,8 @@ bool Scene::SetFont(ID3D12Device* dev, ID3D12CommandQueue* queue, const void* rg
     toSrv.Transition.pResource = tex.Get();
     toSrv.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
     toSrv.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
-    toSrv.Transition.StateAfter = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+    // (both shader stages: the ray tracer's compute shaders read the scene's textures too - GPU-based validation)
+    toSrv.Transition.StateAfter = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
     list->ResourceBarrier(1, &toSrv);
 
     list->Close();

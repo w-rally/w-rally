@@ -45,7 +45,7 @@ using namespace wrally::iface;
 namespace {
 
 const DXGI_FORMAT kBackBufferFormat = DXGI_FORMAT_R8G8B8A8_UNORM;
-const UINT kBackBufferCount = 2;
+const UINT kBackBufferCount = 3;
 constexpr uint32_t kModuleVersion = MakeVersion(0, 1, 0);
 constexpr uint32_t kUiTextureBit = wrally::render::UiPass::kTextureBit;
 constexpr uint32_t kUnknownInstance = 0xFFFFFFFFu;
@@ -57,6 +57,16 @@ struct SwapChain {
     ComPtr<ID3D12DescriptorHeap> rtvHeap;
     UINT rtvStride = 0;
     UINT width = 0, height = 0;
+    // Frame pacing: the swap chain's frame-latency object, waited for before a frame is recorded (WaitForTurn). Without
+    // it DXGI queues up to 3 presents and, with frames in flight, the game's loop ran in bursts at vsync (three frames
+    // ~0.1 ms apart, then ~50 ms: the menus' animations stepped). One wait per frame paces the loop to the display.
+    HANDLE latency = nullptr;
+    static constexpr UINT kFlags = DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT;
+
+    SwapChain() = default;
+    SwapChain(const SwapChain&) = delete;
+    SwapChain& operator=(const SwapChain&) = delete;
+    ~SwapChain() { if (latency) CloseHandle(latency); }
 
     bool Create(ngg::core::Device& dev, HWND hwnd, UINT w, UINT h)
     {
@@ -71,10 +81,16 @@ struct SwapChain {
         sd.BufferCount = kBackBufferCount;
         sd.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
         sd.SampleDesc.Count = 1;
+        sd.Flags = kFlags;
         ComPtr<IDXGISwapChain1> sc1;
         if (FAILED(factory->CreateSwapChainForHwnd(dev.queue.Get(), hwnd, &sd, nullptr, nullptr, &sc1))) return false;
         factory->MakeWindowAssociation(hwnd, DXGI_MWA_NO_ALT_ENTER);
         if (FAILED(sc1.As(&swap))) return false;
+        // Presents queued ahead of the display: the frames in flight (NGG_FRAME_LATENCY=1..3 for A/B).
+        UINT queued = dev.frames;
+        if (const char* e = std::getenv("NGG_FRAME_LATENCY")) queued = UINT(std::clamp(std::atoi(e), 1, 3));
+        swap->SetMaximumFrameLatency(queued);
+        latency = swap->GetFrameLatencyWaitableObject();
         D3D12_DESCRIPTOR_HEAP_DESC hd = {};
         hd.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
         hd.NumDescriptors = kBackBufferCount;
@@ -97,7 +113,7 @@ struct SwapChain {
         if (w == 0 || h == 0 || (w == width && h == height)) return false;
         dev.WaitForGpu();
         for (auto& b : buffers) b.Reset();
-        if (FAILED(swap->ResizeBuffers(kBackBufferCount, w, h, kBackBufferFormat, 0))) return false;
+        if (FAILED(swap->ResizeBuffers(kBackBufferCount, w, h, kBackBufferFormat, kFlags))) return false;
         width = w, height = h;
         return CreateViews(dev);
     }
@@ -108,6 +124,8 @@ struct SwapChain {
         return h;
     }
     ID3D12Resource* CurrentBuffer() const { return buffers[swap->GetCurrentBackBufferIndex()].Get(); }
+    // Before a frame is recorded: until the display has taken enough of the queued presents (1 s at most).
+    void WaitForTurn() const { if (latency) WaitForSingleObjectEx(latency, 1000, TRUE); }
 };
 
 struct Model {
@@ -977,6 +995,7 @@ Status WRALLY_CALL RenderFrame(Renderer* r, const FrameDesc* f)
     // After a device removal: a new device, the scene and everything made in it again, before this frame (§10.6).
     if (const Status d = NeedDevice(r); d != Status::Ok) return d;
     if (!r->g->sc.swap) return r->Fail(Status::ErrDevice, "renderFrame: no swap chain");
+    r->g->sc.WaitForTurn();   // (the one place the frame waits for the display: SwapChain::latency)
     ++r->frames;
     const bool world = !(f->flags & kFrameNoWorld) && f->scene == 1 && r->sceneLoaded;
     if (world) {
