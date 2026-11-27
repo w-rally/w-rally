@@ -25,6 +25,7 @@
 #include <windows.h>
 #include <d3d12.h>
 #include <wrl/client.h>
+#include "slot_timer.h"
 #include <stdint.h>
 #include <string>
 
@@ -102,10 +103,8 @@ private:
     int    m_denoisePasses = 3;   // 1 left the speckle a moving car keeps too little TAA history to average
     uint32_t m_frame = 0;
 
-    Microsoft::WRL::ComPtr<ID3D12QueryHeap>      m_timer;
-    Microsoft::WRL::ComPtr<ID3D12Resource>       m_timerReadback;
+    SlotTimer m_timer;                 // 2 a frame (slot_timer.h)
     UINT64 m_timerHz = 0;
-    bool   m_timerPending = false;
     double m_ms = 0.0;
 };
 

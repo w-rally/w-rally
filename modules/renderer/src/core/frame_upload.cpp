@@ -72,7 +72,15 @@ bool MakeChunk(ID3D12Device* dev, size_t size, Chunk& out)
 
 D3D12_GPU_VIRTUAL_ADDRESS FrameUpload(ID3D12Device* device, const void* data, size_t bytes, size_t align)
 {
-    if (!device || !bytes) return 0;
+    void* cpu = nullptr;
+    const D3D12_GPU_VIRTUAL_ADDRESS va = FrameAlloc(device, bytes, align, &cpu);
+    if (va) memcpy(cpu, data, bytes);
+    return va;
+}
+
+D3D12_GPU_VIRTUAL_ADDRESS FrameAlloc(ID3D12Device* device, size_t bytes, size_t align, void** cpu)
+{
+    if (!device || !bytes || !cpu) return 0;
     Ring& r = TheRing();
     if (r.device != device)
     {
@@ -89,7 +97,7 @@ D3D12_GPU_VIRTUAL_ADDRESS FrameUpload(ID3D12Device* device, const void* data, si
             const size_t start = (s.used + align - 1) & ~(align - 1);
             if (start + bytes <= c.size)
             {
-                memcpy(c.mapped + start, data, bytes);
+                *cpu = c.mapped + start;
                 s.used = start + bytes;
                 return c.res->GetGPUVirtualAddress() + start;
             }

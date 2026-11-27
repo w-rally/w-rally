@@ -1,4 +1,5 @@
 #include "atmosphere_ms.h"
+#include "frame_upload.h"
 #include "log.h"
 #include "pipeline_cache.h"
 #include "shaders.h"
@@ -159,7 +160,7 @@ bool AtmosphereMs::Create(ID3D12Device* dev)
     rb.Type = D3D12_HEAP_TYPE_READBACK;
     D3D12_RESOURCE_DESC bd = {};
     bd.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
-    bd.Width = 256;
+    bd.Width = 2 * 512;   // a 512-aligned placement per frame slot
     bd.Height = 1;
     bd.DepthOrArraySize = 1;
     bd.MipLevels = 1;
@@ -191,12 +192,14 @@ void AtmosphereMs::Update(ID3D12GraphicsCommandList* list, float turbidity, floa
 
     // Last computation's probe texel. The frame is synchronous, so a copy
     // recorded in an earlier frame has landed.
-    if (m_probePending && m_readback)
+    // (The copy's frame slot's frame has run once that slot comes round: Device::BeginFrame.)
+    if (m_probePending && m_probeSlot == FrameSlot() && m_readback)
     {
         const uint16_t* h = nullptr;
-        D3D12_RANGE r = { 0, 8 };
+        D3D12_RANGE r = { (SIZE_T)m_probeSlot * 512, (SIZE_T)m_probeSlot * 512 + 8 };
         if (SUCCEEDED(m_readback->Map(0, &r, (void**)&h)))
         {
+            h += m_probeSlot * 256;
             for (int c = 0; c < 3; ++c) m_probe[c] = HalfToFloat(h[c]);
             D3D12_RANGE none = { 0, 0 };
             m_readback->Unmap(0, &none);
@@ -241,6 +244,7 @@ void AtmosphereMs::Update(ID3D12GraphicsCommandList* list, float turbidity, floa
         D3D12_TEXTURE_COPY_LOCATION dst = {}, src = {};
         dst.pResource = m_readback.Get();
         dst.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+        dst.PlacedFootprint.Offset = (UINT64)FrameSlot() * 512;
         dst.PlacedFootprint.Footprint.Format = kMsFormat;
         dst.PlacedFootprint.Footprint.Width = 1;
         dst.PlacedFootprint.Footprint.Height = 1;
@@ -251,6 +255,7 @@ void AtmosphereMs::Update(ID3D12GraphicsCommandList* list, float turbidity, floa
         D3D12_BOX box = { kProbeX, kProbeY, 0, kProbeX + 1, kProbeY + 1, 1 };
         list->CopyTextureRegion(&dst, 0, 0, 0, &src, &box);
         m_probePending = true;
+        m_probeSlot = FrameSlot();
     }
     b.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_SOURCE;
     b.Transition.StateAfter = kReadState;

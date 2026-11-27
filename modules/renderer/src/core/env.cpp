@@ -1,4 +1,5 @@
 #include "env.h"
+#include "frame_upload.h"
 #include "log.h"
 #include "pipeline_cache.h"
 #include "shaders.h"
@@ -244,7 +245,7 @@ bool Environment::Create(ID3D12Device* dev)
         rb.Type = D3D12_HEAP_TYPE_READBACK;
         D3D12_RESOURCE_DESC bd = {};
         bd.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
-        bd.Width = 256;
+        bd.Width = 2 * 512;   // a 512-aligned placement per frame slot
         bd.Height = 1;
         bd.DepthOrArraySize = 1;
         bd.MipLevels = 1;
@@ -311,13 +312,14 @@ void Environment::Record(ID3D12GraphicsCommandList* list, const SkyParams& p,
         }
     }
 
-    // Last frame's upward irradiance (diagnostics). The frame is synchronous.
-    if (m_irrPending && m_irrReadback)
+    // This frame slot's last upward irradiance (diagnostics; Device::BeginFrame waited for its frame).
+    if (const uint32_t is = FrameSlot(); m_irrPending[is] && m_irrReadback)
     {
         const uint16_t* h = nullptr;
-        D3D12_RANGE r = { 0, 8 };
+        D3D12_RANGE r = { (SIZE_T)is * 512, (SIZE_T)is * 512 + 8 };
         if (SUCCEEDED(m_irrReadback->Map(0, &r, (void**)&h)))
         {
+            h += is * 256;
             auto half = [](uint16_t v) {
                 const uint32_t s = (v >> 15) & 1, e = (v >> 10) & 31, m = v & 1023;
                 float f = (e == 0) ? ldexpf((float)m, -24)
@@ -329,7 +331,7 @@ void Environment::Record(ID3D12GraphicsCommandList* list, const SkyParams& p,
             m_irrReadback->Unmap(0, &none);
             m_irrUpValid = true;
         }
-        m_irrPending = false;
+        m_irrPending[is] = false;
     }
 
     EnvCB cb = {};
@@ -481,6 +483,7 @@ void Environment::Record(ID3D12GraphicsCommandList* list, const SkyParams& p,
             D3D12_TEXTURE_COPY_LOCATION dst = {}, srcLoc = {};
             dst.pResource = m_irrReadback.Get();
             dst.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+            dst.PlacedFootprint.Offset = (UINT64)FrameSlot() * 512;
             dst.PlacedFootprint.Footprint.Format = kEnvFormat;
             dst.PlacedFootprint.Footprint.Width = 1;
             dst.PlacedFootprint.Footprint.Height = 1;
@@ -491,7 +494,7 @@ void Environment::Record(ID3D12GraphicsCommandList* list, const SkyParams& p,
             srcLoc.SubresourceIndex = 0;
             D3D12_BOX box = { kIrrSize / 2, kIrrSize / 2, 0, kIrrSize / 2 + 1, kIrrSize / 2 + 1, 1 };
             list->CopyTextureRegion(&dst, 0, 0, 0, &srcLoc, &box);
-            m_irrPending = true;
+            m_irrPending[FrameSlot()] = true;
         }
         ib.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_SOURCE;
         ib.Transition.StateAfter  = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;

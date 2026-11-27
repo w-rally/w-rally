@@ -1,4 +1,5 @@
 #include "post.h"
+#include "frame_upload.h"
 #include "log.h"
 #include "pipeline_cache.h"
 #include "shaders.h"
@@ -340,7 +341,7 @@ bool PostFx::CreateMetering(ID3D12Device* dev)
                 D3D12_RESOURCE_STATE_COMMON, m_histogram) ||
         !buffer(kExposureCopyOffset + 256, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
                 D3D12_RESOURCE_STATE_COMMON, m_exposureState) ||
-        !buffer(4 * 4, D3D12_HEAP_TYPE_READBACK, D3D12_RESOURCE_FLAG_NONE,
+        !buffer(2 * 4 * 4, D3D12_HEAP_TYPE_READBACK, D3D12_RESOURCE_FLAG_NONE,   // a range per frame slot
                 D3D12_RESOURCE_STATE_COPY_DEST, m_exposureReadback))
         return false;
 
@@ -429,9 +430,9 @@ void PostFx::Meter(ID3D12GraphicsCommandList* list, ID3D12Resource* image,
                          D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
     list->ResourceBarrier(2, post);
     ExposureStateTo(list, D3D12_RESOURCE_STATE_COPY_SOURCE);
-    list->CopyBufferRegion(m_exposureReadback.Get(), 0, m_exposureState.Get(), 0, 16);
+    list->CopyBufferRegion(m_exposureReadback.Get(), (UINT64)FrameSlot() * 16, m_exposureState.Get(), 0, 16);
     ExposureStateTo(list, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
-    m_readbackPending = true;
+    m_readbackPending[FrameSlot()] = true;
 }
 
 bool PostFx::OnResize(ID3D12Device* dev, UINT width, UINT height, UINT outputWidth, UINT outputHeight)
@@ -844,21 +845,21 @@ void PostFx::Resolve(ID3D12GraphicsCommandList* list,
         return h;
     };
 
-    // Last frame's exposure, for the HUD. The frame is synchronous, so the copy
-    // recorded last frame has landed.
-    if (m_readbackPending && m_exposureReadback)
+    // This frame slot's last frame's exposure, for the HUD: its copy has landed (Device::BeginFrame waited for it).
+    if (const uint32_t es = FrameSlot(); m_readbackPending[es] && m_exposureReadback)
     {
         float* st = nullptr;
-        D3D12_RANGE r = { 0, 16 };
+        D3D12_RANGE r = { (SIZE_T)es * 16, (SIZE_T)es * 16 + 16 };
         if (SUCCEEDED(m_exposureReadback->Map(0, &r, reinterpret_cast<void**>(&st))))
         {
+            st += 4 * es;
             m_lastAdaptedLog2 = st[0];
             m_lastMeteredLog2 = st[1];
             m_lastExposure    = st[3];
             D3D12_RANGE none = { 0, 0 };
             m_exposureReadback->Unmap(0, &none);
         }
-        m_readbackPending = false;
+        m_readbackPending[es] = false;
     }
     m_exposureStateNow = D3D12_RESOURCE_STATE_COMMON;   // decayed with last frame's list
     const bool autoExposure = m_autoExposure && m_psoAdapt && m_exposureState;

@@ -247,7 +247,7 @@ private:
     Microsoft::WRL::ComPtr<ID3D12Resource>       m_exposureReadback;
     bool   m_autoExposure = true;
     bool   m_snapExposure = true;    // jump straight to the metered value next frame
-    bool   m_readbackPending = false;
+    bool   m_readbackPending[2] = {};   // a frame slot's exposure copied (Device::kMaxFrames)
     LARGE_INTEGER m_lastTick = {};
     float  m_lastExposure = 0.0f;
     float  m_lastMeteredLog2 = 0.0f;

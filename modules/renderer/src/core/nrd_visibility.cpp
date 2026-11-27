@@ -30,7 +30,9 @@
 // NGG_NRD_FRAMES / _STAB / _BLUR / _PREBLUR / _FIXSTRIDE / _HITW / _AF (REBLUR's settings), NGG_NRD_HISTORY=1 and
 // NGG_NRD_SHOW=conf (debug outputs in view 13), NGG_NRD_VALIDATION=<folder> (REBLUR's validation layer as .ppm).
 #include "nrd_visibility.h"
+#include "frame_upload.h"
 #include "log.h"
+#include "slot_timer.h"
 #include "pipeline_cache.h"
 #include "shaders.h"
 
@@ -183,7 +185,6 @@ static_assert(sizeof(PackCB) % 16 == 0, "PackCB must be whole float4s");
 const UINT kSetSrvs = 6, kSetUavs = 8, kSetSize = kSetSrvs + kSetUavs;
 const UINT kNrdFirst = kSetSize * (1 + kSignals);
 const UINT kHeapSize = 4096;
-const UINT kCbBytes = 256 * 1024;        // NRD's constants, a frame's worth (a few dozen dispatches of < 1 KB)
 
 // How the renderer's AO radius (Rt::Trace's 3 m) normalizes REBLUR's hit distance (rt_ao.hlsl).
 const float kAoRadius = 3.0f;
@@ -210,12 +211,9 @@ struct NrdVisibility::Impl
     ComPtr<ID3D12PipelineState> pack, confPso, confReset, unpack;
     ComPtr<ID3D12DescriptorHeap> heap;
     UINT stride = 0;
-    ComPtr<ID3D12Resource> cb;
-    uint8_t* cbMap = nullptr;
-    ComPtr<ID3D12QueryHeap> timestamps;
-    ComPtr<ID3D12Resource>  timestampReadback;
+    ID3D12Device* device = nullptr;   // (the constants' ring's: frame_upload.h, a ring per frame slot)
+    SlotTimer timestamps;             // 2 a frame (slot_timer.h)
     UINT64 timestampHz = 0;
-    bool   timed = false;
 
     // At the render size (Resize): NRD's pools, the pack's outputs, NRD's outputs and ours, ping-ponged.
     UINT width = 0, height = 0;
@@ -242,6 +240,7 @@ struct NrdVisibility::Impl
     D3D12_PLACED_SUBRESOURCE_FOOTPRINT validationFoot = {};
     uint32_t validationFrame = 0;
     bool validationPending = false;
+    uint32_t validationSlot = 0;     // the frame slot that copied it: read when that slot comes round again
     bool  restart = true, clear = true;
     bool  havePrev = false;
     float prevView[16] = {}, prevProj[16] = {}, prevViewProj[16] = {}, prevJitter[2] = {};
@@ -355,14 +354,11 @@ struct NrdVisibility::Impl
         return true;
     }
 
-    // Constants into the ring at `cbAt` (256-aligned), for a root CBV.
+    // Constants into the frame's ring (frame_upload.h: a ring per frame slot), for a root CBV.
     D3D12_GPU_VIRTUAL_ADDRESS Constants(const void* data, UINT bytes, UINT& cbAt)
     {
-        if (cbAt + bytes > kCbBytes) cbAt = 0;
-        memcpy(cbMap + cbAt, data, bytes);
-        const D3D12_GPU_VIRTUAL_ADDRESS va = cb->GetGPUVirtualAddress() + cbAt;
-        cbAt += (bytes + 255u) & ~255u;
-        return va;
+        (void)cbAt;
+        return FrameUpload(device, data, bytes);
     }
 
     // Into `want`, now or in the batch the caller sends.
@@ -426,10 +422,8 @@ struct NrdVisibility::Impl
             if (!b.empty()) list->ResourceBarrier((UINT)b.size(), b.data());
             if (dd.constantBufferDataSize && (!dd.constantBufferDataMatchesPreviousDispatch || !cbVa))
             {
-                if (cbAt + dd.constantBufferDataSize > kCbBytes) return false;
-                memcpy(cbMap + cbAt, dd.constantBufferData, dd.constantBufferDataSize);
-                cbVa = cb->GetGPUVirtualAddress() + cbAt;
-                cbAt += (dd.constantBufferDataSize + 255u) & ~255u;
+                cbVa = FrameUpload(dev, dd.constantBufferData, dd.constantBufferDataSize);   // the frame's ring
+                if (!cbVa) return false;
             }
             list->SetComputeRootSignature(roots[dd.pipelineIndex].Get());
             list->SetPipelineState(psos[dd.pipelineIndex].Get());
@@ -599,45 +593,9 @@ bool NrdVisibility::Create(Device& dev)
     if (FAILED(device->CreateDescriptorHeap(&hd, IID_PPV_ARGS(&p->heap)))) return false;
     p->stride = device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
 
-    // NRD's constants: an upload ring, mapped for good. The frames are synchronous, so it starts over every frame.
-    {
-        D3D12_HEAP_PROPERTIES hp = {};
-        hp.Type = D3D12_HEAP_TYPE_UPLOAD;
-        D3D12_RESOURCE_DESC d = {};
-        d.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
-        d.Width = kCbBytes;
-        d.Height = 1;
-        d.DepthOrArraySize = 1;
-        d.MipLevels = 1;
-        d.SampleDesc.Count = 1;
-        d.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
-        D3D12_RANGE none = { 0, 0 };
-        if (FAILED(device->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &d, D3D12_RESOURCE_STATE_GENERIC_READ,
-                                                   nullptr, IID_PPV_ARGS(&p->cb))) ||
-            FAILED(p->cb->Map(0, &none, reinterpret_cast<void**>(&p->cbMap))))
-            return false;
-    }
-
-    D3D12_QUERY_HEAP_DESC qh = {};
-    qh.Type = D3D12_QUERY_HEAP_TYPE_TIMESTAMP;
-    qh.Count = 2;
-    if (SUCCEEDED(device->CreateQueryHeap(&qh, IID_PPV_ARGS(&p->timestamps))))
-    {
-        D3D12_HEAP_PROPERTIES hp = {};
-        hp.Type = D3D12_HEAP_TYPE_READBACK;
-        D3D12_RESOURCE_DESC d = {};
-        d.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
-        d.Width = 2 * sizeof(UINT64);
-        d.Height = 1;
-        d.DepthOrArraySize = 1;
-        d.MipLevels = 1;
-        d.SampleDesc.Count = 1;
-        d.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
-        if (FAILED(device->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &d, D3D12_RESOURCE_STATE_COPY_DEST,
-                                                   nullptr, IID_PPV_ARGS(&p->timestampReadback))))
-            p->timestamps.Reset();
-        dev.queue->GetTimestampFrequency(&p->timestampHz);
-    }
+    // NRD's constants: the frame's ring (frame_upload.h). Its timer: a set per frame slot.
+    p->device = device;
+    if (p->timestamps.Create(device, 2)) dev.queue->GetTimestampFrequency(&p->timestampHz);
 
     m = std::move(p);
     Log("nrd: ready - NRD v%u.%u.%u, %u pipelines: SIGMA for the sun and the local lights, the AO %s",
@@ -657,6 +615,7 @@ void NrdVisibility::Record(Device& dev, ID3D12GraphicsCommandList* list, const V
     if (!Ready()) return;
     Impl& p = *m;
     ID3D12Device* device = dev.device.Get();
+    ReadStats();   // this frame slot's last frame's (it has run: Device::BeginFrame)
 
     float sunTowards[3];
     float len = sqrtf(f.sunTravel[0] * f.sunTravel[0] + f.sunTravel[1] * f.sunTravel[1] + f.sunTravel[2] * f.sunTravel[2]);
@@ -714,7 +673,7 @@ void NrdVisibility::Record(Device& dev, ID3D12GraphicsCommandList* list, const V
     // start view, contact regions 33-41 grey (8 bit, view 13) lighter than ours, against 0-3 for the open fraction.
     cb.aoMode = p.aoMode;
 
-    if (p.timestamps) list->EndQuery(p.timestamps.Get(), D3D12_QUERY_TYPE_TIMESTAMP, 0);
+    p.timestamps.Stamp(list, 0);
 
     // ---- pack: the prepass's targets and the raws readable, the guide inputs written
     std::vector<D3D12_RESOURCE_BARRIER> b;
@@ -879,6 +838,7 @@ void NrdVisibility::Record(Device& dev, ID3D12GraphicsCommandList* list, const V
         src.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
         list->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
         p.validationPending = true;
+        p.validationSlot = FrameSlot();
     }
 
     // ---- unpack into our layout, this frame's half of each pair
@@ -921,12 +881,8 @@ void NrdVisibility::Record(Device& dev, ID3D12GraphicsCommandList* list, const V
         p.outValid[s] = true;
     }
 
-    if (p.timestamps)
-    {
-        list->EndQuery(p.timestamps.Get(), D3D12_QUERY_TYPE_TIMESTAMP, 1);
-        list->ResolveQueryData(p.timestamps.Get(), D3D12_QUERY_TYPE_TIMESTAMP, 0, 2, p.timestampReadback.Get(), 0);
-        p.timed = true;
-    }
+    p.timestamps.Stamp(list, 1);
+    p.timestamps.Resolve(list, 0, 2);
 
     // ---- everything back as it came: the prepass's targets, the ray tracer's outputs
     b.clear();
@@ -973,7 +929,7 @@ void NrdVisibility::Record(Device& dev, ID3D12GraphicsCommandList* list, const V
 
 void NrdVisibility::ReadStats()
 {
-    if (m && m->validationPending)
+    if (m && m->validationPending && m->validationSlot == FrameSlot())
     {
         m->validationPending = false;
         const UINT w = m->validationFoot.Footprint.Width, h = m->validationFoot.Footprint.Height;
@@ -997,15 +953,8 @@ void NrdVisibility::ReadStats()
         D3D12_RANGE none = { 0, 0 };
         if (px) m->validationReadback->Unmap(0, &none);
     }
-    if (!m || !m->timed || !m->timestampReadback || !m->timestampHz) return;
-    UINT64* t = nullptr;
-    D3D12_RANGE all = { 0, 2 * sizeof(UINT64) };
-    if (SUCCEEDED(m->timestampReadback->Map(0, &all, reinterpret_cast<void**>(&t))))
-    {
+    if (UINT64 t[2]; m && m->timestampHz && m->timestamps.Take(t))
         m_denoiseMs = t[1] > t[0] ? 1000.0 * double(t[1] - t[0]) / double(m->timestampHz) : 0.0;
-        D3D12_RANGE none = { 0, 0 };
-        m->timestampReadback->Unmap(0, &none);
-    }
 }
 
 #else

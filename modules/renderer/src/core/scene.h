@@ -28,6 +28,7 @@
 
 #include "../format/ngg_format.h"   // for the file's Vertex layout
 #include "sky.h"                    // SkyParams, shared with the sky pass
+#include "slot_timer.h"
 #include "shadow.h"
 #include "env.h"
 #include "grass.h"
@@ -252,6 +253,13 @@ public:
     // exercise. Complements a real shader debugger (RenderDoc) rather than
     // replacing it - this one needs no capture and knows our term names.
     void SetProbe(int x, int y) { m_probeX = x; m_probeY = y; m_probeOn = true; }
+    // The editor's readbacks after a frame (LogProbe, ReadOverlayStats) want that frame finished: with frames in
+    // flight the module waits for the GPU while one of them has something to read (a probe armed, a selection or
+    // overlays drawn) - editor work, never the game's frame.
+    bool WantsFinishedFrame() const
+    {
+        return m_probeOn || !m_selection.empty() || OverlayVertexCount() != 0 || LabelGlyphCount() != 0;
+    }
     void LogProbe();
 
     // Cascaded shadows. The Scene owns the geometry, so it does the drawing;
@@ -1091,10 +1099,6 @@ private:
     uint64_t                 m_modelFrame = 0;
     // The instance stream: an upload buffer written as views are culled; the frame's first record (offset 0) is the
     // identity every non-instanced draw uses. Grown by a new buffer (the old kept to the frame's end).
-    Microsoft::WRL::ComPtr<ID3D12Resource>              m_instBuf;
-    std::vector<Microsoft::WRL::ComPtr<ID3D12Resource>> m_instRetired;
-    uint8_t*                 m_instMapped = nullptr;
-    size_t                   m_instCap = 0, m_instUsed = 0;
     D3D12_VERTEX_BUFFER_VIEW m_instIdentity = {};
     std::vector<ModelBatch>  m_mainBatches;              // the camera's, culled by the prepass (or the main pass)
     bool                     m_mainBatchesValid = false;
@@ -1165,9 +1169,7 @@ private:
     uint32_t                 m_localShadowsDrawn = 0;
     float                    m_localAoShare = 0.0f;
     double                   m_localShadowMs = 0.0;
-    Microsoft::WRL::ComPtr<ID3D12QueryHeap> m_localShadowTimer;
-    Microsoft::WRL::ComPtr<ID3D12Resource>  m_localShadowTimerReadback;
-    bool                     m_localShadowTimerPending = false;
+    SlotTimer                m_localShadowTimer;   // 2 timestamps round RenderLocalShadows
     Microsoft::WRL::ComPtr<ID3D12Resource>       m_vb;
     Microsoft::WRL::ComPtr<ID3D12Resource>       m_ib;
     Microsoft::WRL::ComPtr<ID3D12Resource>       m_depth;
@@ -1334,16 +1336,13 @@ private:
     bool                     m_aerialMarch = false;
     int                      m_mipFallback = 2;
 
-    Microsoft::WRL::ComPtr<ID3D12QueryHeap> m_timer;          // 4 timestamps
-    Microsoft::WRL::ComPtr<ID3D12Resource>  m_timerReadback;
+    SlotTimer                m_timer;              // the main pass's 8 timestamps (slot_timer.h: a set per frame slot)
     UINT64                   m_timerHz = 0;
-    bool                     m_timerPending = false;
     double                   m_passMs = 0.0;
     double                   m_aerialMs = 0.0;
     double                   m_envMs = 0.0;
-    Microsoft::WRL::ComPtr<ID3D12QueryHeap> m_shadowTimer;    // 2 timestamps around RenderShadows
-    Microsoft::WRL::ComPtr<ID3D12Resource>  m_shadowTimerReadback;
-    bool                     m_shadowTimerPending = false;
+    SlotTimer                m_shadowTimer;        // 2 timestamps round RenderShadows
+    SlotTimer                m_foliageTimer;       // 2 timestamps round RenderFoliageShadows
     double                   m_shadowMapMs = 0.0;
     // Dynamic by default now that shadows are real. Mode 0 stays as the A/B
     // reference against RBR's own look, not as a fallback.

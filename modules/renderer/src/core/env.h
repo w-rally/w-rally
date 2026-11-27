@@ -110,7 +110,7 @@ private:
     Microsoft::WRL::ComPtr<ID3D12Resource>       m_irr;
     Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> m_irrRtvHeap;
     Microsoft::WRL::ComPtr<ID3D12Resource>       m_irrReadback;   // one texel, for IrradianceUp
-    bool  m_irrPending = false;
+    bool  m_irrPending[2] = {};   // a frame slot's texel copied (Device::kMaxFrames)
     bool  m_irrUpValid = false;
     float m_irrUp[3] = {};
     Microsoft::WRL::ComPtr<ID3D12Resource>       m_tex;

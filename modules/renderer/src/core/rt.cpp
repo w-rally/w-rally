@@ -1,4 +1,5 @@
 #include "rt.h"
+#include "frame_upload.h"
 #include "log.h"
 #include "pipeline_cache.h"
 #include "shaders.h"
@@ -377,12 +378,8 @@ bool Rt::Create(Device& dev)
         if (!m_psoAoWide) Log("rt: AO wide pass pipeline creation failed - the AO goes unwidened");
     }
 
-    D3D12_QUERY_HEAP_DESC qh = {};
-    qh.Type = D3D12_QUERY_HEAP_TYPE_TIMESTAMP;
-    qh.Count = 5;     // start, after the shadow, after the AO, after the local lights, after the denoise
-    dev.device->CreateQueryHeap(&qh, IID_PPV_ARGS(&m_timestamps));
-    m_timestampReadback = MakeBuffer(dev.device.Get(), 5 * sizeof(UINT64),
-                                     D3D12_HEAP_TYPE_READBACK, D3D12_RESOURCE_STATE_COPY_DEST);
+    // Start, after the shadow, after the AO, after the local lights, after the denoise: a set per frame slot.
+    m_timestamps.Create(dev.device.Get(), 5);
     dev.queue->GetTimestampFrequency(&m_timestampHz);
 
     m_stride = dev.device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
@@ -399,7 +396,7 @@ bool Rt::Create(Device& dev)
     m_lightCounters = MakeBuffer(dev.device.Get(), 4 * sizeof(uint32_t), D3D12_HEAP_TYPE_DEFAULT,
                                  D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
                                  D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
-    m_countersReadback = MakeBuffer(dev.device.Get(), 4 * sizeof(uint32_t),
+    m_countersReadback = MakeBuffer(dev.device.Get(), 2 * 4 * sizeof(uint32_t),   // a range per frame slot
                                     D3D12_HEAP_TYPE_READBACK, D3D12_RESOURCE_STATE_COPY_DEST);
     m_countersZero = MakeBuffer(dev.device.Get(), 4 * sizeof(uint32_t), D3D12_HEAP_TYPE_UPLOAD,
                                 D3D12_RESOURCE_STATE_GENERIC_READ);
@@ -1020,8 +1017,8 @@ bool Rt::UpdateInstances(Device& dev, ID3D12GraphicsCommandList* list,
     if (descs.empty()) { m_tlas.Reset(); m_instanceCount = 0; return false; }
 
     // The two tables go into upload buffers kept from frame to frame (mapped once, a quarter to spare): creating them
-    // every frame was 2 ms of the 3.5 a moving car's TLAS cost. Overwriting is safe - the frames are synchronous, and
-    // last frame's trace and build are done.
+    // every frame was 2 ms of the 3.5 a moving car's TLAS cost. One per frame slot: overwriting is safe, as the frame
+    // that last used this slot's has run (Device::BeginFrame). A grown one replaces it - deferred, not freed at once.
     auto fill = [&](ComPtr<ID3D12Resource>& buf, void*& mapped, const void* data, size_t bytes) {
         if (!buf || buf->GetDesc().Width < bytes)
         {
@@ -1034,9 +1031,12 @@ bool Rt::UpdateInstances(Device& dev, ID3D12GraphicsCommandList* list,
         memcpy(mapped, data, bytes);
         return true;
     };
-    if (!fill(m_instances, m_instancesMapped, descs.data(), descs.size() * sizeof(descs[0])) ||
-        !fill(m_instInfo, m_instInfoMapped, info.data(), info.size() * sizeof(info[0])))
+    const uint32_t fs = FrameSlot();
+    if (!fill(m_instancesSlot[fs], m_instancesSlotMapped[fs], descs.data(), descs.size() * sizeof(descs[0])) ||
+        !fill(m_instInfoSlot[fs], m_instInfoSlotMapped[fs], info.data(), info.size() * sizeof(info[0])))
         return false;
+    m_instances = m_instancesSlot[fs], m_instancesMapped = m_instancesSlotMapped[fs];
+    m_instInfo = m_instInfoSlot[fs], m_instInfoMapped = m_instInfoSlotMapped[fs];
 
     D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS top = {};
     top.Type = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL;
@@ -1232,6 +1232,7 @@ void Rt::Trace(Device& dev, ID3D12GraphicsCommandList* list, ID3D12Resource* dep
                bool ao, float aoRadius, uint32_t aoRays, UINT width, UINT height, const Lights* lights)
 {
     if (!Ready() || !HasScene() || !m_heap || !depth || !normal || !viewProj) return;
+    ReadStats();   // this frame slot's last trace (it has run: Device::BeginFrame)
     if (width != m_width || height != m_height)
     {
         LARGE_INTEGER tt;
@@ -1356,9 +1357,9 @@ void Rt::Trace(Device& dev, ID3D12GraphicsCommandList* list, ID3D12Resource* dep
         list->SetComputeRootDescriptorTable(6, gpuSlot(kSlotSunNrdUav));
     }
 
-    if (m_timestamps) list->EndQuery(m_timestamps.Get(), D3D12_QUERY_TYPE_TIMESTAMP, 0);
+    m_timestamps.Stamp(list, 0);
     list->Dispatch((width + 7) / 8, (height + 7) / 8, 1);
-    if (m_timestamps) list->EndQuery(m_timestamps.Get(), D3D12_QUERY_TYPE_TIMESTAMP, 1);
+    m_timestamps.Stamp(list, 1);
 
     // AMBIENT OCCLUSION, on the same acceleration structure and the same
     // surface reconstruction, into its own output. Timed together with the
@@ -1375,7 +1376,7 @@ void Rt::Trace(Device& dev, ID3D12GraphicsCommandList* list, ID3D12Resource* dep
         if (nrd && m_nrdAo) list->SetComputeRootDescriptorTable(6, gpuSlot(kSlotAoNrdUav));
         list->Dispatch((width + 7) / 8, (height + 7) / 8, 1);
     }
-    if (m_timestamps) list->EndQuery(m_timestamps.Get(), D3D12_QUERY_TYPE_TIMESTAMP, 2);
+    m_timestamps.Stamp(list, 2);
 
     // LOCAL LIGHTS: one ray per pixel to one of them (rt_lights.hlsl), into their own output.
     if (!doLights) m_lightHistValid = false;
@@ -1389,7 +1390,7 @@ void Rt::Trace(Device& dev, ID3D12GraphicsCommandList* list, ID3D12Resource* dep
         list->SetComputeRootShaderResourceView(5, lights->IndicesVa());
         list->Dispatch((width + 7) / 8, (height + 7) / 8, 1);
     }
-    if (m_timestamps) list->EndQuery(m_timestamps.Get(), D3D12_QUERY_TYPE_TIMESTAMP, 3);
+    m_timestamps.Stamp(list, 3);
 
     // ---- denoise, once per feature ------------------------------------------
     DenoiseCB dc = {};
@@ -1430,17 +1431,15 @@ void Rt::Trace(Device& dev, ID3D12GraphicsCommandList* list, ID3D12Resource* dep
     }
     else
         DenoiseAll(list, dc, true, doAo, doLights);
-    if (m_timestamps)
-    {
-        list->EndQuery(m_timestamps.Get(), D3D12_QUERY_TYPE_TIMESTAMP, 4);
-        list->ResolveQueryData(m_timestamps.Get(), D3D12_QUERY_TYPE_TIMESTAMP, 0, 5,
-                               m_timestampReadback.Get(), 0);
-    }
+    m_timestamps.Stamp(list, 4);
+    m_timestamps.Resolve(list, 0, 5);
 
     D3D12_RESOURCE_BARRIER toCopy = Transition(m_counters.Get(),
         D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_SOURCE);
     list->ResourceBarrier(1, &toCopy);
-    list->CopyResource(m_countersReadback.Get(), m_counters.Get());
+    list->CopyBufferRegion(m_countersReadback.Get(), (UINT64)FrameSlot() * 4 * sizeof(uint32_t), m_counters.Get(), 0,
+                           4 * sizeof(uint32_t));
+    m_countersPending[FrameSlot()] = true;
     D3D12_RESOURCE_BARRIER back = Transition(m_counters.Get(),
         D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_COPY_DEST);
     list->ResourceBarrier(1, &back);
@@ -1604,12 +1603,14 @@ void Rt::Widen(ID3D12GraphicsCommandList* list, const DenoiseCB& dc,
 
 void Rt::ReadStats()
 {
-    if (!m_countersReadback) return;
-
+    const uint32_t s = FrameSlot();
     uint32_t* c = nullptr;
-    D3D12_RANGE all = { 0, 4 * sizeof(uint32_t) };
-    if (SUCCEEDED(m_countersReadback->Map(0, &all, reinterpret_cast<void**>(&c))))
+    D3D12_RANGE all = { (SIZE_T)s * 4 * sizeof(uint32_t), (SIZE_T)(s + 1) * 4 * sizeof(uint32_t) };
+    if (m_countersReadback && m_countersPending[s] &&
+        SUCCEEDED(m_countersReadback->Map(0, &all, reinterpret_cast<void**>(&c))))
     {
+        m_countersPending[s] = false;
+        c += 4 * s;
         m_traced = c[0];
         m_shadowed = c[1];
         m_leafHits = c[2];
@@ -1618,18 +1619,13 @@ void Rt::ReadStats()
         m_countersReadback->Unmap(0, &none);
     }
 
-    if (!m_timestampReadback || !m_timestampHz) return;
-    UINT64* t = nullptr;
-    D3D12_RANGE ts = { 0, 5 * sizeof(UINT64) };
-    if (SUCCEEDED(m_timestampReadback->Map(0, &ts, reinterpret_cast<void**>(&t))))
+    if (UINT64 t[5]; m_timestampHz && m_timestamps.Take(t))
     {
         const double k = 1000.0 / (double)m_timestampHz;
         if (t[3] > t[0]) m_lastMs = k * (double)(t[3] - t[0]);
         m_aoMs      = t[2] >= t[1] ? k * (double)(t[2] - t[1]) : 0.0;
         m_lightsMs  = t[3] >= t[2] ? k * (double)(t[3] - t[2]) : 0.0;
         m_denoiseMs = t[4] >= t[3] ? k * (double)(t[4] - t[3]) : 0.0;
-        D3D12_RANGE none = { 0, 0 };
-        m_timestampReadback->Unmap(0, &none);
     }
 }
 

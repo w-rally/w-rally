@@ -1,5 +1,6 @@
 // GRASS: the field round the camera and the spawn of its blades (grass.h; NGG design §2.6 "Grass").
 #include "grass.h"
+#include "frame_upload.h"
 #include "log.h"
 #include "shaders.h"
 #include "pipeline_cache.h"
@@ -330,7 +331,7 @@ bool Grass::CreateGpu(ID3D12Device* dev)
         m_argsInit = Upload(dev, init, sizeof init);
         D3D12_HEAP_PROPERTIES rh = {};
         rh.Type = D3D12_HEAP_TYPE_READBACK;
-        d = BufferDesc(kArgsBytes);
+        d = BufferDesc(kArgsBytes * 2);   // a range per frame slot (Device::kMaxFrames)
         if (!m_argsInit || FAILED(dev->CreateCommittedResource(&rh, D3D12_HEAP_FLAG_NONE, &d,
                                                                D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
                                                                IID_PPV_ARGS(&m_argsReadback))))
@@ -558,6 +559,7 @@ void Grass::Update(ID3D12GraphicsCommandList* list, const Terrain& terrain, cons
     if (!m_gpuTried) m_gpuOk = CreateGpu(dev);
     dev->Release();
     if (!m_gpuOk) return;
+    ReadStats();   // what this frame slot's last frame counted (it has run: Device::BeginFrame)
 
     Stamp(list, 0);
     const float tx = view[12], ty = view[13], tz = view[14];
@@ -579,8 +581,7 @@ void Grass::Update(ID3D12GraphicsCommandList* list, const Terrain& terrain, cons
     }
 
     // The spawn's arguments start over; the instances become writable again.
-    Barrier(list, m_args.Get(), m_readbackPending || m_frame ? D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT
-                                                              : D3D12_RESOURCE_STATE_COPY_DEST,
+    Barrier(list, m_args.Get(), m_frame ? D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT : D3D12_RESOURCE_STATE_COPY_DEST,
             D3D12_RESOURCE_STATE_COPY_DEST);
     list->CopyBufferRegion(m_args.Get(), 0, m_argsInit.Get(), 0, kArgsBytes);
     Barrier(list, m_args.Get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
@@ -645,11 +646,11 @@ void Grass::Update(ID3D12GraphicsCommandList* list, const Terrain& terrain, cons
     list->Dispatch(1, 1, 1);
 
     Barrier(list, m_args.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_SOURCE);
-    list->CopyBufferRegion(m_argsReadback.Get(), 0, m_args.Get(), 0, kArgsBytes);
+    list->CopyBufferRegion(m_argsReadback.Get(), (UINT64)FrameSlot() * kArgsBytes, m_args.Get(), 0, kArgsBytes);
     Barrier(list, m_args.Get(), D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT);
     Barrier(list, m_inst.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER);
     m_instState = D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER;
-    m_readbackPending = true;
+    m_readbackPending[FrameSlot()] = true;
     ++m_frame;
     m_spawned = true;
     Stamp(list, 1);
@@ -664,47 +665,36 @@ bool Grass::Timed()
 void Grass::Stamp(ID3D12GraphicsCommandList* list, uint32_t slot)
 {
     if (!Timed() || slot >= 6) return;
-    if (!m_timer)
+    if (!m_timer.Ready())
     {
         ID3D12Device* dev = nullptr;
         list->GetDevice(IID_PPV_ARGS(&dev));
         if (!dev) return;
-        D3D12_QUERY_HEAP_DESC qh = {};
-        qh.Type = D3D12_QUERY_HEAP_TYPE_TIMESTAMP;
-        qh.Count = 6;
-        D3D12_HEAP_PROPERTIES rh = {};
-        rh.Type = D3D12_HEAP_TYPE_READBACK;
-        const D3D12_RESOURCE_DESC d = BufferDesc(6 * sizeof(UINT64));
         ComPtr<ID3D12CommandQueue> q;
         D3D12_COMMAND_QUEUE_DESC qd = {};
         qd.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
-        if (FAILED(dev->CreateQueryHeap(&qh, IID_PPV_ARGS(&m_timer))) ||
-            FAILED(dev->CreateCommittedResource(&rh, D3D12_HEAP_FLAG_NONE, &d, D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
-                                                IID_PPV_ARGS(&m_timerReadback))) ||
-            FAILED(dev->CreateCommandQueue(&qd, IID_PPV_ARGS(&q))) || FAILED(q->GetTimestampFrequency(&m_timerHz)))
+        if (FAILED(dev->CreateCommandQueue(&qd, IID_PPV_ARGS(&q))) || FAILED(q->GetTimestampFrequency(&m_timerHz)) ||
+            !m_timer.Create(dev, 6))
             m_timer.Reset();
         dev->Release();
-        if (!m_timer) return;
+        if (!m_timer.Ready()) return;
     }
-    list->EndQuery(m_timer.Get(), D3D12_QUERY_TYPE_TIMESTAMP, slot);
+    m_timer.Stamp(list, slot);
     m_stamped |= 1u << slot;
 }
 
 void Grass::ResolveStamps(ID3D12GraphicsCommandList* list)
 {
-    if (!m_timer || m_stamped != 0x3Fu) { m_stamped = 0; return; }
-    list->ResolveQueryData(m_timer.Get(), D3D12_QUERY_TYPE_TIMESTAMP, 0, 6, m_timerReadback.Get(), 0);
-    m_timerPending = true;
+    if (!m_timer.Ready() || m_stamped != 0x3Fu) { m_stamped = 0; return; }
+    m_timer.Resolve(list, 0, 6);
     m_stamped = 0;
 }
 
 void Grass::ReadStats()
 {
-    if (m_timerPending && m_timerReadback && m_timerHz)
+    // This frame slot's last frame (Device::BeginFrame waited for it).
+    if (UINT64 t[6]; m_timerHz && m_timer.Take(t))
     {
-        UINT64* t = nullptr;
-        D3D12_RANGE r = { 0, 6 * sizeof(UINT64) };
-        if (SUCCEEDED(m_timerReadback->Map(0, &r, reinterpret_cast<void**>(&t))))
         {
             for (int k = 0; k < 3; ++k)
                 if (t[2 * k + 1] >= t[2 * k]) m_msSum[k] += double(t[2 * k + 1] - t[2 * k]) * 1000.0 / double(m_timerHz);
@@ -716,16 +706,15 @@ void Grass::ReadStats()
                 m_msSum[0] = m_msSum[1] = m_msSum[2] = m_bladeSum = 0.0;
                 m_msFrames = 0;
             }
-            D3D12_RANGE none = { 0, 0 };
-            m_timerReadback->Unmap(0, &none);
         }
-        m_timerPending = false;
     }
-    if (!m_readbackPending || !m_argsReadback) return;
+    const uint32_t s = FrameSlot();
+    if (!m_readbackPending[s] || !m_argsReadback) return;
     uint32_t* a = nullptr;
-    D3D12_RANGE r = { 0, kArgsBytes };
+    D3D12_RANGE r = { (SIZE_T)s * kArgsBytes, (SIZE_T)(s + 1) * kArgsBytes };
     if (SUCCEEDED(m_argsReadback->Map(0, &r, reinterpret_cast<void**>(&a))))
     {
+        a += s * kArgsBytes / 4;
         m_dropped = 0;
         for (uint32_t l = 0; l < kLods; ++l)
         {
@@ -740,7 +729,7 @@ void Grass::ReadStats()
         D3D12_RANGE none = { 0, 0 };
         m_argsReadback->Unmap(0, &none);
     }
-    m_readbackPending = false;
+    m_readbackPending[s] = false;
 }
 
 } // namespace core

@@ -20,6 +20,10 @@ namespace core {
 // constant buffer view); 0 if no buffer could be made. Valid until that slot's frame comes round again.
 D3D12_GPU_VIRTUAL_ADDRESS FrameUpload(ID3D12Device* device, const void* data, size_t bytes, size_t align = 256);
 
+// `bytes` of the current slot's ring, for the caller to fill through *cpu (write-combined memory: write, never read);
+// its GPU address, or 0 if no buffer could be made. Valid as FrameUpload's.
+D3D12_GPU_VIRTUAL_ADDRESS FrameAlloc(ID3D12Device* device, size_t bytes, size_t align, void** cpu);
+
 // `object` (a resource, a heap, ...) is held until the GPU has run the frame being recorded: for what a frame
 // replaces or lets go of while the GPU may still read it. Null is ignored.
 void DeferRelease(IUnknown* object);

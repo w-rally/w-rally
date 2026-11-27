@@ -140,7 +140,6 @@ public:
     // This frame's: "ours", "NRD"; "" without ray tracing. And its GPU time, last frame's.
     const char* DenoiserName() const;
     double DenoiseMs() const;
-    void ReadDenoiserStats()                { m_nrdVis.ReadStats(); }    // after the GPU wait, as Rt::ReadStats
     // The screen-space AO's knobs (the tier sets the quality).
     Gtao& ScreenSpaceAo()                   { return m_gtao; }
     uint32_t AoRays() const                 { return m_aoRays; }
@@ -233,7 +232,7 @@ private:
     Microsoft::WRL::ComPtr<ID3D12QueryHeap> m_frameTimer;       // [0] the frame's first command, [1] its last
     Microsoft::WRL::ComPtr<ID3D12Resource>  m_frameReadback;
     UINT64      m_frameHz = 0;
-    bool        m_framePending = false;
+    bool        m_framePending[Device::kMaxFrames] = {};   // a frame slot's pair resolved, not yet read
     double      m_frameMs = 0.0;
 };
 

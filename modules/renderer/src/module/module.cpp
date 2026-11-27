@@ -1108,6 +1108,7 @@ Status WRALLY_CALL RenderFrame(Renderer* r, const FrameDesc* f)
     if (capture) WriteCapture(*r);
     r->capturePath.clear();
     if (world) {
+        if (r->g->dev.frames > 1 && r->g->scene.WantsFinishedFrame()) r->g->dev.WaitForGpu();
         r->g->scene.LogProbe();
         r->g->scene.ReadOverlayStats();
     }
@@ -1138,9 +1139,9 @@ Status WRALLY_CALL Stats(Renderer* r, RenderStats* out)
     out->deviceGeneration = r->generation;
     out->sunElevationDeg = r->sunElevationDeg;     // (the game lights its lamps by it: kept through a loss)
     if (r->lost || r->broken) return Status::Ok;   // (no device: nothing to read)
+    // (The ray tracer's and the denoiser's figures were read at the start of their own recording, where their frame
+    // slot's last frame had run - device.h: never here, after a submit, where it may still be running.)
     ngg::core::Rt& rt = r->g->core.Raytracer();
-    rt.ReadStats();
-    r->g->core.ReadDenoiserStats();
     out->passMs = (float)r->g->scene.LastPassMs();
     out->frameMs = (float)r->g->core.LastFrameMs();
     out->sunElevationDeg = r->sunElevationDeg;
