@@ -202,6 +202,18 @@ bool Device::Create(const LUID* luid, bool enableDebugLayer)
     if (FAILED(device->CreateCommandQueue(&qd, IID_PPV_ARGS(&queue)))) return false;
     if (FAILED(device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT,
                                               IID_PPV_ARGS(&alloc)))) return false;
+    // Frames in flight: NGG_FRAMES=2 overlaps the CPU's recording with the GPU's previous frame (see device.h).
+    frames = 1;
+    if (const char* e = std::getenv("NGG_FRAMES")) frames = atoi(e) >= 2 ? 2u : 1u;
+    for (uint32_t k = 0; k < kMaxFrames; ++k)
+    {
+        if (FAILED(device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&frameAlloc[k]))))
+            return false;
+        slotFence[k] = 0;
+    }
+    slot = 0;
+    frameNumber = 0;
+    Log("core: %u frame(s) in flight%s", frames, frames > 1 ? " (NGG_FRAMES)" : "");
     if (FAILED(device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, alloc.Get(),
                                          nullptr, IID_PPV_ARGS(&list)))) return false;
     list->Close();
@@ -215,8 +227,38 @@ bool Device::Create(const LUID* luid, bool enableDebugLayer)
     return fenceEvent != nullptr;
 }
 
+bool Device::BeginFrame()
+{
+    slot = (uint32_t)(frameNumber++ % frames);
+    // The frame that last used this slot has finished: its allocator, its constants and what it deferred are free.
+    if (fence->GetCompletedValue() < slotFence[slot])
+    {
+        fence->SetEventOnCompletion(slotFence[slot], fenceEvent);
+        WaitForSingleObject(fenceEvent, INFINITE);
+    }
+    BeginFrameSlot(slot, frames);
+    if (FAILED(frameAlloc[slot]->Reset())) { CheckRemoved("at BeginFrame"); return false; }
+    return SUCCEEDED(list->Reset(frameAlloc[slot].Get(), nullptr));
+}
+
+void Device::EndFrame()
+{
+    list->Close();
+    ID3D12CommandList* lists[] = { list.Get() };
+    queue->ExecuteCommandLists(1, lists);
+    slotFence[slot] = ++fenceValue;
+    queue->Signal(fence.Get(), slotFence[slot]);
+    if (frames == 1 && fence->GetCompletedValue() < slotFence[slot])
+    {
+        fence->SetEventOnCompletion(slotFence[slot], fenceEvent);
+        WaitForSingleObject(fenceEvent, INFINITE);
+    }
+    CheckRemoved("after a submit");
+}
+
 bool Device::Begin()
 {
+    // Its allocator is free: every EndAndWait waited for it.
     if (FAILED(alloc->Reset())) { CheckRemoved("at Begin"); return false; }
     return SUCCEEDED(list->Reset(alloc.Get(), nullptr));
 }
@@ -227,7 +269,6 @@ void Device::EndAndWait()
     ID3D12CommandList* lists[] = { list.Get() };
     queue->ExecuteCommandLists(1, lists);
     WaitForGpu();
-    ResetFrameUploads();   // the GPU has read every constant this frame placed in the ring
     CheckRemoved("after a submit");
 }
 
@@ -329,6 +370,7 @@ void Device::WaitForGpu()
         fence->SetEventOnCompletion(v, fenceEvent);
         WaitForSingleObject(fenceEvent, INFINITE);
     }
+    ReleaseDeferred();   // the GPU is idle: nothing a frame deferred is in use any more
 }
 
 void Device::Destroy()

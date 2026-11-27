@@ -1034,7 +1034,7 @@ Status WRALLY_CALL RenderFrame(Renderer* r, const FrameDesc* f)
         if (f->camera.cut) r->g->core.ResetHistory();
     }
 
-    if (!r->g->dev.Begin()) {
+    if (!r->g->dev.BeginFrame()) {
         if (Removed(*r, "at Begin")) return Status::Ok;   // the frame is lost; the next one is on a new device
         return r->Fail(Status::ErrDevice, "renderFrame: the command list would not open");
     }
@@ -1097,9 +1097,11 @@ Status WRALLY_CALL RenderFrame(Renderer* r, const FrameDesc* f)
             d5->RemoveDevice();
         }
     }
-    r->g->dev.EndAndWait();
+    r->g->dev.EndFrame();
+    // A capture is read at once (WriteCapture): with frames in flight its frame must have run first.
+    if (capture && r->g->dev.frames > 1) r->g->dev.WaitForGpu();
     r->g->dev.DrainMessages();
-    // A removal in this frame (EndAndWait's CheckRemoved logged DRED's record): the frame is lost - not presented, its
+    // A removal in this frame (EndFrame's CheckRemoved logged DRED's record): the frame is lost - not presented, its
     // readbacks not read, a capture asked for taken from the next one. Ok: the next call that needs the device makes
     // a new one, and the client goes on as if nothing happened.
     if (Removed(*r, "renderFrame")) return Status::Ok;

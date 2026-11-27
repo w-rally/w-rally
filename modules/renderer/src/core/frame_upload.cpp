@@ -11,6 +11,9 @@ namespace core {
 
 namespace {
 
+constexpr uint32_t kSlots = 2;       // Device::kMaxFrames
+constexpr size_t   kChunk = 1 << 20; // 1 MB: a frame's constants fit in one; more are added when not
+
 struct Chunk
 {
     ComPtr<ID3D12Resource> res;
@@ -18,16 +21,22 @@ struct Chunk
     size_t                 size = 0;
 };
 
-constexpr size_t kChunk = 1 << 20;   // 1 MB: a frame's constants fit in one; more are added when not
+struct Slot
+{
+    std::vector<Chunk>            chunks;
+    size_t                        at = 0;     // the chunk being filled
+    size_t                        used = 0;   // bytes of it used
+    std::vector<ComPtr<IUnknown>> deferred;   // held until this slot's frame has run
+};
 
 struct Ring
 {
     // The chunks' device, compared, NOT held: anything alive on a removed device keeps it, and D3D12 then makes no
     // new device on that adapter (the device-loss tests). ReleaseFrameUploads drops the chunks with the device.
-    ID3D12Device*        device = nullptr;
-    std::vector<Chunk>   chunks;
-    size_t               at = 0;     // the chunk being filled
-    size_t               used = 0;   // bytes of it used
+    ID3D12Device* device = nullptr;
+    Slot          slots[kSlots];
+    uint32_t      current = 0;
+    uint32_t      count = 1;
 };
 
 Ring& TheRing()
@@ -67,47 +76,69 @@ D3D12_GPU_VIRTUAL_ADDRESS FrameUpload(ID3D12Device* device, const void* data, si
     Ring& r = TheRing();
     if (r.device != device)
     {
-        r.chunks.clear();
-        r.at = r.used = 0;
+        for (Slot& s : r.slots) s.chunks.clear(), s.at = s.used = 0;
         r.device = device;
     }
+    Slot& s = r.slots[r.current];
     if (align < 16) align = 16;
     for (;;)
     {
-        if (r.at < r.chunks.size())
+        if (s.at < s.chunks.size())
         {
-            Chunk& c = r.chunks[r.at];
-            const size_t start = (r.used + align - 1) & ~(align - 1);
+            Chunk& c = s.chunks[s.at];
+            const size_t start = (s.used + align - 1) & ~(align - 1);
             if (start + bytes <= c.size)
             {
                 memcpy(c.mapped + start, data, bytes);
-                r.used = start + bytes;
+                s.used = start + bytes;
                 return c.res->GetGPUVirtualAddress() + start;
             }
-            ++r.at;   // full (or too small for this): the next chunk, or a new one below
-            r.used = 0;
+            ++s.at;   // full (or too small for this): the next chunk, or a new one below
+            s.used = 0;
             continue;
         }
         Chunk c;
         if (!MakeChunk(device, bytes > kChunk ? ((bytes + 0xFFFF) & ~size_t(0xFFFF)) : kChunk, c)) return 0;
-        r.chunks.push_back(c);
-        r.at = r.chunks.size() - 1;
-        r.used = 0;
+        s.chunks.push_back(c);
+        s.at = s.chunks.size() - 1;
+        s.used = 0;
     }
 }
 
-void ResetFrameUploads()
+void DeferRelease(IUnknown* object)
+{
+    if (!object) return;
+    Ring& r = TheRing();
+    r.slots[r.current].deferred.emplace_back(object);
+}
+
+void BeginFrameSlot(uint32_t slot, uint32_t slots)
 {
     Ring& r = TheRing();
-    r.at = 0;
-    r.used = 0;
+    r.count = slots < 1 ? 1 : slots > kSlots ? kSlots : slots;
+    r.current = slot % r.count;
+    Slot& s = r.slots[r.current];
+    s.at = s.used = 0;
+    s.deferred.clear();
+}
+
+uint32_t FrameSlot() { return TheRing().current; }
+uint32_t FrameSlots() { return TheRing().count; }
+
+void ReleaseDeferred()
+{
+    for (Slot& s : TheRing().slots) s.deferred.clear();
 }
 
 void ReleaseFrameUploads()
 {
     Ring& r = TheRing();
-    r.chunks.clear();
-    r.at = r.used = 0;
+    for (Slot& s : r.slots)
+    {
+        s.chunks.clear();
+        s.at = s.used = 0;
+        s.deferred.clear();
+    }
     r.device = nullptr;
 }
 
