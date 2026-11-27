@@ -317,14 +317,16 @@ QuickChoice QuickPage(const ImGuiLayer& ui, const assets::Catalog& catalog, app:
             }
     const bool carOk = car && usableCar(*car);
 
-    std::vector<Row> rows(8);
-    Row& stage = rows[0];
+    // The rows: START STAGE first (the page's way on), then what the run is.
+    enum { kStartRow, kStageRow, kCarRow, kPhysicsRow, kSetupRow, kDamageRow, kDayRow, kWeatherRow, kRows };
+    std::vector<Row> rows(kRows);
+    Row& stage = rows[kStageRow];
     stage.kind = Row::Open, stage.label = "STAGE";
     stage.shown = st ? Upper(st->title) : "NO STAGES";
     stage.sub = st ? "" : "SEE SETTINGS";
     stage.badge = st ? (st->imported ? 1 : 2) : 0;
     stage.help = "Enter opens the stages: a collection first, then its stages.";
-    Row& carRow = rows[1];
+    Row& carRow = rows[kCarRow];
     carRow.kind = Row::Open, carRow.label = "CAR";
     carRow.shown = car ? Upper(car->name) : "NO CARS";
     carRow.sub = !car ? "SEE SETTINGS" : carOk ? "PHYSICS: " + Upper(car->physicsFrom) : "NOT USABLE BY W-RALLY";
@@ -338,7 +340,7 @@ QuickChoice QuickPage(const ImGuiLayer& ui, const assets::Catalog& catalog, app:
             if (!p.modules.empty()) drivable.push_back(&p);
     const assets::PhysicsVariant* chosen = car ? catalog.PhysicsFor(*car, s) : nullptr;
     int physics = 0;
-    Row& physicsRow = rows[2];
+    Row& physicsRow = rows[kPhysicsRow];
     physicsRow.kind = Row::Choice, physicsRow.label = "PHYSICS";
     for (size_t i = 0; i < drivable.size(); ++i) {
         physicsRow.options.push_back(Upper(drivable[i]->name));
@@ -357,7 +359,7 @@ QuickChoice QuickPage(const ImGuiLayer& ui, const assets::Catalog& catalog, app:
 
     const std::vector<assets::Setup> setups = car ? catalog.SetupsFor(*car, chosen) : std::vector<assets::Setup>{};
     int setup = 0;
-    Row& setupRow = rows[3];
+    Row& setupRow = rows[kSetupRow];
     setupRow.kind = Row::Choice, setupRow.label = "CAR SETUP", setupRow.options = {"DEFAULT"};
     for (size_t i = 0; i < setups.size(); ++i) {
         setupRow.options.push_back(Upper(setups[i].name));
@@ -367,7 +369,7 @@ QuickChoice QuickPage(const ImGuiLayer& ui, const assets::Catalog& catalog, app:
     setupRow.help = "The default setup for the stage's surface, or a saved one. Enter shows its values and sets the car's lamps.";
 
     int damage = static_cast<int>(std::min(s.damage, 3u));
-    Row& damageRow = rows[4];
+    Row& damageRow = rows[kDamageRow];
     damageRow.kind = Row::Choice, damageRow.label = "DAMAGE", damageRow.at = &damage;
     damageRow.options.assign(std::begin(kDamage), std::end(kDamage));
     damageRow.help = "How much the car takes: off, safe, reduced or realistic.";
@@ -389,14 +391,14 @@ QuickChoice QuickPage(const ImGuiLayer& ui, const assets::Catalog& catalog, app:
     char day = chosenWeather >= 0 ? st->weatherDays[chosenWeather] : g_quickDay;
     if (std::find(days.begin(), days.end(), day) == days.end()) day = days.empty() ? 0 : days.front();
     int dayAt = static_cast<int>(std::find(days.begin(), days.end(), day) - days.begin());
-    Row& dayRow = rows[5];
+    Row& dayRow = rows[kDayRow];
     dayRow.kind = Row::Choice, dayRow.label = "TIME OF DAY";
     for (const char d : days) dayRow.options.push_back(d ? assets::DayName(d) : "OTHER");
     if (days.empty()) dayRow.options = {"THE STAGE'S"}, dayAt = 0;
     dayRow.at = &dayAt;
     dayRow.help = "Morning, noon or evening: the times of day this stage has weathers for. The weather below is that time's.";
 
-    Row& weatherRow = rows[6];
+    Row& weatherRow = rows[kWeatherRow];
     weatherRow.kind = Row::Choice, weatherRow.label = "WEATHER", weatherRow.options = {"STAGE DEFAULT"};
     std::vector<int> ofDay;   // the day's weathers, into st->weathers
     int weather = 0;
@@ -415,7 +417,7 @@ QuickChoice QuickPage(const ImGuiLayer& ui, const assets::Catalog& catalog, app:
     weatherRow.help = "A preset weather of that time of day, or Custom: Enter opens the weather - the clouds, the fog, the rain, the "
                       "time of day, the season and the road.";
 
-    Row& start = rows[7];
+    Row& start = rows[kStartRow];
     start.kind = Row::Open, start.label = "START STAGE", start.shown = "", start.sub = "";
     start.off = !st || !carOk;
     start.help = "To the start line.";
@@ -425,21 +427,21 @@ QuickChoice QuickPage(const ImGuiLayer& ui, const assets::Catalog& catalog, app:
         Header(l, "W-RALLY \xC2\xB7 MAIN MENU", "QUICK RALLY");
         l.d->AddRectFilled(l.P(kX0, 196), l.P(kX0 + 720, 197), kLine);
         const int keyRow = ListKeys(rows, g_quick);
-        const int clicked = Rows(l, rows, g_quick, 228, 720, 76);
+        const int clicked = Rows(l, rows, g_quick, 228, 720, 68);   // (68: the eight end above the help)
         const int done = keyRow >= 0 ? keyRow : clicked;
-        if (done == 0) g_page = Page::Stage;
-        else if (done == 1) g_page = Page::Garage;
-        else if (done == 2) Change(physicsRow, +1);
-        else if (done == 3 && car) g_page = Page::Setup;
-        else if (done == 6 && weather == custom) g_page = Page::Weather;
-        else if (done == 6) Change(weatherRow, +1);
-        else if (done == 5) Change(dayRow, +1);
-        else if (done == 4) Change(damageRow, +1);
-        else if (done == 7 && !start.off) c = QuickChoice::Start;
+        if (done == kStageRow) g_page = Page::Stage;
+        else if (done == kCarRow) g_page = Page::Garage;
+        else if (done == kPhysicsRow) Change(physicsRow, +1);
+        else if (done == kSetupRow && car) g_page = Page::Setup;
+        else if (done == kWeatherRow && weather == custom) g_page = Page::Weather;
+        else if (done == kWeatherRow) Change(weatherRow, +1);
+        else if (done == kDayRow) Change(dayRow, +1);
+        else if (done == kDamageRow) Change(damageRow, +1);
+        else if (done == kStartRow && !start.off) c = QuickChoice::Start;
         const Row& sel = rows[g_quick.at];
-        Help(l, g_quick.at == 1 && car && !carOk ? "W-Rally does not know this car: choose another in the garage." : sel.help);
-        const char* enter = g_quick.at == 0 ? "CHOOSE" : g_quick.at == 1 ? "GARAGE" : g_quick.at == 3 ? "DETAILS"
-                            : g_quick.at == 6 && weather == custom ? "EDIT" : g_quick.at == 7 ? "START" : "SELECT";
+        Help(l, g_quick.at == kCarRow && car && !carOk ? "W-Rally does not know this car: choose another in the garage." : sel.help);
+        const char* enter = g_quick.at == kStageRow ? "CHOOSE" : g_quick.at == kCarRow ? "GARAGE" : g_quick.at == kSetupRow ? "DETAILS"
+                            : g_quick.at == kWeatherRow && weather == custom ? "EDIT" : g_quick.at == kStartRow ? "START" : "SELECT";
         if (Footer(l, {{"W S", "MOVE"}, {"A D", "CHANGE"}, {"ENTER", enter}, {"ESC", "BACK"}})) c = QuickChoice::Back;
     });
     if (KeyEsc()) c = QuickChoice::Back;
