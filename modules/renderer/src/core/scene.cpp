@@ -4362,6 +4362,9 @@ bool Scene::UploadDynamic(ID3D12Device* dev)
     const size_t vBytes = m_dynVerts.size() * sizeof(::ngg::Vertex);
     const size_t iBytes = m_dynIndices.size() * sizeof(uint32_t);
 
+    // The old pool may still be drawn by a frame in flight (device.h): released once that frame has run.
+    DeferRelease(m_dynVb.Get());
+    DeferRelease(m_dynIb.Get());
     m_dynVb = MakeGpuBuffer(dev, m_copyQueue.Get(), m_dynVerts.data(), vBytes);
     m_dynIb = MakeGpuBuffer(dev, m_copyQueue.Get(), m_dynIndices.data(), iBytes);
     if (!m_dynVb || !m_dynIb) { Log("scene: dynamic pool upload failed"); return false; }

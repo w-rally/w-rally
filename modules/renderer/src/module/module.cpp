@@ -271,6 +271,7 @@ struct Renderer {
     bool keepCopies = true;                // keepCopies: the big bytes kept here (default: no reload callback)
     bool replaying = false;                // Recover is calling the table: nothing journaled
     bool lost = false;                     // removed; the next call that needs the device makes a new one
+    bool inFlight = false;                 // a frame submitted since the GPU was last waited for (Settle)
     bool broken = false;                   // a new device was made but the rest of the renderer was not: ErrFault
     uint32_t generation = 0;               // devices made after the first (RenderStats::deviceGeneration)
     std::chrono::steady_clock::time_point lastFailed{};   // a new device's last failed try
@@ -408,6 +409,16 @@ bool Removed(Renderer& r, const char* where)
 
 // Before a call that needs the device: Ok, or why not. After a removal, a new device first (a second or two: the
 // scene loaded again); a renderer whose new device failed tries again at most once a second.
+// With frames in flight (device.h) a call between frames that replaces what the GPU may still be drawing - a scene,
+// a texture and its view, a model's materials, the editor's overlays, labels and font, the settings' passes - waits
+// for it first: once per batch of such calls (loads and editor work, never the game's steady frame).
+void Settle(Renderer& r)
+{
+    if (!r.inFlight || r.lost || !r.g || !r.g->dev.queue) return;
+    r.inFlight = false;
+    if (r.g->dev.frames > 1) r.g->dev.WaitForGpu();
+}
+
 Status NeedDevice(Renderer* r)
 {
     if (!r) return Status::ErrInvalidArg;
@@ -587,6 +598,7 @@ Status WRALLY_CALL ApplySettings(Renderer* r, const RenderSettings* s)
     if (s->mode != WindowMode::Windowed) return r->Fail(Status::ErrNotSupported, "only windowed so far");
     r->settings = *s;                  // (a new device takes these)
     if (const Status d = NeedDevice(r); d != Status::Ok) return d;
+    Settle(*r);
     Apply(*r);
     return Status::Ok;
 }
@@ -625,6 +637,7 @@ Status WRALLY_CALL LoadScene(Renderer* r, const void* bytes, uint64_t count, Sce
     if (!r || !out) return Status::ErrInvalidArg;
     if (!bytes || count < 16) return r->Fail(Status::ErrFormat, "load: empty buffer");
     if (const Status d = NeedDevice(r); d != Status::Ok) return d;
+    Settle(*r);
     if (!r->replaying) r->journal.ForgetScene();
     const Status s = Retry(r, [&] { return LoadSceneNow(r, bytes, count, out); });
     if (s == Status::Ok && !r->replaying) {
@@ -640,6 +653,7 @@ Status WRALLY_CALL LoadSceneVariant(Renderer* r, const void* bytes, uint64_t cou
 {
     if (!r) return Status::ErrInvalidArg;
     if (const Status d = NeedDevice(r); d != Status::Ok) return d;
+    Settle(*r);
     r->g->scene.SetVariant(variant);
     const Status s = LoadScene(r, bytes, count, out);
     r->g->scene.SetVariant(nullptr);      // a later loadScene draws a file's main variant, as it always did
@@ -705,6 +719,7 @@ Status AddSceneTexture(Renderer* r, const void* dds, uint64_t bytes, TextureHand
     if (!r || !out || !dds || !bytes) return Status::ErrInvalidArg;
     if (!r->sceneLoaded) return r->Fail(Status::ErrInvalidArg, std::string(what) + ": load a scene first (textures are its)");
     if (const Status d = NeedDevice(r); d != Status::Ok) return d;
+    Settle(*r);
     const Status s = Retry(r, [&] {
         const uint32_t h = r->g->scene.AddTexture(r->g->dev.device.Get(), r->g->dev.queue.Get(), dds, static_cast<size_t>(bytes), data);
         if (!h) return r->Fail(Status::ErrFormat, std::string(what) + ": the DDS could not be decoded or uploaded");
@@ -735,6 +750,7 @@ Status WRALLY_CALL CreateTextureRgba(Renderer* r, const void* rgba, uint32_t wid
     if (out) *out = 0;
     if (!r || !out) return Status::ErrInvalidArg;
     if (const Status d = NeedDevice(r); d != Status::Ok) return d;
+    Settle(*r);
     const Status s = Retry(r, [&] {
         std::string e;
         const uint32_t slot = r->g->ui.AddTexture(r->g->dev, rgba, width, height, e);
@@ -840,6 +856,7 @@ Status WRALLY_CALL CreateModel(Renderer* r, const ModelDesc* d, ModelHandle* out
 {
     if (out) *out = 0;
     if (const Status s = NeedDevice(r); s != Status::Ok) return s;
+    Settle(*r);
     const Status s = Retry(r, [&] { return CreateModelNow(r, d, out); });
     if (s == Status::Ok && !r->replaying) {
         Journal::Op op{Journal::Op::Model};
@@ -1098,6 +1115,7 @@ Status WRALLY_CALL RenderFrame(Renderer* r, const FrameDesc* f)
         }
     }
     r->g->dev.EndFrame();
+    r->inFlight = true;
     // A capture is read at once (WriteCapture): with frames in flight its frame must have run first.
     if (capture && r->g->dev.frames > 1) r->g->dev.WaitForGpu();
     r->g->dev.DrainMessages();
@@ -1284,6 +1302,7 @@ Status WRALLY_CALL EditSetOverlayLines(Renderer* r, uint32_t layer, const LineVe
     if (!r || layer >= kEditOverlayLayers || (count && !v)) return Status::ErrInvalidArg;
     if (count & 1u) return r->Fail(Status::ErrInvalidArg, "setOverlayLines: an odd vertex count (a segment is a pair)");
     if (const Status d = NeedDevice(r); d != Status::Ok) return d;
+    Settle(*r);
     const Status s = Retry(r, [&] {
         if (!r->g->scene.SetOverlayLines(r->g->dev.device.Get(), layer + 1,
                                          reinterpret_cast<const ngg::core::Scene::OverlayVertex*>(v), count, flags))
@@ -1307,6 +1326,7 @@ Status WRALLY_CALL EditSetFont(Renderer* r, const void* rgba, uint32_t width, ui
 {
     if (!r || !rgba || !width || !height || !columns || !rows) return Status::ErrInvalidArg;
     if (const Status d = NeedDevice(r); d != Status::Ok) return d;
+    Settle(*r);
     const Status s = Retry(r, [&] {
         if (!r->g->scene.SetFont(r->g->dev.device.Get(), r->g->dev.queue.Get(), rgba, width, height, columns, rows, firstChar))
             return r->Fail(Status::ErrDevice, "setFont: the atlas could not be uploaded");
@@ -1325,6 +1345,7 @@ Status WRALLY_CALL EditSetLabels(Renderer* r, uint32_t layer, const EditLabel* l
 {
     if (!r || layer >= kEditLabelLayers || (count && (!labels || !blob))) return Status::ErrInvalidArg;
     if (const Status d = NeedDevice(r); d != Status::Ok) return d;
+    Settle(*r);
     if (count && !r->g->scene.HasFont()) return r->Fail(Status::ErrInvalidArg, "setLabels: no font yet (setFont)");
     if (!r->g->scene.SetLabels(r->g->dev.device.Get(), layer, reinterpret_cast<const ngg::core::Scene::Label*>(labels), count,
                             blob, blobBytes, pixelHeight, flags))

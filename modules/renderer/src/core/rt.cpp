@@ -541,6 +541,9 @@ bool Rt::IsBuilding(uint64_t key) const
 
 void Rt::ForgetScene()
 {
+    // (A frame in flight may still trace them - device.h: released once it has run.)
+    for (auto& e : m_blas) DeferRelease(e.second.as.Get());
+    DeferRelease(m_tlas.Get());
     m_blas.clear();
     m_tlas.Reset();
     m_instanceCount = 0;
@@ -834,6 +837,7 @@ bool Rt::Rebuild(Device& dev, ID3D12GraphicsCommandList* list, const Scene::RtSh
             ++it;
             continue;
         }
+        DeferRelease(it->second.as.Get());   // the frame in flight's TLAS may still name it (device.h)
         it = m_blas.erase(it);
     }
     std::vector<uint64_t> published;              // what the TLAS can hold now: built and live (and a held world)
@@ -864,12 +868,15 @@ bool Rt::Rebuild(Device& dev, ID3D12GraphicsCommandList* list, const Scene::RtSh
         const size_t bytes = v.size() * 4;
         void* p = nullptr;
         D3D12_RANGE none = { 0, 0 };
-        if (buf && buf->GetDesc().Width >= bytes && SUCCEEDED(buf->Map(0, &none, &p)))
+        // With frames in flight (device.h) the last frame's any-hit tests may still read it: a new one, the old one
+        // released once that frame has run.
+        if (FrameSlots() == 1 && buf && buf->GetDesc().Width >= bytes && SUCCEEDED(buf->Map(0, &none, &p)))
         {
             memcpy(p, v.data(), bytes);
             buf->Unmap(0, nullptr);
             return;
         }
+        DeferRelease(buf.Get());
         buf = MakeBuffer(dev.device.Get(), bytes + bytes / 3, D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_STATE_GENERIC_READ);
         if (buf && SUCCEEDED(buf->Map(0, &none, &p)))
         {
@@ -881,6 +888,7 @@ bool Rt::Rebuild(Device& dev, ID3D12GraphicsCommandList* list, const Scene::RtSh
     write(m_ibAlpha, alpha);
     write(m_triMaterial, alphaMat);
     if (!m_triPlant || !m_ibAlpha || !m_triMaterial) return false;
+    DeferRelease(m_materials.Get());   // (a frame in flight may still read the old table)
     m_materials = shared.materials;
     m_vertexStride = shared.stride;
     m_staticVb = shared.staticVb;
@@ -1022,7 +1030,7 @@ bool Rt::UpdateInstances(Device& dev, ID3D12GraphicsCommandList* list,
     }
     m_appearedFlagged = !m_appeared.empty();
     m_appeared.clear();
-    if (descs.empty()) { m_tlas.Reset(); m_instanceCount = 0; return false; }
+    if (descs.empty()) { DeferRelease(m_tlas.Get()); m_tlas.Reset(); m_instanceCount = 0; return false; }
 
     // The two tables go into upload buffers kept from frame to frame (mapped once, a quarter to spare): creating them
     // every frame was 2 ms of the 3.5 a moving car's TLAS cost. One per frame slot: overwriting is safe, as the frame
@@ -1058,13 +1066,19 @@ bool Rt::UpdateInstances(Device& dev, ID3D12GraphicsCommandList* list,
 
     // A quarter to spare: the count goes up and down by a few as car parts land and leave.
     if (!m_tlas || m_tlas->GetDesc().Width < topInfo.ResultDataMaxSizeInBytes)
+    {
+        DeferRelease(m_tlas.Get());   // a frame in flight may still trace the old one (device.h)
         m_tlas = MakeBuffer(dev.device.Get(), topInfo.ResultDataMaxSizeInBytes + topInfo.ResultDataMaxSizeInBytes / 4,
                             D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_RAYTRACING_ACCELERATION_STRUCTURE,
                             D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
+    }
     if (!m_scratch || m_scratch->GetDesc().Width < scratchBytes)
+    {
+        DeferRelease(m_scratch.Get());
         m_scratch = MakeBuffer(dev.device.Get(), scratchBytes + scratchBytes / 4, D3D12_HEAP_TYPE_DEFAULT,
                                D3D12_RESOURCE_STATE_COMMON,
                                D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
+    }
     if (!m_tlas || !m_scratch) return false;
 
     // Recorded in the FRAME's list, before its first ray (the prepass is next; the traces come after it): no
