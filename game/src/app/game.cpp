@@ -1418,14 +1418,24 @@ StageEnd RunStage(Shell& sh, const Options& given, bool fromMenu, std::string& e
             double gsum = 0;
             for (float ms : frameMsSeen) gsum += ms;
             const double n = phaseFrames, render = phaseMs[1] / n, gpu = gsum / double(frameMsSeen.size());
-            std::printf("cpu phases (means): physics wait %.2f ms, RenderFrame %.2f ms (of it ~%.2f ms GPU, ~%.2f ms the "
-                        "renderer's CPU), Present %.2f ms\n", phaseMs[0] / n, render, gpu, render - gpu, phaseMs[2] / n);
+            // RenderFrame - GPU is the renderer's CPU only when the frame is synchronous (NGG_FRAMES=1). With two
+            // frames in flight (the default) RenderFrame overlaps the GPU's previous frame and holds the wait for it;
+            // NGG_CPU_TIMES=1 gives the renderer's own CPU then.
+            const char* const fe = std::getenv("NGG_FRAMES");
+            if (fe && std::atoi(fe) == 1)
+                std::printf("cpu phases (means): physics wait %.2f ms, RenderFrame %.2f ms (of it ~%.2f ms GPU, ~%.2f ms "
+                            "the renderer's CPU), Present %.2f ms\n", phaseMs[0] / n, render, gpu, render - gpu,
+                            phaseMs[2] / n);
+            else
+                std::printf("cpu phases (means): physics wait %.2f ms, RenderFrame %.2f ms (frames in flight: overlaps "
+                            "the GPU's %.2f ms; NGG_CPU_TIMES=1 for the renderer's CPU), Present %.2f ms\n",
+                            phaseMs[0] / n, render, gpu, phaseMs[2] / n);
         }
         if (wallMsSeen.size() > 60) {
             std::vector<float> w(wallMsSeen.begin() + 30, wallMsSeen.end());
             double wsum = 0;
             for (float ms : w) wsum += ms;
-            std::printf("wall frame (CPU + GPU, vsync off to mean it): mean %.2f ms (%.0f fps), median %.2f, p95 %.2f, p99 "
+            std::printf("wall frame (vsync off to mean it): mean %.2f ms (%.0f fps), median %.2f, p95 %.2f, p99 "
                         "%.2f ms\n", wsum / w.size(), 1000.0 * w.size() / wsum, tail(w, 0.5), tail(w, 0.95), tail(w, 0.99));
         }
     }

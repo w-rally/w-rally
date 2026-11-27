@@ -4,7 +4,7 @@
 // Used by every client of ngg-core - the game and the editor (design §8)
 // through WRenderer. Nothing in ngg-core knows about the game.
 //
-// FRAMES IN FLIGHT (NGG_FRAMES=1|2, default 1): the frame's list is recorded
+// FRAMES IN FLIGHT (NGG_FRAMES=1|2, default 2): the frame's list is recorded
 // on its slot's allocator (BeginFrame/EndFrame). With one, EndFrame waits for
 // the GPU as the renderer always did; with two, the CPU records frame N+1
 // while the GPU runs frame N, and BeginFrame waits only for the frame that
@@ -32,7 +32,7 @@ struct Device
     Microsoft::WRL::ComPtr<ID3D12CommandAllocator>    alloc;                    // the immediate path's
     Microsoft::WRL::ComPtr<ID3D12CommandAllocator>    frameAlloc[kMaxFrames];   // a frame slot's each
     Microsoft::WRL::ComPtr<ID3D12GraphicsCommandList> list;
-    uint32_t frames = 1;                // frames in flight (NGG_FRAMES), read at Create
+    uint32_t frames = 2;                // frames in flight (NGG_FRAMES, default 2), read at Create
     uint32_t slot = 0;                  // the frame being recorded's slot
     uint64_t frameNumber = 0;           // frames begun
     bool     recording = false;         // between BeginFrame and EndFrame

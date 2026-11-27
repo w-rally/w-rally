@@ -210,9 +210,10 @@ bool Device::Create(const LUID* luid, bool enableDebugLayer)
     if (FAILED(device->CreateCommandQueue(&qd, IID_PPV_ARGS(&queue)))) return false;
     if (FAILED(device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT,
                                               IID_PPV_ARGS(&alloc)))) return false;
-    // Frames in flight: NGG_FRAMES=2 overlaps the CPU's recording with the GPU's previous frame (see device.h).
-    frames = 1;
-    if (const char* e = std::getenv("NGG_FRAMES")) frames = atoi(e) >= 2 ? 2u : 1u;
+    // Frames in flight: two (the default) overlap the CPU's recording with the GPU's previous frame (see device.h);
+    // NGG_FRAMES=1 is the synchronous fallback.
+    frames = 2;
+    if (const char* e = std::getenv("NGG_FRAMES")) frames = atoi(e) == 1 ? 1u : 2u;
     for (uint32_t k = 0; k < kMaxFrames; ++k)
     {
         if (FAILED(device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&frameAlloc[k]))))
@@ -221,7 +222,7 @@ bool Device::Create(const LUID* luid, bool enableDebugLayer)
     }
     slot = 0;
     frameNumber = 0;
-    Log("core: %u frame(s) in flight%s", frames, frames > 1 ? " (NGG_FRAMES)" : "");
+    Log("core: %u frame(s) in flight%s", frames, std::getenv("NGG_FRAMES") ? " (NGG_FRAMES)" : "");
     if (FAILED(device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, alloc.Get(),
                                          nullptr, IID_PPV_ARGS(&list)))) return false;
     list->Close();

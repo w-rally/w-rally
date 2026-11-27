@@ -291,7 +291,7 @@ void Renderer::RecordFrame(Device& dev, D3D12_CPU_DESCRIPTOR_HANDLE outRtv,
     ID3D12GraphicsCommandList* list = dev.list.Get();
     if (!list) return;
     // NGG_CPU_TIMES: the CPU time each stage of the recording takes, means over 300 frames (where a frame's CPU goes;
-    // the frame is synchronous, so it adds to the GPU's).
+    // with NGG_FRAMES=1 it adds to the GPU's; with frames in flight it overlaps the GPU's previous frame).
     static const bool cpuTimes = std::getenv("NGG_CPU_TIMES") != nullptr;
     static const char* const kStage[] = { "grass", "foliage near", "RT current", "lights", "prepass", "visibility",
                                           "foliage map", "sky", "scene pass", "post", "rest" };
