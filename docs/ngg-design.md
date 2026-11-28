@@ -131,7 +131,9 @@ The ABI the game sees (`include/wrally/iface/renderer.h`, `renderer_edit.h`) is 
   `Publish`ed into the slot's half). Table calls between frames that replace GPU state (loads, models, textures,
   editor overlays, settings) wait for the GPU first (`Settle`, module.cpp), as does a render-size change. Something
   that must read this frame's result (the pixel probe, overlay stats, a capture) asks for a finished frame
-  (`Scene::WantsFinishedFrame`) and waits. RTX 5070 Ti, 1440p high native, shipped stage, real time: 97 -> 153 fps
+  (`Scene::WantsFinishedFrame`) and waits. **Pacing:** the swap chain has 3 buffers and a frame-latency object (latency = the frames in
+  flight) that `renderFrame` waits on first. With 2 buffers and DXGI's default 3 queued presents the loop ran in bursts
+  at vsync (3 frames ~0.1 ms apart, then ~50 ms); now it is as even as with one frame (menu: 16.7 +-1.4 ms). RTX 5070 Ti, 1440p high native, shipped stage, real time: 97 -> 153 fps
   (p95 11.7 -> 8.4 ms), the GPU frame unchanged; the frame is now GPU-bound.
 - **Never key a descriptor on a resource pointer.** A recreated texture can land at the freed one's address; the
   RT visibility / AO descriptors are rewritten on every set (`Scene::SetRtVisibility`, `SetRtAo`).
@@ -2682,6 +2684,7 @@ All read once, at start-up or first use; development only unless noted.
 | `NGG_RR_BIAS=1` | RR's bias-current-colour mask also takes the moved-object mask (4.11; off: it ghosted slightly more) | `rr_visibility.cpp` |
 | `NGG_RR_GUIDES=nospec\|white` | RR's guides A/B: no specular albedo / white albedos | `rr_visibility.cpp` |
 | `NGG_FRAMES=1\|2` | frames in flight (default 2); 1 is the synchronous frame, for A/B and as a fallback (1.3) | `device.cpp` |
+| `NGG_FRAME_LATENCY=1..3` | presents queued ahead of the display (default: the frames in flight); the loop waits once per frame on the swap chain's latency object (1.3) | `module.cpp` |
 | `NGG_GPU_VALIDATION=1` | with the debug layer: GPU-based validation (slow; resource states and descriptors as the GPU uses them) | `device.cpp` |
 | `NGG_CPU_TIMES` | the CPU time of each stage of `RecordFrame`, means over 300 frames | `renderer.cpp`, `scene.cpp` |
 | `NGG_MODEL_LODS` | log each instanced model's LODs at load: distance and triangles | `models.cpp` |
