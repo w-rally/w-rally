@@ -1042,6 +1042,10 @@ private:
     bool ClipHidden(const float* bmin, const float* bmax) const;
     void DrawClipWalls(ID3D12GraphicsCommandList* list, int which);
     void ClipFix(ID3D12GraphicsCommandList* list, D3D12_CPU_DESCRIPTOR_HANDLE dsv);
+public:
+    // The depth's writable DSV (the prepass's), for the sky's depth test (Sky::Record).
+    D3D12_CPU_DESCRIPTOR_HANDLE DepthDsv() const { return m_dsvHeap->GetCPUDescriptorHandleForHeapStart(); }
+private:
     // The reflection focus's opaque draws with their own reflection rays (ReflOpen, shader model 6.5): [forward,
     // deferred][cull none, back, front]. Only these carry the ray query - in every pipeline, its state cost the whole
     // main pass ~1 ms on the development GPU.

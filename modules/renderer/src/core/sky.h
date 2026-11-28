@@ -94,17 +94,18 @@ class Sky
 public:
     bool Create(ID3D12Device* device, DXGI_FORMAT rtvFormat);
 
-    // Draws the sky over the whole target with NO depth test or write, so it is
-    // recorded BEFORE opaque geometry and simply replaces the colour clear.
-    // Cheap enough at this resolution; a depth-tested version that only shades
-    // untouched pixels is an optimisation for later, not a correctness matter.
+    // Draws the sky, recorded BEFORE opaque geometry, in place of the colour clear. With `depthDsv` (this frame's
+    // prepass depth, in DEPTH_WRITE) only where the prepass left the far plane (reverse-Z 0): the world covers the
+    // rest and the main pass draws every one of those pixels. Each sky pixel integrates the atmosphere (16 x 6
+    // samples); over a forest most of the screen is covered, and shading it all was 0.63 ms of a 4.9 ms frame on an
+    // RTX 5070 Ti at 1080p. Without it (no prepass this frame, NGG_SKY_DEPTH=0): the whole target, no depth.
     //
     // view/proj follow ngg-core's camera contract (see scene.h). Pass the
     // ORIGINAL projection - only its two tangent terms are read, and those are
     // untouched by the reverse-Z flip Scene applies.
     void Record(ID3D12GraphicsCommandList* list, D3D12_CPU_DESCRIPTOR_HANDLE rtv,
                 const float* view, const float* proj, UINT width, UINT height,
-                const SkyParams& params);
+                const SkyParams& params, const D3D12_CPU_DESCRIPTOR_HANDLE* depthDsv = nullptr);
 
     bool Ready() const { return m_pso != nullptr; }
 
@@ -123,6 +124,7 @@ private:
 
     Microsoft::WRL::ComPtr<ID3D12RootSignature>  m_rootSig;
     Microsoft::WRL::ComPtr<ID3D12PipelineState>  m_pso;
+    Microsoft::WRL::ComPtr<ID3D12PipelineState>  m_psoDepth;   // the same, tested against the prepass's depth
     Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> m_srvHeap;   // the MS table
     AtmosphereMs m_ms;
     bool         m_msOn = true;

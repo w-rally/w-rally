@@ -495,6 +495,7 @@ void Renderer::RecordFrame(Device& dev, D3D12_CPU_DESCRIPTOR_HANDLE outRtv,
     m_scene.BeginFrame(dev.device.Get());   // the models' instance stream starts over
     m_scene.SetReflectionTlas(0);
     ID3D12Resource* motion = nullptr;
+    bool prepassDrawn = false;   // this frame's prepass depth is there (the sky's depth test)
     if (m_scene.Ready())
     {
         // THE GRASS's field and blades for this camera (grass.h), before the prepass draws them - and before the TLAS:
@@ -518,6 +519,7 @@ void Renderer::RecordFrame(Device& dev, D3D12_CPU_DESCRIPTOR_HANDLE outRtv,
         const bool prepass = m_scene.RecordPrepass(list, view, proj, width, height);
         stage(4);
         if (prepass) motion = m_scene.MotionBuffer();
+        prepassDrawn = prepass;
 
         m_rtActive = m_preferRt && prepass && m_rt.HasScene() && m_rtValid && m_scene.ShadowsOn();
         // Back on the RT path (the first BVH of a load built, the switch, shadows on again): its histories are from
@@ -587,7 +589,11 @@ void Renderer::RecordFrame(Device& dev, D3D12_CPU_DESCRIPTOR_HANDLE outRtv,
     stage(10);
     const D3D12_CPU_DESCRIPTOR_HANDLE hdrRtv = m_post.Begin(list);
     if (m_skyOn && m_sky.Ready())
-        m_sky.Record(list, hdrRtv, view, proj, width, height, sky);
+    {
+        // Only where the prepass left the far plane, when there was one (Sky::Record).
+        const D3D12_CPU_DESCRIPTOR_HANDLE dsv = prepassDrawn ? m_scene.DepthDsv() : D3D12_CPU_DESCRIPTOR_HANDLE{};
+        m_sky.Record(list, hdrRtv, view, proj, width, height, sky, prepassDrawn ? &dsv : nullptr);
+    }
     else
         list->ClearRenderTargetView(hdrRtv, PostFx::kHdrClear, 0, nullptr);
     stage(7);

@@ -944,7 +944,7 @@ Frame order (`Renderer::RecordFrame` in `modules/renderer/src/core/renderer.cpp`
 | atmosphere for the frame | `Scene::SetAtmosphere(sky)`, `Sky::SetMultipleScattering` mirrored from the Scene | one `SkyParams` for every consumer |
 | TAA jitter | `PostFx::Jitter` → `Scene::SetJitter`, `Sky::SetJitter` | set **before** the prepass (see 3.7) |
 | prepass, visibility | `Scene::RecordPrepass`, RT or cascades | depth, normals, motion |
-| sky | `PostFx::Begin`, `Sky::Record` (or a clear to `PostFx::kHdrClear` with the sky off) | covers every pixel, no depth |
+| sky | `PostFx::Begin`, `Sky::Record` (or a clear to `PostFx::kHdrClear` with the sky off) | after a prepass only where it left the far plane (depth test `GREATER_EQUAL` at z = 0, no write; the main pass draws the rest): 0.63 ms -> ~0.05 at 1080p on the RTX's share, 0.94-1.18 -> 0.02-0.09 ms on the dev iGPU; without a prepass every pixel |
 | scene main pass | `Scene::Record`: `AtmosphereMs::Update` (only when dirty), `Environment::Record`, reflection probe resolve, `AerialLut::Record`, draws | |
 | post | `PostFx::Resolve`: TAA or upscaler, meter, tonemap + sharpen + encode | into the client's target |
 
@@ -2659,6 +2659,7 @@ All read once, at start-up or first use; development only unless noted.
 
 | variable | effect | read in |
 |---|---|---|
+| `NGG_SKY_DEPTH=0` | the sky drawn over the whole target without the depth test (A/B; by default it shades only where the prepass left the far plane) | `sky.cpp` |
 | `NGG_SHADER_DIR=<dir>` | compile shaders from the files at run time; disables the pipeline library | `shaders.cpp`, `pipeline_cache.cpp` |
 | `NGG_SHADER_DUMP=<dir>` | write each shader blob as handed out | `shaders.cpp` |
 | `NGG_SHADERC_THREADS=<n>` | build-time compiler's threads (default cores, max 16) | `shaderc/main.cpp` |
