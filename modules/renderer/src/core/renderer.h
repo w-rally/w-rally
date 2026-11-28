@@ -29,6 +29,7 @@
 #include <stdint.h>
 #include <memory>
 
+#include "slot_timer.h"
 #include "device.h"
 #include "scene.h"
 #include "sky.h"
@@ -234,6 +235,14 @@ private:
     UINT64      m_frameHz = 0;
     bool        m_framePending[Device::kMaxFrames] = {};   // a frame slot's pair resolved, not yet read
     double      m_frameMs = 0.0;
+    // NGG_GPU_TIMES: a timestamp at each of RecordFrame's stage boundaries (the NGG_CPU_TIMES stages), so the GPU
+    // frame splits into stages that add up to it. Which stage each timestamp closes, per frame slot.
+    SlotTimer   m_stageTimer;
+    static constexpr uint32_t kStageStamps = 24;
+    int8_t      m_stageOf[Device::kMaxFrames][kStageStamps] = {};
+    uint32_t    m_stageStamps[Device::kMaxFrames] = {};
+    double      m_gpuStageMs[11] = {};
+    uint32_t    m_gpuStageFrames = 0;
 };
 
 } // namespace core

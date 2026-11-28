@@ -2695,6 +2695,7 @@ All read once, at start-up or first use; development only unless noted.
 | `NGG_FRAMES=1\|2` | frames in flight (default 2); 1 is the synchronous frame, for A/B and as a fallback (1.3) | `device.cpp` |
 | `NGG_FRAME_LATENCY=1..3` | presents queued ahead of the display (default: the frames in flight); the loop waits once per frame on the swap chain's latency object (1.3) | `module.cpp` |
 | `NGG_GPU_VALIDATION=1` | with the debug layer: GPU-based validation (slow; resource states and descriptors as the GPU uses them) | `device.cpp` |
+| `NGG_GPU_TIMES` | the GPU time of the same stages (a timestamp at each stage boundary, so they add up to the GPU frame), means over 300 frames | `renderer.cpp` |
 | `NGG_CPU_TIMES` | the CPU time of each stage of `RecordFrame`, means over 300 frames | `renderer.cpp`, `scene.cpp` |
 | `NGG_MODEL_LODS` | log each instanced model's LODs at load: distance and triangles | `models.cpp` |
 | `NGG_FOLIAGE_SPLIT=<m>[,<m>]` | the sun cascades' split distances over the computed ones (A/B) | `shadow.cpp` |
