@@ -1878,8 +1878,12 @@ void Scene::RenderFoliageShadows(ID3D12GraphicsCommandList* list, const float* v
     if (!dev) return;
     // Its own timer (the cascades' path times RenderShadows): this slot's last time, then open this one.
     const bool timed = m_foliageTimer.Ready() && m_timerHz;
-    if (UINT64 t[2]; timed && m_foliageTimer.Take(t) && t[1] >= t[0])
-        m_foliageMapMs = 1000.0 * double(t[1] - t[0]) / double(m_timerHz);
+    if (UINT64 t[3]; timed && m_foliageTimer.Take(t) && t[2] >= t[1] && t[1] >= t[0])
+    {
+        m_foliageMapMs = 1000.0 * double(t[2] - t[0]) / double(m_timerHz);
+        m_foliageSliceMs[0] = 1000.0 * double(t[1] - t[0]) / double(m_timerHz);
+        m_foliageSliceMs[1] = 1000.0 * double(t[2] - t[1]) / double(m_timerHz);
+    }
     if (timed) m_foliageTimer.Stamp(list, 0);
     m_shadows->ToDepthWrite(list);
     const UINT res = m_shadows->Resolution();
@@ -1934,6 +1938,8 @@ void Scene::RenderFoliageShadows(ID3D12GraphicsCommandList* list, const float* v
         // Each slice its own near placements and the coarser slices' that reach into it, those whose shadow can reach
         // the view (UpdateFoliageNear). (A coarser LOD in the far slice was tried: its triangles 1.9 M -> 0.1 M, the
         // pass no faster - it is fill-bound.)
+        // (Drawing the placements nearest the sun first was tried, 2026-11-28: no faster - the alpha test turns early
+        // depth rejection off, and the overdraw is within a crown's own leaf cards.)
         CullModels(dev, cplanes, eye, true, batches, c);
         if (!batches.empty())
         {
@@ -1972,6 +1978,7 @@ void Scene::RenderFoliageShadows(ID3D12GraphicsCommandList* list, const float* v
                 tris[c] += (uint64_t)(o.indexCount / 3) * d.instCount;
             }
         }
+        if (timed && c == 0) m_foliageTimer.Stamp(list, 1);
     }
     dev->Release();
     m_shadows->ToShaderResource(list);
@@ -1980,12 +1987,14 @@ void Scene::RenderFoliageShadows(ID3D12GraphicsCommandList* list, const float* v
     // NGG_FOLIAGE_TIMES: the map pass's GPU time and what it drew, every 120th frame (measuring only).
     static const bool times = getenv("NGG_FOLIAGE_TIMES") != nullptr;
     if (times && m_foliageFrame % 120 == 0)
-        Log("scene: foliage map pass %.2f ms GPU; slice 0: %u draws, %.0fk tris; slice 1: %u draws, %.0fk tris",
-            m_foliageMapMs, draws[0], tris[0] / 1000.0, draws[1], tris[1] / 1000.0);
+        Log("scene: foliage map pass %.2f ms GPU; slice 0: %.2f ms, %u draws, %.0fk tris; slice 1: %.2f ms, %u draws, "
+            "%.0fk tris", m_foliageMapMs, m_foliageSliceMs[0], draws[0], tris[0] / 1000.0, m_foliageSliceMs[1], draws[1],
+            tris[1] / 1000.0);
     if (timed)
     {
-        m_foliageTimer.Stamp(list, 1);
-        m_foliageTimer.Resolve(list, 0, 2);
+        if (m_foliageCascades < 2) m_foliageTimer.Stamp(list, 1);
+        m_foliageTimer.Stamp(list, 2);
+        m_foliageTimer.Resolve(list, 0, 3);
     }
 }
 
@@ -3256,7 +3265,7 @@ bool Scene::LoadFromMemory(ID3D12Device* dev, ID3D12CommandQueue* queue,
         if (m_timerHz && m_timer.Create(dev, 8))
         {
             m_shadowTimer.Create(dev, 2);
-            m_foliageTimer.Create(dev, 2);
+            m_foliageTimer.Create(dev, 3);
             m_localShadowTimer.Create(dev, 2);
         }
     }

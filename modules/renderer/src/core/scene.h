@@ -1167,6 +1167,7 @@ private:
     bool                     m_foliageFit = false;         // the cascades' targets hold this frame's foliage fit
     bool                     m_foliageDrawn = false;       // ... and were drawn (the main pass reads them)
     double                   m_foliageMapMs = 0.0;
+    double                   m_foliageSliceMs[2] = {};   // of it, slice 0's and slice 1's (NGG_FOLIAGE_TIMES)
     Microsoft::WRL::ComPtr<ID3D12PipelineState>  m_psoFoliageShadowAlpha;   // a leaf's caster bias, small
     // The DrawItems of `batches` for a pass: one per batch submesh; `fadeSolid` - a crossfading batch's opaque submesh
     // through its alpha-tested twin, which dithers.
