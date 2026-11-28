@@ -77,6 +77,7 @@ struct QualityTier
     float       sharpen;      // TAA post-sharpen
     float       grassReach;   // metres the grass is drawn to (Scene::SetGrassReach); 0 none
     float       grassDensity; // a scale on the grass types' blades per m2 (the 1.5 ms budget on the dev iGPU)
+    uint32_t    shadowRes;    // the sun maps' side: the foliage map's on the RT path, the cascades' otherwise
 };
 
 class Renderer
@@ -241,6 +242,7 @@ private:
     UINT64      m_frameHz = 0;
     bool        m_framePending[Device::kMaxFrames] = {};   // a frame slot's pair resolved, not yet read
     double      m_frameMs = 0.0;
+    uint32_t    m_shadowResWanted = 2048;   // the tier's (or NGG_FOLIAGE_RES): the maps are made again in RecordFrame
     // NGG_GPU_TIMES: a timestamp at each of RecordFrame's stage boundaries (the NGG_CPU_TIMES stages), so the GPU
     // frame splits into stages that add up to it. Which stage each timestamp closes, per frame slot.
     SlotTimer   m_stageTimer;

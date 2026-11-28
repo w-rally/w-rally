@@ -17,10 +17,13 @@ const QualityTier& Renderer::Tier(Quality q)
     // Costs on the development machine's integrated Radeon, lab forest view
     // (965k geometry pixels) - see design §1.5 for the measurement.
     static const QualityTier kTiers[3] = {
-        { "low",    false, 0, 0, 0.25f, 0.0f, 0.0f },   // RT sun shadows only - the VR baseline
-        { "medium", true,  1, 1, 0.50f, 30.0f, 0.6f },   // + RT AO, one ray (the default); XeGTAO medium (2 slices x 2 steps)
-        { "high",   true,  2, 2, 0.50f, 80.0f, 1.0f },   // + RT AO, two rays: less noise at rest; XeGTAO high (3 x 3);
-                                                         // the grass to 80 m at its authored density (RTX-class GPUs)
+        { "low",    false, 0, 0, 0.25f, 0.0f, 0.0f, 1024 },   // RT sun shadows only - the VR baseline
+        { "medium", true,  1, 1, 0.50f, 30.0f, 0.6f, 1024 },   // + RT AO, one ray (the default); XeGTAO medium (2 x 2)
+        { "high",   true,  2, 2, 0.50f, 80.0f, 1.0f, 2048 },   // + RT AO, two rays: less noise at rest; XeGTAO high (3 x 3);
+                                                               // the grass to 80 m at its authored density (RTX-class GPUs)
+        // The sun maps (shadowRes): the foliage map is fill-bound - the near trees' leaf cards over and over - so its
+        // side is its cost: on the dev iGPU's forest 11-17 ms at 2048, 4.6-7.4 at 1024 (the dapples by the car a little
+        // softer). High keeps 2048 (0.64 ms on an RTX 5070 Ti at 1080p).
     };
     const int i = (int)q;
     return kTiers[(i < 0 || i > 2) ? 1 : i];
@@ -42,8 +45,11 @@ void Renderer::SetQuality(Quality q)
     float density = t.grassDensity;
     if (const char* e = std::getenv("NGG_GRASS_DENSITY")) density = (float)atof(e);
     m_scene.SetGrassDensity(density);
-    Log("renderer: quality %s (AO %s, %u ray(s), sharpen %.2f, grass to %.0f m at density x%.2f)",
-        t.name, t.ao ? "on" : "off", t.ao ? t.aoRays : 0, t.sharpen, grass, density);
+    // The sun maps' side: made again at the next frame's start (RecordFrame). NGG_FOLIAGE_RES wins, for A/B.
+    const char* resEnv = std::getenv("NGG_FOLIAGE_RES");
+    m_shadowResWanted = resEnv ? (uint32_t)(std::min)((std::max)(atoi(resEnv), 512), 8192) : t.shadowRes;
+    Log("renderer: quality %s (AO %s, %u ray(s), sharpen %.2f, grass to %.0f m at density x%.2f, sun maps %u)",
+        t.name, t.ao ? "on" : "off", t.ao ? t.aoRays : 0, t.sharpen, grass, density, m_shadowResWanted);
 }
 
 bool Renderer::Create(Device& dev, DXGI_FORMAT outputFormat, UINT width, UINT height,
@@ -58,10 +64,11 @@ bool Renderer::Create(Device& dev, DXGI_FORMAT outputFormat, UINT width, UINT he
     ID3D12Device* d = dev.device.Get();
     if (!m_sky.Create(d, PostFx::kHdrFormat)) Log("renderer: sky unavailable - frames clear instead");
     {
-        // NGG_FOLIAGE_RES: the maps' resolution (the cascades', and on the RT path the foliage map's) - A/B only.
-        const char* e = std::getenv("NGG_FOLIAGE_RES");
-        const UINT res = e ? (UINT)(std::min)((std::max)(atoi(e), 512), 8192) : 2048u;
-        if (!m_shadows.Create(d, res)) Log("renderer: cascaded shadow maps unavailable");
+        // The maps' side follows the quality tier (QualityTier::shadowRes, NGG_FOLIAGE_RES over it): made at the
+        // wanted one here, again in RecordFrame when SetQuality changes it.
+        if (const char* e = std::getenv("NGG_FOLIAGE_RES"))
+            m_shadowResWanted = (uint32_t)(std::min)((std::max)(atoi(e), 512), 8192);
+        if (!m_shadows.Create(d, m_shadowResWanted)) Log("renderer: cascaded shadow maps unavailable");
     }
     if (!m_gtao.Create(d, dev.queue.Get())) Log("renderer: no screen-space AO - the cascades go without AO");
     m_scene.SetShadowMaps(&m_shadows);
@@ -385,6 +392,16 @@ void Renderer::RecordFrame(Device& dev, D3D12_CPU_DESCRIPTOR_HANDLE outRtv,
     {
         const float zNear = -proj[14] / proj[10];
         m_post.SetCamera(zNear, proj[10] * zNear / (proj[10] - 1.0f), 2.0f * atanf(1.0f / proj[5]));
+    }
+
+    // The quality tier changed the sun maps' side (SetQuality): made again before anything draws into or reads them -
+    // the GPU waited for first, as a frame in flight may still read the old ones; the scene's view of them rewritten.
+    if (m_shadows.Ready() && m_shadowResWanted != m_shadows.Resolution())
+    {
+        dev.WaitForGpu();
+        if (m_shadows.Create(dev.device.Get(), m_shadowResWanted)) Log("renderer: sun maps %u", m_shadowResWanted);
+        else Log("renderer: the sun maps could not be made at %u", m_shadowResWanted);
+        m_scene.ShadowMapsRemade();
     }
 
     // The whole frame's GPU time (LastFrameMs): this slot's last frame's, read now - BeginFrame waited for it

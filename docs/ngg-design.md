@@ -520,7 +520,13 @@ touch), pieces wider than 50 m (`kPlantMaxWidth`) left out.
     round them), sharper than the sun. Half reads as clear round flecks with soft edges. `NGG_FOLIAGE_PENUMBRA` scales
     it (10.8). **Resolution is not what blurs them:** a 4096 map looked the same as 2048 with the real penumbra, and
     cost +11-13 ms GPU frame under a dense canopy (the chase camera at 41's start, the alpha-tested leaves' fill in the
-    map pass), so it stays 2048 on any GPU.
+    map pass), so it is never above 2048. **Its side follows the quality tier** (`QualityTier::shadowRes`, 2026-11-28):
+    high 2048, medium and low 1024 - the user's choice. The pass is fill-bound, so the side is its cost: dev iGPU,
+    forest, high vegetation, 11.2-11.5 ms at 2048 against 5.3-5.7 at 1024 (slice 0 6.4-6.8 -> 2.6-2.8); an RTX 5070 Ti
+    pays 0.64 ms at 2048 (1080p). At 1024 the sun gaps along a shadow's edge by the car come out a little softer. The
+    maps are made again at the next frame's start when the tier changes (`Renderer::RecordFrame`, after a GPU wait).
+    Drawing the placements nearest the sun first was tried: no faster (the alpha test turns early depth rejection
+    off; the overdraw is within a crown's own leaf cards).
   - **The map pass under a dense canopy** (2026-11-20). In that view (native 1080p, still frames) the map cost the
     frame +6-9 ms (36.9 / 37.3 -> 46.2 / 43.2 ms; main pass +1.0-1.8 ms, ray tracing -1.6 ms). Its own GPU time
     (`NGG_FOLIAGE_TIMES=1` logs it every 120th frame) was 6.1-7.6 ms, and **it is fill-bound** - the alpha-tested
@@ -2695,7 +2701,7 @@ All read once, at start-up or first use; development only unless noted.
 | `NGG_FOLIAGE_NEAR=<m>`, `NGG_FOLIAGE_CASCADES=1..4` | the foliage map's reach (default 60 m) and slices (default 2) | `models.cpp` |
 | `NGG_FOLIAGE_BIAS=<units>`, `NGG_FOLIAGE_SLOPE=<k>` | the foliage map's caster bias (default 40, 1.5) | `scene.cpp` |
 | `NGG_FOLIAGE_PENUMBRA=<k>` | the foliage map's penumbra over the sun's (default 0.5; 1 the real sun's, 0 crisp) | `models.cpp` |
-| `NGG_FOLIAGE_RES=<n>` | the sun maps' resolution, the cascades' and the foliage map's (default 2048; A/B) | `renderer.cpp` |
+| `NGG_FOLIAGE_RES=<n>` | the sun maps' resolution, the cascades' and the foliage map's, over the quality tier's (high 2048, medium and low 1024; A/B) | `renderer.cpp` |
 | `NGG_FOLIAGE_VIEW_CULL=0` | the foliage map draws every near placement, not only those whose shadow can reach the view (A/B) | `models.cpp` |
 | `NGG_FOLIAGE_TIMES=1` | log the foliage map pass's GPU time and draws every 120th frame | `scene.cpp` |
 | `NGG_NO_SOLIDS` | don't measure solid cards: every alpha-tested object treated as foliage (A/B) | `scene.cpp` |
@@ -2803,7 +2809,7 @@ moved out of the tier keeps the tier's value as its default, so the Quality tier
 | # | item | state / why | blocked on |
 |---|---|---|---|
 | 36 | **Grass row** (off / near / medium / far) | grass reach and density are inside the tier today (`QualityTier::grassReach`, `grassDensity`: low none, medium 30 m, high 50 m). A row of its own: off, 30 m, 50 m, 80 m, density with it. `NGG_GRASS` / `NGG_GRASS_DENSITY` stay over it. Small | nothing |
-| 37 | **Shadow quality row** (low / medium / high), the non-RT path | the cascades are 2048² fixed at `Create` (`NGG_FOLIAGE_RES` is A/B only) and the lamps' maps 1024². The row sets 1024 / 2048 / 4096 and 512 / 1024 / 2048, recreating the maps on change. Low also updates cascade 3 every 3rd frame (#11); high gets the penumbra and the cascade cross-fade (#10). On the RT path it sets only the near foliage map's resolution (#9). Small, plus #10/#11 if taken with it | nothing |
+| 37 | **Shadow quality row** (low / medium / high), the non-RT path | the sun maps follow the quality tier now (high 2048², medium and low 1024², made again on change; `NGG_FOLIAGE_RES` over it) and the lamps' maps 1024². The row sets 1024 / 2048 / 4096 and 512 / 1024 / 2048, recreating the maps on change. Low also updates cascade 3 every 3rd frame (#11); high gets the penumbra and the cascade cross-fade (#10). On the RT path it sets only the near foliage map's resolution (#9). Small, plus #10/#11 if taken with it | nothing |
 | 38 | **Texture quality row** (low / medium / high) | every texture is resident (#23). Low drops the top mip of textures from 1024 up at load, medium of 2048 up, high keeps all: ~4x less VRAM on the big ones for 2-4 GB cards. Stage, models and the car alike; a change reloads the scene's textures (the device-lost journal already re-supplies them, §10.6). An interim answer to #23, not streaming | nothing |
 | 39 | **Spectators row** (off / some / all) | thin the spectators out by a stable hash per object. Needs to know which objects are spectators: an object kind from the converters, never a renderer guess (RBR's vegetation block also holds people, cars, houses, fences). Small once tagged | a `spectator` kind from Wallaby and the importer |
 | 40 | **Ray-tracing detail row** (low / medium / high) | the RT structure's cost is now the plants (#9). The row sets how far placements go into the TLAS and how: low - plants beyond ~80 m out, the rest opaque; medium - out beyond ~200 m, alpha-tested only within 60 m (today's foliage-map range); high - alpha-tested further, out beyond ~400 m. Takes #9's open "distant placements opaque or out of the TLAS". Distances to be measured on the RTX machine (GPU frame ms) and judged by eye while driving. Medium | #9's look while driving |

@@ -1,4 +1,5 @@
 #include "shadow.h"
+#include "frame_upload.h"
 #include "log.h"
 
 #include <algorithm>
@@ -91,6 +92,12 @@ void Mul(const float* a, const float* b, float* out)
 
 bool ShadowMaps::Create(ID3D12Device* dev, UINT resolution)
 {
+    // Made again (another side): the old ones freed once no frame in flight reads them (frame_upload.h).
+    if (m_texture) DeferRelease(m_texture.Get());
+    if (m_dsvHeap) DeferRelease(m_dsvHeap.Get());
+    m_texture.Reset();
+    m_dsvHeap.Reset();
+    m_inDepthWrite = true;   // (a new texture starts in DEPTH_WRITE)
     m_resolution = resolution;
 
     D3D12_HEAP_PROPERTIES heap = {};

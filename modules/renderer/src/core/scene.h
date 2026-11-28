@@ -368,6 +368,8 @@ public:
     bool FoliageMapOn() const { return m_foliageMap; }
     void RenderFoliageShadows(ID3D12GraphicsCommandList* list, const float* view);
     double FoliageMapMs() const { return m_foliageMapMs; }
+    // The sun maps were made again (another side: Renderer::SetQuality): their view in the heap is rewritten.
+    void ShadowMapsRemade() { m_shadowSrvReady = false; }
     // --- editor: per-object visibility (design §8, tier 1) -----------------
     //
     // Hiding is a DRAW-LIST edit and costs no GPU work, which is what makes an
