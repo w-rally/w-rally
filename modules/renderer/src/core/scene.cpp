@@ -705,24 +705,43 @@ void Scene::DescribeRt(std::vector<uint64_t>& meshes, std::vector<RtInstanceDesc
             d.forceOpaque = (o.matFlags & kMaterialAlphaTest) == 0;
             d.moved = Travel(o.bmin0, o.bmax0, o.xform, o.prevXform) > kRtMovedMin;
             memcpy(d.prevXform, o.prevXform, sizeof(d.prevXform));
-            if (std::find(meshes.begin(), meshes.end(), d.mesh) == meshes.end())
-                meshes.push_back(d.mesh);
+            meshes.push_back(d.mesh);   // (repeats sorted out by the caller)
             instances.push_back(d);
         }
     }
-    DescribeModelsRt(meshes, instances);
+}
+
+void Scene::RtModelMasks(std::vector<std::pair<uint32_t, uint32_t>>& out) const
+{
+    out.clear();
+    RefreshModelsRt();
+    // Near the camera (UpdateFoliageNear): its shell out of the sun's rays - the foliage map shadows with its drawn
+    // leaves instead; every other ray still sees it.
+    const size_t n = (std::min)(m_placementNear.size(), m_rtModelFirst.empty() ? 0 : m_rtModelFirst.size() - 1);
+    for (size_t pi = 0; pi < n; ++pi)
+        if (m_placementNear[pi] && !m_placements[pi].removed)
+            for (uint32_t k = m_rtModelFirst[pi]; k < m_rtModelFirst[pi + 1]; ++k) out.emplace_back(k, kRtMaskNearShell);
+}
+
+void Scene::RtModels(const std::vector<uint64_t>*& meshes, const std::vector<RtInstanceDesc>*& instances,
+                     uint32_t& revision) const
+{
+    RefreshModelsRt();
+    meshes = &m_rtModelMeshes;
+    instances = &m_rtModelInstances;
+    revision = m_rtModelRev;
 }
 
 // The placements in the ray-traced scene: a BLAS per submesh of each model's ray-traced LOD (its dynamic mesh), a TLAS
 // instance per placement and submesh. Cached: DescribeRt runs every frame anything moves (the car), and these only
 // change with a placement edit or a load.
-void Scene::DescribeModelsRt(std::vector<uint64_t>& meshes, std::vector<RtInstanceDesc>& instances) const
+void Scene::RefreshModelsRt() const
 {
-    if (m_rtModelInstancesDirty || m_rtModelGen != m_rtGeneration || m_rtModelNearRev != m_foliageRevision)
+    if (m_rtModelInstancesDirty || m_rtModelGen != m_rtGeneration)
     {
         const bool logIt = m_rtModelInstancesDirty;
-        m_rtModelNearRev = m_foliageRevision;
         m_rtModelInstances.clear();
+        m_rtModelFirst.assign(m_placements.size() + 1, 0);
         m_rtModelMeshes.clear();
         auto key = [&](uint32_t mesh) { return kRtDynamic | ((uint64_t)m_rtGeneration << 32) | mesh; };
         auto live = [&](uint32_t mesh) { return mesh && mesh <= m_dynMeshes.size() && m_dynMeshes[mesh - 1].alive; };
@@ -750,9 +769,8 @@ void Scene::DescribeModelsRt(std::vector<uint64_t>& meshes, std::vector<RtInstan
                 for (int c = 0; c < 3; ++c) d.xform[r * 4 + c] = p.cols[c][r];
             for (int c = 0; c < 3; ++c) d.xform[12 + c] = p.cols[c][3];
             memcpy(d.prevXform, d.xform, sizeof(d.xform));
-            // Near the camera (UpdateFoliageNear): its shell out of the sun's rays - the foliage map shadows with its
-            // drawn leaves instead; every other ray still sees it.
-            if (pi < m_placementNear.size() && m_placementNear[pi]) d.mask = kRtMaskNearShell;
+            // (Near the camera its shell leaves the sun's rays: RtModelMasks, per frame.)
+            m_rtModelFirst[pi] = (uint32_t)m_rtModelInstances.size();
             for (const ModelSub& s : m.lods[m.rtLod].subs)
             {
                 if (!live(s.mesh)) continue;
@@ -762,14 +780,21 @@ void Scene::DescribeModelsRt(std::vector<uint64_t>& meshes, std::vector<RtInstan
                 m_rtModelInstances.push_back(d);
             }
         }
+        // (Removed placements hold their next one's start; the end closes the last.)
+        uint32_t next = (uint32_t)m_rtModelInstances.size();
+        m_rtModelFirst[m_placements.size()] = next;
+        for (size_t i = m_placements.size(); i-- > 0;)
+            if (m_placements[i].removed) m_rtModelFirst[i] = next;
+            else next = m_rtModelFirst[i];
         if (logIt && !m_models.empty())
             Log("scene: models ray traced - %zu BLAS mesh(es), %zu triangle(s) (%zu model(s) from a ray-only LOD); "
                 "%zu TLAS instance(s)", m_rtModelMeshes.size(), blasTris, rayOnly, m_rtModelInstances.size());
         m_rtModelInstancesDirty = false;
         m_rtModelGen = m_rtGeneration;
+        std::sort(m_rtModelMeshes.begin(), m_rtModelMeshes.end());
+        m_rtModelMeshes.erase(std::unique(m_rtModelMeshes.begin(), m_rtModelMeshes.end()), m_rtModelMeshes.end());
+        ++m_rtModelRev;
     }
-    meshes.insert(meshes.end(), m_rtModelMeshes.begin(), m_rtModelMeshes.end());
-    instances.insert(instances.end(), m_rtModelInstances.begin(), m_rtModelInstances.end());
 }
 
 bool Scene::BuildRtMesh(uint64_t key, RtMeshData& out) const

@@ -69,12 +69,17 @@ public:
     // buffers and the descriptor heap, then the TLAS over the built meshes
     // (UpdateInstances, into `list`).
     bool Rebuild(Device& dev, ID3D12GraphicsCommandList* list, const Scene::RtShared& shared,
-                 const std::vector<uint64_t>& liveKeys,
+                 const std::vector<uint64_t>& liveKeys, const std::vector<Scene::RtInstanceDesc>& fixed,
+                 uint32_t fixedRevision, const std::vector<std::pair<uint32_t, uint32_t>>& fixedMasks,
                  const std::vector<Scene::RtInstanceDesc>& instances);
     // When only instances changed (a drag, an added instance of a known mesh):
     // the TLAS and the instance table, nothing else.
     // Recorded into `list` - the frame's, before its first ray - and not waited for.
-    bool UpdateInstances(Device& dev, ID3D12GraphicsCommandList* list,
+    // The table is `fixed` (the model placements, Scene::RtModels) then `instances`. The fixed part is converted and
+    // written into a frame slot's table only when `fixedRevision` or the BLAS set changed since that slot's last.
+    // `fixedMasks`: (index into `fixed`, instance mask) for this frame, patched over the written fixed part.
+    bool UpdateInstances(Device& dev, ID3D12GraphicsCommandList* list, const std::vector<Scene::RtInstanceDesc>& fixed,
+                         uint32_t fixedRevision, const std::vector<std::pair<uint32_t, uint32_t>>& fixedMasks,
                          const std::vector<Scene::RtInstanceDesc>& instances);
     // The dynamic pool was uploaded again (a new buffer, the old one freed) and nothing else changed for the TLAS:
     // the any-hit test's view of it follows, without a Rebuild.
@@ -276,6 +281,21 @@ private:
     // current slot's (UpdateInstances).
     Microsoft::WRL::ComPtr<ID3D12Resource>       m_instancesSlot[2], m_instInfoSlot[2];
     void*                                        m_instancesSlotMapped[2] = {}, *m_instInfoSlotMapped[2] = {};
+    // The fixed part of the table (UpdateInstances), converted: kept while its revision and the BLAS set hold.
+    struct InstInfo { uint32_t triBase, vertexBase, vb, material, moved; float was[12]; uint32_t owner; };
+    std::vector<D3D12_RAYTRACING_INSTANCE_DESC>  m_fixedDescs;
+    std::vector<InstInfo>                        m_fixedInfo;
+    uint64_t                                     m_fixedStamp = 0;          // +1 whenever m_fixedDescs change
+    uint32_t                                     m_fixedRevision = 0xFFFFFFFFu;
+    uint64_t                                     m_fixedBlasRev = ~0ull;
+    uint64_t                                     m_slotFixedStamp[2] = {};  // what each slot's table holds (0: unknown)
+    uint64_t                                     m_blasRev = 1;             // +1 whenever m_blas changes
+    std::vector<uint32_t>                        m_fixedOut;                // per `fixed` entry: its row, ~0 none
+    std::vector<uint32_t>                        m_slotPatched[2];          // rows whose mask a slot's copy has patched
+    std::vector<uint64_t>                        m_restKeys;                // the per-frame part's keys by row ...
+    std::vector<const BlasEntry*>                m_restEntries;             // ... and their BLAS (null: none)
+    std::vector<D3D12_GPU_VIRTUAL_ADDRESS>       m_restVa;
+    uint64_t                                     m_restBlasRev = 0;
     Microsoft::WRL::ComPtr<ID3D12Resource>       m_instances, m_instInfo;
     void*                                        m_instancesMapped = nullptr;   // (upload, mapped for good)
     void*                                        m_instInfoMapped = nullptr;

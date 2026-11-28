@@ -5,6 +5,7 @@
 #include "shaders.h"
 
 #include <algorithm>
+#include <iterator>
 #include <cstdlib>
 #include <math.h>
 
@@ -222,30 +223,50 @@ void Renderer::KeepRtCurrent(Device& dev)
 
     // A new mesh's vertices, before its BLAS. A new upload is a new buffer, which the any-hit test's view must follow.
     const bool poolMoved = m_scene.FlushDynamic(dev.device.Get());
+    // This frame's part (the world, moved and dynamic objects: a hundred or so) described anew; the placements' part
+    // (Scene::RtModels, 11k+ on a forest stage) only when it changed. Every frame the car moves comes here.
     std::vector<uint64_t> keys;
     std::vector<Scene::RtInstanceDesc> instances;
     m_scene.DescribeRt(keys, instances);
+    const std::vector<uint64_t>* modelKeys = nullptr;
+    const std::vector<Scene::RtInstanceDesc>* modelInstances = nullptr;
+    uint32_t modelRev = 0;
+    m_scene.RtModels(modelKeys, modelInstances, modelRev);
+    m_scene.RtModelMasks(m_rtModelMasks);
     std::sort(keys.begin(), keys.end());
     keys.erase(std::unique(keys.begin(), keys.end()), keys.end());
-
-    std::vector<uint64_t> built;
-    size_t missing = 0, building = 0, moved = 0;
-    for (uint64_t k : keys)
+    // The whole key set (both parts, sorted) and which of it is built: worked out again only when a part's keys
+    // changed, something landed, something was missing or building last time, or the TLAS holds another set.
+    const bool keysChanged = keys != m_rtOwnKeys || modelRev != m_rtKeysModelRev;
+    if (keysChanged)
     {
-        if (m_rt.HasMesh(k)) built.push_back(k);
-        else if (m_rt.IsBuilding(k)) ++building;
-        else ++missing;
+        m_rtOwnKeys = keys;
+        m_rtKeysModelRev = modelRev;
+        m_rtAllKeys.clear();
+        std::set_union(keys.begin(), keys.end(), modelKeys->begin(), modelKeys->end(), std::back_inserter(m_rtAllKeys));
+    }
+    size_t missing = 0, building = 0, moved = 0;
+    if (keysChanged || landed || m_rtKeysPending || m_rtBuilt != m_rt.PublishedKeys())
+    {
+        m_rtBuilt.clear();
+        for (uint64_t k : m_rtAllKeys)
+        {
+            if (m_rt.HasMesh(k)) m_rtBuilt.push_back(k);
+            else if (m_rt.IsBuilding(k)) ++building;
+            else ++missing;
+        }
+        m_rtKeysPending = missing || building;
     }
     for (const Scene::RtInstanceDesc& d : instances) moved += d.moved ? 1 : 0;
     // The same set: nothing landed or dropped (what is missing is submitted below and changes no TLAS yet) - the TLAS
     // alone, and the pool's view when it was uploaded again for a mesh now building. So the frame a mesh appears in
     // allocates no more here than a frame the car moves in.
-    const bool sameSet = m_rt.HasScene() && !landed && built == m_rt.PublishedKeys();
+    const bool sameSet = m_rt.HasScene() && !landed && m_rtBuilt == m_rt.PublishedKeys();
 
     if (missing)
     {
         std::vector<Scene::RtMeshData> fresh;
-        for (uint64_t k : keys)
+        for (uint64_t k : m_rtAllKeys)
         {
             if (m_rt.HasMesh(k) || m_rt.IsBuilding(k)) continue;
             Scene::RtMeshData m;
@@ -253,21 +274,24 @@ void Renderer::KeepRtCurrent(Device& dev)
         }
         if (!fresh.empty() && m_rt.SubmitBlases(dev, m_scene.RtVertexStride(), fresh)) building += fresh.size();
     }
-    Log("renderer: scene revision %u - %zu mesh key(s) (%zu built, %zu building%s), %zu instance(s), %zu moved -> %s",
-        rev, keys.size(), built.size(), building, landed ? ", some just landed" : "", instances.size(), moved,
-        sameSet ? "instances only" : "publish");
+    // (Not on a frame that only moves instances: that is every frame the car drives, and the line cost 0.13 ms.)
+    if (!sameSet || missing)
+        Log("renderer: scene revision %u - %zu mesh key(s) (%zu built, %zu building%s), %zu + %zu instance(s), %zu "
+            "moved -> %s", rev, m_rtAllKeys.size(), m_rtBuilt.size(), building, landed ? ", some just landed" : "",
+            modelInstances->size(), instances.size(), moved, sameSet ? "instances only" : "publish");
 
     if (sameSet)
     {
         if (poolMoved) m_rt.FollowDynamicPool(dev.device.Get(), m_scene.DynamicVertexBuffer(),
                                               m_scene.DynamicVertexCount());
-        m_rtValid = m_rt.UpdateInstances(dev, dev.list.Get(), instances);
+        m_rtValid = m_rt.UpdateInstances(dev, dev.list.Get(), *modelInstances, modelRev, m_rtModelMasks, instances);
     }
     else
     {
         Scene::RtShared shared;
         m_rtValid = m_scene.BuildRtShared(dev.device.Get(), shared) &&
-                    m_rt.Rebuild(dev, dev.list.Get(), shared, keys, instances);
+                    m_rt.Rebuild(dev, dev.list.Get(), shared, m_rtAllKeys, *modelInstances, modelRev, m_rtModelMasks,
+                               instances);
     }
     // An empty TLAS while the first BLASes build (a load) is not a failure: the cascades meanwhile.
     m_rtReason = m_rtValid ? nullptr
@@ -294,6 +318,9 @@ void Renderer::RecordFrame(Device& dev, D3D12_CPU_DESCRIPTOR_HANDLE outRtv,
     // NGG_CPU_TIMES: the CPU time each stage of the recording takes, means over 300 frames (where a frame's CPU goes;
     // with NGG_FRAMES=1 it adds to the GPU's; with frames in flight it overlaps the GPU's previous frame).
     static const bool cpuTimes = std::getenv("NGG_CPU_TIMES") != nullptr;
+    // NGG_GPU_TIMES: the GPU time of the same stages (m_stageTimer), means over 300 frames.
+    static const bool gpuTimes = std::getenv("NGG_GPU_TIMES") != nullptr;
+    const uint32_t gs = FrameSlot();
     static const char* const kStage[] = { "grass", "foliage near", "RT current", "lights", "prepass", "visibility",
                                           "foliage map", "sky", "scene pass", "post", "rest" };
     constexpr int kStages = 11;
@@ -304,6 +331,11 @@ void Renderer::RecordFrame(Device& dev, D3D12_CPU_DESCRIPTOR_HANDLE outRtv,
     int64_t stageAt = cpuTimes ? clockNow() : 0;
     const int64_t frameAt = stageAt;
     auto stage = [&](int k) {
+        if (gpuTimes && m_stageTimer.Ready() && m_stageStamps[gs] < kStageStamps)
+        {
+            m_stageOf[gs][m_stageStamps[gs]] = (int8_t)k;
+            m_stageTimer.Stamp(list, m_stageStamps[gs]++);
+        }
         if (!cpuTimes) return;
         const int64_t t = clockNow();
         stageMs[k] += double(t - stageAt) * tickMs;
@@ -392,6 +424,40 @@ void Renderer::RecordFrame(Device& dev, D3D12_CPU_DESCRIPTOR_HANDLE outRtv,
         m_framePending[ts] = false;
     }
     if (m_frameTimer) list->EndQuery(m_frameTimer.Get(), D3D12_QUERY_TYPE_TIMESTAMP, 2 * ts);
+    // NGG_GPU_TIMES: this slot's last frame's stages taken, this frame's first timestamp (the start) written.
+    if (gpuTimes && m_frameHz)
+    {
+        if (!m_stageTimer.Ready()) m_stageTimer.Create(dev.device.Get(), kStageStamps);
+        UINT64 t[kStageStamps];
+        if (m_stageTimer.Ready() && m_stageStamps[gs] > 1 && m_stageTimer.Take(t))
+        {
+            for (uint32_t i = 1; i < m_stageStamps[gs]; ++i)
+                if (t[i] >= t[i - 1]) m_gpuStageMs[m_stageOf[gs][i]] += double(t[i] - t[i - 1]) * 1000.0 / double(m_frameHz);
+            if (++m_gpuStageFrames == 300)
+            {
+                static const char* const kName[11] = { "grass", "foliage near", "RT current", "lights", "prepass",
+                                                       "visibility", "foliage map", "sky", "scene pass", "post", "rest" };
+                char line[512];
+                int n = snprintf(line, sizeof line, "renderer: GPU per frame (mean of 300):");
+                double sum = 0;
+                for (int k = 0; k < 11; ++k)
+                {
+                    n += snprintf(line + n, sizeof line - n, " %s %.2f,", kName[k], m_gpuStageMs[k] / 300.0);
+                    sum += m_gpuStageMs[k];
+                    m_gpuStageMs[k] = 0;
+                }
+                snprintf(line + n, sizeof line - n, " total %.2f ms", sum / 300.0);
+                Log("%s", line);
+                m_gpuStageFrames = 0;
+            }
+        }
+        m_stageStamps[gs] = 0;
+        if (m_stageTimer.Ready())
+        {
+            m_stageOf[gs][0] = -1;
+            m_stageTimer.Stamp(list, m_stageStamps[gs]++);
+        }
+    }
 
     // Which tonemap this frame gets is a rule, not a free choice: the debug
     // views carry FALSE COLOUR, not radiance, and a curve would change the very
@@ -429,6 +495,7 @@ void Renderer::RecordFrame(Device& dev, D3D12_CPU_DESCRIPTOR_HANDLE outRtv,
     m_scene.BeginFrame(dev.device.Get());   // the models' instance stream starts over
     m_scene.SetReflectionTlas(0);
     ID3D12Resource* motion = nullptr;
+    bool prepassDrawn = false;   // this frame's prepass depth is there (the sky's depth test)
     if (m_scene.Ready())
     {
         // THE GRASS's field and blades for this camera (grass.h), before the prepass draws them - and before the TLAS:
@@ -452,6 +519,7 @@ void Renderer::RecordFrame(Device& dev, D3D12_CPU_DESCRIPTOR_HANDLE outRtv,
         const bool prepass = m_scene.RecordPrepass(list, view, proj, width, height);
         stage(4);
         if (prepass) motion = m_scene.MotionBuffer();
+        prepassDrawn = prepass;
 
         m_rtActive = m_preferRt && prepass && m_rt.HasScene() && m_rtValid && m_scene.ShadowsOn();
         // Back on the RT path (the first BVH of a load built, the switch, shadows on again): its histories are from
@@ -521,7 +589,11 @@ void Renderer::RecordFrame(Device& dev, D3D12_CPU_DESCRIPTOR_HANDLE outRtv,
     stage(10);
     const D3D12_CPU_DESCRIPTOR_HANDLE hdrRtv = m_post.Begin(list);
     if (m_skyOn && m_sky.Ready())
-        m_sky.Record(list, hdrRtv, view, proj, width, height, sky);
+    {
+        // Only where the prepass left the far plane, when there was one (Sky::Record).
+        const D3D12_CPU_DESCRIPTOR_HANDLE dsv = prepassDrawn ? m_scene.DepthDsv() : D3D12_CPU_DESCRIPTOR_HANDLE{};
+        m_sky.Record(list, hdrRtv, view, proj, width, height, sky, prepassDrawn ? &dsv : nullptr);
+    }
     else
         list->ClearRenderTargetView(hdrRtv, PostFx::kHdrClear, 0, nullptr);
     stage(7);
@@ -552,6 +624,11 @@ void Renderer::RecordFrame(Device& dev, D3D12_CPU_DESCRIPTOR_HANDLE outRtv,
     // The BLAS batches this frame queued (KeepRtCurrent): their threads allocate while the frame waits for the GPU.
     m_rt.StartBatches();
 
+    if (gpuTimes && m_stageTimer.Ready() && m_stageStamps[gs] > 0)
+    {
+        stage(10);   // (the rest, to the frame's end)
+        m_stageTimer.Resolve(list, 0, m_stageStamps[gs]);
+    }
     if (m_frameTimer)
     {
         list->EndQuery(m_frameTimer.Get(), D3D12_QUERY_TYPE_TIMESTAMP, 2 * ts + 1);

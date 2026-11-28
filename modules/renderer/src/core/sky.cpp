@@ -4,6 +4,7 @@
 #include "pipeline_cache.h"
 #include "shaders.h"
 
+#include <cstdlib>
 #include <d3dcompiler.h>
 #include <cmath>
 #include <cstring>
@@ -116,6 +117,15 @@ bool Sky::Create(ID3D12Device* dev, DXGI_FORMAT rtvFormat)
         Log("sky: pipeline state creation failed");
         return false;
     }
+    // Only where the prepass left the far plane: the triangle is at z = 0, reverse-Z GREATER_EQUAL passes only where
+    // the depth is still 0. No write. (Without it the sky is drawn whole, as before.)
+    pd.DepthStencilState.DepthEnable = TRUE;
+    pd.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ZERO;
+    pd.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_GREATER_EQUAL;
+    pd.DSVFormat = DXGI_FORMAT_D32_FLOAT;
+    static const bool depthOff = [] { const char* e = std::getenv("NGG_SKY_DEPTH"); return e && e[0] == '0'; }();
+    if (!depthOff && FAILED(CreatePipeline(dev, &pd, IID_PPV_ARGS(&m_psoDepth))))
+        Log("sky: the depth-tested pipeline failed - the sky is drawn whole");
 
     D3D12_DESCRIPTOR_HEAP_DESC hd = {};
     hd.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
@@ -142,7 +152,7 @@ bool Sky::Create(ID3D12Device* dev, DXGI_FORMAT rtvFormat)
 
 void Sky::Record(ID3D12GraphicsCommandList* list, D3D12_CPU_DESCRIPTOR_HANDLE rtv,
                  const float* view, const float* proj, UINT width, UINT height,
-                 const SkyParams& p)
+                 const SkyParams& p, const D3D12_CPU_DESCRIPTOR_HANDLE* depthDsv)
 {
     if (!m_pso) return;
 
@@ -210,7 +220,8 @@ void Sky::Record(ID3D12GraphicsCommandList* list, D3D12_CPU_DESCRIPTOR_HANDLE rt
     dev->Release();
     if (!cbRes) return;
 
-    list->OMSetRenderTargets(1, &rtv, FALSE, nullptr);
+    const bool tested = depthDsv && m_psoDepth;
+    list->OMSetRenderTargets(1, &rtv, FALSE, tested ? depthDsv : nullptr);
 
     D3D12_VIEWPORT vp = { 0.0f, 0.0f, (float)width, (float)height, 0.0f, 1.0f };
     D3D12_RECT sc = { 0, 0, (LONG)width, (LONG)height };
@@ -218,7 +229,7 @@ void Sky::Record(ID3D12GraphicsCommandList* list, D3D12_CPU_DESCRIPTOR_HANDLE rt
     list->RSSetScissorRects(1, &sc);
 
     list->SetGraphicsRootSignature(m_rootSig.Get());
-    list->SetPipelineState(m_pso.Get());
+    list->SetPipelineState(tested ? m_psoDepth.Get() : m_pso.Get());
     list->SetGraphicsRootConstantBufferView(0, cbRes);
     ID3D12DescriptorHeap* heaps[] = { m_srvHeap.Get() };
     list->SetDescriptorHeaps(1, heaps);

@@ -944,7 +944,7 @@ Frame order (`Renderer::RecordFrame` in `modules/renderer/src/core/renderer.cpp`
 | atmosphere for the frame | `Scene::SetAtmosphere(sky)`, `Sky::SetMultipleScattering` mirrored from the Scene | one `SkyParams` for every consumer |
 | TAA jitter | `PostFx::Jitter` → `Scene::SetJitter`, `Sky::SetJitter` | set **before** the prepass (see 3.7) |
 | prepass, visibility | `Scene::RecordPrepass`, RT or cascades | depth, normals, motion |
-| sky | `PostFx::Begin`, `Sky::Record` (or a clear to `PostFx::kHdrClear` with the sky off) | covers every pixel, no depth |
+| sky | `PostFx::Begin`, `Sky::Record` (or a clear to `PostFx::kHdrClear` with the sky off) | after a prepass only where it left the far plane (depth test `GREATER_EQUAL` at z = 0, no write; the main pass draws the rest): 0.63 ms -> ~0.05 at 1080p on the RTX's share, 0.94-1.18 -> 0.02-0.09 ms on the dev iGPU; without a prepass every pixel |
 | scene main pass | `Scene::Record`: `AtmosphereMs::Update` (only when dirty), `Environment::Record`, reflection probe resolve, `AerialLut::Record`, draws | |
 | post | `PostFx::Resolve`: TAA or upscaler, meter, tonemap + sharpen + encode | into the client's target |
 
@@ -1362,6 +1362,16 @@ the instance table) is **recorded into the frame's own list**, before the prepas
 second context, no wait. Its two tables (instance descs, `gInst`) are upload buffers kept and mapped for good, a
 quarter to spare; the TLAS and its scratch also grow with a quarter to spare. `Rt::Rebuild` drops dead BLASes and
 rewrites the shared any-hit buffers and the descriptor heap, then the TLAS the same way.
+
+**The table in two parts** (2026-11-28): the model placements first (`Scene::RtModels`, 10 567 instances on stage
+41, cached with a revision), then the frame's own (`DescribeRt`: the world, moved and dynamic objects, ~1000). The
+placements' part is converted only when its revision or the BLAS set changes, and written into a frame slot's table
+only when that slot's copy is stale; the near shells' masks (`Scene::RtModelMasks`, the near set moves every few
+frames as the car drives) are patched over it in place. The frame's part keeps its BLAS lookups and addresses by row.
+The key sets are sorted and counted again only when they can have changed, and the revision line is logged only on a
+publish. Dev iGPU, stage 41, high vegetation: `KeepRtCurrent` 3.6-4.1 -> 0.6 ms CPU on a frame that only moves
+instances (describe 1.05 -> 0.3, table 1.3-2.1 -> 0.25, keys 0.35 -> 0.02, log 0.13 -> 0); frames with a publish
+(BLASes landed) still pay `Rebuild`. Images unchanged.
 
 **The TLAS per frame** (2026-11-19, dev iGPU, 1080p, the car driving; `KeepRtCurrent` CPU = the whole of step 5,
 `DescribeRt` included; GPU = timestamps around the build):
@@ -2649,6 +2659,7 @@ All read once, at start-up or first use; development only unless noted.
 
 | variable | effect | read in |
 |---|---|---|
+| `NGG_SKY_DEPTH=0` | the sky drawn over the whole target without the depth test (A/B; by default it shades only where the prepass left the far plane) | `sky.cpp` |
 | `NGG_SHADER_DIR=<dir>` | compile shaders from the files at run time; disables the pipeline library | `shaders.cpp`, `pipeline_cache.cpp` |
 | `NGG_SHADER_DUMP=<dir>` | write each shader blob as handed out | `shaders.cpp` |
 | `NGG_SHADERC_THREADS=<n>` | build-time compiler's threads (default cores, max 16) | `shaderc/main.cpp` |
@@ -2695,6 +2706,7 @@ All read once, at start-up or first use; development only unless noted.
 | `NGG_FRAMES=1\|2` | frames in flight (default 2); 1 is the synchronous frame, for A/B and as a fallback (1.3) | `device.cpp` |
 | `NGG_FRAME_LATENCY=1..3` | presents queued ahead of the display (default: the frames in flight); the loop waits once per frame on the swap chain's latency object (1.3) | `module.cpp` |
 | `NGG_GPU_VALIDATION=1` | with the debug layer: GPU-based validation (slow; resource states and descriptors as the GPU uses them) | `device.cpp` |
+| `NGG_GPU_TIMES` | the GPU time of the same stages (a timestamp at each stage boundary, so they add up to the GPU frame), means over 300 frames | `renderer.cpp` |
 | `NGG_CPU_TIMES` | the CPU time of each stage of `RecordFrame`, means over 300 frames | `renderer.cpp`, `scene.cpp` |
 | `NGG_MODEL_LODS` | log each instanced model's LODs at load: distance and triangles | `models.cpp` |
 | `NGG_FOLIAGE_SPLIT=<m>[,<m>]` | the sun cascades' split distances over the computed ones (A/B) | `shadow.cpp` |
@@ -2719,7 +2731,7 @@ glass, and VR behind `kRendererCapVr`.
 | # | item | state / why | blocked on |
 |---|---|---|---|
 | 1 | **Build a new mesh's BLAS off the frame** | done (4.2): queued, recorded on a thread, built on the ray tracer's own compute queue, fenced, landed 1-2 frames later. Left: the landing frame's publish, 7-18 ms CPU (the any-hit buffers rebuilt whole - appending the new BLASes' share would make it ~1 ms); dropping a car frees its BLASes on the frame (3-8 ms); a frame's other allocations can still wait a millisecond or so behind the thread's | nothing |
-| 2 | **TLAS refit instead of a full rebuild** | done the other way (4.2): the per-frame cost was the two upload buffers created every frame and the secondary context's submit and wait, not the build. Now kept tables and the build in the frame's list: 4.1-4.5 -> 1.4 ms CPU per moving frame (11 578 instances), GPU unchanged. A refit was built and measured: 0.25 ms saved, 1-2 ms lost in tracing around a fast car - dropped. Left: `DescribeRt` and the instance table rebuilt from scratch each frame (~1 ms CPU in the forest) | nothing |
+| 2 | **TLAS refit instead of a full rebuild** | done the other way (4.2): the per-frame cost was the two upload buffers created every frame and the secondary context's submit and wait, not the build. Now kept tables and the build in the frame's list: 4.1-4.5 -> 1.4 ms CPU per moving frame (11 578 instances), GPU unchanged. A refit was built and measured: 0.25 ms saved, 1-2 ms lost in tracing around a fast car - dropped. The instance table in two parts, the placements' cached (4.2): 3.6-4.1 -> 0.6 ms CPU on the dev machine. Left: `Rebuild` on a publish | nothing |
 | 3 | **Pipelines in parallel** | built and reverted (§1.6). A cold start was ~5 s shorter, but AMD driver 32.0.31021.5001 crashed in `amdxc64.dll` or hung in about 1 run of 12-28 whenever two threads compiled. `NGG_PIPELINE_THREADS=<n>` retries it. Run it 60+ times with the crash/hang harness before trusting it | a driver that survives it (newer AMD, or NVIDIA) |
 | 4 | **Measure the pipeline library on NVIDIA** | it saves nothing on the AMD iGPU, so it is opt-in (`NGG_PIPELINE_CACHE=library`). On the RTX machine, run with `NGG_DRIVER_SHADER_CACHE=clear`, with and without it, and compare the log's `pipelines:` lines. If there is no win there either, delete `pipeline_cache`'s library and keep the wrappers | the RTX machine |
 | 5 | **Shader hot reload** | `NGG_SHADER_DIR` compiles from the files at start only. Recreating the pipelines without a restart is not built | nothing (optional) |

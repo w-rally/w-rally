@@ -718,7 +718,17 @@ public:
         Microsoft::WRL::ComPtr<ID3D12Resource> materials;  uint32_t materialCount = 0;
         std::vector<ID3D12Resource*> textures;             // null-free; missing -> white
     };
+    // Everything in the ray-traced scene but the model placements (RtModels): the world, moved and dynamic objects.
+    // `meshes` may repeat a key (the caller sorts them).
     void DescribeRt(std::vector<uint64_t>& meshes, std::vector<RtInstanceDesc>& instances) const;
+    // The model placements' part, kept until a placement, the near set or a load changes it - then `revision` moves.
+    // 11k+ instances on a forest stage: rebuilt and copied every frame they were 1 ms of the CPU's frame.
+    void RtModels(const std::vector<uint64_t>*& meshes, const std::vector<RtInstanceDesc>*& instances,
+                  uint32_t& revision) const;
+    // This frame's masks over RtModels' instances: (index into them, mask) for the placements near the camera
+    // (UpdateFoliageNear: their shells out of the sun's rays). Kept apart so the near set, which changes every few
+    // frames as the car drives, does not rebuild the 11k instances to change a few dozen masks.
+    void RtModelMasks(std::vector<std::pair<uint32_t, uint32_t>>& out) const;
     // A static object in the world's BLAS: drawn, not moved, and not keyed (a
     // keyed object is the physics' and gets a BLAS of its own from the load).
     bool InRtWorld(size_t i) const
@@ -1032,6 +1042,10 @@ private:
     bool ClipHidden(const float* bmin, const float* bmax) const;
     void DrawClipWalls(ID3D12GraphicsCommandList* list, int which);
     void ClipFix(ID3D12GraphicsCommandList* list, D3D12_CPU_DESCRIPTOR_HANDLE dsv);
+public:
+    // The depth's writable DSV (the prepass's), for the sky's depth test (Sky::Record).
+    D3D12_CPU_DESCRIPTOR_HANDLE DepthDsv() const { return m_dsvHeap->GetCPUDescriptorHandleForHeapStart(); }
+private:
     // The reflection focus's opaque draws with their own reflection rays (ReflOpen, shader model 6.5): [forward,
     // deferred][cull none, back, front]. Only these carry the ray query - in every pipeline, its state cost the whole
     // main pass ~1 ms on the development GPU.
@@ -1125,6 +1139,8 @@ private:
     mutable bool                        m_rtModelInstancesDirty = true;
     mutable uint32_t                    m_rtModelGen = 0xFFFFFFFFu;
     mutable uint32_t                    m_rtModelNearRev = 0xFFFFFFFFu;
+    mutable uint32_t                    m_rtModelRev = 0;   // RtModels' revision: +1 each rebuild
+    mutable std::vector<uint32_t>       m_rtModelFirst;     // per placement: its first instance in RtModels (count+1)
     std::vector<DrawOrder>              m_shadowOrder;      // a cascade's model draws (RenderShadows)
     void PlacementTransform(PlacementRt& p) const;
     void RebuildModelCells();
@@ -1155,7 +1171,7 @@ private:
     // The DrawItems of `batches` for a pass: one per batch submesh; `fadeSolid` - a crossfading batch's opaque submesh
     // through its alpha-tested twin, which dithers.
     void ModelDrawItems(const std::vector<ModelBatch>& batches, std::vector<DrawOrder>& order, bool shadow);
-    void DescribeModelsRt(std::vector<uint64_t>& meshes, std::vector<RtInstanceDesc>& instances) const;
+    void RefreshModelsRt() const;
     std::vector<DrawOrder>   m_drawOrder;
     UINT                     m_prepassRtvStride = 0;
     bool                     m_prepassThisFrame = false;

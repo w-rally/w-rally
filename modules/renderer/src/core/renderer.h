@@ -29,6 +29,7 @@
 #include <stdint.h>
 #include <memory>
 
+#include "slot_timer.h"
 #include "device.h"
 #include "scene.h"
 #include "sky.h"
@@ -228,12 +229,26 @@ private:
     bool        m_rtActive = false;
     bool        m_rtTraced = false;           // m_rtActive as of the last frame that drew the world
     const char* m_rtReason = "not built yet";
+    // KeepRtCurrent's key sets, kept from frame to frame: this frame's part (sorted), the whole set with the
+    // placements', and which of it is built (worked out again only when something can have changed it).
+    std::vector<uint64_t> m_rtOwnKeys, m_rtAllKeys, m_rtBuilt;
+    uint32_t    m_rtKeysModelRev = 0xFFFFFFFFu;
+    bool        m_rtKeysPending = true;   // something was missing or building at the last count
+    std::vector<std::pair<uint32_t, uint32_t>> m_rtModelMasks;   // Scene::RtModelMasks, this frame's
 
     Microsoft::WRL::ComPtr<ID3D12QueryHeap> m_frameTimer;       // [0] the frame's first command, [1] its last
     Microsoft::WRL::ComPtr<ID3D12Resource>  m_frameReadback;
     UINT64      m_frameHz = 0;
     bool        m_framePending[Device::kMaxFrames] = {};   // a frame slot's pair resolved, not yet read
     double      m_frameMs = 0.0;
+    // NGG_GPU_TIMES: a timestamp at each of RecordFrame's stage boundaries (the NGG_CPU_TIMES stages), so the GPU
+    // frame splits into stages that add up to it. Which stage each timestamp closes, per frame slot.
+    SlotTimer   m_stageTimer;
+    static constexpr uint32_t kStageStamps = 24;
+    int8_t      m_stageOf[Device::kMaxFrames][kStageStamps] = {};
+    uint32_t    m_stageStamps[Device::kMaxFrames] = {};
+    double      m_gpuStageMs[11] = {};
+    uint32_t    m_gpuStageFrames = 0;
 };
 
 } // namespace core

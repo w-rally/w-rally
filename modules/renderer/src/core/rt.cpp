@@ -545,6 +545,7 @@ void Rt::ForgetScene()
     for (auto& e : m_blas) DeferRelease(e.second.as.Get());
     DeferRelease(m_tlas.Get());
     m_blas.clear();
+    ++m_blasRev;
     m_tlas.Reset();
     m_instanceCount = 0;
     m_appeared.clear();
@@ -801,6 +802,7 @@ bool Rt::Land()
                 m_appeared.push_back(e.first);
                 m_blas[e.first] = std::move(e.second);
             }
+            ++m_blasRev;
             Log("rt: %zu BLAS(es) built, in the TLAS %.0f ms / %u frame(s) after the submit", b.entries.size(),
                 MsSince(b.submitted), b.frames + 1);
         }
@@ -813,7 +815,8 @@ bool Rt::Land()
 }
 
 bool Rt::Rebuild(Device& dev, ID3D12GraphicsCommandList* list, const Scene::RtShared& shared,
-                 const std::vector<uint64_t>& liveKeys,
+                 const std::vector<uint64_t>& liveKeys, const std::vector<Scene::RtInstanceDesc>& fixed,
+                 uint32_t fixedRevision, const std::vector<std::pair<uint32_t, uint32_t>>& fixedMasks,
                  const std::vector<Scene::RtInstanceDesc>& instances)
 {
     if (!Ready() || !shared.staticVb) return false;
@@ -839,6 +842,7 @@ bool Rt::Rebuild(Device& dev, ID3D12GraphicsCommandList* list, const Scene::RtSh
         }
         DeferRelease(it->second.as.Get());   // the frame in flight's TLAS may still name it (device.h)
         it = m_blas.erase(it);
+        ++m_blasRev;
     }
     std::vector<uint64_t> published;              // what the TLAS can hold now: built and live (and a held world)
     for (uint64_t k : liveKeys)
@@ -960,7 +964,7 @@ bool Rt::Rebuild(Device& dev, ID3D12GraphicsCommandList* list, const Scene::RtSh
 
     std::vector<Scene::RtInstanceDesc> all = instances;
     for (uint64_t k : held) all.push_back(Scene::RtInstanceDesc{ k });
-    const bool ok = UpdateInstances(dev, list, all);
+    const bool ok = UpdateInstances(dev, list, fixed, fixedRevision, fixedMasks, all);
 
     Log("rt: published %zu BLAS(es)%s: %u instance(s) in the TLAS, %zu alpha-tested triangles for the any-hit test, "
         "%zu textures - %.1f ms", published.size(), held.empty() ? "" : " (the old world kept while the new builds)",
@@ -992,7 +996,8 @@ constexpr float kRtAppearedFrom = 1.0e4f;
 // any single version of it is traced. Not refitted (ALLOW_UPDATE +
 // PERFORM_UPDATE): measured (design 4.2), a refit saved 0.25 ms of a 0.4 ms
 // build and the stretched boxes around a fast car cost 1-2 ms of tracing.
-bool Rt::UpdateInstances(Device& dev, ID3D12GraphicsCommandList* list,
+bool Rt::UpdateInstances(Device& dev, ID3D12GraphicsCommandList* list, const std::vector<Scene::RtInstanceDesc>& fixed,
+                         uint32_t fixedRevision, const std::vector<std::pair<uint32_t, uint32_t>>& fixedMasks,
                          const std::vector<Scene::RtInstanceDesc>& instances)
 {
     if (!Ready() || !m_heap) return false;
@@ -1000,26 +1005,48 @@ bool Rt::UpdateInstances(Device& dev, ID3D12GraphicsCommandList* list,
     if (FAILED(dev.device.As(&dev5))) return false;
 
     std::vector<D3D12_RAYTRACING_INSTANCE_DESC> descs;
-    struct InstInfo { uint32_t triBase, vertexBase, vb, material, moved; float was[12]; uint32_t owner; };
     std::vector<InstInfo> info;
-    for (const Scene::RtInstanceDesc& d : instances)
+    // The per-frame part's BLAS lookups, by position: its order holds from frame to frame, so a row whose key is
+    // last frame's (and the BLAS set unchanged) takes last frame's entry - a thousand map lookups were 0.3 ms.
+    // (And its GPU address, a call into the runtime per row.)
+    if (m_restBlasRev != m_blasRev)
     {
-        auto it = m_blas.find(d.mesh);
-        if (it == m_blas.end() || !it->second.as) continue;
+        m_restKeys.clear();
+        m_restEntries.clear();
+        m_restVa.clear();
+        m_restBlasRev = m_blasRev;
+    }
+    m_restKeys.resize(instances.size(), ~0ull);
+    m_restEntries.resize(instances.size(), nullptr);
+    m_restVa.resize(instances.size(), 0);
+    auto lookup = [&](uint64_t key, size_t row, D3D12_GPU_VIRTUAL_ADDRESS& va) -> const BlasEntry* {
+        if (row != ~size_t(0) && m_restKeys[row] == key) { va = m_restVa[row]; return m_restEntries[row]; }
+        auto it = m_blas.find(key);
+        const BlasEntry* e = it == m_blas.end() || !it->second.as ? nullptr : &it->second;
+        va = e ? e->Va() : 0;
+        if (row != ~size_t(0)) m_restKeys[row] = key, m_restEntries[row] = e, m_restVa[row] = va;
+        return e;
+    };
+    descs.reserve(fixed.size() + instances.size());
+    info.reserve(fixed.size() + instances.size());
+    auto convert = [&](const Scene::RtInstanceDesc& d, uint32_t idBase, bool withAppeared, size_t row = ~size_t(0)) {
+        D3D12_GPU_VIRTUAL_ADDRESS va = 0;
+        const BlasEntry* e = lookup(d.mesh, row, va);
+        if (!e) return;
         D3D12_RAYTRACING_INSTANCE_DESC id = {};
         ToInstanceTransform(d.xform, id.Transform);
-        id.InstanceID = (UINT)descs.size();          // indexes the table below
+        id.InstanceID = idBase + (UINT)descs.size();  // indexes the table below
         id.InstanceMask = d.mask ? d.mask : Scene::kRtMaskAll | (d.focus ? Scene::kRtMaskFocus : 0u);
         id.Flags = d.forceOpaque ? D3D12_RAYTRACING_INSTANCE_FLAG_FORCE_OPAQUE
                                  : D3D12_RAYTRACING_INSTANCE_FLAG_NONE;
-        id.AccelerationStructure = it->second.Va();
+        id.AccelerationStructure = va;
         descs.push_back(id);
         // A mesh whose BLAS landed since the last table (Land) is NEW to the rays: what they hit there was nothing
         // last frame. It goes in as an occluder that was far away (kRtAppearedFrom), so Allow gives the pixels whose
         // rays hit it no history - its shadow and AO come in at once instead of fading in over the old "unoccluded"
         // (design 4.5). One frame: the next table (InstancesStale) is the ordinary one.
-        const bool appeared = std::find(m_appeared.begin(), m_appeared.end(), d.mesh) != m_appeared.end();
-        InstInfo in = { it->second.triBase, it->second.vertexBase, it->second.vbSelect, d.material,
+        const bool appeared = withAppeared && std::find(m_appeared.begin(), m_appeared.end(), d.mesh) != m_appeared.end();
+        InstInfo in = { e->triBase, e->vertexBase, e->vbSelect, d.material,
                         d.moved || appeared ? 1u : 0u };
         for (int r = 0; r < 4; ++r)                  // the rows' xyz (row vectors)
             for (int c = 0; c < 3; ++c) in.was[r * 3 + c] = d.prevXform[r * 4 + c];
@@ -1027,15 +1054,63 @@ bool Rt::UpdateInstances(Device& dev, ID3D12GraphicsCommandList* list,
             for (int c = 0; c < 3; ++c) in.was[9 + c] += kRtAppearedFrom;
         in.owner = d.owner;
         info.push_back(in);
+    };
+    // The fixed part (the placements): converted again only when they or the BLAS set changed. A frame with meshes
+    // just landed flags them (appeared) in a converted copy, written to this slot alone.
+    if (fixedRevision != m_fixedRevision || m_blasRev != m_fixedBlasRev)
+    {
+        descs.reserve(fixed.size());
+        info.reserve(fixed.size());
+        m_fixedOut.assign(fixed.size(), ~0u);
+        for (size_t i = 0; i < fixed.size(); ++i)
+        {
+            const size_t before = descs.size();
+            convert(fixed[i], 0, false);
+            if (descs.size() != before) m_fixedOut[i] = (uint32_t)before;
+        }
+        m_fixedDescs.swap(descs);
+        m_fixedInfo.swap(info);
+        descs.clear();
+        info.clear();
+        m_fixedRevision = fixedRevision;
+        m_fixedBlasRev = m_blasRev;
+        ++m_fixedStamp;
     }
+    const uint32_t nFixed = (uint32_t)m_fixedDescs.size();
+    std::vector<InstInfo> fixedFlagged;   // the fixed part's info with this frame's appeared meshes flagged
+    if (!m_appeared.empty())
+    {
+        bool any = false;
+        for (size_t i = 0; i < fixed.size() && !any; ++i)
+            any = std::find(m_appeared.begin(), m_appeared.end(), fixed[i].mesh) != m_appeared.end();
+        if (any)
+        {
+            for (const Scene::RtInstanceDesc& d : fixed) convert(d, 0, true);
+            fixedFlagged.swap(info);
+            descs.clear();
+            info.clear();
+        }
+    }
+    for (size_t i = 0; i < instances.size(); ++i) convert(instances[i], nFixed, true, i);
     m_appearedFlagged = !m_appeared.empty();
     m_appeared.clear();
-    if (descs.empty()) { DeferRelease(m_tlas.Get()); m_tlas.Reset(); m_instanceCount = 0; return false; }
+    const size_t total = nFixed + descs.size();
+    if (total == 0) { DeferRelease(m_tlas.Get()); m_tlas.Reset(); m_instanceCount = 0; return false; }
 
     // The two tables go into upload buffers kept from frame to frame (mapped once, a quarter to spare): creating them
     // every frame was 2 ms of the 3.5 a moving car's TLAS cost. One per frame slot: overwriting is safe, as the frame
     // that last used this slot's has run (Device::BeginFrame). A grown one replaces it - deferred, not freed at once.
-    auto fill = [&](ComPtr<ID3D12Resource>& buf, void*& mapped, const void* data, size_t bytes) {
+    const uint32_t fs = FrameSlot();
+    // The fixed part is written only when this slot's copy is not of this stamp (or carries appeared flags): a new
+    // or grown buffer, a changed fixed part, or a frame with landed meshes among the placements.
+    const bool flagged = !fixedFlagged.empty();
+    const bool grow = !m_instancesSlot[fs] ||
+                      m_instancesSlot[fs]->GetDesc().Width < total * sizeof(D3D12_RAYTRACING_INSTANCE_DESC) ||
+                      !m_instInfoSlot[fs] || m_instInfoSlot[fs]->GetDesc().Width < total * sizeof(InstInfo);
+    const bool writeFixed = grow || flagged || m_slotFixedStamp[fs] != m_fixedStamp;
+    auto fill = [&](ComPtr<ID3D12Resource>& buf, void*& mapped, const void* head, size_t headBytes, const void* tail,
+                    size_t tailBytes) {
+        const size_t bytes = headBytes + tailBytes;
         if (!buf || buf->GetDesc().Width < bytes)
         {
             mapped = nullptr;
@@ -1044,13 +1119,36 @@ bool Rt::UpdateInstances(Device& dev, ID3D12GraphicsCommandList* list,
             D3D12_RANGE none = { 0, 0 };
             if (!buf || FAILED(buf->Map(0, &none, &mapped))) { buf.Reset(); mapped = nullptr; return false; }
         }
-        memcpy(mapped, data, bytes);
+        if (writeFixed && headBytes) memcpy(mapped, head, headBytes);
+        if (tailBytes) memcpy(static_cast<uint8_t*>(mapped) + headBytes, tail, tailBytes);
         return true;
     };
-    const uint32_t fs = FrameSlot();
-    if (!fill(m_instancesSlot[fs], m_instancesSlotMapped[fs], descs.data(), descs.size() * sizeof(descs[0])) ||
-        !fill(m_instInfoSlot[fs], m_instInfoSlotMapped[fs], info.data(), info.size() * sizeof(info[0])))
+    if (!fill(m_instancesSlot[fs], m_instancesSlotMapped[fs], m_fixedDescs.data(),
+              nFixed * sizeof(D3D12_RAYTRACING_INSTANCE_DESC), descs.data(), descs.size() * sizeof(descs[0])) ||
+        !fill(m_instInfoSlot[fs], m_instInfoSlotMapped[fs], flagged ? fixedFlagged.data() : m_fixedInfo.data(),
+              nFixed * sizeof(InstInfo), info.data(), info.size() * sizeof(info[0])))
+    {
+        m_slotFixedStamp[fs] = 0;
         return false;
+    }
+    m_slotFixedStamp[fs] = flagged ? 0 : m_fixedStamp;   // (a flagged copy is rewritten the next time round)
+    // This frame's masks over the fixed part, in the slot's own copy: last time's patches undone (unless the part was
+    // just written whole), this frame's applied. A few dozen rows, where rewriting the part was 11k.
+    {
+        auto* rows = static_cast<D3D12_RAYTRACING_INSTANCE_DESC*>(m_instancesSlotMapped[fs]);
+        std::vector<uint32_t>& patched = m_slotPatched[fs];
+        if (!writeFixed)
+            for (uint32_t r : patched)
+                if (r < nFixed) rows[r].InstanceMask = m_fixedDescs[r].InstanceMask;
+        patched.clear();
+        for (const auto& m : fixedMasks)
+        {
+            if (m.first >= m_fixedOut.size() || m_fixedOut[m.first] == ~0u) continue;
+            const uint32_t r = m_fixedOut[m.first];
+            rows[r].InstanceMask = m.second;
+            patched.push_back(r);
+        }
+    }
     m_instances = m_instancesSlot[fs], m_instancesMapped = m_instancesSlotMapped[fs];
     m_instInfo = m_instInfoSlot[fs], m_instInfoMapped = m_instInfoSlotMapped[fs];
 
@@ -1058,7 +1156,7 @@ bool Rt::UpdateInstances(Device& dev, ID3D12GraphicsCommandList* list,
     top.Type = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL;
     top.DescsLayout = D3D12_ELEMENTS_LAYOUT_ARRAY;
     top.Flags = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PREFER_FAST_BUILD;
-    top.NumDescs = (UINT)descs.size();
+    top.NumDescs = (UINT)total;
     top.InstanceDescs = m_instances->GetGPUVirtualAddress();
     D3D12_RAYTRACING_ACCELERATION_STRUCTURE_PREBUILD_INFO topInfo = {};
     dev5->GetRaytracingAccelerationStructurePrebuildInfo(&top, &topInfo);
@@ -1113,11 +1211,11 @@ bool Rt::UpdateInstances(Device& dev, ID3D12GraphicsCommandList* list,
         D3D12_SHADER_RESOURCE_VIEW_DESC sd = {};
         sd.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
         sd.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-        sd.Buffer.NumElements = (UINT)info.size();
+        sd.Buffer.NumElements = (UINT)total;
         sd.Buffer.StructureByteStride = sizeof(InstInfo);
         dev.device->CreateShaderResourceView(m_instInfo.Get(), &sd, slot(kSlotInst));
     }
-    m_instanceCount = (uint32_t)descs.size();
+    m_instanceCount = (uint32_t)total;
     return true;
 }
 
