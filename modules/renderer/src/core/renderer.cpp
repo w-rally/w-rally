@@ -18,7 +18,8 @@ const QualityTier& Renderer::Tier(Quality q)
     static const QualityTier kTiers[3] = {
         { "low",    false, 0, 0, 0.25f, 0.0f, 0.0f },   // RT sun shadows only - the VR baseline
         { "medium", true,  1, 1, 0.50f, 30.0f, 0.6f },   // + RT AO, one ray (the default); XeGTAO medium (2 slices x 2 steps)
-        { "high",   true,  2, 2, 0.50f, 50.0f, 0.4f },   // + RT AO, two rays: less noise at rest; XeGTAO high (3 x 3)
+        { "high",   true,  2, 2, 0.50f, 80.0f, 1.0f },   // + RT AO, two rays: less noise at rest; XeGTAO high (3 x 3);
+                                                         // the grass to 80 m at its authored density (RTX-class GPUs)
     };
     const int i = (int)q;
     return kTiers[(i < 0 || i > 2) ? 1 : i];
@@ -32,7 +33,7 @@ void Renderer::SetQuality(Quality q)
     if (t.aoRays) SetAoRays(t.aoRays);
     m_gtao.SetQuality(t.gtaoQuality);
     m_post.SetSharpen(t.sharpen);
-    // The grass's reach (NGG design §2.6 "Grass"): low none, medium 30 m, high 50 m. NGG_GRASS=<metres> (0: off) wins,
+    // The grass's reach (NGG design §2.6 "Grass"): low none, medium 30 m, high 80 m. NGG_GRASS=<metres> (0: off) wins,
     // for A/B; NGG_GRASS_DENSITY scales the blades per m2.
     float grass = t.grassReach;
     if (const char* e = std::getenv("NGG_GRASS")) grass = (float)atof(e);

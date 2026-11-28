@@ -8,7 +8,7 @@
 // the UI pass (module/ui.h) after the frame.
 
 #include <windows.h>
-#include <dxgi1_4.h>
+#include <dxgi1_5.h>
 
 #include <cstdio>
 #include <cstdlib>
@@ -61,7 +61,10 @@ struct SwapChain {
     // it DXGI queues up to 3 presents and, with frames in flight, the game's loop ran in bursts at vsync (three frames
     // ~0.1 ms apart, then ~50 ms: the menus' animations stepped). One wait per frame paces the loop to the display.
     HANDLE latency = nullptr;
-    static constexpr UINT kFlags = DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT;
+    UINT flags = DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT;
+    // Tearing (vsync off): without it a windowed flip swap chain shows frames at the compositor's rate - on the RTX's
+    // 60 Hz display a 5.2 ms GPU frame came out at 8.4 ms. Where the system supports it, vsync off presents at once.
+    bool tearing = false;
 
     SwapChain() = default;
     SwapChain(const SwapChain&) = delete;
@@ -73,6 +76,12 @@ struct SwapChain {
         width = w, height = h;
         ComPtr<IDXGIFactory4> factory;
         if (FAILED(CreateDXGIFactory1(IID_PPV_ARGS(&factory)))) return false;
+        ComPtr<IDXGIFactory5> factory5;
+        BOOL allow = FALSE;
+        tearing = SUCCEEDED(factory.As(&factory5)) &&
+                  SUCCEEDED(factory5->CheckFeatureSupport(DXGI_FEATURE_PRESENT_ALLOW_TEARING, &allow, sizeof(allow))) &&
+                  allow && !std::getenv("NGG_NO_TEARING");
+        if (tearing) flags |= DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING;
         DXGI_SWAP_CHAIN_DESC1 sd = {};
         sd.Width = w;
         sd.Height = h;
@@ -81,7 +90,7 @@ struct SwapChain {
         sd.BufferCount = kBackBufferCount;
         sd.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
         sd.SampleDesc.Count = 1;
-        sd.Flags = kFlags;
+        sd.Flags = flags;
         ComPtr<IDXGISwapChain1> sc1;
         if (FAILED(factory->CreateSwapChainForHwnd(dev.queue.Get(), hwnd, &sd, nullptr, nullptr, &sc1))) return false;
         factory->MakeWindowAssociation(hwnd, DXGI_MWA_NO_ALT_ENTER);
@@ -113,7 +122,7 @@ struct SwapChain {
         if (w == 0 || h == 0 || (w == width && h == height)) return false;
         dev.WaitForGpu();
         for (auto& b : buffers) b.Reset();
-        if (FAILED(swap->ResizeBuffers(kBackBufferCount, w, h, kBackBufferFormat, kFlags))) return false;
+        if (FAILED(swap->ResizeBuffers(kBackBufferCount, w, h, kBackBufferFormat, flags))) return false;
         width = w, height = h;
         return CreateViews(dev);
     }
@@ -332,9 +341,15 @@ void Apply(Renderer& r)
     if (s.ambientOcclusionOff) r.g->core.SetAmbientOcclusion(false);   // after the tier, which sets its own
     r.g->core.SetPreferRayTracedShadows(s.rayTracing != 0);
     r.g->scene.SetShadowsOn(s.shadows != 0);
+    // Vegetation detail: the models' LOD distances x 1 / 2 / 3, and on medium and high at least these metres for
+    // LOD 0, 1 and 2 - sized for a car at speed, not a walker (a 1 m bush switched at 6 m on high).
+    static const float kFloorMedium[3] = { 20.0f, 50.0f, 120.0f }, kFloorHigh[3] = { 40.0f, 100.0f, 250.0f };
     r.g->scene.SetModelLodScale(s.vegetationDetail >= kVegetationHigh     ? 3.0f
                              : s.vegetationDetail == kVegetationMedium ? 2.0f
-                                                                       : 1.0f);
+                                                                       : 1.0f,
+                                s.vegetationDetail >= kVegetationHigh     ? kFloorHigh
+                             : s.vegetationDetail == kVegetationMedium ? kFloorMedium
+                                                                       : nullptr);
     r.g->post.SetAutoExposure(s.autoExposure != 0);
     r.g->core.SetUpscaling(r.g->dev, s.upscaler == kUpscalerFsr      ? ngg::core::UpscalerKind::Fsr
                                : s.upscaler == kUpscalerDlss   ? ngg::core::UpscalerKind::Dlss
@@ -520,6 +535,8 @@ std::string MakeGpu(Renderer& r, UINT width, UINT height, bool again)
     const char* cacheDir = r.host.files.cacheDir ? r.host.files.cacheDir(r.host.ctx) : nullptr;
     ngg::core::OpenPipelineCache(n.dev.device.Get(), cacheDir ? cacheDir : "");
     if (!n.sc.Create(n.dev, r.hwnd, width, height)) return "swap chain creation failed";
+    ngg::core::Log("wrenderer: swap chain %ux%u, %u buffers, tearing %s", n.sc.width, n.sc.height, kBackBufferCount,
+                   n.sc.tearing ? "allowed (vsync off presents at once)" : "not available");
     r.width = n.sc.width, r.height = n.sc.height;
     if (!n.core.Create(n.dev, kBackBufferFormat, n.sc.width, n.sc.height, !(r.initFlags & kRendererNoRayTracing)))
         return "renderer creation failed";
@@ -1161,7 +1178,8 @@ Status WRALLY_CALL Present(Renderer* r)
     if (r->lost) return Status::Ok;   // the frame was lost with the device: nothing to show (renderFrame makes a new one)
     if (r->broken) return Status::ErrFault;
     if (!r->g->sc.swap) return Status::ErrInvalidArg;
-    const HRESULT hr = r->g->sc.swap->Present(r->settings.vsync ? 1 : 0, 0);
+    const HRESULT hr = r->g->sc.swap->Present(r->settings.vsync ? 1 : 0,
+                                              !r->settings.vsync && r->g->sc.tearing ? DXGI_PRESENT_ALLOW_TEARING : 0);
     if (hr == DXGI_ERROR_DEVICE_REMOVED || hr == DXGI_ERROR_DEVICE_RESET) {
         ngg::core::Log("wrenderer: present: 0x%08lX (%s)", (unsigned long)hr,
                        hr == DXGI_ERROR_DEVICE_RESET ? "DEVICE_RESET" : "DEVICE_REMOVED");

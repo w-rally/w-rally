@@ -112,6 +112,13 @@ bool Scene::LoadModels(ID3D12Device* dev, const uint8_t* models, size_t modelByt
     m_modelLodScale = m_modelLodSetting;
     if (const char* e = std::getenv("NGG_MODEL_LOD_SCALE"))
         m_modelLodScale = (std::max)(0.05f, (float)atof(e));
+    for (int k = 0; k < 3; ++k) m_modelLodFloor[k] = m_modelLodFloorSetting[k];
+    if (const char* e = std::getenv("NGG_MODEL_LOD_FLOOR"))   // <m0>,<m1>,<m2> (0,0,0: none), for A/B
+    {
+        float f[3] = {};
+        if (sscanf_s(e, "%f,%f,%f", &f[0], &f[1], &f[2]) == 3)
+            for (int k = 0; k < 3; ++k) m_modelLodFloor[k] = (std::max)(0.0f, f[k]);
+    }
     if (!models) return false;
 
     ModelChunkHeader h = {};
@@ -364,10 +371,11 @@ bool Scene::LoadModels(ID3D12Device* dev, const uint8_t* models, size_t modelByt
     m_modelCellsDirty = true;
     RebuildModelCells();
     Log("scene: models - %u model(s): %zu LODs (%zu ray tracing only), %zu submeshes, %zu triangles, %u material(s) "
-        "(+%zu twins); %zu placement(s) (%zu in other variants), %zu replace a plant; LOD scale %.2f; %zu with wind, "
-        "%zu with a crown",
+        "(+%zu twins); %zu placement(s) (%zu in other variants), %zu replace a plant; LOD scale %.2f, at "
+        "least %.0f / %.0f / %.0f m; %zu with wind, %zu with a crown",
         h.modelCount, lodTotal, rayOnlyLods, subTotal, tris, h.materialCount, m_materials.size() - matBase - h.materialCount,
-        m_placements.size(), otherVariant, replacedPlants.size(), m_modelLodScale, windModels, crowns);
+        m_placements.size(), otherVariant, replacedPlants.size(), m_modelLodScale, m_modelLodFloor[0], m_modelLodFloor[1],
+        m_modelLodFloor[2], windModels, crowns);
     return true;
 }
 
@@ -405,12 +413,20 @@ void Scene::PlacementTransform(PlacementRt& p) const
     }
 }
 
-void Scene::SetModelLodScale(float scale)
+void Scene::SetModelLodScale(float scale, const float floor[3])
 {
     m_modelLodSetting = (std::max)(0.05f, scale);
-    if (std::getenv("NGG_MODEL_LOD_SCALE")) return;   // the A/B switch wins
-    if (m_modelLodScale == m_modelLodSetting) return;
-    m_modelLodScale = m_modelLodSetting;
+    bool changed = false;
+    for (int k = 0; k < 3; ++k)
+    {
+        // Rising: LOD k+1 never ends before LOD k.
+        const float f = (std::max)(floor ? (std::max)(0.0f, floor[k]) : 0.0f, k ? m_modelLodFloorSetting[k - 1] : 0.0f);
+        m_modelLodFloorSetting[k] = f;
+        if (!std::getenv("NGG_MODEL_LOD_FLOOR") && m_modelLodFloor[k] != f) m_modelLodFloor[k] = f, changed = true;
+    }
+    if (!std::getenv("NGG_MODEL_LOD_SCALE") && m_modelLodScale != m_modelLodSetting)   // (the A/B switch wins)
+        m_modelLodScale = m_modelLodSetting, changed = true;
+    if (!changed) return;
     // The cells' reach (how far a cell's models are drawn at all) follows the distances; the batches are re-picked.
     m_modelCellsDirty = true;
     RebuildModelCells();
@@ -445,7 +461,7 @@ void Scene::RebuildModelCells()
             c.bmax[k] = (std::max)(c.bmax[k], p.bmax[k]);
         }
         const ModelDef& m = m_models[p.d.model];
-        c.reach = (std::max)(c.reach, m.lods[m.drawLods - 1].maxDist * p.d.scaleY * m_modelLodScale);
+        c.reach = (std::max)(c.reach, ModelLodEnd(m, m.drawLods - 1, p.d.scaleY * m_modelLodScale));
     }
 }
 
@@ -744,10 +760,12 @@ void Scene::CullModels(ID3D12Device* dev, const float planes[6][4], const float 
             const float d = sqrtf(d2);
             // The drawn LODs only: a ray-only one (the last, ngg_format.h) is never picked, nor faded into.
             uint32_t lod = 0;
-            while (lod < m.drawLods && d >= m.lods[lod].maxDist * s) ++lod;
+            while (lod < m.drawLods && d >= ModelLodEnd(m, lod, s)) ++lod;
             if (lod >= m.drawLods) continue;
             ++visible;
-            const float fw = m.fade * s, end = m.lods[lod].maxDist * s;
+            // The crossfade band: the authored one, or a tenth of the distance where a floor moved the switch out
+            // (a switch at 100 m in a 0.4 m band is a pop).
+            const float end = ModelLodEnd(m, lod, s), fw = (std::max)(m.fade * s, 0.1f * end);
             if (shadow || fw <= 0.0f || d <= end - fw)
             {
                 emit(p, lod, 0.0f);

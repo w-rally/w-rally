@@ -563,7 +563,9 @@ public:
     void SetShadowsOn(bool on) { m_shadowsOn = on; }
     // How far the instanced models keep their detailed LODs: every LOD distance (and the crossfade, and how far a
     // model is drawn at all) times `scale` - the client's vegetation detail. NGG_MODEL_LOD_SCALE, when set, wins.
-    void SetModelLodScale(float scale);
+    // The instanced models' LOD distances: the authored ones (sized to the model) x `scale`, and at least `floor`
+    // metres for LOD 0, 1 and 2 (a racing car is past a bush before a size-based LOD would switch; null: none).
+    void SetModelLodScale(float scale, const float floor[3] = nullptr);
 
     // GRASS (grass.h; NGG design §2.6 "Grass"): drawn round the camera to `metres` where the file has an NGGF chunk
     // (the quality tier: low 0 - off, medium 30, high 50); 0 off, and then the cards the chunk replaces are drawn.
@@ -1095,6 +1097,14 @@ private:
     bool                     m_modelCellsDirty = false;
     float                    m_modelLodScale = 1.0f;     // in use: NGG_MODEL_LOD_SCALE, else m_modelLodSetting
     float                    m_modelLodSetting = 1.0f;   // SetModelLodScale's
+    float                    m_modelLodFloor[3] = {};    // metres LOD 0, 1, 2 reach at least (NGG_MODEL_LOD_FLOOR wins)
+    float                    m_modelLodFloorSetting[3] = {};
+    // Where a model's LOD ends for a placement of scale `s` (its scale x the LOD scale).
+    float ModelLodEnd(const ModelDef& m, uint32_t lod, float s) const
+    {
+        const float authored = m.lods[lod].maxDist * s;
+        return authored > m_modelLodFloor[lod < 2 ? lod : 2] ? authored : m_modelLodFloor[lod < 2 ? lod : 2];
+    }
     uint32_t                 m_replacedPlants = 0, m_replacedTris = 0;
     ModelStats               m_modelStats, m_modelStatsBuild;
     uint64_t                 m_modelFrame = 0;

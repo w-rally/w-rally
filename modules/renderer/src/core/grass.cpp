@@ -607,7 +607,8 @@ void Grass::Update(ID3D12GraphicsCommandList* list, const Terrain& terrain, cons
         uint32_t typeCount;
         float maxDensity;
         float planes[6][4];
-        uint32_t cap[3], pad;
+        uint32_t cap[3];
+        float nearBoost;   // the blades' density at the camera over the far cards' (falls to 1 by lod1)
     } cb = {};
     static_assert(sizeof(SpawnCB) == 44 * 4, "SpawnCB: 44 root constants (grass.hlsl SpawnCB)");
     const float half = 0.5f * kClip * kTexel;
@@ -627,6 +628,10 @@ void Grass::Update(ID3D12GraphicsCommandList* list, const Terrain& terrain, cons
     cb.maxDensity = maxDensity;
     memcpy(cb.planes, planes, sizeof planes);
     for (uint32_t l = 0; l < kLods; ++l) cb.cap[l] = kCap[l];
+    // Near the camera single blades looked sparser than the far cards (each stands for a clump, seen edge-on): the
+    // blades' density is raised there, x2 at the camera down to x1 where the cards start. NGG_GRASS_NEAR=<k> for A/B.
+    static const float nearBoost = [] { const char* e = std::getenv("NGG_GRASS_NEAR"); return e ? (float)atof(e) : 2.0f; }();
+    cb.nearBoost = (std::max)(1.0f, nearBoost);
 
     list->SetComputeRootSignature(m_spawnRs.Get());
     ID3D12DescriptorHeap* heaps[] = { m_srvHeap.Get() };
