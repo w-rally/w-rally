@@ -5,6 +5,7 @@
 #include "shaders.h"
 
 #include <algorithm>
+#include <iterator>
 #include <cstdlib>
 #include <math.h>
 
@@ -222,30 +223,50 @@ void Renderer::KeepRtCurrent(Device& dev)
 
     // A new mesh's vertices, before its BLAS. A new upload is a new buffer, which the any-hit test's view must follow.
     const bool poolMoved = m_scene.FlushDynamic(dev.device.Get());
+    // This frame's part (the world, moved and dynamic objects: a hundred or so) described anew; the placements' part
+    // (Scene::RtModels, 11k+ on a forest stage) only when it changed. Every frame the car moves comes here.
     std::vector<uint64_t> keys;
     std::vector<Scene::RtInstanceDesc> instances;
     m_scene.DescribeRt(keys, instances);
+    const std::vector<uint64_t>* modelKeys = nullptr;
+    const std::vector<Scene::RtInstanceDesc>* modelInstances = nullptr;
+    uint32_t modelRev = 0;
+    m_scene.RtModels(modelKeys, modelInstances, modelRev);
+    m_scene.RtModelMasks(m_rtModelMasks);
     std::sort(keys.begin(), keys.end());
     keys.erase(std::unique(keys.begin(), keys.end()), keys.end());
-
-    std::vector<uint64_t> built;
-    size_t missing = 0, building = 0, moved = 0;
-    for (uint64_t k : keys)
+    // The whole key set (both parts, sorted) and which of it is built: worked out again only when a part's keys
+    // changed, something landed, something was missing or building last time, or the TLAS holds another set.
+    const bool keysChanged = keys != m_rtOwnKeys || modelRev != m_rtKeysModelRev;
+    if (keysChanged)
     {
-        if (m_rt.HasMesh(k)) built.push_back(k);
-        else if (m_rt.IsBuilding(k)) ++building;
-        else ++missing;
+        m_rtOwnKeys = keys;
+        m_rtKeysModelRev = modelRev;
+        m_rtAllKeys.clear();
+        std::set_union(keys.begin(), keys.end(), modelKeys->begin(), modelKeys->end(), std::back_inserter(m_rtAllKeys));
+    }
+    size_t missing = 0, building = 0, moved = 0;
+    if (keysChanged || landed || m_rtKeysPending || m_rtBuilt != m_rt.PublishedKeys())
+    {
+        m_rtBuilt.clear();
+        for (uint64_t k : m_rtAllKeys)
+        {
+            if (m_rt.HasMesh(k)) m_rtBuilt.push_back(k);
+            else if (m_rt.IsBuilding(k)) ++building;
+            else ++missing;
+        }
+        m_rtKeysPending = missing || building;
     }
     for (const Scene::RtInstanceDesc& d : instances) moved += d.moved ? 1 : 0;
     // The same set: nothing landed or dropped (what is missing is submitted below and changes no TLAS yet) - the TLAS
     // alone, and the pool's view when it was uploaded again for a mesh now building. So the frame a mesh appears in
     // allocates no more here than a frame the car moves in.
-    const bool sameSet = m_rt.HasScene() && !landed && built == m_rt.PublishedKeys();
+    const bool sameSet = m_rt.HasScene() && !landed && m_rtBuilt == m_rt.PublishedKeys();
 
     if (missing)
     {
         std::vector<Scene::RtMeshData> fresh;
-        for (uint64_t k : keys)
+        for (uint64_t k : m_rtAllKeys)
         {
             if (m_rt.HasMesh(k) || m_rt.IsBuilding(k)) continue;
             Scene::RtMeshData m;
@@ -253,21 +274,24 @@ void Renderer::KeepRtCurrent(Device& dev)
         }
         if (!fresh.empty() && m_rt.SubmitBlases(dev, m_scene.RtVertexStride(), fresh)) building += fresh.size();
     }
-    Log("renderer: scene revision %u - %zu mesh key(s) (%zu built, %zu building%s), %zu instance(s), %zu moved -> %s",
-        rev, keys.size(), built.size(), building, landed ? ", some just landed" : "", instances.size(), moved,
-        sameSet ? "instances only" : "publish");
+    // (Not on a frame that only moves instances: that is every frame the car drives, and the line cost 0.13 ms.)
+    if (!sameSet || missing)
+        Log("renderer: scene revision %u - %zu mesh key(s) (%zu built, %zu building%s), %zu + %zu instance(s), %zu "
+            "moved -> %s", rev, m_rtAllKeys.size(), m_rtBuilt.size(), building, landed ? ", some just landed" : "",
+            modelInstances->size(), instances.size(), moved, sameSet ? "instances only" : "publish");
 
     if (sameSet)
     {
         if (poolMoved) m_rt.FollowDynamicPool(dev.device.Get(), m_scene.DynamicVertexBuffer(),
                                               m_scene.DynamicVertexCount());
-        m_rtValid = m_rt.UpdateInstances(dev, dev.list.Get(), instances);
+        m_rtValid = m_rt.UpdateInstances(dev, dev.list.Get(), *modelInstances, modelRev, m_rtModelMasks, instances);
     }
     else
     {
         Scene::RtShared shared;
         m_rtValid = m_scene.BuildRtShared(dev.device.Get(), shared) &&
-                    m_rt.Rebuild(dev, dev.list.Get(), shared, keys, instances);
+                    m_rt.Rebuild(dev, dev.list.Get(), shared, m_rtAllKeys, *modelInstances, modelRev, m_rtModelMasks,
+                               instances);
     }
     // An empty TLAS while the first BLASes build (a load) is not a failure: the cascades meanwhile.
     m_rtReason = m_rtValid ? nullptr
