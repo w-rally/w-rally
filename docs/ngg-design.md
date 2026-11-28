@@ -442,7 +442,11 @@ touch), pieces wider than 50 m (`kPlantMaxWidth`) left out.
   Only against the file's own plant table (without one, the cards stay and the load says so).
 - LODs switch by distance from the camera scaled by the placement's height and by the **vegetation detail**
   (`RenderSettings::vegetationDetail`, interface 23: low / medium / high = the file's distances x1 / x2 / x3,
-  `Scene::SetModelLodScale`, which also rebuilds the cells' reach; `NGG_MODEL_LOD_SCALE=<k>` wins for A/B). The
+  `Scene::SetModelLodScale`, which also rebuilds the cells' reach; `NGG_MODEL_LOD_SCALE=<k>` wins for A/B), **and at
+  least a floor in metres** for LOD 0 / 1 / 2: medium 20 / 50 / 120, high 40 / 100 / 250 (`NGG_MODEL_LOD_FLOOR`).
+  Size-based distances suit a walker, not a car at 30 m/s: on high a 1 m bush went LOD0 -> billboard between 6 and
+  40 m, three pops in under two seconds. Where a floor moved a switch out, the crossfade band is at least a tenth of
+  the distance. The
   converter's distances are steep: LOD0 -> LOD1 at about twice the tree's height, LOD1 holding ~5 % of LOD0's
   triangles, so trees went coarse a short way off; the game defaults to medium. Measured on stage 41 (golden replay
   ticks 3000-9000, 390 frames, 1080p RT, dev iGPU), GPU frame median: x1 43.95 ms, x2 46.20 (+5 %), x3 47.56 (+8 %),
@@ -779,7 +783,9 @@ where the strip cards were, thinning under crowns) and the `NGGP` plants whose c
 - **Shadows:** grass receives the sun (traced from its prepass pixel, the foliage map's leaves, or the cascades) and
   casts nothing: no shadow map, not in the BVH.
 - **Quality tiers** (`QualityTier::grassReach`, `grassDensity`): low off, medium 30 m at x0.6 the types' blades per
-  m2, high 50 m at x0.4 (the budget, below). `NGG_GRASS=<metres>` (0 off) and `NGG_GRASS_DENSITY` win, for A/B;
+  m2, high 80 m at x1.0 (for RTX-class GPUs; it was 50 m at x0.4, the iGPU budget below: on the dev iGPU high now
+  costs ~1.4 ms of grass against 0.4). **Near the camera** the blades' density is raised (x2 at the camera down to x1
+  where the cards start, `NGG_GRASS_NEAR`): single blades read sparser than the far cards, each a clump seen edge-on. `NGG_GRASS=<metres>` (0 off) and `NGG_GRASS_DENSITY` win, for A/B;
   `NGG_GRASS_TIMES=1` logs the grass's own GPU times (field + spawn, prepass, main pass) every 300 frames.
 - **Tests:** `grass-41` (`ngg-check --grass`): a made-up NGGF on stage 41 drawn (blades counted, the ground changed),
   none without it, grass off drawing the stage without the chunk pixel for pixel, and each refusal rule broken in
@@ -2669,6 +2675,9 @@ All read once, at start-up or first use; development only unless noted.
 | `NGG_LOCAL_SHADOW_TURN=<k>` | scale of the per-pixel rotation of the local shadow-map filter (default 1) | `scene.cpp` |
 | `NGG_LOCAL_SHADOW_LOG` | log the shadow-slot candidates every 300 frames | `lights.cpp` |
 | `NGG_PROBE_FACES=1..6` | cube-probe faces drawn per frame (default 2) | `scene.cpp` |
+| `NGG_MODEL_LOD_FLOOR=<m0>,<m1>,<m2>` | the metres LOD 0, 1, 2 reach at least, over the vegetation detail's (high 40/100/250, medium 20/50/120, low none; `0,0,0` the size-based distances alone) | `models.cpp` |
+| `NGG_GRASS_NEAR=<k>` | the grass blades' density at the camera over the far cards' (default 2, falling to 1 where the cards start; 1 = off) | `grass.cpp` |
+| `NGG_NO_TEARING` | vsync off waits for the compositor (no `DXGI_PRESENT_ALLOW_TEARING`), for A/B | `module.cpp` |
 | `NGG_MODEL_LOD_SCALE=<k>` | instanced models' LOD distances scaled (min 0.05), over the vegetation detail setting | `models.cpp` |
 | `NGG_WIND=<speed>[,<gust>[,<deg>]]` | that wind over the weather's (m/s, 0..1, towards; default gust 0.5, 90 deg): the wind's A/B | `module.cpp` |
 | `NGG_FOLIAGE_SHADOW=off` | no foliage map on the RT path: every instanced model's sun shadow from its shell, the crown's ellipsoid on its leaves (A/B; §2.6) | `models.cpp` |

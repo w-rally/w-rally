@@ -137,7 +137,7 @@ cbuffer SpawnCB : register(b0)
     float  gMaxDensity;           // the densest type's blades per m2 (candidates per m2 = this x gDensityScale)
     float4 gPlanes[6];            // the view frustum, world space (inside: dot >= 0)
     uint   gCap0, gCap1, gCap2;   // instances per LOD
-    uint   gSpawnPad;
+    float  gNearBoost;            // the blades' density at the camera (x, down to 1 at gLod1: the cards keep theirs)
 };
 struct GrassTypeGpu { float heightMin, heightMax, density, width, dryness, spread, wind, seedHeads; };
 Texture2D<float>  gFieldHeight : register(t0);
@@ -201,7 +201,9 @@ void CSSpawn(uint3 id : SV_DispatchThreadID)
     const float widen = clamp(rsqrt(max(fade, 0.08)), 1.0, 2.5);
 
     const uint seed = Pcg((uint)patch.x * 73856093u ^ (uint)patch.y * 19349663u);
-    const float candidates = gMaxDensity * gDensityScale * kPatch * kPatch / (lod == 2u ? (float)kClump : 1.0);
+    // Near the camera single blades read sparser than the far cards (a clump each, seen edge-on): more of them there.
+    const float nearBoost = lod == 2u ? 1.0 : lerp(gNearBoost, 1.0, smoothstep(0.0, gLod1, dist));
+    const float candidates = gMaxDensity * gDensityScale * nearBoost * kPatch * kPatch / (lod == 2u ? (float)kClump : 1.0);
     const uint n = (uint)max(1.0, ceil(candidates));
     const uint loop = min(n, (uint)ceil((float)n * fade));
 
