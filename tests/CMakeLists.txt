@@ -46,11 +46,12 @@ endif()
 if(EXISTS "${WRALLY_TEST_RBR_DIR}/Maps/track-41_M.trk" AND EXISTS "${_golden_ngg}" AND EXISTS "${WRALLY_TEST_GOLDEN}")
     add_test(NAME golden-replay-41 COMMAND W-Rally ${WRALLY_TEST_RBR_DIR} ${_golden_ngg} --stage track-41_M --step 0.1
              --no-sound --overrides none --replay ${WRALLY_TEST_GOLDEN} --out ${CMAKE_BINARY_DIR}/tests-bin/golden-41.phr)
+    # Vsync off: the replay is not paced by the display (with vsync it waited for every refresh, +40 s at 60 Hz).
     set_tests_properties(golden-replay-41 PROPERTIES PASS_REGULAR_EXPRESSION "replay check: [0-9]+ poses, all bit-exact"
-                         TIMEOUT 600)
+                         TIMEOUT 600 ENVIRONMENT "PHYS_DRIVE_OFF=vsync")
     if(EXISTS "${WRALLY_TEST_STAGE_NGG}")
         # The shipped stage's trees and grass drawn in a light wind (the user's black-speck case, NGG design §2.6).
-        set_tests_properties(golden-replay-41 PROPERTIES ENVIRONMENT "${WRALLY_TEST_STAGE_WIND}")
+        set_tests_properties(golden-replay-41 PROPERTIES ENVIRONMENT "PHYS_DRIVE_OFF=vsync;${WRALLY_TEST_STAGE_WIND}")
     endif()
 else()
     message(STATUS "golden-replay-41 left out: needs WRALLY_TEST_RBR_DIR, WRALLY_TEST_NGG and WRALLY_TEST_GOLDEN")
